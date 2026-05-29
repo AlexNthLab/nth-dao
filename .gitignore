@@ -62,3 +62,7 @@ group_chat_server*.log
 *.key
 *.pem
 credentials.json
+
+# Frontend
+frontend/node_modules/
+frontend/*.tsbuildinfo
