@@ -27,7 +27,7 @@ pyproject.toml: nth-dao
 : nth_dao
 """
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 __author__ = "NTH DAO Project"
 
 #

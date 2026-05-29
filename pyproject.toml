@@ -44,7 +44,7 @@ anthropic = ["anthropic>=0.40.0"]
 openai = ["openai>=1.0.0"]
 google = ["google-generativeai>=0.3.0"]
 hermes = []  # via subprocess; install hermes-agent separately
-web = ["fastapi>=0.100", "uvicorn>=0.20"]  # web_dashboard.py
+web = ["fastapi>=0.100", "uvicorn>=0.20"]  # nth_dao.web unified console
 
 [project.urls]
 Homepage = "https://github.com/AlexNthLab/nth-dao"
@@ -54,12 +54,14 @@ Changelog = "https://github.com/AlexNthLab/nth-dao/blob/main/CHANGELOG.md"
 
 [project.scripts]
 nth-blackboard = "team_layer.blackboard.cli:main"
+nth-web = "nth_dao.web:main"
 
 [tool.setuptools]
 packages = [
     "nth_dao",
     "nth_dao.discovery",
     "nth_dao.orchestration",
+    "nth_dao.web",
     "team_layer",
     "team_layer.memory_providers",
     "team_layer.compression",
@@ -72,6 +74,7 @@ packages = [
 # Optional package data: include INTEGRATION_GUIDE inside nth_dao/
 [tool.setuptools.package-data]
 "nth_dao" = ["INTEGRATION_GUIDE.md", "*.toml"]
+"nth_dao.web" = ["static/**/*"]
 
 [tool.setuptools.exclude-package-data]
 "*" = [".gitignore", ".gitkeep", "__pycache__/*", "*.pyc"]
