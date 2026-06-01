@@ -48,12 +48,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import secrets
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
+
+logger = logging.getLogger("nth_dao.gossip")
+
+# 重放窗口：超过此秒数的旧消息丢弃（无论签名是否有效）
+REPLAY_WINDOW_SECONDS = 600  # 10 分钟
+# 时钟漂移容忍：未来 N 秒以内仍接受
+FUTURE_DRIFT_SECONDS = 60
+# Handshake 挑战超时
+HANDSHAKE_TIMEOUT = 8.0
 
 #
 
@@ -109,49 +121,105 @@ class GossipNode:
 
     def __init__(
         self,
-        identity,       # AgentIdentity
+        identity,       # AgentIdentity (必须带签名能力)
         channel,        # TeamChannel
         host: str = "127.0.0.1",
         port: int = 9876,
         bootstrap_peers: Optional[List[str]] = None,
+        trusted_pubkeys: Optional[Dict[str, str]] = None,
+        require_signature: bool = True,
+        allow_tofu: bool = True,
+        trust_graph=None,  # 可选 TrustGraph：启用 web-of-trust 传递信任
+        wot_max_depth: int = 2,
     ):
         """
         Args:
-            identity:
-            channel:
-            host:
-            port:
-            bootstrap_peers:  peer URL  ["ws://alice.local:9876"]
+            identity: 本节点身份；require_signature=True 时必须能 sign（PyNaCl）
+            channel: 本地 channel sink
+            host: 监听 host
+            port: 监听端口
+            bootstrap_peers: 启动时尝试连接的 peer URL
+            trusted_pubkeys: 预置的 {agent_id: pubkey_hex}；运行时可用 trust_agent() 追加
+            require_signature: True = 拒绝无签名/签名错误的 gossip。默认 True（安全默认）
         """
         _ws_required("GossipNode")
+        if require_signature and not (identity and identity.can_sign):
+            raise ValueError(
+                "GossipNode require_signature=True 需要 identity 能签名 "
+                "（AgentIdentity.generate() + pynacl extra）"
+            )
 
         self.identity = identity
         self.channel = channel
         self.host = host
         self.port = port
+        self.require_signature = require_signature
+        self.allow_tofu = allow_tofu
 
-        # Peer
-        self.peers: Dict[str, websockets.WebSocketServerProtocol] = {}  # agent_id  connection
-        self.peer_infos: Dict[str, PeerInfo] = {}  # agent_id  info
+        # Peer 连接
+        self.peers: Dict[str, websockets.WebSocketServerProtocol] = {}
+        self.peer_infos: Dict[str, PeerInfo] = {}
         self.bootstrap_urls = bootstrap_peers or []
 
-        #
+        # ───── 信任锚 ─────
+        # agent_id → pubkey_hex 的映射，直接 pinned 信任。
+        # 不在这里 AND 也不在 trust_graph 可达内的 agent_id → 签名消息被拒（require_signature=True）
+        self._trusted_pubkeys: Dict[str, str] = dict(trusted_pubkeys or {})
+        # 本节点自己永远在信任里
+        if identity and identity.can_sign:
+            self._trusted_pubkeys[str(identity.agent_id)] = identity.pubkey_hex
+        # 可选 web-of-trust：传递信任图
+        self.trust_graph = trust_graph
+        self.wot_max_depth = max(1, min(wot_max_depth, 5))
+        # 把本地 pinned anchors 也注册成 trust_graph 的 roots（如果有）
+        if self.trust_graph is not None:
+            for aid, pk in self._trusted_pubkeys.items():
+                try:
+                    self.trust_graph.add_root(aid, pk)
+                except Exception as e:
+                    logger.debug("trust_graph.add_root(%s) failed: %s", aid, e)
+
+        # 订阅
         self.subscriptions: Set[str] = set()
 
-        # msg_id  timestamp
+        # 去重：msg_id 集合（最近 N 个）
         self._seen: deque = deque(maxlen=self.DEDUP_CACHE_SIZE)
+        self._seen_set: Set[str] = set()
 
-        #
+        # 回调
         self._on_message: Optional[Callable] = None
         self._on_peer_join: Optional[Callable] = None
         self._on_peer_leave: Optional[Callable] = None
 
-        #
+        # 内部状态
         self._server = None
         self._running = False
         self._tasks: List[asyncio.Task] = []
 
     #
+
+    # ───── 信任锚管理 ─────
+
+    def trust_agent(self, agent_id: str, pubkey_hex: str) -> None:
+        """新增/更新一个被信任的 agent_id → pubkey_hex 映射。
+
+        一旦写入，后续来自该 agent_id 的 gossip 都会用此 pubkey 验签。
+        切换 pubkey 会断信任链（接下来要 agent 用新 pubkey 重新 handshake）。
+        """
+        if not agent_id or not pubkey_hex:
+            raise ValueError("agent_id and pubkey_hex required")
+        old = self._trusted_pubkeys.get(agent_id)
+        if old and old != pubkey_hex:
+            raise ValueError(f"agent '{agent_id}' is already pinned to a different pubkey")
+        self._trusted_pubkeys[agent_id] = pubkey_hex
+
+    def is_trusted(self, agent_id: str) -> bool:
+        return agent_id in self._trusted_pubkeys
+
+    def trusted_pubkey_for(self, agent_id: str) -> Optional[str]:
+        return self._trusted_pubkeys.get(agent_id)
+
+    # ───── 回调 ─────
 
     def on_message(self, callback: Callable) -> None:
         """callback(msg_dict, from_agent_id)"""
@@ -214,40 +282,114 @@ class GossipNode:
     #
 
     async def connect(self, url: str) -> bool:
-        """ peer"""
+        """主动连接 peer，含 challenge-response 验证对方持有声称的 pubkey。
+
+        Handshake 流程（client 视角）：
+            1) → hello {agent_id, pubkey_hex}
+            2) ← challenge {nonce}
+            3) → challenge_response {nonce_sig}   (用我的私钥签 nonce)
+            4) ← welcome {agent_id, pubkey_hex, channels, server_challenge}
+            5) → server_challenge_response {server_nonce_sig}
+            6) ← ack | close
+        """
         _ws_required("connect")
         try:
             ws = await ws_connect(url)
-            #
+        except Exception as e:
+            logger.warning("connect %s failed: %s", url, e)
+            return False
+
+        try:
+            # 1) hello
             await self._send_hello(ws)
-            response = await asyncio.wait_for(ws.recv(), timeout=5)
-            data = json.loads(response)
 
-            if data.get("type") == "welcome":
-                agent_id = data["agent_id"]
-                self.peers[agent_id] = ws
-                self.peer_infos[agent_id] = PeerInfo(
-                    agent_id=agent_id,
-                    url=url,
-                    pubkey_hex=data.get("pubkey_hex", ""),
-                    channels=set(data.get("channels", [])),
-                    connected_at=time.time(),
-                    last_seen=time.time(),
-                )
+            # 2) 收 challenge
+            raw = await asyncio.wait_for(ws.recv(), timeout=HANDSHAKE_TIMEOUT)
+            challenge = json.loads(raw)
+            if challenge.get("type") != "challenge":
+                await ws.close(1008, "expected challenge")
+                return False
+            nonce = challenge.get("nonce", "")
+            if not nonce:
+                await ws.close(1008, "missing nonce")
+                return False
 
-                #
-                self._tasks.append(asyncio.create_task(self._recv_loop(agent_id, ws)))
+            # 3) sign challenge
+            sig = self.identity.sign_json({"nonce": nonce}).hex() if False else \
+                  self.identity.sign(_canon({"nonce": nonce})).hex()
+            await self._send_json(ws, {
+                "type": "challenge_response",
+                "agent_id": str(self.identity.agent_id),
+                "sig": sig,
+            })
 
-                #  peer
-                await self._send_json(ws, {"type": "peer_list"})
+            # 4) 收 welcome（含 server_challenge）
+            raw = await asyncio.wait_for(ws.recv(), timeout=HANDSHAKE_TIMEOUT)
+            welcome = json.loads(raw)
+            if welcome.get("type") != "welcome":
+                await ws.close(1008, "expected welcome")
+                return False
 
-                if self._on_peer_join:
-                    self._on_peer_join(self.peer_infos[agent_id])
+            remote_agent_id = welcome.get("agent_id", "")
+            remote_pubkey = welcome.get("pubkey_hex", "")
+            server_nonce = welcome.get("server_challenge", "")
+            server_sig = welcome.get("server_sig", "")
+            if not (remote_agent_id and remote_pubkey and server_nonce and server_sig):
+                await ws.close(1008, "incomplete welcome")
+                return False
+            known_pubkey = self._trusted_pubkeys.get(remote_agent_id)
+            if known_pubkey and known_pubkey != remote_pubkey:
+                await ws.close(1008, "pubkey mismatch with trust anchor")
+                return False
+            if not known_pubkey and not self.allow_tofu:
+                await ws.close(1008, "untrusted server")
+                return False
+            if not _verify_nonce(remote_pubkey, server_nonce, server_sig):
+                await ws.close(1008, "invalid server signature")
+                return False
 
-                return True
-        except Exception:
-            pass
-        return False
+            # 5) 我们也签 server_nonce 证身（已经在 step 3 证过，但服务端可能要双签）
+            # 这里 server_challenge 已在 _handle_connection 收 challenge_response 时验过；
+            # 客户端不需要再回签 server_challenge。welcome 就是 ack。
+
+            # 把对端 pubkey 加入信任锚（首次见 = TOFU；之后 rotate 会 warn）
+            if not known_pubkey:
+                self.trust_agent(remote_agent_id, remote_pubkey)
+
+            self.peers[remote_agent_id] = ws
+            self.peer_infos[remote_agent_id] = PeerInfo(
+                agent_id=remote_agent_id,
+                url=url,
+                pubkey_hex=remote_pubkey,
+                channels=set(welcome.get("channels", [])),
+                connected_at=time.time(),
+                last_seen=time.time(),
+            )
+
+            self._tasks.append(asyncio.create_task(self._recv_loop(remote_agent_id, ws)))
+            await self._send_json(ws, {"type": "peer_list"})
+
+            if self._on_peer_join:
+                try:
+                    self._on_peer_join(self.peer_infos[remote_agent_id])
+                except Exception:
+                    logger.exception("on_peer_join callback raised")
+            return True
+
+        except (asyncio.TimeoutError, json.JSONDecodeError, KeyError) as e:
+            logger.warning("handshake to %s failed: %s", url, e)
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            logger.exception("connect %s unexpected error: %s", url, e)
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            return False
 
     async def disconnect(self, agent_id: str) -> None:
         """ peer """
@@ -362,53 +504,112 @@ class GossipNode:
     #
 
     async def _handle_connection(self, ws):
-        """ WebSocket """
+        """服务端 handshake：发 challenge、验证 client 持有 pubkey。"""
         try:
-            #
-            hello = await asyncio.wait_for(ws.recv(), timeout=5)
-            data = json.loads(hello)
-
-            if data.get("type") != "hello":
+            # 1) 等 hello
+            raw = await asyncio.wait_for(ws.recv(), timeout=HANDSHAKE_TIMEOUT)
+            hello = json.loads(raw)
+            if hello.get("type") != "hello":
                 await ws.close(1008, "expected hello")
                 return
 
-            remote_agent_id = data["agent_id"]
-            remote_pubkey = data.get("pubkey_hex", "")
+            remote_agent_id = hello.get("agent_id", "")
+            remote_pubkey = hello.get("pubkey_hex", "")
+            if not remote_agent_id or not remote_pubkey:
+                await ws.close(1008, "missing agent_id/pubkey_hex")
+                return
 
-            #  welcome
+            # 如果是被信任的旧 agent_id，pubkey 必须一致；否则就是冒名
+            known_pubkey = self._trusted_pubkeys.get(remote_agent_id)
+            if known_pubkey and known_pubkey != remote_pubkey:
+                logger.warning(
+                    "rejecting connection: %s claims a different pubkey",
+                    remote_agent_id,
+                )
+                await ws.close(1008, "pubkey mismatch with trust anchor")
+                return
+
+            # 2) 发 challenge
+            if not known_pubkey and not self.allow_tofu:
+                await ws.close(1008, "untrusted peer")
+                return
+
+            nonce = secrets.token_hex(16)
+            await self._send_json(ws, {"type": "challenge", "nonce": nonce})
+
+            # 3) 等 challenge_response，验证签名 = remote 持有 pubkey 对应私钥
+            raw = await asyncio.wait_for(ws.recv(), timeout=HANDSHAKE_TIMEOUT)
+            resp = json.loads(raw)
+            if resp.get("type") != "challenge_response":
+                await ws.close(1008, "expected challenge_response")
+                return
+            client_sig_hex = resp.get("sig", "")
+            if not client_sig_hex or not _verify_nonce(remote_pubkey, nonce, client_sig_hex):
+                logger.warning(
+                    "challenge_response signature invalid for %s", remote_agent_id
+                )
+                await ws.close(1008, "invalid challenge signature")
+                return
+
+            # client 通过了 → 把 pubkey 锚定到 agent_id
+            if not known_pubkey:
+                self.trust_agent(remote_agent_id, remote_pubkey)
+
+            # 4) welcome（也带 server_challenge，可选给 client 验证）
+            server_nonce = secrets.token_hex(16)
+            server_sig = self.identity.sign(_canon({"nonce": server_nonce})).hex()
             await self._send_json(ws, {
                 "type": "welcome",
                 "agent_id": str(self.identity.agent_id),
                 "pubkey_hex": self.identity.pubkey_hex,
                 "channels": list(self.subscriptions),
+                "server_challenge": server_nonce,
+                "server_sig": server_sig,
             })
 
-            #  peer
+            # 注册 peer
+            try:
+                remote_url = f"ws://{ws.remote_address[0]}:{ws.remote_address[1]}"
+            except Exception:
+                remote_url = ""
             self.peers[remote_agent_id] = ws
             self.peer_infos[remote_agent_id] = PeerInfo(
                 agent_id=remote_agent_id,
-                url=f"ws://{ws.remote_address[0]}:{ws.remote_address[1]}",
+                url=remote_url,
                 pubkey_hex=remote_pubkey,
                 connected_at=time.time(),
                 last_seen=time.time(),
             )
 
             if self._on_peer_join:
-                self._on_peer_join(self.peer_infos[remote_agent_id])
+                try:
+                    self._on_peer_join(self.peer_infos[remote_agent_id])
+                except Exception:
+                    logger.exception("on_peer_join callback raised")
 
-            #
+            # 进入消息循环
             await self._recv_loop(remote_agent_id, ws)
 
         except asyncio.TimeoutError:
             await ws.close(1008, "handshake timeout")
-        except Exception:
-            pass
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("handshake parse error: %s", e)
+            try:
+                await ws.close(1008, "handshake parse error")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.exception("handshake unexpected: %s", e)
 
     async def _recv_loop(self, agent_id: str, ws):
         """ peer """
         try:
             async for raw in ws:
-                self.peer_infos.get(agent_id, PeerInfo(agent_id=agent_id, url="")).last_seen = time.time()
+                # 修复：原代码用 dict.get(.., default) 给 default 对象写 last_seen，
+                # 当 peer 不在表里时是 no-op。这里只在存在时更新。
+                pi = self.peer_infos.get(agent_id)
+                if pi:
+                    pi.last_seen = time.time()
 
                 try:
                     data = json.loads(raw)
@@ -459,38 +660,95 @@ class GossipNode:
             # Peer
             await self.disconnect(agent_id)
 
-    async def _handle_gossip(self, data: dict, from_agent_id: str) -> None:
-        """ gossip  +  +  +  + """
+    async def _handle_gossip(self, data: dict, relay_peer_id: str) -> None:
+        """处理从 relay_peer_id 转发来的 gossip 消息。
+
+        安全检查（按顺序）：
+            1) msg_id 去重
+            2) timestamp 在重放窗口内（防回放）
+            3) 用 msg["from_agent"] 对应的 *信任锚 pubkey* 验签
+               —— 不是 relay_peer 的 pubkey！gossip 是多跳的
+            4) require_signature=True 时，未签名或验签失败 → 拒绝并 log
+        """
         msg_dict = data.get("message", {})
         msg_id = msg_dict.get("msg_id", "")
+        author_id = msg_dict.get("from_agent", "")
+        ts = msg_dict.get("timestamp", "")
 
-        #
-        if msg_id in self._seen:
+        if not msg_id or not author_id:
+            logger.debug("dropping gossip without msg_id/from_agent")
             return
-        self._seen.append(msg_id)
 
-        #  pubkey
+        # 1) 去重
+        if msg_id in self._seen_set:
+            return
+        # Mark as seen only after trust and signature checks pass.
+
+        # 2) 时间戳防回放
+        if not _within_replay_window(ts):
+            logger.warning(
+                "dropping replay/skewed msg %s from author=%s ts=%s (relay=%s)",
+                msg_id[:8], author_id, ts, relay_peer_id,
+            )
+            return
+
+        # 3) 用作者的信任锚 pubkey 验签 —— 不是中继者的！
         sig = msg_dict.get("sig", "")
-        if sig and from_agent_id in self.peer_infos:
-            pubkey_hex = self.peer_infos[from_agent_id].pubkey_hex
-            if pubkey_hex:
-                #
-                if not self.identity.verify_json(msg_dict, sig, pubkey_hex=pubkey_hex):
-                    #
-                    pass
+        author_pubkey = self._trusted_pubkeys.get(author_id)
+        trust_source = "pinned" if author_pubkey else None
 
-        #  channelappend JSONL
+        # 直接锚不命中时，回退到 trust graph 解析（web-of-trust 传递信任）
+        if author_pubkey is None and self.trust_graph is not None:
+            resolved = self.trust_graph.trusted_pubkey_for(
+                author_id, max_depth=self.wot_max_depth,
+            )
+            if resolved:
+                author_pubkey = resolved
+                trust_source = "wot"
+
+        if self.require_signature:
+            if not sig:
+                logger.warning(
+                    "dropping unsigned msg %s from %s (relay=%s)",
+                    msg_id[:8], author_id, relay_peer_id,
+                )
+                return
+            if not author_pubkey:
+                logger.warning(
+                    "dropping msg %s from untrusted author=%s "
+                    "(no pinned pubkey, no WoT chain within depth=%d)",
+                    msg_id[:8], author_id, self.wot_max_depth,
+                )
+                return
+            if not _verify_msg_signature(msg_dict, sig, author_pubkey):
+                logger.warning(
+                    "dropping msg %s: signature does not match trusted pubkey for %s "
+                    "(trust_source=%s)",
+                    msg_id[:8], author_id, trust_source,
+                )
+                return
+        else:
+            # require_signature=False 模式（仅用于开发/测试）
+            if sig and author_pubkey:
+                if not _verify_msg_signature(msg_dict, sig, author_pubkey):
+                    logger.info(
+                        "weak-mode: signature mismatch for %s, accepting anyway",
+                        msg_id[:8],
+                    )
+
+        # 通过 → 入本地 channel ledger
+        self._mark_seen(msg_id)
         self._channel_append(msg_dict)
 
-        #
+        # 回调
         if self._on_message:
             try:
-                self._on_message(msg_dict, from_agent_id)
+                self._on_message(msg_dict, relay_peer_id)
             except Exception:
-                pass
+                logger.exception("on_message callback raised")
 
-        #  peergossip fanout
-        await self._relay(msg_dict, exclude=from_agent_id)
+        # 中继给其它 peer
+        await self._relay(msg_dict, exclude=relay_peer_id)
 
     async def _relay(self, msg_dict: dict, exclude: str = "") -> None:
         """ peer"""
@@ -509,6 +767,13 @@ class GossipNode:
         from .channel import ChannelMessage
         msg = ChannelMessage.from_dict(msg_dict)
         self.channel._append(msg)
+
+    def _mark_seen(self, msg_id: str) -> None:
+        if len(self._seen) == self._seen.maxlen:
+            evicted = self._seen[0]
+            self._seen_set.discard(evicted)
+        self._seen_set.add(msg_id)
+        self._seen.append(msg_id)
 
     #
 
@@ -544,5 +809,73 @@ class GossipNode:
     async def _send_json(ws, data: dict) -> None:
         try:
             await ws.send(json.dumps(data, ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("send_json failed: %s", e)
+
+
+# ───────────────────── 模块级辅助 ─────────────────────
+
+
+def _canon(data: dict) -> bytes:
+    """canonical JSON bytes —— 跟 identity.canonical_json 保持一致。"""
+    from .identity import canonical_json
+    return canonical_json(data)
+
+
+def _verify_nonce(pubkey_hex: str, nonce: str, sig_hex: str) -> bool:
+    """验证 challenge nonce 签名 —— 证明 client 持有 pubkey 对应的私钥。"""
+    from .identity import _NACL_AVAILABLE, _VerifyKey  # type: ignore
+    if not _NACL_AVAILABLE:
+        return False
+    try:
+        assert _VerifyKey is not None
+        verify_key = _VerifyKey(bytes.fromhex(pubkey_hex))
+        payload = _canon({"nonce": nonce})
+        verify_key.verify(payload, bytes.fromhex(sig_hex))
+        return True
+    except Exception:
+        return False
+
+
+def _verify_msg_signature(msg_dict: dict, sig_hex: str, pubkey_hex: str) -> bool:
+    """验证 ChannelMessage 的签名 —— 必须用作者的 pubkey，不是中继者的。"""
+    from .identity import _NACL_AVAILABLE, _VerifyKey  # type: ignore
+    if not _NACL_AVAILABLE:
+        return False
+    # 与 channel.TeamChannel.send() 中签名时构造 payload 的字段对齐
+    payload = {
+        "msg_id": msg_dict.get("msg_id", ""),
+        "channel": msg_dict.get("channel", ""),
+        "from_agent": msg_dict.get("from_agent", ""),
+        "content": msg_dict.get("content", ""),
+        "content_type": msg_dict.get("content_type", "text"),
+        "reply_to": msg_dict.get("reply_to", ""),
+        "mentions": msg_dict.get("mentions", []),
+        "timestamp": msg_dict.get("timestamp", ""),
+        "metadata": msg_dict.get("metadata", {}),
+    }
+    try:
+        assert _VerifyKey is not None
+        _VerifyKey(bytes.fromhex(pubkey_hex)).verify(
+            _canon(payload), bytes.fromhex(sig_hex)
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _within_replay_window(ts: str) -> bool:
+    """timestamp 在 [now - REPLAY_WINDOW, now + FUTURE_DRIFT] 之内？"""
+    if not ts:
+        return False
+    try:
+        msg_time = datetime.fromisoformat(ts)
+    except ValueError:
+        return False
+    now = datetime.now()
+    delta = (now - msg_time).total_seconds()
+    if delta > REPLAY_WINDOW_SECONDS:
+        return False
+    if delta < -FUTURE_DRIFT_SECONDS:
+        return False
+    return True

@@ -8,7 +8,7 @@ can be inspected, synced with Git, and merged by higher-level tools later.
 from __future__ import annotations
 
 import json
-import os
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from .membership import MembershipManager, TeamRole
+
+# Lazy imports to avoid circular deps at module level
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .event_bus import EventBus
+    from .identity import AgentIdentity
+from .util import atomic_write_json, safe_load_json, safe_id as _safe_id_util
+
+logger = logging.getLogger("nth_dao.groups")
 
 
 DEFAULT_CHANNELS_DIR = "team_channels"
@@ -237,10 +246,14 @@ class GroupManager:
         self,
         workspace: Union[str, Path],
         membership: Optional[MembershipManager] = None,
+        event_bus: Optional["EventBus"] = None,
+        identity: Optional["AgentIdentity"] = None,
     ):
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.membership = membership or MembershipManager(self.workspace)
+        self._event_bus = event_bus
+        self._identity = identity
 
     @property
     def channels_dir(self) -> Path:
@@ -302,7 +315,8 @@ class GroupManager:
         if not path.exists():
             return None
         try:
-            return Channel.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            data = safe_load_json(path, fallback=None)
+            return Channel.from_dict(data) if data is not None else None
         except Exception:
             return None
 
@@ -401,8 +415,11 @@ class GroupManager:
             return []
         items = []
         for path in sorted(self.announcements_dir.glob("*.json")):
+            data = safe_load_json(path, fallback=None)
+            if data is None:
+                continue
             try:
-                item = Announcement.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                item = Announcement.from_dict(data)
             except Exception:
                 continue
             if not channel_id or item.channel_id == channel_id:
@@ -475,10 +492,11 @@ class GroupManager:
 
     def get_task(self, task_id: str) -> Optional[Task]:
         path = self._task_path(task_id)
-        if not path.exists():
+        data = safe_load_json(path, fallback=None)
+        if data is None:
             return None
         try:
-            return Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            return Task.from_dict(data)
         except Exception:
             return None
 
@@ -525,10 +543,11 @@ class GroupManager:
 
     def get_trust_hint(self, agent_id: str) -> Optional[TrustHint]:
         path = self._trust_path(agent_id)
-        if not path.exists():
+        data = safe_load_json(path, fallback=None)
+        if data is None:
             return None
         try:
-            return TrustHint.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            return TrustHint.from_dict(data)
         except Exception:
             return None
 
@@ -576,7 +595,30 @@ class GroupManager:
             summary=summary,
             metadata=metadata or {},
         )
+
+        # Legacy path: append to audit.jsonl (always, for backward compat)
         self._append_jsonl(self.audit_path, event.to_dict())
+
+        # New path: route through EventBus with Ed25519 signing when available
+        if self._event_bus is not None:
+            try:
+                bus_event = self._event_bus.emit(
+                    f"group.{event_type}",
+                    {
+                        "actor_id": actor_id,
+                        "target_type": target_type,
+                        "target_id": target_id,
+                        "summary": summary,
+                        "metadata": metadata or {},
+                    },
+                    identity=self._identity,
+                )
+                # Cross-reference: store the bus event_id so the legacy
+                # audit.jsonl and signed events.jsonl can be correlated
+                event.metadata["bus_event_id"] = bus_event.event_id
+            except Exception as exc:
+                logger.warning("EventBus emit failed for %s: %s", event_type, exc)
+
         return event
 
     def _require_permission(self, agent_id: str, permission: str) -> None:
@@ -607,10 +649,7 @@ class GroupManager:
 
     @staticmethod
     def _write_json(path: Path, data: Dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(str(tmp), str(path))
+        atomic_write_json(path, data)
 
     @staticmethod
     def _append_jsonl(path: Path, data: Dict[str, Any]) -> None:
@@ -623,20 +662,24 @@ class GroupManager:
         if not path.exists():
             return []
         items = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines:
             if not line.strip():
                 continue
             try:
                 items.append(json.loads(line))
-            except Exception:
+            except json.JSONDecodeError:
                 continue
         return items
 
     @staticmethod
     def _safe_id(value: str) -> str:
-        value = value.strip().lower().replace(" ", "-")
-        safe = "".join(c if c.isalnum() or c in "_-." else "-" for c in value)
-        return safe or DEFAULT_CHANNEL_ID
+        # 保留 groups 的特殊语义：小写化、空格转 -，然后走 util safe_id
+        value = (value or "").strip().lower().replace(" ", "-")
+        return _safe_id_util(value, allow_extra="_-.", fallback=DEFAULT_CHANNEL_ID)
 
 
 def _enum_or_default(enum_cls, value, default):

@@ -1,39 +1,38 @@
 """
-attach()   API
+attach() — one-line integration API.
 
- Agent  NTH DAO
+Join any agent framework to NTH DAO:
 
     import nth_dao as nth
     team = nth.attach(
         agent_id="my-agent",
-        backend="mock",                #  AgentBackend
+        backend="mock",                # str (registry id) or AgentBackend instance
         capabilities=["python", "web"],
         groups=["frontend"],
         workspace="./my-team-workspace",
     )
 
-    #
-    team.memory                # TeamMemoryManager   system prompt
-    team.blackboard            # Blackboard
-    team.runner                # MissionRunner
-    team.finder                # PeerFinder
+    # The TeamSession exposes:
+    team.memory                # TeamMemoryManager (4 providers, injected into system prompt)
+    team.blackboard            # Blackboard (shared workspace)
+    team.runner                # MissionRunner (claim / handoff / complete)
+    team.finder                # PeerFinder (capability-based teammate lookup)
     team.discover()            # list_alive agents
-    team.start_mission(...)
-    team.detach()              #
+    team.start_mission(...)    # publish a multi-step mission
+    team.detach()              # flush ledger, unregister, close backend
 
-
-- attach() 4 Provider + Blackboard + Discovery + Mission
-- TeamSession  facade
-- detach() ledger
+Design:
+- attach() wires up 4 memory providers + Blackboard + Discovery + Mission store
+- TeamSession is a thin façade combining them
+- detach() flushes the ledger and releases resources (idempotent)
 """
 
 from __future__ import annotations
 
-import socket
-import threading
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Protocol, Union, runtime_checkable
 
 from team_layer import TeamAgent, TeamMemoryManager
 from team_layer.backends import AgentBackend, default_registry
@@ -49,11 +48,63 @@ from .discovery import AgentRegistry, PeerFinder
 from .orchestration import Mission, MissionRunner, MissionStore
 from .membership import MembershipManager
 from .identity import AgentIdentity
+from .event_bus import EventBus
+from .groups import GroupManager
+
+logger = logging.getLogger("nth_dao.attach")
+
+
+@runtime_checkable
+class _Closeable(Protocol):
+    """Structural protocol for backends that have explicit resource release.
+
+    A backend may implement any one of `close`, `stop`, or `shutdown`
+    (in that priority order). detach() will call the first one it finds.
+    """
+
+    def close(self) -> Any: ...  # pragma: no cover — protocol stub
+
+
+def _owner_or_none(agent_identity: Optional[AgentIdentity], config) -> Optional[AgentIdentity]:
+    """Return agent_identity if it matches the team's pinned owner_pubkey.
+
+    Ensures only the legitimate owner re-signs team.json. Any other agent
+    sees `owner_identity=None` on their MembershipManager, so their saves
+    won't carry signatures — which will then fail load_config() on other
+    nodes (preventing tamper-via-git-sync).
+    """
+    if agent_identity is None or not getattr(agent_identity, "can_sign", False):
+        return None
+    pinned = getattr(config, "owner_pubkey", "")
+    if pinned and pinned == agent_identity.pubkey_hex:
+        return agent_identity
+    # Fresh team with no owner pinned yet → can't act as owner via attach().
+    # Use `MembershipManager(workspace).enable_signed_owner(identity, actor_id=...)`
+    # explicitly to bootstrap.
+    return None
+
+
+def _close_backend(backend: Optional[Any]) -> None:
+    """Best-effort backend release, tolerant to ducks of varying species."""
+    if backend is None:
+        return
+    for closer in ("close", "stop", "shutdown"):
+        fn = getattr(backend, closer, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception as e:
+                logger.warning("backend.%s raised during detach: %s", closer, e)
+            return
+    logger.debug(
+        "backend %r has no close/stop/shutdown method; skipping",
+        type(backend).__name__,
+    )
 
 
 @dataclass
 class TeamSession:
-    """attach()  facade    NTH DAO runtime """
+    """Façade returned by attach(); aggregates the full NTH DAO runtime for one agent."""
     agent_id: str
     backend_id: str
     workspace: Path
@@ -66,20 +117,22 @@ class TeamSession:
     mission_store: MissionStore
     runner: MissionRunner
     membership: MembershipManager
+    groups: Optional[GroupManager] = None
+    event_bus: Optional[EventBus] = None
     identity: Optional[AgentIdentity] = None
     backend: Optional[AgentBackend] = None
     capabilities: List[str] = field(default_factory=list)
-    groups: List[str] = field(default_factory=list)
+    groups_list: List[str] = field(default_factory=list)
     _detached: bool = False
 
     #
 
     def discover(self) -> List:
-        """ Agent"""
+        """List currently alive agents (including self)."""
         return self.registry.list_alive()
 
     def discover_others(self) -> List:
-        """ Agent"""
+        """List currently alive agents excluding self."""
         return [r for r in self.registry.list_alive() if r.agent_id != self.agent_id]
 
     def find_teammate(
@@ -88,7 +141,12 @@ class TeamSession:
         needed_capabilities: Optional[List[str]] = None,
         group: Optional[str] = None,
     ):
-        """"""
+        """Find one teammate by capability / capability-set / group.
+
+        Note: return type varies by branch — `needed_capabilities` returns a
+        `MatchResult` (with .score), the other two return an `AgentRecord`.
+        For type-consistent code use `team.finder` directly.
+        """
         if needed_capabilities:
             return self.finder.best_match(
                 needed_capabilities=needed_capabilities,
@@ -119,7 +177,7 @@ class TeamSession:
         priority: str = "normal",
         tags: Optional[List[str]] = None,
     ) -> Mission:
-        """"""
+        """Publish a new mission to the store and post a Kanban card to the blackboard."""
         m = Mission.new(
             title=title,
             goal=goal,
@@ -132,7 +190,7 @@ class TeamSession:
         )
         self.mission_store.create(m)
 
-        #  mission  blackboard Kanban
+        # Surface the mission on the blackboard Kanban
         self.blackboard.post(
             topic=f"[MISSION] {title}",
             author=self.agent_id,
@@ -142,13 +200,13 @@ class TeamSession:
             metadata={"mission_id": m.id, "type": "mission"},
         )
 
-        #
+        # Mark this agent as the mission owner in the registry
         self.registry.update_status(current_mission=m.id)
 
         return m
 
     def take_next_work(self) -> Optional[Mission]:
-        """ step  claim  """""
+        """Find a claimable step and atomically claim it; returns the parent mission."""
         found = self.runner.find_work()
         if not found:
             return None
@@ -158,19 +216,24 @@ class TeamSession:
         return mission
 
     def detach(self) -> None:
-        """ + """
+        """完成所有清理：agent.finalize、registry.unregister、backend.close。
+
+        任何一步失败都不阻断后续；统一 log warn。
+        """
         if self._detached:
             return
-        #  agent
+        # agent finalize（落盘 ledger 等）
         try:
             self.agent.finalize()
         except Exception as e:
-            print(f"[ATTACH] finalize warning: {e}")
-        #
+            logger.warning("agent.finalize raised during detach: %s", e)
+        # registry 注销心跳
         try:
             self.registry.unregister()
         except Exception as e:
-            print(f"[ATTACH] unregister warning: {e}")
+            logger.warning("registry.unregister raised during detach: %s", e)
+        # backend 关停（subprocess / HTTP session 等）
+        _close_backend(self.backend)
         self._detached = True
 
     def __enter__(self):
@@ -204,30 +267,49 @@ def attach(
     join_token: str = "",
     identity: Optional[AgentIdentity] = None,
 ) -> TeamSession:
-    """
-     NTH DAO
+    """One-line integration: wire up an agent's NTH DAO runtime.
 
     Args:
-        agent_id:  Agent id
-        backend:  registry  AgentBackend  None backend
-        backend_kwargs:  backend  ctor
-        capabilities:  ["python", "web", "codegen"]
-        groups:  ["frontend", "ops"]
-        workspace:  dir
-         NTH DAO runtime
+        agent_id: Stable identifier for this agent.
+        backend: One of: a backend id (str) registered in default_registry,
+                 an AgentBackend instance, or None (no LLM backend).
+        backend_kwargs: ctor kwargs passed to the backend factory when `backend` is a str.
+        capabilities: e.g. ["python", "web", "codegen"]
+        groups: e.g. ["frontend", "ops"]
+        workspace: Directory that holds the NTH DAO runtime artifacts.
 
     Returns:
-        TeamSession   facade  with  detach
+        TeamSession — façade combining agent + memory + blackboard + discovery +
+        mission store + runner + membership; works as a context manager
+        (with-statement) that calls detach() on exit.
+
+    Raises:
+        PermissionError: when the team's join_policy denies this agent_id (and
+        no valid join_token / approval is present).
     """
     workspace = Path(workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
     capabilities = capabilities or []
     groups = groups or []
-    membership = MembershipManager(workspace)
     agent_identity = identity or AgentIdentity.from_string(agent_id, label=agent_id)
+    # MembershipManager: if the agent identity has signing keys *and* the
+    # existing team.json was signed by this same pubkey, this agent acts as
+    # owner (signs subsequent saves). Otherwise the owner-signing layer is
+    # inactive (legacy behavior).
+    membership = MembershipManager(workspace, owner_identity=_owner_or_none(
+        agent_identity, MembershipManager(workspace).load_config(),
+    ))
 
-    # 1. backend
+    # 1. 先做 membership gate —— 不通过则连 backend 都不创建（避免 subprocess 泄漏）
+    allowed, reason = membership.ensure_member(agent_id, token=join_token)
+    if not allowed:
+        raise PermissionError(
+            f"Agent '{agent_id}' cannot attach to this team: {reason}. "
+            "Submit a join request or ask a team admin for approval/invite."
+        )
+
+    # 2. 创建/挂载 backend
     backend_instance: Optional[AgentBackend] = None
     backend_id_str = "none"
     if isinstance(backend, AgentBackend):
@@ -236,13 +318,6 @@ def attach(
     elif isinstance(backend, str):
         backend_instance = default_registry.create(backend, **(backend_kwargs or {}))
         backend_id_str = backend
-
-    allowed, reason = membership.ensure_member(agent_id, token=join_token)
-    if not allowed:
-        raise PermissionError(
-            f"Agent '{agent_id}' cannot attach to this team: {reason}. "
-            "Submit a join request or ask a team admin for approval/invite."
-        )
 
     # 2. 4+1  Provider
     providers = [
@@ -292,6 +367,18 @@ def attach(
         store=mission_store,
         agent_id=agent_id,
         capabilities=capabilities,
+        registry=registry,  # 让 handoff 能检查目标 alive
+    )
+
+    # 8. EventBus — unified team-level signed event stream (L0)
+    event_bus = EventBus(workspace, identity=agent_identity)
+
+    # 9. GroupManager — channels, messages, tasks, audit (with EventBus routing)
+    group_mgr = GroupManager(
+        workspace,
+        membership=membership,
+        event_bus=event_bus,
+        identity=agent_identity if agent_identity.can_sign else None,
     )
 
     return TeamSession(
@@ -306,8 +393,10 @@ def attach(
         mission_store=mission_store,
         runner=runner,
         membership=membership,
+        groups=group_mgr,
+        event_bus=event_bus,
         identity=agent_identity,
         backend=backend_instance,
         capabilities=capabilities,
-        groups=groups,
+        groups_list=groups,
     )

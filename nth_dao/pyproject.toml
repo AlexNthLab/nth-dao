@@ -5,14 +5,8 @@ build-backend = "setuptools.build_meta"
 # Note: This pyproject.toml ships inside nth_dao/ for historical
 # extraction notes. The forward package name is now nth-dao.
 #
-# Currently nth_dao lives alongside team_layer/ within the
-# Hermes fork. To extract:
-#   1. mkdir nth-dao-repo && cd nth-dao-repo
-#   2. cp -r ../hermes-team-agent/team_layer ../hermes-team-agent/nth_dao ./
-#   3. mv nth_dao/pyproject.toml ./pyproject.toml
-#   4. git init && git add . && git commit -m "extract nth-dao"
-#   5. pip install -e . (test)
-#   6. twine upload dist/* (PyPI release)
+# This file is retained only as an in-package extraction note. The repository
+# root pyproject.toml is the authoritative packaging configuration.
 
 [project]
 name = "nth-dao"
@@ -44,6 +38,7 @@ dev = ["pytest>=7.0", "ruff>=0.1.0"]
 contracts = ["pydantic>=2.0"]  # stricter EvoLoop contract validation
 retries = ["tenacity>=8.0"]    # better retry primitives in generated skills
 crypto = ["pynacl>=1.5"]       # optional Ed25519 agent identity/signing
+web = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 [project.urls]
 Homepage = "https://github.com/AlexNthLab/nth-dao"
@@ -51,6 +46,7 @@ Source = "https://github.com/AlexNthLab/nth-dao"
 
 [project.scripts]
 nth-blackboard = "team_layer.blackboard.cli:main"
+nth-web = "nth_dao.web:main"
 
 [tool.setuptools]
-packages = ["nth_dao", "nth_dao", "team_layer"]
+packages = ["nth_dao", "nth_dao.discovery", "nth_dao.orchestration", "nth_dao.web", "team_layer"]

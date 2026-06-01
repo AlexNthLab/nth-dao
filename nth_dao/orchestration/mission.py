@@ -1,15 +1,18 @@
 """
-Mission & MissionStep
+Mission & MissionStep — long-running multi-step tasks that relay across
+sessions / terminals / agents.
 
-Mission
-    planning  active  completed
-                      failed
-                      paused
+Mission states:
+    planning  →  active  →  completed
+                         →  failed
+                         →  paused
+                         →  cancelled
 
-Step
-    todo  claimed  active  done
-                                 failed
-                                 handed_off  ( Agent)
+Step states:
+    todo  →  claimed  →  active  →  done
+                                 →  failed
+                                 →  handed_off  (transfer to another agent)
+                                 →  blocked
 """
 
 from __future__ import annotations
@@ -114,6 +117,23 @@ class Mission:
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # ── template linkage (v0.9.3) ──
+    # When set, this mission was instantiated from a template; template_lock
+    # captures publisher_sig at instantiation time so the mission stays
+    # reproducible even if the template is later modified or deprecated.
+    template_id: Optional[str] = None
+    template_version: Optional[str] = None
+    template_lock: Dict[str, Any] = field(default_factory=dict)
+
+    # ── reserved fields (v0.9.3, not yet implemented) ──
+    # Filled in by future versions; default values are inert. Keeping the
+    # field names stable now lets a later release populate them without
+    # breaking on-disk format.
+    owner_did: str = ""
+    legal_jurisdiction: str = ""
+    governing_arbiter: str = ""
+    credentials_required: List[str] = field(default_factory=list)
+
     #
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -159,8 +179,9 @@ class Mission:
     @classmethod
     def from_dict(cls, data: dict) -> "Mission":
         fields = {f for f in cls.__dataclass_fields__}
-        steps_data = data.pop("steps", [])
-        m = cls(**{k: v for k, v in data.items() if k in fields})
+        # 不 mutate 入参；之前用 data.pop 会把调用方的 dict 改坏
+        steps_data = data.get("steps", [])
+        m = cls(**{k: v for k, v in data.items() if k in fields and k != "steps"})
         m.steps = [MissionStep.from_dict(s) for s in steps_data]
         return m
 
@@ -210,9 +231,12 @@ class Mission:
         }
 
     def is_finished(self) -> bool:
+        """所有 step 都 DONE / HANDED_OFF 终态？空 step list = False（待规划）。"""
         if not self.steps:
             return False
-        return all(s.status == StepStatus.DONE.value for s in self.steps)
+        # HANDED_OFF 算"我方做完了"，新 owner 会继续推进
+        terminal_ok = {StepStatus.DONE.value, StepStatus.HANDED_OFF.value}
+        return all(s.status in terminal_ok for s in self.steps)
 
     def short(self) -> str:
         p = self.progress()

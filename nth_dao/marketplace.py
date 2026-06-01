@@ -48,7 +48,10 @@ credits Agent-to-Agent
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -58,6 +61,9 @@ from typing import Any, Dict, List, Optional
 from .identity import AgentIdentity
 from .channel import TeamChannel
 from .reputation import ReputationManager
+from .util import atomic_write_json, safe_load_json, safe_id as _safe_id_util
+
+logger = logging.getLogger("nth_dao.marketplace")
 
 
 #
@@ -225,29 +231,75 @@ class TaskMarketplace:
         self.orders_dir = workspace / marketplace_dir
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
-        #
+        # 同一进程内对 credits 做线程互斥；跨进程靠 atomic_write_json + file lock
+        self._credit_lock = threading.RLock()
         self._credit_file = workspace / marketplace_dir / f"{self._safe_id(agent_id)}_credits.json"
+        self._credit_ledger = workspace / marketplace_dir / f"{self._safe_id(agent_id)}_credits.ledger.jsonl"
         self._init_credits()
 
     #
 
     def _init_credits(self) -> None:
         if not self._credit_file.exists():
-            self._write_credits(100)  #  agent
+            self._write_credits(100.0, txn=None)  # 新 agent 100 起手
 
     def _read_credits(self) -> float:
+        data = safe_load_json(self._credit_file, fallback=None)
+        if not isinstance(data, dict):
+            return 0.0
         try:
-            return json.loads(self._credit_file.read_text()).get("balance", 0)
-        except Exception:
-            return 0
+            return float(data.get("balance", 0))
+        except (TypeError, ValueError):
+            return 0.0
 
-    def _write_credits(self, balance: float) -> None:
-        tmp = self._credit_file.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps({"agent_id": self.agent_id, "balance": round(balance, 2)}, indent=2),
-            encoding="utf-8",
+    def _write_credits(self, balance: float, txn: Optional[Dict[str, Any]]) -> None:
+        """更新余额并追加一条 ledger 记录。
+
+        ledger 是 append-only jsonl，每次变动一行 {ts, balance_before, balance_after, txn}。
+        即使余额文件丢失也可以从 ledger 重建，便于审计 / 双花检测。
+        """
+        atomic_write_json(
+            self._credit_file,
+            {"agent_id": self.agent_id, "balance": round(balance, 2)},
         )
-        os.replace(str(tmp), str(self._credit_file))
+        if txn is not None:
+            entry = {
+                "ts": datetime.now().isoformat(),
+                "agent_id": self.agent_id,
+                "balance_after": round(balance, 2),
+                **txn,
+            }
+            self._credit_ledger.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._credit_ledger, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _transfer_credits(
+        self,
+        delta: float,
+        order_id: str,
+        kind: str,
+    ) -> float:
+        """原子地 +/- 余额。delta<0 时检查不能透支。
+
+        Returns:
+            新余额
+        Raises:
+            ValueError: 余额不足
+        """
+        with self._credit_lock:
+            before = self._read_credits()
+            after = round(before + delta, 2)
+            if after < 0 - 1e-9:
+                raise ValueError(
+                    f"insufficient credits: balance={before}, requested delta={delta}"
+                )
+            self._write_credits(after, txn={
+                "kind": kind,
+                "delta": round(delta, 2),
+                "balance_before": before,
+                "order_id": order_id,
+            })
+            return after
 
     @property
     def balance(self) -> float:
@@ -284,14 +336,15 @@ class TaskMarketplace:
         Raises:
             ValueError:
         """
-        #
+        # 预扣验证（真正的扣款放到 order 创建后做，否则 fail 时会扣了又退）
+        if reward < 0:
+            raise ValueError("reward must be >= 0")
         if reward > 0 and self._read_credits() < reward:
             raise ValueError(
                 f"Insufficient credits: balance={self._read_credits()}, "
                 f"reward={reward}"
             )
 
-        import uuid
         order = TaskOrder(
             order_id=uuid.uuid4().hex,
             creator=self.agent_id,
@@ -318,9 +371,9 @@ class TaskMarketplace:
             }
             order.creator_sig = self.identity.sign_json(payload)
 
-        #
+        # 通过 ledger 扣款（双花防护）
         if reward > 0:
-            self._write_credits(self._read_credits() - reward)
+            self._transfer_credits(-reward, order_id=order.order_id, kind="escrow_lock")
 
         self._save(order)
 
@@ -510,11 +563,12 @@ class TaskMarketplace:
         order_id: str,
         reason: str = "",
     ) -> TaskOrder:
-        """ open
+        """驳回 submitted 状态的订单，重新开放。
 
-        Args:
-            order_id:  ID
-            reason:
+        修复了原版本两个 bug：
+            1) hasattr 检查不存在的 claimant_history → DM 永远发到 "unknown"
+            2) 先清空 claimant 再用 claimant → 通知发不到原 claimant
+        现在：先记下 claimant，再清空，最后 DM。
         """
         order = self._require_my_order(order_id)
         if order.status != OrderStatus.SUBMITTED:
@@ -522,6 +576,7 @@ class TaskMarketplace:
                 f"Order {order_id[:8]} is {order.status.value}, not submitted"
             )
 
+        rejected_claimant = order.claimant  # 先记下来！
         now = datetime.now().isoformat()
         order.status = OrderStatus.OPEN
         order.claimant = ""
@@ -533,15 +588,19 @@ class TaskMarketplace:
             "actor": self.agent_id,
             "timestamp": now,
             "reason": reason,
+            "rejected_claimant": rejected_claimant,
         })
 
         self._save(order)
 
-        if self.channel:
-            self.channel.dm(
-                order.claimant if hasattr(order, 'claimant_history') else "unknown",
-                f" Your submission for '{order.title}' was rejected: {reason}",
-            )
+        if self.channel and rejected_claimant:
+            try:
+                self.channel.dm(
+                    rejected_claimant,
+                    f"Your submission for '{order.title}' was rejected: {reason}",
+                )
+            except Exception as e:
+                logger.warning("reject DM failed: %s", e)
 
         return order
 
@@ -560,9 +619,11 @@ class TaskMarketplace:
             "timestamp": datetime.now().isoformat(),
         })
 
-        #
+        # 取消订单 → 退还冻结金额
         if order.reward > 0:
-            self._write_credits(self._read_credits() + order.reward)
+            self._transfer_credits(
+                +order.reward, order_id=order.order_id, kind="escrow_refund_cancel"
+            )
 
         self._save(order)
         return order
@@ -682,9 +743,13 @@ class TaskMarketplace:
                             "timestamp": now.isoformat(),
                         })
                         self._save(o)
-                        #
+                        # 到期 → 退还冻结金额
                         if o.reward > 0:
-                            self._write_credits(self._read_credits() + o.reward)
+                            self._transfer_credits(
+                                +o.reward,
+                                order_id=o.order_id,
+                                kind="escrow_refund_expired",
+                            )
                         expired_count += 1
 
                 #
@@ -731,23 +796,19 @@ class TaskMarketplace:
         return order
 
     def _load(self, order_id: str) -> Optional[TaskOrder]:
-        path = self.orders_dir / f"{order_id}.json"
-        if not path.exists():
+        path = self.orders_dir / f"{_safe_id_util(order_id)}.json"
+        data = safe_load_json(path, fallback=None)
+        if data is None:
             return None
         try:
-            return TaskOrder.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            return TaskOrder.from_dict(data)
         except Exception:
             return None
 
     def _save(self, order: TaskOrder) -> None:
-        path = self.orders_dir / f"{order.order_id}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(order.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(str(tmp), str(path))
+        path = self.orders_dir / f"{_safe_id_util(order.order_id)}.json"
+        atomic_write_json(path, order.to_dict())
 
     @staticmethod
     def _safe_id(agent_id: str) -> str:
-        return "".join(c if c.isalnum() or c in "_-" else "-" for c in agent_id)
+        return _safe_id_util(agent_id)

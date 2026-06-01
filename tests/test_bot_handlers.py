@@ -24,9 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 #  import botbot
 import os
-os.environ.setdefault("KEDELAW_BOT_TOKEN", "fake-token-for-test")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "fake-token-for-test")
 os.environ.setdefault("DEEPSEEK_API_KEY", "fake-key-for-test")
-os.environ.setdefault("KEDELAW_ALLOWED_USERS", "6506447491")
+os.environ.setdefault("TELEGRAM_ALLOWED_USERS", "6506447491")
 
 #  import bot  handlers
 import nth_telegram_bot as bot

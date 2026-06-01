@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
+
+logger = logging.getLogger("nth_dao.identity")
 
 
 DEFAULT_IDENTITY_DIR = ".nth"
@@ -122,6 +126,48 @@ class AgentIdentity:
             metadata=metadata or {},
         )
 
+    # ─── v0.9.5: W3C did:key standard alignment ───
+
+    def as_did(self) -> str:
+        """Return the W3C did:key string for this identity's pubkey.
+
+        Spec: https://w3c-ccg.github.io/did-key-spec/
+
+        For cryptographic identities, this is `did:key:z<base58btc(0xed01 || pubkey)>`.
+        For plain identities (no pubkey), raises ValueError — plain agent_ids
+        do not have a did:key representation.
+        """
+        if not self.pubkey_hex:
+            raise ValueError(
+                "as_did() requires a cryptographic identity; "
+                "plain agent_ids have no did:key form"
+            )
+        from .did_key import encode_ed25519_did_key_hex
+        return encode_ed25519_did_key_hex(self.pubkey_hex)
+
+    @classmethod
+    def from_did(
+        cls,
+        did: str,
+        label: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "AgentIdentity":
+        """Construct a verify-only AgentIdentity from a W3C did:key string.
+
+        The resulting identity has `can_sign=False` — you can verify signatures
+        made by this DID but not sign new ones. Use `AgentIdentity.generate()`
+        for a signing-capable identity.
+        """
+        from .did_key import decode_ed25519_did_key
+        pubkey_bytes = decode_ed25519_did_key(did)
+        return cls(
+            agent_id=AgentID.from_pubkey(pubkey_bytes.hex()),
+            label=label,
+            metadata=metadata or {},
+            _signing_key=None,
+            _verify_key=pubkey_bytes,
+        )
+
     @classmethod
     def generate(
         cls,
@@ -155,12 +201,32 @@ class AgentIdentity:
         pubkey_hex = data.get("pubkey", "")
         if signing_hex and pubkey_hex:
             _require_crypto("AgentIdentity.load() with a keypair")
+            assert _SigningKey is not None
+
+            try:
+                signing_bytes = bytes.fromhex(signing_hex)
+                verify_bytes = bytes.fromhex(pubkey_hex)
+            except ValueError as e:
+                raise ValueError(
+                    f"identity file {identity_path} has malformed hex keys: {e}"
+                ) from e
+
+            # 防 identity 文件被换 pubkey 攻击：
+            # 私钥派生出来的真 pubkey 必须等于文件里宣称的 pubkey
+            derived_pub = _SigningKey(signing_bytes).verify_key.encode()
+            if derived_pub != verify_bytes:
+                raise ValueError(
+                    f"identity file {identity_path} keypair mismatch: "
+                    "private_key does not derive the stored pubkey. "
+                    "file may have been tampered with — refuse to load."
+                )
+
             return cls(
                 agent_id=AgentID.from_pubkey(pubkey_hex),
                 label=data.get("label", ""),
                 metadata=data.get("metadata", {}),
-                _signing_key=bytes.fromhex(signing_hex),
-                _verify_key=bytes.fromhex(pubkey_hex),
+                _signing_key=signing_bytes,
+                _verify_key=verify_bytes,
             )
 
         return cls.from_string(
@@ -192,16 +258,16 @@ class AgentIdentity:
         identity_path.parent.mkdir(parents=True, exist_ok=True)
 
         data = self.public_dict()
-        if self._signing_key:
+        has_private = bool(self._signing_key)
+        if has_private:
             data["private_key"] = self._signing_key.hex()
 
         tmp = identity_path.with_suffix(identity_path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(str(tmp), str(identity_path))
-        try:
-            identity_path.chmod(0o600)
-        except Exception:
-            pass
+
+        if has_private:
+            _restrict_to_owner(identity_path)
 
     def sign(self, payload: bytes) -> bytes:
         if not self.can_sign:
@@ -275,3 +341,75 @@ def load_or_generate(
     )
     fallback.save(identity_path)
     return fallback
+
+
+# ───────────────────── private-key file permission hardening ─────────────────
+
+
+def _restrict_to_owner(path: Path) -> None:
+    """尽力把文件权限收紧到只有 owner 可读。
+
+    POSIX: chmod 0o600
+    Windows: 用 icacls 把 ACL 缩到当前用户；失败必须 warn —— 不能像之前那样
+             `except: pass` 把私钥裸奔藏起来。
+    """
+    if sys.platform == "win32":
+        ok = _restrict_windows_acl(path)
+        if not ok:
+            logger.warning(
+                "could not restrict ACL on private key file %s — "
+                "file may be readable by other local users. "
+                "Inspect permissions with: icacls %s",
+                path, path,
+            )
+        return
+
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        logger.warning("could not chmod 0600 on %s: %s", path, e)
+
+
+def _restrict_windows_acl(path: Path) -> bool:
+    """Windows: 用 icacls 把私钥 ACL 限制到当前用户。
+
+    正确顺序：
+        1) /grant <USER>:(F)     # 先给自己显式 full
+        2) /inheritance:r         # 再剥离继承的 ACE
+        3) 自检：还能读吗？如果不能 → /inheritance:e 还原（保命）+ 返回 False
+    """
+    import getpass
+    import subprocess
+
+    user = os.environ.get("USERNAME") or getpass.getuser()
+    if not user:
+        return False
+    try:
+        # 1) 先 grant 自己
+        r1 = subprocess.run(
+            ["icacls", str(path), "/grant", f"{user}:(F)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r1.returncode != 0:
+            return False
+        # 2) 再 strip 继承
+        r2 = subprocess.run(
+            ["icacls", str(path), "/inheritance:r"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r2.returncode != 0:
+            return False
+        # 3) 自检读取 —— 若失败立刻还原继承
+        try:
+            with open(path, "rb") as fh:
+                fh.read(1)
+        except OSError:
+            # 还原 inheritance，至少文件还能用
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:e"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return False
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False

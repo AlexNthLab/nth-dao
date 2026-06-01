@@ -268,54 +268,60 @@ class TeamChannel:
     def fetch(
         self,
         channel: str = TEAM_CHANNEL,
-        since: Optional[str] = None,      # ISO timestamp
-        since_msg_id: Optional[str] = None,  #  ID
+        since: Optional[str] = None,      # ISO timestamp, 严格大于此值
+        since_msg_id: Optional[str] = None,  # 取这个 msg 之后的所有
         limit: int = 50,
     ) -> List[ChannelMessage]:
-        """
+        """读取 channel 最近 limit 条消息（按 timestamp 全局排序）。
 
-        Args:
-            channel:
-            since:
-            since_msg_id:  ID
-            limit:
-
-        Returns:
-
+        修复了原版本：
+            1) 跨多文件（{host}_{agent}_{date}.jsonl）按文件遍历会乱序
+               → 现在先全部加载，按 timestamp 全局排序，再切 limit
+            2) since_msg_id 在跨文件时可能漏掉 → 改成"先排序后切"
         """
         dir_path = self.base_dir / _channel_dir(channel)
         if not dir_path.exists():
             return []
 
-        messages = []
-        found_since = since_msg_id is None and since is None
-
+        # 1) 全部加载 + 按 timestamp 排序
+        all_msgs: List[ChannelMessage] = []
         for file_path in sorted(dir_path.glob("*.jsonl")):
             try:
-                for line in file_path.read_text(encoding="utf-8").strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    data = json.loads(line)
-                    msg = ChannelMessage.from_dict(data)
-
-                    # since
-                    if not found_since:
-                        if since_msg_id and msg.msg_id == since_msg_id:
-                            found_since = True
-                            continue  #  since_msg_id
-                        if since and msg.timestamp > since:
-                            found_since = True
-                        if not found_since:
-                            continue
-
-                    messages.append(msg)
-
-                    if len(messages) >= limit:
-                        break
-            except Exception:
+                lines = file_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
                 continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                try:
+                    all_msgs.append(ChannelMessage.from_dict(data))
+                except Exception:
+                    continue
 
-        return messages[-limit:] if len(messages) > limit else messages
+        all_msgs.sort(key=lambda m: (m.timestamp, m.msg_id))
+
+        # 2) 切 since 边界
+        if since_msg_id:
+            cut = -1
+            for i, m in enumerate(all_msgs):
+                if m.msg_id == since_msg_id:
+                    cut = i
+                    break
+            if cut >= 0:
+                all_msgs = all_msgs[cut + 1:]
+            # since_msg_id 没找到 → 当作没过滤（caller bookmark 已过期/不在本节点）
+        elif since:
+            all_msgs = [m for m in all_msgs if m.timestamp > since]
+
+        # 3) 切 limit
+        if limit > 0 and len(all_msgs) > limit:
+            return all_msgs[-limit:]
+        return all_msgs
 
     def fetch_all(
         self,
@@ -469,7 +475,11 @@ class TeamChannel:
                 count = 0
                 for file_path in dir_path.glob("*.jsonl"):
                     try:
-                        count += sum(1 for _ in file_path.read_text(encoding="utf-8").strip().split("\n") if _.strip())
+                        count += sum(
+                            1
+                            for line in file_path.read_text(encoding="utf-8").splitlines()
+                            if line.strip()
+                        )
                     except Exception:
                         pass
                 channel_name = dir_path.name.replace("--", ":", 1)

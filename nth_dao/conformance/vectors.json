@@ -1,0 +1,384 @@
+{
+  "format": "nth-dao-conformance-v1",
+  "schema_version": 1,
+  "generated_at": "2026-06-01T06:45:56.857940",
+  "reference_impl": "nth-dao Python (pyproject version)",
+  "vectors": {
+    "canonical_json": [
+      {
+        "id": "canon-001",
+        "description": "Empty object",
+        "input": {},
+        "expected_bytes_hex": "7b7d"
+      },
+      {
+        "id": "canon-002",
+        "description": "Single ASCII field",
+        "input": {
+          "name": "alice"
+        },
+        "expected_bytes_hex": "7b226e616d65223a22616c696365227d"
+      },
+      {
+        "id": "canon-003",
+        "description": "Field order MUST be sorted alphabetically",
+        "input": {
+          "z": 1,
+          "a": 2,
+          "m": 3
+        },
+        "expected_bytes_hex": "7b2261223a322c226d223a332c227a223a317d"
+      },
+      {
+        "id": "canon-004",
+        "description": "Nested objects also sort keys",
+        "input": {
+          "outer": {
+            "z": 1,
+            "a": 2
+          },
+          "another": true
+        },
+        "expected_bytes_hex": "7b22616e6f74686572223a747275652c226f75746572223a7b2261223a322c227a223a317d7d"
+      },
+      {
+        "id": "canon-005",
+        "description": "Arrays preserve order",
+        "input": {
+          "items": [
+            3,
+            1,
+            2
+          ]
+        },
+        "expected_bytes_hex": "7b226974656d73223a5b332c312c325d7d"
+      },
+      {
+        "id": "canon-006",
+        "description": "Unicode preserved as UTF-8 (no \\u escapes)",
+        "input": {
+          "name": "Alice 王"
+        },
+        "expected_bytes_hex": "7b226e616d65223a22416c69636520e78e8b227d"
+      },
+      {
+        "id": "canon-007",
+        "description": "No whitespace between tokens",
+        "input": {
+          "a": 1,
+          "b": [
+            2,
+            3
+          ]
+        },
+        "expected_bytes_hex": "7b2261223a312c2262223a5b322c335d7d"
+      },
+      {
+        "id": "canon-008",
+        "description": "Booleans and null encoded as JSON literals",
+        "input": {
+          "yes": true,
+          "no": false,
+          "absent": null
+        },
+        "expected_bytes_hex": "7b22616273656e74223a6e756c6c2c226e6f223a66616c73652c22796573223a747275657d"
+      }
+    ],
+    "fingerprint": [
+      {
+        "id": "fp-001",
+        "description": "Fingerprint of a known Ed25519 pubkey",
+        "input": {
+          "pubkey_hex": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+          "agent_id": ""
+        },
+        "expected_fingerprint": "1a2f85ab3c2b5298"
+      },
+      {
+        "id": "fp-002",
+        "description": "Different pubkey → different fingerprint",
+        "input": {
+          "pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "agent_id": ""
+        },
+        "expected_fingerprint": "12eedbba7b51e9d1"
+      },
+      {
+        "id": "fp-003",
+        "description": "Plain agent_id fingerprint (no pubkey)",
+        "input": {
+          "pubkey_hex": "",
+          "agent_id": "alice"
+        },
+        "expected_fingerprint": "2bd806c97f0e00af"
+      }
+    ],
+    "signature_verify": [
+      {
+        "id": "sig-001",
+        "description": "Valid signature under matching pubkey",
+        "pubkey_hex": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+        "message_hex": "4e54482044414f20636f6e666f726d616e63652074657374206d657373616765",
+        "signature_hex": "99b105d22a8c1dabf29611308e61763942494d347f695834f1809c838c46f55e936494829e49310db007ba1a0b3f5e51cb3a5768c735108dfd2ad600ddd6f006",
+        "expected_valid": true
+      },
+      {
+        "id": "sig-002",
+        "description": "Same signature under different pubkey → invalid",
+        "pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+        "message_hex": "4e54482044414f20636f6e666f726d616e63652074657374206d657373616765",
+        "signature_hex": "99b105d22a8c1dabf29611308e61763942494d347f695834f1809c838c46f55e936494829e49310db007ba1a0b3f5e51cb3a5768c735108dfd2ad600ddd6f006",
+        "expected_valid": false
+      },
+      {
+        "id": "sig-003",
+        "description": "Tampered signature byte → invalid",
+        "pubkey_hex": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+        "message_hex": "4e54482044414f20636f6e666f726d616e63652074657374206d657373616765",
+        "signature_hex": "00b105d22a8c1dabf29611308e61763942494d347f695834f1809c838c46f55e936494829e49310db007ba1a0b3f5e51cb3a5768c735108dfd2ad600ddd6f006",
+        "expected_valid": false
+      }
+    ],
+    "endorsement_canonical_payload": [
+      {
+        "id": "endorse-001",
+        "description": "Minimal endorsement",
+        "input": {
+          "endorser_pubkey": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+          "subject_pubkey": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "subject_agent_id": "bob",
+          "depth_allowed": 1,
+          "context": "general",
+          "issued_at": "2026-01-01T00:00:00",
+          "expires_at": "2026-12-31T00:00:00",
+          "sig": ""
+        },
+        "expected_canonical_hex": "7b22636f6e74657874223a2267656e6572616c222c2264657074685f616c6c6f776564223a312c22656e646f727365725f7075626b6579223a2234636235616266366164373966626635616262636361666363323639643835636432363531656434623838356235383639663234316165646630613562613239222c22657870697265735f6174223a22323032362d31322d33315430303a30303a3030222c226973737565645f6174223a22323032362d30312d30315430303a30303a3030222c227375626a6563745f6167656e745f6964223a22626f62222c227375626a6563745f7075626b6579223a2237343232623938383735393830363865333263343434386139343961646232393064306634653335623965303162306565356631613165363030666532363734227d"
+      },
+      {
+        "id": "endorse-002",
+        "description": "Endorsement with context=code_review and depth=2",
+        "input": {
+          "endorser_pubkey": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+          "subject_pubkey": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "subject_agent_id": "bob",
+          "depth_allowed": 2,
+          "context": "code_review",
+          "issued_at": "2026-02-15T10:30:00",
+          "expires_at": "2026-08-15T10:30:00",
+          "sig": ""
+        },
+        "expected_canonical_hex": "7b22636f6e74657874223a22636f64655f726576696577222c2264657074685f616c6c6f776564223a322c22656e646f727365725f7075626b6579223a2234636235616266366164373966626635616262636361666363323639643835636432363531656434623838356235383639663234316165646630613562613239222c22657870697265735f6174223a22323032362d30382d31355431303a33303a3030222c226973737565645f6174223a22323032362d30322d31355431303a33303a3030222c227375626a6563745f6167656e745f6964223a22626f62222c227375626a6563745f7075626b6579223a2237343232623938383735393830363865333263343434386139343961646232393064306634653335623965303162306565356631613165363030666532363734227d"
+      }
+    ],
+    "template_canonical_payload": [
+      {
+        "id": "template-001",
+        "description": "Minimal v1.0.0 template",
+        "input": {
+          "template_id": "code-review",
+          "version": "1.0.0",
+          "publisher_pubkey": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "name": "Code Review",
+          "description": "Review a diff.",
+          "template_type": "agent_task",
+          "category": "code_review",
+          "tags": [
+            "python"
+          ],
+          "required_capabilities": [
+            "code_review"
+          ],
+          "inputs": {},
+          "outputs": {},
+          "steps": [],
+          "suggested_reward": 5.0,
+          "suggested_deadline_hours": 0.0,
+          "created_at": "2026-01-01T00:00:00",
+          "deprecated": false,
+          "deprecated_reason": "",
+          "supersedes": [],
+          "delegations": [],
+          "credentials_required": [],
+          "legal_jurisdiction": "",
+          "publisher_sig": ""
+        },
+        "expected_canonical_hex": "7b2263617465676f7279223a22636f64655f726576696577222c22637265617465645f6174223a22323032362d30312d30315430303a30303a3030222c2263726564656e7469616c735f7265717569726564223a5b5d2c2264656c65676174696f6e73223a5b5d2c2264657072656361746564223a66616c73652c22646570726563617465645f726561736f6e223a22222c226465736372697074696f6e223a22526576696577206120646966662e222c22696e70757473223a7b7d2c226c6567616c5f6a7572697364696374696f6e223a22222c226e616d65223a22436f646520526576696577222c226f757470757473223a7b7d2c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227075626c69736865725f7075626b6579223a2234636235616266366164373966626635616262636361666363323639643835636432363531656434623838356235383639663234316165646630613562613239222c2272657175697265645f6361706162696c6974696573223a5b22636f64655f726576696577225d2c227374657073223a5b5d2c227375676765737465645f646561646c696e655f686f757273223a302e302c227375676765737465645f726577617264223a352e302c2273757065727365646573223a5b5d2c2274616773223a5b22707974686f6e225d2c2274656d706c6174655f6964223a22636f64652d726576696577222c2274656d706c6174655f74797065223a226167656e745f7461736b222c2276657273696f6e223a22312e302e30227d"
+      }
+    ],
+    "channel_message_canonical": [
+      {
+        "id": "chmsg-001",
+        "description": "Plain text ChannelMessage signable payload (no mentions / no reply)",
+        "input": {
+          "msg_id": "abcd1234567890ef",
+          "channel": "team",
+          "from_agent": "alice",
+          "content": "Hello DAO",
+          "content_type": "text",
+          "reply_to": "",
+          "mentions": [],
+          "timestamp": "2026-04-01T12:00:00",
+          "metadata": {}
+        },
+        "expected_canonical_hex": "7b226368616e6e656c223a227465616d222c22636f6e74656e74223a2248656c6c6f2044414f222c22636f6e74656e745f74797065223a2274657874222c2266726f6d5f6167656e74223a22616c696365222c226d656e74696f6e73223a5b5d2c226d65746164617461223a7b7d2c226d73675f6964223a2261626364313233343536373839306566222c227265706c795f746f223a22222c2274696d657374616d70223a22323032362d30342d30315431323a30303a3030227d"
+      },
+      {
+        "id": "chmsg-002",
+        "description": "ChannelMessage with reply_to and mentions",
+        "input": {
+          "msg_id": "1234567890abcdef",
+          "channel": "group:backend",
+          "from_agent": "bob",
+          "content": "ack @alice",
+          "content_type": "text",
+          "reply_to": "abcd1234567890ef",
+          "mentions": [
+            "alice"
+          ],
+          "timestamp": "2026-04-01T12:00:30",
+          "metadata": {
+            "thread": "code-review"
+          }
+        },
+        "expected_canonical_hex": "7b226368616e6e656c223a2267726f75703a6261636b656e64222c22636f6e74656e74223a2261636b2040616c696365222c22636f6e74656e745f74797065223a2274657874222c2266726f6d5f6167656e74223a22626f62222c226d656e74696f6e73223a5b22616c696365225d2c226d65746164617461223a7b22746872656164223a22636f64652d726576696577227d2c226d73675f6964223a2231323334353637383930616263646566222c227265706c795f746f223a2261626364313233343536373839306566222c2274696d657374616d70223a22323032362d30342d30315431323a30303a3330227d"
+      }
+    ],
+    "invitation_canonical": [
+      {
+        "id": "invite-001",
+        "description": "Invitation minimal example",
+        "input": {
+          "team_id": "t1",
+          "team_name": "Test Team",
+          "owner_pubkey": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+          "issuer": "alice",
+          "issued_at": "2026-01-01T00:00:00",
+          "expires_at": "2026-01-08T00:00:00",
+          "join_token": "secret",
+          "ws_url": "ws://192.168.1.5:9876",
+          "psk": "lan-secret",
+          "sig": ""
+        },
+        "expected_canonical_hex": "7b22657870697265735f6174223a22323032362d30312d30385430303a30303a3030222c226973737565645f6174223a22323032362d30312d30315430303a30303a3030222c22697373756572223a22616c696365222c226a6f696e5f746f6b656e223a22736563726574222c226f776e65725f7075626b6579223a2234636235616266366164373966626635616262636361666363323639643835636432363531656434623838356235383639663234316165646630613562613239222c2270736b223a226c616e2d736563726574222c227465616d5f6964223a227431222c227465616d5f6e616d65223a2254657374205465616d222c2277735f75726c223a2277733a2f2f3139322e3136382e312e353a39383736227d"
+      }
+    ],
+    "team_config_canonical": [
+      {
+        "id": "team-001",
+        "description": "Signed TeamConfig minimal example",
+        "input": {
+          "team_id": "abc12345",
+          "team_name": "Test Team",
+          "join_policy": "approval",
+          "join_token": "",
+          "admin_ids": [
+            "alice"
+          ],
+          "member_ids": [
+            "alice"
+          ],
+          "roles": {
+            "alice": "owner"
+          },
+          "created_at": "2026-01-01T00:00:00",
+          "metadata": {},
+          "owner_pubkey": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+          "owner_sig": "",
+          "sig_updated_at": "2026-01-01T00:00:00"
+        },
+        "expected_canonical_hex": "7b2261646d696e5f696473223a5b22616c696365225d2c22637265617465645f6174223a22323032362d30312d30315430303a30303a3030222c226a6f696e5f706f6c696379223a22617070726f76616c222c226a6f696e5f746f6b656e223a22222c226d656d6265725f696473223a5b22616c696365225d2c226d65746164617461223a7b7d2c226f776e65725f7075626b6579223a2234636235616266366164373966626635616262636361666363323639643835636432363531656434623838356235383639663234316165646630613562613239222c22726f6c6573223a7b22616c696365223a226f776e6572227d2c227369675f757064617465645f6174223a22323032362d30312d30315430303a30303a3030222c227465616d5f6964223a226162633132333435222c227465616d5f6e616d65223a2254657374205465616d227d"
+      }
+    ],
+    "did_key_encoding": [
+      {
+        "id": "did-001",
+        "description": "Encode pubkey 00000000... as did:key",
+        "input": {
+          "pubkey_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "expected_did": "did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP"
+      },
+      {
+        "id": "did-002",
+        "description": "Encode pubkey 01010101... as did:key",
+        "input": {
+          "pubkey_hex": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        "expected_did": "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76"
+      },
+      {
+        "id": "did-003",
+        "description": "Encode pubkey 00010203... as did:key",
+        "input": {
+          "pubkey_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        },
+        "expected_did": "did:key:z6MkeTGwHmLmuCmgg4ABYhzWVh6ZX7hTwWt8gguAretUfc9c"
+      }
+    ],
+    "lan_psk_tag": [
+      {
+        "id": "psk-001",
+        "description": "HMAC-SHA256 psk_tag over canonical nth-dao-query",
+        "input": {
+          "psk": "team-secret",
+          "message": {
+            "type": "nth-dao-query",
+            "v": 1,
+            "from": "alice",
+            "wants": [],
+            "nonce": "deadbeef"
+          }
+        },
+        "expected_psk_tag": "effa9e89ab95a1e9c9568b6d3c876f598f4187df6c9f000db12d5576f569910c"
+      },
+      {
+        "id": "psk-002",
+        "description": "HMAC-SHA256 psk_tag over canonical nth-dao-hello",
+        "input": {
+          "psk": "team-secret",
+          "message": {
+            "type": "nth-dao-hello",
+            "v": 1,
+            "agent_id": "alice",
+            "nonce": "feedface"
+          }
+        },
+        "expected_psk_tag": "f8ff2b3a70127fd804cee206a9c0b2d1de0feb048ef6e1ce19626c7e79c0b969"
+      }
+    ],
+    "replay_window": [
+      {
+        "id": "replay-001",
+        "description": "Message timestamp = now → accepted",
+        "offset_seconds": 0,
+        "expected_within_window": true
+      },
+      {
+        "id": "replay-002",
+        "description": "Message timestamp = 30 seconds ago → accepted",
+        "offset_seconds": -30,
+        "expected_within_window": true
+      },
+      {
+        "id": "replay-003",
+        "description": "Message timestamp = 30 seconds in future (allowed clock skew) → accepted",
+        "offset_seconds": 30,
+        "expected_within_window": true
+      },
+      {
+        "id": "replay-004",
+        "description": "Message timestamp = 120 seconds in future → REJECTED (drift cap)",
+        "offset_seconds": 120,
+        "expected_within_window": false
+      },
+      {
+        "id": "replay-005",
+        "description": "Message timestamp = 700 seconds ago → REJECTED (replay window)",
+        "offset_seconds": -700,
+        "expected_within_window": false
+      }
+    ]
+  }
+}
