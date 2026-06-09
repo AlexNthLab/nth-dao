@@ -1,0 +1,213 @@
+/**
+ * Rules — the manual-mode → autopilot-mode transition surface.
+ *
+ * Each Rule = (trigger condition, action, status, cap_token).
+ * Active rules cause processes to flow through Blackboard
+ * without ever raising a Decision. Drafts let the user think
+ * through a rule before activating it.
+ *
+ * UI structure mirrors the Decision/Mission views (sidebar list
+ * + main detail + signature inspector) so the user's eye
+ * already knows where things are.
+ */
+
+import { useMemo, useState } from "react";
+import { IconSliders, IconZap } from "./Icons";
+import { SignaturePanel } from "./SignaturePanel";
+import type { Rule } from "../types-v2";
+
+export interface RulesViewProps {
+  rules: Rule[];
+}
+
+function statusPill(s: Rule["status"]): "ok" | "wait" | "dim" {
+  if (s === "active") return "ok";
+  if (s === "paused") return "wait";
+  return "dim";
+}
+
+export function RulesView({ rules }: RulesViewProps) {
+  const sorted = useMemo(
+    () =>
+      rules.slice().sort((a, b) => {
+        // Active first, then draft, then paused. Within group, by
+        // most-recently-updated.
+        const order: Record<Rule["status"], number> = {
+          active: 0, draft: 1, paused: 2,
+        };
+        return (
+          order[a.status] - order[b.status] ||
+          b.updated_at.localeCompare(a.updated_at)
+        );
+      }),
+    [rules],
+  );
+
+  const [selectedId, setSelectedId] = useState<string | null>(
+    sorted[0]?.id ?? null,
+  );
+  const selected = sorted.find((r) => r.id === selectedId) ?? null;
+
+  const activeCount = rules.filter((r) => r.status === "active").length;
+  const totalFires = rules.reduce((sum, r) => sum + r.fired_30d, 0);
+
+  return (
+    <>
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <span className="sidebar-title">Rules</span>
+          <span className="sidebar-count">{rules.length}</span>
+        </div>
+        <div className="sidebar-list">
+          {sorted.map((r) => (
+            <button
+              key={r.id}
+              className={`sidebar-item ${selectedId === r.id ? "active" : ""}`}
+              onClick={() => setSelectedId(r.id)}
+            >
+              <div className="sidebar-item-title">
+                <span className={`pill ${statusPill(r.status)}`}>
+                  {r.status}
+                </span>
+                <span className="truncate">{r.title}</span>
+              </div>
+              <div className="sidebar-item-meta">
+                <span style={{ textTransform: "capitalize" }}>{r.workflow}</span>
+                <span className="muted">·</span>
+                <span>{r.fired_30d}× / 30d</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <section className="main">
+        <div className="main-head">
+          <p className="main-eyebrow">Rules</p>
+          <h1 className="main-title">Set your company boundaries</h1>
+          <p className="main-subtitle">
+            Rules turn approval-required actions into auto-execute
+            ones. Each rule is bounded by a long-lived cap_token —
+            the cryptographic anchor of the authority you delegate.
+            {" "}
+            <span style={{ color: "var(--accent)" }}>
+              {activeCount} active · {totalFires} fires in last 30d
+            </span>
+          </p>
+        </div>
+
+        <div className="main-body">
+          {selected ? (
+            <>
+              <article className="decision-card">
+                <div className="decision-card-head">
+                  <div>
+                    <h3 className="decision-card-title">
+                      {selected.status === "active" && (
+                        <span
+                          style={{
+                            color: "var(--accent)",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            marginRight: 8,
+                          }}
+                        >
+                          <IconZap size={16} />
+                        </span>
+                      )}
+                      {selected.title}
+                    </h3>
+                    <div className="decision-card-subject">
+                      <span style={{ textTransform: "capitalize" }}>
+                        {selected.workflow}
+                      </span>
+                      <span className="muted">·</span>
+                      <span>cap_token <code>{selected.cap_token_id}</code></span>
+                    </div>
+                  </div>
+                  <span className={`pill ${statusPill(selected.status)}`}>
+                    {selected.status}
+                  </span>
+                </div>
+
+                <div style={{ display: "grid", gap: 12, margin: "16px 0" }}>
+                  <div>
+                    <div className="detail-section-label">When</div>
+                    <p className="decision-card-rationale" style={{ marginTop: 4 }}>
+                      {selected.when}
+                    </p>
+                  </div>
+                  <div>
+                    <div className="detail-section-label">Then</div>
+                    <p className="decision-card-rationale" style={{ marginTop: 4 }}>
+                      {selected.then}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="decision-card-meta">
+                  <span>fired <code>{selected.fired_30d}×</code> in last 30 days</span>
+                  <span>
+                    last updated{" "}
+                    {new Date(selected.updated_at).toLocaleDateString()}
+                  </span>
+                </div>
+
+                <div className="decision-card-actions">
+                  {selected.status === "active" ? (
+                    <>
+                      <button className="btn btn-secondary">Pause</button>
+                      <button className="btn btn-ghost">Edit</button>
+                    </>
+                  ) : selected.status === "draft" ? (
+                    <>
+                      <button className="btn btn-primary">
+                        <IconZap size={14} /> Activate
+                      </button>
+                      <button className="btn btn-ghost">Edit</button>
+                      <button className="btn btn-danger">Discard</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="btn btn-primary">Resume</button>
+                      <button className="btn btn-ghost">Edit</button>
+                    </>
+                  )}
+                  <span style={{ flex: 1 }} />
+                  <button className="btn btn-ghost">View linked cap_token</button>
+                </div>
+              </article>
+            </>
+          ) : (
+            <div className="main-empty" style={{ minHeight: 200 }}>
+              <div className="main-empty-icon">
+                <IconSliders size={36} />
+              </div>
+              <p>No rules yet.</p>
+              <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                Create your first rule to start moving routine
+                decisions to autopilot.
+              </p>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <aside className="detail">
+        <div className="detail-head">
+          <span className="detail-title">Rule detail</span>
+        </div>
+        <div className="detail-body">
+          {selected ? (
+            <SignaturePanel
+              value={selected}
+              title="Rule definition"
+            />
+          ) : (
+            <p className="muted">Select a rule to inspect.</p>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}

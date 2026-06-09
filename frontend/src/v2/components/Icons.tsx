@@ -110,3 +110,34 @@ export const IconSearch = (p: Props) => (
     <line x1="21" y1="21" x2="16.65" y2="16.65" />
   </Svg>
 );
+
+// Layout / Kanban board — Blackboard primary view
+export const IconLayout = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <line x1="3" y1="9" x2="21" y2="9" />
+    <line x1="9" y1="21" x2="9" y2="9" />
+  </Svg>
+);
+
+// Sliders — Rules / policy authoring
+export const IconSliders = (p: Props) => (
+  <Svg {...p}>
+    <line x1="4" y1="21" x2="4" y2="14" />
+    <line x1="4" y1="10" x2="4" y2="3" />
+    <line x1="12" y1="21" x2="12" y2="12" />
+    <line x1="12" y1="8" x2="12" y2="3" />
+    <line x1="20" y1="21" x2="20" y2="16" />
+    <line x1="20" y1="12" x2="20" y2="3" />
+    <line x1="1" y1="14" x2="7" y2="14" />
+    <line x1="9" y1="8" x2="15" y2="8" />
+    <line x1="17" y1="16" x2="23" y2="16" />
+  </Svg>
+);
+
+// Zap — auto-execute / fire indicator on Blackboard cards
+export const IconZap = (p: Props) => (
+  <Svg {...p}>
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+  </Svg>
+);

@@ -23,13 +23,18 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { BlackboardView } from "./components/BlackboardView";
 import { CommandPalette } from "./components/CommandPalette";
 import { DecisionQueue } from "./components/DecisionQueue";
 import { IconNav } from "./components/IconNav";
 import { MissionList } from "./components/MissionList";
+import { RulesView } from "./components/RulesView";
 import { StatusBar } from "./components/StatusBar";
 import { Topbar } from "./components/Topbar";
-import { mockCapTokens, mockDecisions, mockMissions, mockReceipts } from "./mock";
+import {
+  mockCapTokens, mockDecisions, mockMissions, mockProcesses,
+  mockReceipts, mockRules,
+} from "./mock";
 import type {
   CommandItem,
   Decision,
@@ -48,7 +53,12 @@ const MOCK_IDENTITY: IdentityHeader = {
 };
 
 export default function App() {
-  const [active, setActive] = useState<NavId>("inbox");
+  /* Default landing = Blackboard per the autopilot-mode philosophy
+   * (DESIGN_TRADE_OFFS extension): the operational dashboard is
+   * the steady-state home screen; Decisions is consulted only when
+   * the badge calls. In manual mode (early V1) users will quickly
+   * switch to Decisions; the badge + Cmd+K make that one keypress. */
+  const [active, setActive] = useState<NavId>("blackboard");
   const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
   const [cmdkOpen, setCmdkOpen] = useState(false);
 
@@ -87,12 +97,20 @@ export default function App() {
   // Command palette items — flat list, substring search.
   const commands: CommandItem[] = useMemo(
     () => [
-      { id: "nav-inbox",      title: "Go to Decisions",  shortcut: "G I", run: () => setActive("inbox") },
-      { id: "nav-missions",   title: "Go to Missions",   shortcut: "G M", run: () => setActive("missions") },
-      { id: "nav-audit",      title: "Go to Audit",      shortcut: "G A", run: () => setActive("audit") },
-      { id: "nav-governance", title: "Go to Governance", shortcut: "G V", run: () => setActive("governance") },
-      { id: "nav-delegate",   title: "Go to Delegate",   shortcut: "G D", run: () => setActive("delegate") },
-      { id: "nav-chat",       title: "Go to DAO Chat",   shortcut: "G C", run: () => setActive("chat") },
+      { id: "nav-blackboard", title: "Go to Blackboard",  shortcut: "G B", run: () => setActive("blackboard") },
+      { id: "nav-inbox",      title: "Go to Decisions",   shortcut: "G I", run: () => setActive("inbox") },
+      { id: "nav-missions",   title: "Go to Missions",    shortcut: "G M", run: () => setActive("missions") },
+      { id: "nav-rules",      title: "Go to Rules",       shortcut: "G R", run: () => setActive("rules") },
+      { id: "nav-audit",      title: "Go to Audit",       shortcut: "G A", run: () => setActive("audit") },
+      { id: "nav-governance", title: "Go to Governance",  shortcut: "G V", run: () => setActive("governance") },
+      { id: "nav-delegate",   title: "Go to Delegate",    shortcut: "G D", run: () => setActive("delegate") },
+      { id: "nav-chat",       title: "Go to DAO Chat",    shortcut: "G C", run: () => setActive("chat") },
+      {
+        id: "new-rule",
+        title: "Create a new Rule",
+        hint: "Move an approval flow to autopilot",
+        run: () => setActive("rules"),
+      },
       {
         id: "issue-cap",
         title: "Issue cap_token to a helper agent",
@@ -136,7 +154,9 @@ export default function App() {
 
   /* ── current view ── */
   let view: React.ReactNode;
-  if (active === "inbox") {
+  if (active === "blackboard") {
+    view = <BlackboardView processes={mockProcesses} />;
+  } else if (active === "inbox") {
     view = (
       <DecisionQueue
         decisions={decisions}
@@ -147,6 +167,8 @@ export default function App() {
     );
   } else if (active === "missions") {
     view = <MissionList missions={mockMissions} />;
+  } else if (active === "rules") {
+    view = <RulesView rules={mockRules} />;
   } else {
     view = (
       <>
@@ -211,8 +233,10 @@ export default function App() {
 
 function labelFor(id: NavId): string {
   switch (id) {
+    case "blackboard": return "Blackboard";
     case "inbox":      return "Decisions";
     case "missions":   return "Missions";
+    case "rules":      return "Rules";
     case "audit":      return "Audit";
     case "governance": return "Governance";
     case "delegate":   return "Delegate";

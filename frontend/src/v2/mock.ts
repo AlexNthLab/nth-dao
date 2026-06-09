@@ -12,6 +12,8 @@ import type {
   MissionSummary,
   ReceiptSummary,
   CapTokenSummary,
+  ProcessCard,
+  Rule,
 } from "./types-v2";
 
 const helperA = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm56811A";
@@ -144,6 +146,124 @@ export const mockReceipts: ReceiptSummary[] = [
     has_cap_token: true,
     summary: "Sent to 3 early users",
     issued_at: "2026-06-09T13:45:00Z",
+  },
+];
+
+/** Blackboard seeds — the autopilot-era "one-person company"
+ *  operational dashboard. Concrete demo: a small e-commerce shop
+ *  where the seller (the user) sleeps while agents handle orders. */
+export const mockProcesses: ProcessCard[] = [
+  {
+    id: "ord-1247",
+    title: "Order #1247",
+    subtitle: "2× Mechanical keyboard · Tokyo",
+    workflow: "shopping",
+    stage: "in_progress",
+    current_agent: "fulfillment-bot",
+    next_agent: "shipping-bot",
+    cap_token_id: "cap-bnHs82Lq",
+    amount: "¥3,400",
+    updated_at: new Date(Date.now() - 22 * 60_000).toISOString(),
+    auto: true,
+  },
+  {
+    id: "ord-1248",
+    title: "Order #1248",
+    subtitle: "1× Standing desk · Osaka",
+    workflow: "shopping",
+    stage: "received",
+    current_agent: "intake-bot",
+    next_agent: "fulfillment-bot",
+    cap_token_id: "cap-bnHs82Lq",
+    amount: "¥8,900",
+    updated_at: new Date(Date.now() - 4 * 60_000).toISOString(),
+    auto: true,
+  },
+  {
+    id: "ord-1246",
+    title: "Order #1246",
+    subtitle: "1× Cable kit · Kyoto",
+    workflow: "shopping",
+    stage: "done",
+    current_agent: "shipping-bot",
+    amount: "¥240",
+    updated_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    auto: true,
+  },
+  {
+    id: "ord-1244",
+    title: "Order #1244 — refund request",
+    subtitle: "Customer claims damaged on arrival",
+    workflow: "support",
+    stage: "awaiting_external",
+    current_agent: "support-bot",
+    next_agent: "refund-bot",
+    cap_token_id: "cap-supportLong",
+    amount: "¥1,200",
+    updated_at: new Date(Date.now() - 35 * 60_000).toISOString(),
+    auto: true,
+  },
+  {
+    id: "ord-1240",
+    title: "Order #1240 — chargeback flagged",
+    subtitle: "Bank dispute received, needs manual review",
+    workflow: "support",
+    stage: "blocked",
+    current_agent: "support-bot",
+    cap_token_id: "cap-supportLong",
+    amount: "¥4,500",
+    updated_at: new Date(Date.now() - 12 * 3600_000).toISOString(),
+    auto: false,
+  },
+];
+
+export const mockRules: Rule[] = [
+  {
+    id: "rule-001",
+    title: "Auto-pack and ship orders under ¥5,000",
+    when: "New order received, amount < ¥5,000, item in stock",
+    then: "fulfillment-bot packs → shipping-bot dispatches → "
+      + "notification-bot mails tracking number",
+    workflow: "shopping",
+    cap_token_id: "cap-bnHs82Lq",
+    status: "active",
+    fired_30d: 87,
+    updated_at: "2026-05-15T10:00:00Z",
+  },
+  {
+    id: "rule-002",
+    title: "Auto-refund within 30 days of purchase",
+    when: "Refund request received, within 30d, no fraud flag",
+    then: "support-bot confirms → refund-bot processes → "
+      + "ledger-bot reconciles",
+    workflow: "support",
+    cap_token_id: "cap-supportLong",
+    status: "active",
+    fired_30d: 12,
+    updated_at: "2026-05-20T14:30:00Z",
+  },
+  {
+    id: "rule-003",
+    title: "Hold chargebacks for manual review",
+    when: "Bank chargeback notification received",
+    then: "Raise Decision (do not auto-process)",
+    workflow: "support",
+    cap_token_id: "cap-supportLong",
+    status: "active",
+    fired_30d: 1,
+    updated_at: "2026-05-22T09:15:00Z",
+  },
+  {
+    id: "rule-004",
+    title: "Auto-sign vendor invoices from verified vendors",
+    when: "Mandate request from vendor in verified-list, amount "
+      + "< ¥10,000",
+    then: "mandate-bot signs → ledger-bot records",
+    workflow: "finance",
+    cap_token_id: "cap-financeLong",
+    status: "draft",
+    fired_30d: 0,
+    updated_at: "2026-06-08T18:00:00Z",
   },
 ];
 

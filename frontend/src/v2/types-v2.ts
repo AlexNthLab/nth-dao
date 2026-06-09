@@ -114,14 +114,84 @@ export interface StatusBarState {
   pending_decisions: number;
 }
 
-/** What the IconNav can navigate to. */
+/** What the IconNav can navigate to.
+ *
+ *  Ordering reflects the dual-era philosophy:
+ *  - In autopilot mode (target steady state, ~Q4 2026): the
+ *    Blackboard is the user's primary screen; Decisions exists
+ *    only as an exception/alert inbox.
+ *  - In manual mode (now): users still hit Decisions every day.
+ *    The visual priority via `decisionCount` badge handles that
+ *    without reordering the nav.
+ */
 export type NavId =
+  | "blackboard"
   | "inbox"
   | "missions"
+  | "rules"
   | "audit"
   | "governance"
   | "delegate"
   | "chat";
+
+/** Blackboard operational state — what a one-person company's
+ *  process pipeline looks like at a glance. */
+export type ProcessStage =
+  | "received"
+  | "in_progress"
+  | "awaiting_external"
+  | "done"
+  | "blocked";
+
+export interface ProcessCard {
+  id: string;
+  /** e.g. "Order #1247", "Refund #88", "Onboard candidate" */
+  title: string;
+  /** Free-form one-line context. */
+  subtitle: string;
+  /** Workflow this process belongs to (e.g. "shopping",
+   *  "support", "hiring"). Drives swim-lane grouping. */
+  workflow: string;
+  /** Pipeline state. */
+  stage: ProcessStage;
+  /** Agent label currently driving the process. */
+  current_agent: string;
+  /** Optional next agent in the relay. */
+  next_agent?: string;
+  /** Cap_token authorizing the current step. */
+  cap_token_id?: string;
+  /** Money in play, if applicable. ("¥3500" / "$420") */
+  amount?: string;
+  /** ISO timestamp of last state change. */
+  updated_at: string;
+  /** True when this process consumed a Rule and skipped Decision
+   *  Queue. Drives the "auto" badge. */
+  auto: boolean;
+}
+
+/** A user-defined Rule that turns approval-required actions into
+ *  auto-executed ones, bounded by a permanent (or long-lived)
+ *  cap_token. */
+export interface Rule {
+  id: string;
+  /** Imperative title — "Auto-pack orders under ¥1000". */
+  title: string;
+  /** When the rule fires — short natural-language condition. */
+  when: string;
+  /** What the rule causes — short natural-language action. */
+  then: string;
+  /** Workflow this rule belongs to. */
+  workflow: string;
+  /** Linked cap_token (the rule's authority anchor). */
+  cap_token_id: string;
+  /** Status — "active" = currently auto-executing, "draft" = saved
+   *  but not in force, "paused" = user temporarily disabled. */
+  status: "active" | "draft" | "paused";
+  /** How many times this rule has fired in the trailing 30 days. */
+  fired_30d: number;
+  /** When the user last updated the rule. */
+  updated_at: string;
+}
 
 /** Cmd+K command definition. */
 export interface CommandItem {

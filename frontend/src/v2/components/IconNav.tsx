@@ -14,16 +14,44 @@
  */
 
 import {
-  IconChat, IconInbox, IconKey, IconScale, IconScroll, IconTarget,
+  IconChat, IconInbox, IconKey, IconLayout, IconScale, IconScroll,
+  IconSliders, IconTarget,
 } from "./Icons";
 import type { NavId } from "../types-v2";
 
+/* Ordering rationale (DESIGN_TRADE_OFFS extension, autopilot vision):
+ *
+ *   Blackboard 1st — the autopilot-era main screen: operational
+ *   dashboard of every process every agent is driving. As Rules
+ *   mature, Decisions Queue shrinks and Blackboard becomes the
+ *   eye line for "is my one-person company running smoothly?".
+ *
+ *   Decisions 2nd — exceptions inbox (manual mode + autopilot
+ *   alerts). Has a badge for unread, so it's visually loud when
+ *   work is pending and quiet when on-policy.
+ *
+ *   Missions 3rd — long-running goals (still useful when a single
+ *   AI is executing a multi-step plan that doesn't fit a Rule).
+ *
+ *   Rules 4th — where users transition manual approvals to
+ *   autopilot. Each rule pins to a long-lived cap_token.
+ *
+ *   Audit 5th — read-only verification of the past.
+ *
+ *   Governance 6th — cross-DAO politics.
+ *
+ *   Delegate 7th — raw cap_token management (advanced users).
+ *
+ *   DAO Chat last — deprioritized; NTH DAO is not Slack.
+ */
 const ITEMS: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: string }[] = [
-  { id: "inbox",      icon: IconInbox,  label: "Decisions" },
-  { id: "missions",   icon: IconTarget, label: "Missions" },
-  { id: "audit",      icon: IconScroll, label: "Audit" },
-  { id: "governance", icon: IconScale,  label: "Governance" },
-  { id: "delegate",   icon: IconKey,    label: "Delegate" },
+  { id: "blackboard", icon: IconLayout,  label: "Blackboard" },
+  { id: "inbox",      icon: IconInbox,   label: "Decisions" },
+  { id: "missions",   icon: IconTarget,  label: "Missions" },
+  { id: "rules",      icon: IconSliders, label: "Rules" },
+  { id: "audit",      icon: IconScroll,  label: "Audit" },
+  { id: "governance", icon: IconScale,   label: "Governance" },
+  { id: "delegate",   icon: IconKey,     label: "Delegate" },
 ];
 
 const SECONDARY: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: string }[] = [
