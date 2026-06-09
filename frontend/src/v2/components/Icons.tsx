@@ -141,3 +141,41 @@ export const IconZap = (p: Props) => (
     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
   </Svg>
 );
+
+// Users — Agent directory (helpers + contacts + LAN peers)
+export const IconUsers = (p: Props) => (
+  <Svg {...p}>
+    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+  </Svg>
+);
+
+// UserPlus — "Add agent" affordance
+export const IconUserPlus = (p: Props) => (
+  <Svg {...p}>
+    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <circle cx="8.5" cy="7" r="4" />
+    <line x1="20" y1="8" x2="20" y2="14" />
+    <line x1="23" y1="11" x2="17" y2="11" />
+  </Svg>
+);
+
+// Send — chat composer
+export const IconSend = (p: Props) => (
+  <Svg {...p}>
+    <line x1="22" y1="2" x2="11" y2="13" />
+    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+  </Svg>
+);
+
+// Wifi — LAN discovery indicator
+export const IconWifi = (p: Props) => (
+  <Svg {...p}>
+    <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+    <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+    <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+    <line x1="12" y1="20" x2="12.01" y2="20" />
+  </Svg>
+);

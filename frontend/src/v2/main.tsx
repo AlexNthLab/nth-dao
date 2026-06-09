@@ -1,10 +1,15 @@
 /**
- * v2 entry point — `npm run dev -- --mode v2` would mount this
- * App against the same `#root` as the existing v1.
+ * v2 entry point.
  *
- * For now, swap the import in `frontend/index.html` (or your dev
- * server's entry) from `src/main.tsx` to `src/v2/main.tsx` to
- * preview the new shell.
+ * Preview path: ``http://127.0.0.1:5173/v2.html`` (served by
+ * Vite when ``npm run dev`` is running from ``frontend/``).
+ * The companion ``v2.html`` next to ``index.html`` is what loads
+ * this module — no swap of the v1 entry needed.
+ *
+ * v1 keeps its own ``index.html`` → ``src/main.tsx``, so both
+ * UIs co-exist during the migration. Once v2 reaches feature
+ * parity, ``index.html`` flips to point here and the v1 source
+ * goes to ``src/v1-legacy/`` for archival.
  */
 
 import { StrictMode } from "react";

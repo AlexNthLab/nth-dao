@@ -15,7 +15,7 @@
 
 import {
   IconChat, IconInbox, IconKey, IconLayout, IconScale, IconScroll,
-  IconSliders, IconTarget,
+  IconSliders, IconTarget, IconUsers,
 } from "./Icons";
 import type { NavId } from "../types-v2";
 
@@ -49,13 +49,14 @@ const ITEMS: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: s
   { id: "inbox",      icon: IconInbox,   label: "Decisions" },
   { id: "missions",   icon: IconTarget,  label: "Missions" },
   { id: "rules",      icon: IconSliders, label: "Rules" },
+  { id: "agents",     icon: IconUsers,   label: "Agents" },
   { id: "audit",      icon: IconScroll,  label: "Audit" },
   { id: "governance", icon: IconScale,   label: "Governance" },
   { id: "delegate",   icon: IconKey,     label: "Delegate" },
 ];
 
 const SECONDARY: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: string }[] = [
-  { id: "chat", icon: IconChat, label: "DAO Chat" },
+  { id: "chat", icon: IconChat, label: "Chat" },
 ];
 
 export interface IconNavProps {

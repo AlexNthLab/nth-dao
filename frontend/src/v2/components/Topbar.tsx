@@ -31,7 +31,7 @@ export function Topbar({ identity, onCmdK }: TopbarProps) {
 
       <div className="topbar-spacer" />
 
-      <button className="cmdk-trigger" onClick={onCmdK}>
+      <button type="button" className="cmdk-trigger" onClick={onCmdK}>
         <span>Search or command</span>
         <kbd>⌘K</kbd>
       </button>

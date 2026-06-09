@@ -14,6 +14,9 @@ import type {
   CapTokenSummary,
   ProcessCard,
   Rule,
+  AgentEntry,
+  ChatMessage,
+  Conversation,
 } from "./types-v2";
 
 const helperA = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm56811A";
@@ -295,3 +298,147 @@ export const mockCapTokens: CapTokenSummary[] = [
     use_count: 4,
   },
 ];
+
+/** Agent directory seeds — three sources (local helpers,
+ *  ContactBook entries, LAN-discovered peers) merged into one
+ *  flat list for the AgentDirectoryView. */
+export const mockAgents: AgentEntry[] = [
+  {
+    did: "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A",
+    code: "7e3a-91b2",
+    label: "billing-helper",
+    source: "local",
+    capabilities: ["nth-dao.chat", "nth-dao.mandate"],
+    last_seen: new Date(Date.now() - 5 * 60_000).toISOString(),
+    has_active_cap: true,
+  },
+  {
+    did: "did:key:z6MkpQ8eF1xRzL3tJyN5sWvD9XbA2C7uYkP4hM8kT6f3B",
+    code: "1f9c-44de",
+    label: "code-helper",
+    source: "local",
+    capabilities: ["nth-dao.chat", "nth-dao.tasks"],
+    last_seen: new Date(Date.now() - 30 * 60_000).toISOString(),
+    has_active_cap: true,
+  },
+  {
+    did: "did:key:z6MkrTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH",
+    code: "a3d8-c5fa",
+    label: "Alice (Acme Cloud rep)",
+    source: "contact",
+    capabilities: ["nth-dao.chat", "nth-dao.mandate"],
+    last_seen: new Date(Date.now() - 2 * 86400_000).toISOString(),
+    has_active_cap: false,
+  },
+  {
+    did: "did:key:z6Mk5p1H3kT9YqXqMpL7Wm2N6bV8jK4cD5fE3hQ9rZxAtPq",
+    code: "62b1-08e4",
+    label: "mumolawos-coordinator",
+    source: "lan",
+    capabilities: [
+      "nth-dao.chat",
+      "nth-dao.dao-management",
+      "nth-dao.governance",
+      "nth-dao.a2a-protocol",
+    ],
+    last_seen: new Date(Date.now() - 12 * 60_000).toISOString(),
+    has_active_cap: false,
+  },
+  {
+    did: "did:key:z6MkjyN3aP2qLkR8wEsTvB4nMc6dF9gXuYhAvKkH7tQ4rPsM",
+    code: "ff04-7c3b",
+    label: "fulfillment-bot",
+    source: "local",
+    capabilities: ["nth-dao.chat", "nth-dao.tasks"],
+    last_seen: new Date(Date.now() - 90_000).toISOString(),
+    has_active_cap: true,
+  },
+];
+
+/** Conversation seeds — channel + DM mix to show the Chat view
+ *  can host both DAO governance threads and direct lines to
+ *  helpers. */
+export const mockConversations: Conversation[] = [
+  {
+    id: "ch-general",
+    title: "#general",
+    subtitle: "Home DAO · 4 members",
+    last_preview:
+      "billing-helper: Acme invoice queued for your approval — see Decisions",
+    last_at: new Date(Date.now() - 8 * 60_000).toISOString(),
+    unread: 1,
+    kind: "channel",
+  },
+  {
+    id: "dm-billing-helper",
+    title: "DM: billing-helper",
+    subtitle: "Direct line to your AI accountant",
+    last_preview:
+      "I drafted the launch announcement. Receipt id 0a9c0bf3…",
+    last_at: new Date(Date.now() - 22 * 60_000).toISOString(),
+    unread: 0,
+    kind: "dm",
+  },
+  {
+    id: "dm-code-helper",
+    title: "DM: code-helper",
+    subtitle: "Refactor sessions",
+    last_preview:
+      "Pricing service extracted. Tests pass. Ready for review.",
+    last_at: new Date(Date.now() - 4 * 3600_000).toISOString(),
+    unread: 0,
+    kind: "dm",
+  },
+  {
+    id: "ch-launch",
+    title: "#launch",
+    subtitle: "Home DAO · 3 members",
+    last_preview: "you: shipping it Friday. final QA tonight.",
+    last_at: new Date(Date.now() - 86400_000).toISOString(),
+    unread: 0,
+    kind: "channel",
+  },
+];
+
+export const mockChatMessages: Record<string, ChatMessage[]> = {
+  "ch-general": [
+    {
+      message_id: "m-1",
+      sender_id: "admin",
+      sender_label: "you",
+      body: "morning. anyone seen the Acme invoice come through?",
+      created_at: new Date(Date.now() - 45 * 60_000).toISOString(),
+    },
+    {
+      message_id: "m-2",
+      sender_id: "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A",
+      sender_label: "billing-helper",
+      body:
+        "Yes — landed at 09:42. ¥3,500. Within your vendor allowlist. "
+        + "I queued it as a Decision so you can approve when ready.",
+      created_at: new Date(Date.now() - 8 * 60_000).toISOString(),
+      nth_receipt_id: "0a9c0bf3e89b6901cdab12345678cafe",
+    },
+  ],
+  "dm-billing-helper": [
+    {
+      message_id: "m-10",
+      sender_id: "admin",
+      sender_label: "you",
+      body: "draft the launch announcement, low-key tone please",
+      created_at: new Date(Date.now() - 80 * 60_000).toISOString(),
+    },
+    {
+      message_id: "m-11",
+      sender_id: "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A",
+      sender_label: "billing-helper",
+      body:
+        "Drafted v1. Receipt id 0a9c0bf3… signed under your "
+        + "cap_token cap-bnHs82Lq. Want me to ping 3 early users?",
+      created_at: new Date(Date.now() - 22 * 60_000).toISOString(),
+      nth_receipt_id: "0a9c0bf3e89b6901cdab12345678cafe",
+    },
+  ],
+  "dm-code-helper": [],
+  "ch-launch": [],
+};

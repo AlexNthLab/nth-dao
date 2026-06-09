@@ -129,10 +129,61 @@ export type NavId =
   | "inbox"
   | "missions"
   | "rules"
+  | "agents"
   | "audit"
   | "governance"
   | "delegate"
   | "chat";
+
+/** Agent directory entry — for both local helpers and discovered
+ *  peers. The shape unifies three discovery sources (LAN mDNS,
+ *  ContactBook, A2A AgentCard) into a single row the UI can render
+ *  homogeneously. */
+export type AgentSource = "local" | "contact" | "lan" | "a2a";
+
+export interface AgentEntry {
+  did: string;
+  code: string;
+  label: string;
+  source: AgentSource;
+  /** A2A skill IDs advertised by the agent (from
+   *  /.well-known/agent.json::skills[].id). */
+  capabilities: string[];
+  /** Optional last-seen timestamp (ISO). */
+  last_seen?: string;
+  /** Whether we have an active cap_token issued to this agent. */
+  has_active_cap: boolean;
+  /** Full A2A AgentCard JSON if we fetched it. */
+  agent_card?: Record<string, unknown>;
+}
+
+/** A single chat message inside a conversation. Aligns with the
+ *  backend's existing /api/messages payload shape. */
+export interface ChatMessage {
+  message_id: string;
+  sender_id: string;
+  sender_label: string;
+  body: string;
+  created_at: string;
+  /** When the sender is an AI agent and the message was signed
+   *  via a cap_token, the receipt id is here for the {} viewer. */
+  nth_receipt_id?: string;
+}
+
+/** Conversation summary — what the sidebar of the Chat view
+ *  shows. A conversation is either a channel inside a DAO, or a
+ *  direct line with a helper agent. */
+export interface Conversation {
+  id: string;
+  /** "#general", "DM: helper-A", etc. */
+  title: string;
+  subtitle: string;
+  /** Most recent message preview. */
+  last_preview: string;
+  last_at: string;
+  unread: number;
+  kind: "channel" | "dm";
+}
 
 /** Blackboard operational state — what a one-person company's
  *  process pipeline looks like at a glance. */
