@@ -1,0 +1,112 @@
+/**
+ * Inline SVG icons (Lucide-style outline, 1.5px stroke, 24x24 viewBox).
+ *
+ * Why hand-written, not emoji: emoji rasterize differently per OS,
+ * carry colors we cannot control, and fight the single-accent
+ * design discipline. These icons inherit ``currentColor`` so the
+ * design tokens drive every glyph.
+ *
+ * Why hand-written, not lucide-react package: zero dependency cost
+ * for ~10 glyphs. Adopt the package if the count exceeds 30.
+ */
+import type { SVGProps } from "react";
+
+type Props = SVGProps<SVGSVGElement> & { size?: number };
+
+function Svg({ size = 18, children, ...rest }: Props & { children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...rest}
+    >
+      {children}
+    </svg>
+  );
+}
+
+export const IconInbox = (p: Props) => (
+  <Svg {...p}>
+    <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+  </Svg>
+);
+
+export const IconTarget = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <circle cx="12" cy="12" r="6" />
+    <circle cx="12" cy="12" r="2" />
+  </Svg>
+);
+
+export const IconScroll = (p: Props) => (
+  <Svg {...p}>
+    <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+    <path d="M22 17a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3" />
+    <path d="M5 17H2v-2a2 2 0 0 1 2-2h15" />
+  </Svg>
+);
+
+export const IconScale = (p: Props) => (
+  <Svg {...p}>
+    <path d="M16 16h6l-3-9-3 9z" />
+    <path d="M2 16h6l-3-9-3 9z" />
+    <path d="M7 21h10" />
+    <path d="M12 3v18" />
+    <path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2" />
+  </Svg>
+);
+
+export const IconKey = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="8" cy="15" r="4" />
+    <path d="m10.85 12.15 7.32-7.32" />
+    <path d="M18 8l4-4" />
+    <path d="m20 6 2-2" />
+  </Svg>
+);
+
+export const IconChat = (p: Props) => (
+  <Svg {...p}>
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+  </Svg>
+);
+
+export const IconCheck = (p: Props) => (
+  <Svg {...p}><polyline points="20 6 9 17 4 12" /></Svg>
+);
+
+export const IconX = (p: Props) => (
+  <Svg {...p}>
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </Svg>
+);
+
+export const IconClock = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </Svg>
+);
+
+export const IconBraces = (p: Props) => (
+  <Svg {...p}>
+    <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1" />
+    <path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" />
+  </Svg>
+);
+
+export const IconSearch = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+  </Svg>
+);
