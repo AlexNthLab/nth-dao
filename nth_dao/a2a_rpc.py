@@ -524,8 +524,16 @@ class A2ARPCHandler:
                     f"({existing['status']['state']}); cannot append",
                 )
             task = self.tasks.append_message(target_task_id, message)
-            # Update state to WORKING since a new message arrived
-            assert task is not None  # we just verified existence
+            # Update state to WORKING since a new message arrived.
+            # MED-7 fix 2026-06-10: assert dropped under `python -O`;
+            # explicit guard so a regression in append_message that
+            # returns None surfaces a clear ValueError instead of an
+            # opaque AttributeError downstream.
+            if task is None:
+                raise ValueError(
+                    f"append_message returned None for task "
+                    f"{target_task_id!r} despite existence check",
+                )
             task = self.tasks.set_state(target_task_id, TASK_STATE_WORKING)
             # F2 (2026-06-08): use ``step_started`` not ``goal_started``
             # for messages appended to an existing task — the goal is

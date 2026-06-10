@@ -13,6 +13,16 @@ import type { SVGProps } from "react";
 
 type Props = SVGProps<SVGSVGElement> & { size?: number };
 
+/* All icons in this module are decorative — they sit next to a
+ * text label that already names the action ("Approve", "Send",
+ * "New mission"). Therefore the SVGs MUST be hidden from assistive
+ * tech (audit fix 2026-06-10, finding L2 + C2 a11y batch). The
+ * focus stays on the surrounding <button>'s text or aria-label.
+ *
+ * If a caller needs a non-decorative icon (icon-only button with
+ * no text), they should pass aria-hidden={false} AND wrap the use
+ * site with an aria-label on the parent button.
+ */
 function Svg({ size = 18, children, ...rest }: Props & { children: React.ReactNode }) {
   return (
     <svg
@@ -24,6 +34,8 @@ function Svg({ size = 18, children, ...rest }: Props & { children: React.ReactNo
       strokeWidth={1.5}
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
       {...rest}
     >
       {children}
@@ -177,5 +189,15 @@ export const IconWifi = (p: Props) => (
     <path d="M1.42 9a16 16 0 0 1 21.16 0" />
     <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
     <line x1="12" y1="20" x2="12.01" y2="20" />
+  </Svg>
+);
+
+// Plus — "create / add new" affordance. Used by the Blackboard
+// "New process" and MissionList "New mission" entry buttons added
+// per user audit 2026-06-10 ("需要有添加/发起任务功能").
+export const IconPlus = (p: Props) => (
+  <Svg {...p}>
+    <line x1="12" y1="5" x2="12" y2="19" />
+    <line x1="5" y1="12" x2="19" y2="12" />
   </Svg>
 );

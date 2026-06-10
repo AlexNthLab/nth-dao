@@ -23,6 +23,7 @@
 import { useState } from "react";
 import { IconBraces, IconCheck, IconClock, IconX } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
+import { relativeFuture, relativeTime } from "../utils/time";
 import type { Decision } from "../types-v2";
 
 export interface DecisionCardProps {
@@ -30,24 +31,6 @@ export interface DecisionCardProps {
   onApprove: (id: string) => Promise<void> | void;
   onReject: (id: string) => Promise<void> | void;
   onDefer: (id: string) => Promise<void> | void;
-}
-
-function relativeTime(iso: string): string {
-  const d = new Date(iso);
-  const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return d.toLocaleDateString();
-}
-
-function relativeFuture(iso: string): string {
-  const d = new Date(iso);
-  const diff = (d.getTime() - Date.now()) / 1000;
-  if (diff < 0) return "expired";
-  if (diff < 3600) return `in ${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `in ${Math.floor(diff / 3600)}h`;
-  return `in ${Math.floor(diff / 86400)}d`;
 }
 
 export function DecisionCard({ decision, onApprove, onReject, onDefer }: DecisionCardProps) {

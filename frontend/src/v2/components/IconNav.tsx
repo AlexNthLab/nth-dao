@@ -66,34 +66,64 @@ export interface IconNavProps {
 }
 
 export function IconNav({ active, decisionCount, onNav }: IconNavProps) {
+  // A11y (audit fix 2026-06-10, finding C2): every icon-only nav
+  // button needs an aria-label so screen readers can announce the
+  // destination. The visual tooltip span exists only for sighted
+  // users on hover — assistive tech reads the aria-label instead.
+  // Also expose `aria-current="page"` on the active item so screen
+  // readers say "current page" — standard nav-landmark idiom.
   return (
-    <nav className="icon-nav">
-      {ITEMS.map(({ id, icon: Icon, label }) => (
-        <button
-          key={id}
-          className={`icon-nav-btn ${active === id ? "active" : ""}`}
-          onClick={() => onNav(id)}
-        >
-          <Icon size={18} />
-          {id === "inbox" && decisionCount > 0 && (
-            <span className="icon-nav-badge">{decisionCount}</span>
-          )}
-          <span className="icon-nav-tooltip">{label}</span>
-        </button>
-      ))}
+    <nav className="icon-nav" aria-label="Primary navigation">
+      {ITEMS.map(({ id, icon: Icon, label }) => {
+        const isActive = active === id;
+        const announcement =
+          id === "inbox" && decisionCount > 0
+            ? `${label}, ${decisionCount} pending`
+            : label;
+        return (
+          <button
+            key={id}
+            type="button"
+            className={`icon-nav-btn ${isActive ? "active" : ""}`}
+            onClick={() => onNav(id)}
+            aria-label={announcement}
+            aria-current={isActive ? "page" : undefined}
+            title={label}
+          >
+            <Icon size={18} />
+            {id === "inbox" && decisionCount > 0 && (
+              <span className="icon-nav-badge" aria-hidden="true">
+                {decisionCount}
+              </span>
+            )}
+            <span className="icon-nav-tooltip" aria-hidden="true">
+              {label}
+            </span>
+          </button>
+        );
+      })}
 
       <div className="icon-nav-spacer" />
 
-      {SECONDARY.map(({ id, icon: Icon, label }) => (
-        <button
-          key={id}
-          className={`icon-nav-btn ${active === id ? "active" : ""}`}
-          onClick={() => onNav(id)}
-        >
-          <Icon size={18} />
-          <span className="icon-nav-tooltip">{label}</span>
-        </button>
-      ))}
+      {SECONDARY.map(({ id, icon: Icon, label }) => {
+        const isActive = active === id;
+        return (
+          <button
+            key={id}
+            type="button"
+            className={`icon-nav-btn ${isActive ? "active" : ""}`}
+            onClick={() => onNav(id)}
+            aria-label={label}
+            aria-current={isActive ? "page" : undefined}
+            title={label}
+          >
+            <Icon size={18} />
+            <span className="icon-nav-tooltip" aria-hidden="true">
+              {label}
+            </span>
+          </button>
+        );
+      })}
     </nav>
   );
 }

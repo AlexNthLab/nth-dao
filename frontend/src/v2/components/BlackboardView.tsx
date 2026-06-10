@@ -1,31 +1,55 @@
 /**
  * Blackboard — the autopilot-era main screen.
  *
- * This is the operational dashboard of a one-person company: a
- * Kanban-style board where each card is a process (an order, a
- * support ticket, an invoice) and each column is a workflow stage.
+ * This is the operational dashboard of a one-person company: each
+ * card is a process (an order, a support ticket, an invoice) and
+ * each section is a workflow stage. Stages are stacked vertically
+ * so the user scrolls top→bottom from Intake to Done — Chinese-
+ * keyboard mental model (per user audit 2026-06-10): "竖排适合用户
+ * 习惯". The earlier horizontal Kanban created an unnatural left↔
+ * right scroll axis on narrower screens and made the Done column
+ * (least-interesting) consume the same visual budget as Intake
+ * (most-interesting).
  *
- * Why Kanban, not list:
- *   - Spatial layout shows the flow of work at a glance — the
- *     user immediately sees where work is queued vs done
- *   - Color-coded ⚡ badge marks auto-executed processes (no
- *     decision queue interruption) — the "rule mode is working"
- *     signal
- *   - Blocked / awaiting-external columns visually surface
- *     exceptions that DO need attention
+ * Vertical layout invariants:
+ *   - Stage sections are ordered by lifecycle: Intake → Working →
+ *     Awaiting → Blocked → Done. Eye flow matches reading order.
+ *   - The stage header (pill + count) is sticky so the user
+ *     always knows what stage they're scrolling through.
+ *   - Each card uses full main-body width — no 220px squeeze.
+ *   - Blocked / Awaiting still visually pop because their pill
+ *     colors carry through; nothing needs spatial isolation.
  *
  * Sidebar shows workflow filters; detail rail shows the selected
  * process card's full state including which agent is currently
  * driving and which cap_token authorizes them.
  */
 
-import { useMemo, useState } from "react";
-import { IconLayout, IconZap } from "./Icons";
+import { useEffect, useMemo, useState } from "react";
+import { IconLayout, IconPlus, IconZap } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
+import { relativeTimeShort } from "../utils/time";
 import type { ProcessCard, ProcessStage } from "../types-v2";
 
 export interface BlackboardViewProps {
   processes: ProcessCard[];
+  /** Optional: when wired, the Blackboard head shows a "New process"
+   *  button that opens an inline form. v1 captures locally; backend
+   *  integration drops the result into /api/processes. */
+  onCreate?: (draft: NewProcessDraft) => void;
+  /** Workflow choices to seed the create-form dropdown. If omitted
+   *  the form derives them from existing processes. */
+  workflowOptions?: string[];
+}
+
+/** Minimal shape the create-process form emits. The receiver
+ *  (App.tsx for v1, /api/processes for v1.x) is responsible for
+ *  hydrating into a full ProcessCard (id, updated_at, etc). */
+export interface NewProcessDraft {
+  title: string;
+  workflow: string;
+  subtitle?: string;
+  current_agent: string;
 }
 
 const COLUMNS: { id: ProcessStage; label: string; pill: "ok" | "wait" | "bad" | "dim" }[] = [
@@ -36,15 +60,11 @@ const COLUMNS: { id: ProcessStage; label: string; pill: "ok" | "wait" | "bad" | 
   { id: "done",               label: "Done",     pill: "dim"  },
 ];
 
-function relativeTime(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  return `${Math.floor(diff / 86400)}d`;
-}
+// (was a local relativeTime() — moved to ../utils/time, audit M3)
 
-export function BlackboardView({ processes }: BlackboardViewProps) {
+export function BlackboardView({
+  processes, onCreate, workflowOptions,
+}: BlackboardViewProps) {
   const workflows = useMemo(
     () => Array.from(new Set(processes.map((p) => p.workflow))).sort(),
     [processes],
@@ -52,6 +72,7 @@ export function BlackboardView({ processes }: BlackboardViewProps) {
 
   const [activeWorkflow, setActiveWorkflow] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const filtered = useMemo(
     () =>
@@ -122,45 +143,90 @@ export function BlackboardView({ processes }: BlackboardViewProps) {
       </aside>
 
       <section className="main">
-        <div className="main-head">
-          <p className="main-eyebrow">Blackboard</p>
-          <h1 className="main-title">
-            {activeWorkflow === "all"
-              ? "Operations"
-              : activeWorkflow[0].toUpperCase() + activeWorkflow.slice(1)}
-          </h1>
-          <p className="main-subtitle">
-            What every agent is doing right now.{" "}
-            <span style={{ color: "var(--accent)" }}>
-              {autoPct}% of active processes are running on autopilot
-              (Rule-authorized).
-            </span>
-          </p>
+        <div
+          className="main-head"
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 16,
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <p className="main-eyebrow">Blackboard</p>
+            <h1 className="main-title">
+              {activeWorkflow === "all"
+                ? "Operations"
+                : activeWorkflow[0].toUpperCase() + activeWorkflow.slice(1)}
+            </h1>
+            <p className="main-subtitle">
+              What every agent is doing right now.{" "}
+              <span style={{ color: "var(--accent)" }}>
+                {autoPct}% of active processes are running on autopilot
+                (Rule-authorized).
+              </span>
+            </p>
+          </div>
+          {onCreate && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setCreateOpen(true)}
+              title="Start a new process — drops into Intake"
+              style={{ marginTop: 4, flexShrink: 0 }}
+            >
+              <IconPlus size={14} /> New process
+            </button>
+          )}
         </div>
 
         <div
           className="main-body"
           style={{ paddingRight: 24 }}
         >
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: `repeat(${COLUMNS.length}, minmax(220px, 1fr))`,
-              gap: 12,
-              overflowX: "auto",
-            }}
-          >
+          {createOpen && onCreate && (
+            <NewProcessForm
+              workflowOptions={
+                workflowOptions && workflowOptions.length > 0
+                  ? workflowOptions
+                  : workflows
+              }
+              onCancel={() => setCreateOpen(false)}
+              onSubmit={(draft) => {
+                onCreate(draft);
+                setCreateOpen(false);
+              }}
+            />
+          )}
+
+          {/* Stages stacked top→bottom. Each stage is a section with
+              a sticky header pill + the cards listed vertically
+              underneath at full main-body width. */}
+          <div className="stack" style={{ gap: 24 }}>
             {COLUMNS.map((col) => {
               const items = byStage.get(col.id) ?? [];
               return (
-                <div key={col.id}>
+                <section key={col.id}>
+                  {/* Sticky stage header. z-index coupling: this sits
+                      INSIDE .main-body. .main-head is a sibling DOM
+                      node (also z-index 1), but distinct stacking
+                      contexts — they do not overlap because .main-
+                      head is fixed at the top via the layout grid
+                      and these stickies live in scrollable content.
+                      Background must match .main-body's background
+                      (var(--bg-root)) or cards bleed through. */}
                   <div
                     style={{
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
                       marginBottom: 8,
-                      padding: "0 4px",
+                      padding: "6px 4px",
+                      position: "sticky",
+                      top: 0,
+                      background: "var(--bg-root)",
+                      zIndex: 1,
+                      borderBottom: "1px solid var(--border)",
                     }}
                   >
                     <span className={`pill ${col.pill}`}>{col.label}</span>
@@ -168,7 +234,7 @@ export function BlackboardView({ processes }: BlackboardViewProps) {
                       {items.length}
                     </span>
                   </div>
-                  <div className="stack" style={{ minHeight: 60 }}>
+                  <div className="stack" style={{ gap: 8 }}>
                     {items.map((p) => (
                       <article
                         key={p.id}
@@ -234,18 +300,12 @@ export function BlackboardView({ processes }: BlackboardViewProps) {
                           }}
                         >
                           <span>{p.current_agent}</span>
-                          {p.amount && (
-                            <span className="mono">{p.amount}</span>
-                          )}
-                        </div>
-                        <div
-                          style={{
-                            marginTop: 6,
-                            fontSize: 10,
-                            color: "var(--fg-tertiary)",
-                          }}
-                        >
-                          {relativeTime(p.updated_at)}
+                          <span style={{ display: "flex", gap: 12 }}>
+                            {p.amount && (
+                              <span className="mono">{p.amount}</span>
+                            )}
+                            <span>{relativeTimeShort(p.updated_at)}</span>
+                          </span>
                         </div>
                       </article>
                     ))}
@@ -264,7 +324,7 @@ export function BlackboardView({ processes }: BlackboardViewProps) {
                       </div>
                     )}
                   </div>
-                </div>
+                </section>
               );
             })}
           </div>
@@ -343,5 +403,246 @@ export function BlackboardView({ processes }: BlackboardViewProps) {
         </div>
       </aside>
     </>
+  );
+}
+
+/* ── NewProcessForm ──────────────────────────────────────────────
+ * Inline drawer at the top of main-body. Kept inline (not modal)
+ * so the user can still see the Operations stack behind it — the
+ * very thing they're adding to. Mirrors the AddByDidForm pattern
+ * in AgentDirectoryView for consistency.
+ *
+ * Required fields: title + workflow (so the new process can be
+ * routed to its lane) + current_agent (who's driving). Subtitle
+ * is optional one-liner. New processes always land in `received`
+ * stage — promotion is the agent's job.
+ */
+interface NewProcessFormProps {
+  workflowOptions: string[];
+  onCancel: () => void;
+  onSubmit: (draft: NewProcessDraft) => void;
+}
+
+function NewProcessForm({
+  workflowOptions, onCancel, onSubmit,
+}: NewProcessFormProps) {
+  const [title, setTitle] = useState("");
+  const [workflow, setWorkflow] = useState(workflowOptions[0] ?? "");
+  const [customWorkflow, setCustomWorkflow] = useState("");
+  const [subtitle, setSubtitle] = useState("");
+  const [agent, setAgent] = useState("self-prompt");
+
+  /* Symmetric to NewMissionForm (audit pass#3 finding I2 bonus,
+   * 2026-06-10): if workflowOptions changes identity while the
+   * form is open and the active selection drops out, reset to the
+   * first valid option. v1 passes a static literal so this is
+   * latent — v1.x will read from /api/workflows where the list
+   * can refresh under the open form. The "__new__" sentinel is
+   * NOT in workflowOptions so it always falls through the guard
+   * and stays selected — correct behaviour. */
+  useEffect(() => {
+    if (workflow === "__new__") return;
+    if (workflowOptions.length > 0 && !workflowOptions.includes(workflow)) {
+      setWorkflow(workflowOptions[0]);
+    }
+  }, [workflowOptions, workflow]);
+
+  const usingCustom = workflow === "__new__";
+  const effectiveWorkflow = usingCustom
+    ? customWorkflow.trim().toLowerCase()
+    : workflow;
+
+  const canSubmit =
+    title.trim().length > 0 &&
+    effectiveWorkflow.length > 0 &&
+    agent.trim().length > 0;
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    onSubmit({
+      title: title.trim(),
+      workflow: effectiveWorkflow,
+      subtitle: subtitle.trim() || undefined,
+      current_agent: agent.trim(),
+    });
+  }
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      className="decision-card"
+      style={{
+        padding: 16,
+        marginBottom: 16,
+        borderColor: "var(--accent-muted)",
+      }}
+    >
+      <h3
+        style={{
+          margin: "0 0 4px",
+          fontSize: 14,
+          fontWeight: 600,
+          color: "var(--accent)",
+        }}
+      >
+        Start a new process
+      </h3>
+      <p
+        className="muted"
+        style={{ margin: "0 0 12px", fontSize: 11 }}
+      >
+        It drops into <strong>Intake</strong>. The driver agent will
+        pick it up on the next loop.
+      </p>
+
+      <div className="stack" style={{ gap: 10 }}>
+        <div>
+          <label
+            style={{
+              display: "block",
+              fontSize: 11,
+              color: "var(--fg-tertiary)",
+              marginBottom: 4,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            Title
+          </label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Refund order #4521"
+            required
+            autoFocus
+            style={{ width: "100%" }}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: 11,
+                color: "var(--fg-tertiary)",
+                marginBottom: 4,
+                textTransform: "uppercase",
+                letterSpacing: "0.04em",
+              }}
+            >
+              Workflow
+            </label>
+            <select
+              value={workflow}
+              onChange={(e) => setWorkflow(e.target.value)}
+              style={{ width: "100%" }}
+            >
+              {workflowOptions.map((wf) => (
+                <option key={wf} value={wf}>
+                  {wf}
+                </option>
+              ))}
+              <option value="__new__">+ New workflow…</option>
+            </select>
+          </div>
+          {usingCustom && (
+            <div style={{ flex: 1 }}>
+              <label
+                style={{
+                  display: "block",
+                  fontSize: 11,
+                  color: "var(--fg-tertiary)",
+                  marginBottom: 4,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                New workflow name
+              </label>
+              <input
+                type="text"
+                value={customWorkflow}
+                onChange={(e) => setCustomWorkflow(e.target.value)}
+                placeholder="finance"
+                required={usingCustom}
+                style={{ width: "100%" }}
+              />
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label
+            style={{
+              display: "block",
+              fontSize: 11,
+              color: "var(--fg-tertiary)",
+              marginBottom: 4,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            Driver agent
+          </label>
+          <input
+            type="text"
+            value={agent}
+            onChange={(e) => setAgent(e.target.value)}
+            placeholder="self-prompt | billing-helper | …"
+            required
+            style={{ width: "100%" }}
+          />
+        </div>
+
+        <div>
+          <label
+            style={{
+              display: "block",
+              fontSize: 11,
+              color: "var(--fg-tertiary)",
+              marginBottom: 4,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            Subtitle (optional)
+          </label>
+          <input
+            type="text"
+            value={subtitle}
+            onChange={(e) => setSubtitle(e.target.value)}
+            placeholder="one-line context"
+            style={{ width: "100%" }}
+          />
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          marginTop: 16,
+          justifyContent: "flex-end",
+        }}
+      >
+        <button
+          type="button"
+          className="btn"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          className="btn btn-primary"
+          disabled={!canSubmit}
+        >
+          Create process
+        </button>
+      </div>
+    </form>
   );
 }

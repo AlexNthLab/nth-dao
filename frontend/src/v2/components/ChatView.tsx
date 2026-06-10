@@ -26,6 +26,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChat, IconSend } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
+import { useToast } from "./Toast";
+import { relativeTimeShort } from "../utils/time";
 import type { ChatMessage, Conversation } from "../types-v2";
 
 export interface ChatViewProps {
@@ -34,18 +36,19 @@ export interface ChatViewProps {
   /** Wired to /api/messages once backend integration lands. The
    *  v2 implementation drops the message into local state for now. */
   onSend: (convId: string, body: string) => Promise<void> | void;
+  /** Whose perspective is this view rendered from? Used to right-
+   *  align messages where sender_id === currentUserId. Defaulted
+   *  to "admin" for backwards compat with v1 single-user mock,
+   *  but App.tsx now passes the real identity (audit pass#4 fix
+   *  I3, 2026-06-10): previously hardcoded comparison `=== "admin"`
+   *  styled every non-admin user's own messages as incoming. */
+  currentUserId?: string;
 }
 
-function relTime(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  return new Date(iso).toLocaleDateString();
-}
+// (was a local relTime() — moved to ../utils/time, audit M3)
 
 export function ChatView({
-  conversations, messagesByConv, onSend,
+  conversations, messagesByConv, onSend, currentUserId = "admin",
 }: ChatViewProps) {
   const sorted = useMemo(
     () => conversations.slice().sort(
@@ -61,7 +64,9 @@ export function ChatView({
   const messages = selectedId ? messagesByConv[selectedId] ?? [] : [];
 
   const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const toast = useToast();
 
   // Auto-scroll to the bottom when messages change or conversation
   // switches. Behaviour matches every chat app users know.
@@ -70,12 +75,38 @@ export function ChatView({
     if (el) el.scrollTop = el.scrollHeight;
   }, [selectedId, messages.length]);
 
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
-    if (!draft.trim() || !selectedId) return;
+  /* Send handler (audit fix 2026-06-10, finding C4 + review#1):
+   *   Original bug: setDraft("") fired BEFORE await onSend(); if
+   *   onSend() throws (network error, signing-key unavailable),
+   *   the user's typed message disappeared into the void with no
+   *   visual signal. Fix: clear the draft optimistically, capture
+   *   the body, run onSend inside try/catch. On failure, restore
+   *   the draft and emit an error toast so the user can retry.
+   *
+   *   `doSend()` is the pure mutation; `handleSend()` is the form
+   *   binding. Keeping them split avoids a structural type lie
+   *   where the same function was called with both FormEvent and
+   *   KeyboardEvent. */
+  async function doSend() {
+    if (!draft.trim() || !selectedId || sending) return;
     const body = draft;
     setDraft("");
-    await onSend(selectedId, body);
+    setSending(true);
+    try {
+      await onSend(selectedId, body);
+    } catch (err) {
+      // Restore the draft so the user can retry without retyping.
+      setDraft(body);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.push(`Send failed: ${msg}`, "error");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleSend(e: React.FormEvent) {
+    e.preventDefault();
+    void doSend();
   }
 
   // Last AI-agent message in the current conversation — the
@@ -167,7 +198,7 @@ export function ChatView({
               ) : (
                 <div className="stack" style={{ gap: 16 }}>
                   {messages.map((m) => {
-                    const isYou = m.sender_id === "admin";
+                    const isYou = m.sender_id === currentUserId;
                     return (
                       <article
                         key={m.message_id}
@@ -204,7 +235,7 @@ export function ChatView({
                           >
                             {m.sender_label}
                           </strong>
-                          <span>{relTime(m.created_at)}</span>
+                          <span>{relativeTimeShort(m.created_at)}</span>
                         </div>
                         <p
                           style={{
@@ -252,7 +283,7 @@ export function ChatView({
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    if (draft.trim()) void handleSend(e);
+                    void doSend();
                   }
                 }}
                 placeholder={`Message ${selected.title}…`}
@@ -266,9 +297,10 @@ export function ChatView({
               <button
                 type="submit"
                 className="btn btn-primary"
-                disabled={!draft.trim()}
+                disabled={!draft.trim() || sending}
+                aria-label={sending ? "Sending message" : "Send message"}
               >
-                <IconSend size={14} /> Send
+                <IconSend size={14} /> {sending ? "Sending…" : "Send"}
               </button>
             </form>
           </>

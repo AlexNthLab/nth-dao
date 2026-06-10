@@ -20,9 +20,10 @@
 
 import { useMemo, useState } from "react";
 import {
-  IconSearch, IconUserPlus, IconUsers, IconWifi, IconZap,
+  IconSearch, IconSend, IconUserPlus, IconUsers, IconWifi, IconZap,
 } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
+import { relativeTimeShort } from "../utils/time";
 import type { AgentEntry, AgentSource } from "../types-v2";
 
 export interface AgentDirectoryViewProps {
@@ -33,6 +34,11 @@ export interface AgentDirectoryViewProps {
   onScanLan: () => Promise<void> | void;
   /** Issue cap_token to this agent — pivots to Delegate view. */
   onIssueCap: (did: string) => void;
+  /** Send a chat message to this agent — pivots to Chat view with
+   *  the right conversation pre-selected (audit fix 2026-06-10,
+   *  finding C5: "Send message" button was decorative). When
+   *  omitted the button is hidden rather than render a no-op. */
+  onSendMessage?: (did: string) => void;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -51,17 +57,10 @@ const SOURCE_PILL: Record<AgentSource, "ok" | "wait" | "bad" | "dim"> = {
 
 type Filter = "all" | AgentSource;
 
-function relTime(iso?: string): string {
-  if (!iso) return "—";
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+// (was a local relTime() — moved to ../utils/time, audit M3)
 
 export function AgentDirectoryView({
-  agents, onAddByDid, onScanLan, onIssueCap,
+  agents, onAddByDid, onScanLan, onIssueCap, onSendMessage,
 }: AgentDirectoryViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -339,7 +338,7 @@ export function AgentDirectoryView({
                         {a.did.slice(0, 20)}…
                       </code>
                       <span>·</span>
-                      <span>last seen {relTime(a.last_seen)}</span>
+                      <span>last seen {relativeTimeShort(a.last_seen)}</span>
                     </div>
                   </div>
                   <span className={`pill ${SOURCE_PILL[a.source]}`}>
@@ -391,13 +390,19 @@ export function AgentDirectoryView({
                   >
                     <IconZap size={12} /> Issue cap_token
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    Send message
-                  </button>
+                  {onSendMessage && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSendMessage(a.did);
+                      }}
+                      aria-label={`Send a message to ${a.label || a.did}`}
+                    >
+                      <IconSend size={12} /> Send message
+                    </button>
+                  )}
                 </div>
               </article>
             ))}

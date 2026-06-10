@@ -5,6 +5,26 @@
  * backend grows ``/api/decisions``, ``/api/missions/active`` etc.,
  * the replacement happens here ONLY — components consume the same
  * types.
+ *
+ * ╔═══════════════════════ DRIFT WATCH ═══════════════════════╗
+ * ║  This file MUST stay structurally aligned with the Python ║
+ * ║  ``_seed_*`` functions in ``nth_dao/web/v2_api.py``.      ║
+ * ║                                                           ║
+ * ║  Why: the v2 console renders mock.ts when the hub is      ║
+ * ║  unreachable, AND renders the Python seed when the hub is ║
+ * ║  up but the disk readers find no live data. If the two    ║
+ * ║  diverge (different ids, different titles, different      ║
+ * ║  ordering) a user toggling hub up/down sees different     ║
+ * ║  "demo data" in the same view — a trust hit.              ║
+ * ║                                                           ║
+ * ║  Drift class confined to structural fields (id / title /  ║
+ * ║  DID / array order). Timestamps differ by design —        ║
+ * ║  Date.now() here, datetime.now() server-side.             ║
+ * ║                                                           ║
+ * ║  Phase 2 plan: extract this data to ``seed.json`` and     ║
+ * ║  have both Python and TypeScript import it. Tracking:     ║
+ * ║  review pass#1 finding N1 (2026-06-10).                   ║
+ * ╚═══════════════════════════════════════════════════════════╝
  */
 
 import type {
@@ -19,7 +39,15 @@ import type {
   Conversation,
 } from "./types-v2";
 
-const helperA = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm56811A";
+// Self-consistency fix 2026-06-10 (review pass#2 finding): this
+// const was previously `…GwjeFm56811A` while every literal use of
+// the same agent elsewhere in this file (mockAgents[0].did, the
+// sender_id of billing-helper's chat messages) was `…GwjeFm568311A`
+// — a 1-char drift hidden inside mock.ts itself. The Python seed
+// in nth_dao/web/v2_api.py mirrors the longer form, so the const
+// is realigned to match. Any DID-equality check between the helperA
+// var and the agent record would have silently failed before this.
+const helperA = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A";
 const helperB = "did:key:z6MkpQ8eF1xRzL3tJyN5sWvD9XbA2C7uYkP4hM8kT6f3B";
 
 export const mockDecisions: Decision[] = [

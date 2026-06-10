@@ -21,7 +21,24 @@
  *   - Approve/reject buttons are the only saturated controls on screen
  */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+/* Fonts (audit fix 2026-06-10, finding M9): the Google Fonts CDN
+ * @import on this line previously phoned home to googleapis.com
+ * on every first paint, leaking the visiting user's IP to a third
+ * party. NTH DAO's whole point is sovereignty over identity-
+ * adjacent metadata — that's a contradiction.
+ *
+ * Path forward in three tiers:
+ *   v1 (now)    — drop the CDN import. Fall through to the system
+ *                 font stack defined in :root --t-ui / --t-mono.
+ *                 Looks slightly different on Windows (Segoe UI)
+ *                 vs macOS (-apple-system); both are dense, neutral
+ *                 sans-serifs and within the design intent.
+ *   v1.x        — bundle via @fontsource/inter + @fontsource/jetbrains-mono
+ *                 npm packages so the fonts ship with the build.
+ *   self-host   — for air-gapped deployments, copy WOFF2 files
+ *                 into /fonts/ and declare @font-face here.
+ *
+ * Until v1.x lands, the stack below covers Windows, macOS, Linux. */
 
 /* ── design tokens ─────────────────────────────────────────────── */
 
@@ -66,8 +83,19 @@
   --status-bad-bg:   rgba(239, 68, 68, 0.12);
 
   /* Type scale */
-  --t-mono:  'JetBrains Mono', ui-monospace, monospace;
-  --t-ui:    'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  /* Font stacks (audit M9 expanded fallbacks 2026-06-10):
+   *   - --t-ui   first tries Inter (installed locally on dev
+   *              machines), then the platform's UI sans-serif
+   *              (Segoe UI on Windows, -apple-system on macOS,
+   *              system-ui generic), then any sans.
+   *   - --t-mono first tries JetBrains Mono, then platform
+   *              monospace defaults. ui-monospace is macOS
+   *              system; Consolas is Windows; Liberation Mono
+   *              covers most Linux distros. */
+  --t-mono:  'JetBrains Mono', ui-monospace, 'Consolas',
+             'Liberation Mono', 'Menlo', monospace;
+  --t-ui:    'Inter', -apple-system, BlinkMacSystemFont,
+             'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
 
   /* Radii */
   --r-sm: 6px;
@@ -107,7 +135,7 @@ button {
   padding: 0;
 }
 
-input, textarea {
+input, textarea, select {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -118,12 +146,32 @@ input, textarea {
   transition: border-color var(--m-fast) var(--ease);
 }
 
-input:focus, textarea:focus {
+input:focus, textarea:focus, select:focus {
   border-color: var(--accent);
   background: var(--bg-elevated);
 }
 
 textarea { resize: vertical; min-height: 60px; }
+
+/* <select> needs explicit appearance reset on dark themes
+ * otherwise WebKit renders a system-colored caret + light bg. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--fg-tertiary) 50%),
+    linear-gradient(135deg, var(--fg-tertiary) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 2px),
+    calc(100% - 9px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+select option {
+  background: var(--bg-panel);
+  color: var(--fg-primary);
+}
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb {
@@ -596,6 +644,12 @@ textarea { resize: vertical; min-height: 60px; }
 .pill.ok   { background: var(--status-ok-bg);   color: var(--status-ok); }
 .pill.wait { background: var(--status-wait-bg); color: var(--status-wait); }
 .pill.bad  { background: var(--status-bad-bg);  color: var(--status-bad); }
+/* `pill.dim` is the only surviving consumer of the `.dim` token —
+ * used by RulesView.statusPill (draft rules), MissionList.statusPill
+ * (cancelled/completed), AgentDirectoryView SOURCE_PILL (lan/a2a),
+ * and BlackboardView COLUMNS (Done). Do NOT remove this rule when
+ * cleaning up dead CSS — the standalone `.dim` body-text class
+ * dropped 2026-06-10 was separate. See audit review#5 (2026-06-10). */
 .pill.dim  { background: var(--bg-elevated);    color: var(--fg-secondary); }
 
 .pill::before {
@@ -805,8 +859,18 @@ textarea { resize: vertical; min-height: 60px; }
 /* ── utility ────────────────────────────────────────────────────── */
 
 .mono { font-family: var(--t-mono); }
-.dim  { color: var(--fg-secondary); }
+/* `.dim` standalone class removed 2026-06-10 (audit L1) — it was
+ * dead-CSS, used nowhere in the v2 tree. The .pill.dim modifier
+ * still exists as a pill-color variant (see .pill rules above)
+ * and is distinct from a body-text color. Use .muted for any
+ * "demoted text" intent. */
 .muted { color: var(--fg-tertiary); }
+
+/* Toast slide-in (used by components/Toast.tsx) */
+@keyframes toastIn {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
 .truncate { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .row { display: flex; align-items: center; gap: 8px; }
 .col { display: flex; flex-direction: column; gap: 8px; }

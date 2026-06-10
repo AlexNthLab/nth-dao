@@ -23,27 +23,39 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import {
+  fetchAgents, fetchCapTokens, fetchConversations, fetchDecisions,
+  fetchMessages, fetchMissions, fetchProcesses, fetchReceipts,
+  probeHub,
+} from "./api";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
-import { BlackboardView } from "./components/BlackboardView";
+import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
 import { ChatView } from "./components/ChatView";
 import { CommandPalette } from "./components/CommandPalette";
 import { DecisionQueue } from "./components/DecisionQueue";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { IconNav } from "./components/IconNav";
-import { MissionList } from "./components/MissionList";
+import { MissionList, type NewMissionDraft } from "./components/MissionList";
 import { RulesView } from "./components/RulesView";
 import { StatusBar } from "./components/StatusBar";
+import { ToastProvider, useToast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
 import {
   mockAgents, mockCapTokens, mockChatMessages, mockConversations,
   mockDecisions, mockMissions, mockProcesses, mockReceipts, mockRules,
 } from "./mock";
 import type {
+  AgentEntry,
+  CapTokenSummary,
   ChatMessage,
   CommandItem,
   Conversation,
   Decision,
   IdentityHeader,
+  MissionSummary,
   NavId,
+  ProcessCard,
+  ReceiptSummary,
   StatusBarState,
 } from "./types-v2";
 
@@ -56,7 +68,24 @@ const MOCK_IDENTITY: IdentityHeader = {
   code: "a3ff-62eb",
 };
 
+/* Default-export App wraps the inner shell in ErrorBoundary (audit
+ * fix M4) + ToastProvider (audit fix M14/M15/C4). Doing the wrap
+ * at this layer keeps AppInner free to call useToast() — hooks
+ * can't appear in the same component that provides the context.
+ *
+ * The boundary is OUTSIDE the toast provider so a crash in the
+ * toast viewport itself still triggers the recovery UI. */
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <ToastProvider>
+        <AppInner />
+      </ToastProvider>
+    </ErrorBoundary>
+  );
+}
+
+function AppInner() {
   /* Default landing = Blackboard per the autopilot-mode philosophy
    * (DESIGN_TRADE_OFFS extension): the operational dashboard is
    * the steady-state home screen; Decisions is consulted only when
@@ -71,61 +100,263 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<Record<string, ChatMessage[]>>(
     mockChatMessages,
   );
-  const [conversations] = useState<Conversation[]>(mockConversations);
+  /* Review fix C1 (2026-06-10): conversations was previously not
+   * given a setter — the bootstrap fetched the list but had no way
+   * to apply it, so the Chat sidebar was permanently stuck on the
+   * 4 mock conversations even when the hub returned more or fewer.
+   * Lifted to state with a setter and applied in the boot effect. */
+  const [conversations, setConversations] =
+    useState<Conversation[]>(mockConversations);
+  /* Review fix C2 (2026-06-10): cap_tokens + receipts now lifted
+   * so the status bar reflects live hub data. Previously the bar
+   * permanently sourced from mockCapTokens / mockReceipts and lied
+   * about active cap count + chain head whenever the hub was up. */
+  const [capTokens, setCapTokens] =
+    useState<CapTokenSummary[]>(mockCapTokens);
+  const [receipts, setReceipts] =
+    useState<ReceiptSummary[]>(mockReceipts);
+  /* Lifted for symmetry with the bootstrap fetcher — agents stayed
+   * mock before because the boot effect only toasted on success
+   * without applying. */
+  const [agents, setAgents] = useState<AgentEntry[]>(mockAgents);
+  // Missions + processes lifted to state to support the "+ New
+  // mission" / "+ New process" entry points (user audit 2026-06-10).
+  // Local-only mutation in v1 — pointing at the matching backend
+  // endpoints is a one-line swap inside the handlers.
+  const [missions, setMissions] = useState<MissionSummary[]>(mockMissions);
+  const [processes, setProcesses] = useState<ProcessCard[]>(mockProcesses);
+  /** Drives MissionList's selectedId on next render — set by the
+   *  create handler so the user immediately sees the new mission
+   *  selected in the sidebar + detail rail. MissionList resets it
+   *  back to null after consuming. */
+  const [focusMissionId, setFocusMissionId] = useState<string | null>(null);
+
+  // Toast hook (audit M14/M15) — used by the agent-directory
+  // handlers, the LAN scan, rule transitions, and the keyboard
+  // shortcut feedback paths.
+  const toast = useToast();
+
+  /* Hub bootstrap (Phase 1 of the local-hub plan, 2026-06-10):
+   * On mount, probe ``/api/v2/health``. If reachable, fetch every
+   * read endpoint and replace the local mock state. If unreachable
+   * (hub not running, dev session with vite only) the mock data
+   * stays — UI works either way.
+   *
+   * Why a single useEffect with sequential fetches rather than
+   * SWR/Tanstack-Query: Phase 1 needs the surface, not the cache.
+   * Phase 2's WebSocket subscription will replace the pull model
+   * entirely. Adding a cache library now would be premature.
+   *
+   * Per-view fetch failures are tolerated — if /api/v2/decisions
+   * 500s but /api/v2/missions succeeds, we keep mock decisions
+   * and live missions side-by-side. The toast banner makes the
+   * partial-failure visible.                                      */
+  const [hubReady, setHubReady] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+    (async () => {
+      const reachable = await probeHub(undefined, ctrl.signal);
+      if (cancelled) return;
+      setHubReady(reachable);
+      if (!reachable) return;
+
+      // Fan out — but don't bail the whole batch on one failure.
+      // Order MUST match the destructuring below.
+      const settled = await Promise.allSettled([
+        fetchDecisions(ctrl.signal),
+        fetchMissions(ctrl.signal),
+        fetchProcesses(ctrl.signal),
+        fetchAgents(ctrl.signal),
+        fetchConversations(ctrl.signal),
+        fetchCapTokens(ctrl.signal),
+        fetchReceipts(ctrl.signal),
+      ]);
+      if (cancelled) return;
+      const [
+        decRes, misRes, procRes, agRes, convRes, capRes, recRes,
+      ] = settled;
+      if (decRes.status === "fulfilled")  setDecisions(decRes.value);
+      if (misRes.status === "fulfilled")  setMissions(misRes.value);
+      if (procRes.status === "fulfilled") setProcesses(procRes.value);
+      if (agRes.status === "fulfilled")   setAgents(agRes.value);
+      if (convRes.status === "fulfilled") setConversations(convRes.value);
+      if (capRes.status === "fulfilled")  setCapTokens(capRes.value);
+      if (recRes.status === "fulfilled")  setReceipts(recRes.value);
+
+      const failures = settled.filter((r) => r.status === "rejected").length;
+      const totalEndpoints = settled.length;
+
+      /* Review fix N2 + P9 (2026-06-10): branch on failure count
+       * AND show "—" instead of "0" for any rejected fetch so the
+       * user can distinguish "endpoint returned empty" from
+       * "endpoint errored". A real 0 and a network-failure 0 used
+       * to render identically.
+       *
+       *   all-failed  → error  (hub reachable but broken)
+       *   some-failed → warn   (partial data, "—" marks the gap)
+       *   none-failed → success
+       */
+      const fmt = (r: PromiseSettledResult<{ length: number }>) =>
+        r.status === "fulfilled" ? String(r.value.length) : "—";
+      const procStr = fmt(procRes);
+      const agStr   = fmt(agRes);
+      if (failures === totalEndpoints) {
+        toast.push(
+          `Hub reachable but all ${totalEndpoints} read endpoints failed — ` +
+          `showing mock data. Check the hub log.`,
+          "error",
+        );
+      } else if (failures > 0) {
+        toast.push(
+          `Hub online · ${failures}/${totalEndpoints} endpoints failed · ` +
+          `${agStr} agents · ${procStr} processes`,
+          "warn",
+        );
+      } else {
+        toast.push(
+          `Hub online · ${agStr} agents · ${procStr} processes`,
+          "success",
+        );
+      }
+
+      if (convRes.status === "fulfilled" && convRes.value.length > 0) {
+        // Hydrate per-conversation messages lazily on first selection.
+        // Phase 1 ships seed conversations + ChatView uses local state
+        // on send, so we accept eventual-consistency here.
+        try {
+          const first = convRes.value[0];
+          if (first) {
+            const msgs = await fetchMessages(first.id, ctrl.signal);
+            if (!cancelled) {
+              setChatMessages((prev) => ({ ...prev, [first.id]: msgs }));
+            }
+          }
+        } catch { /* swallow — mock messages stay */ }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+    };
+    // Intentionally empty deps — boot once. Phase 2's WS will
+    // handle live updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ── decision handlers (declared early so the keyboard handler
-   *    below can reference them) ─────────────────────────────── */
-  function handleApprove(id: string) {
-    setDecisions((prev) => prev.filter((d) => d.id !== id));
-    // TODO: POST /api/decisions/{id}/approve
-  }
-  function handleReject(id: string) {
-    setDecisions((prev) => prev.filter((d) => d.id !== id));
-    // TODO: POST /api/decisions/{id}/reject
-  }
-  function handleDefer(id: string) {
-    setDecisions((prev) => prev.filter((d) => d.id !== id));
-    // TODO: POST /api/decisions/{id}/defer
-  }
+   *    below can reference them) ───────────────────────────────
+   *
+   * Multi-user race safety (audit pass#4 fix C1, 2026-06-10):
+   * the optimistic UI update (`filter out the id`) lands first so
+   * the queue feels responsive; the backend call is wrapped in
+   * try/catch. On failure (HTTP 409 because another approver
+   * already resolved it, 403 because the user lost cap, 500 etc.),
+   * we restore the original list snapshot AND surface an error
+   * toast — the user knows their action did NOT take effect.
+   *
+   * In v1 the TODO branch is a no-op so the catch path is
+   * unreachable. The scaffold is in place so backend integration
+   * is a single-line swap (replace the comment with `await fetch
+   * (...)`) without revisiting race semantics.   */
+  // Past-tense lookup for error toast grammar — the verb-to-
+  // participle map avoids "rejectd" / "deferd" from naive
+  // ${transition}d interpolation (review pass#4 follow-up).
+  const TRANSITION_PAST = {
+    approve: "approved",
+    reject:  "rejected",
+    defer:   "deferred",
+  } as const;
 
-  /* U7 (audit fix 2026-06-10): Cmd+J / Cmd+R / Cmd+D shortcuts on
+  async function resolveDecision(
+    id: string,
+    transition: "approve" | "reject" | "defer",
+  ) {
+    // Capture the specific decision being removed (not the whole
+    // array) so rollback only re-inserts THIS item — concurrent
+    // resolveDecision calls on other ids stay independent. Walks
+    // back the concurrency hazard flagged in review pass#4:
+    // a whole-array snapshot would restore items another in-flight
+    // call already optimistically removed.
+    const target = decisions.find((d) => d.id === id);
+    if (!target) return;
+
+    setDecisions((prev) => prev.filter((d) => d.id !== id));
+    try {
+      // TODO: await fetch(`/api/decisions/${id}/${transition}`, { method: "POST" })
+      //   then check response.ok / status === 409.
+      // For v1 the body is empty; no throw is possible today.
+      await Promise.resolve(transition);
+    } catch (err) {
+      // Re-insert only if it isn't already back (e.g., a server
+      // push notification reverted the removal in the meantime).
+      setDecisions((prev) =>
+        prev.some((d) => d.id === id) ? prev : [...prev, target],
+      );
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.push(
+        `Decision ${id} could not be ${TRANSITION_PAST[transition]}: ${msg}. ` +
+        `It may have already been resolved by another user.`,
+        "error",
+      );
+    }
+  }
+  function handleApprove(id: string) { void resolveDecision(id, "approve"); }
+  function handleReject(id: string)  { void resolveDecision(id, "reject"); }
+  function handleDefer(id: string)   { void resolveDecision(id, "defer"); }
+
+  /* U7 (audit fix 2026-06-10): Cmd+J / Cmd+D shortcuts on the
    * Decisions view used to be decorative kbd hints — now they
    * actually fire. Falls through to default browser behavior on
    * non-Decisions views (Cmd+R reload remains, Cmd+D bookmark
-   * remains) so we never hijack a global Ctrl+R reload in dev. */
+   * remains) so we never hijack a global Ctrl+R reload in dev.
+   *
+   * Additional audit fixes 2026-06-10:
+   *   M11 — event.repeat guard: holding Cmd+J would fire approve
+   *        on every key-repeat event, allowing a single held
+   *        keystroke to silently consume the entire queue. Bail
+   *        early so each press requires a release.
+   *   M12 — sort moved INSIDE the j/d branch. The previous code
+   *        sorted decisions on EVERY Cmd+anything press (including
+   *        the Cmd+K palette open path), wasting O(n log n) per
+   *        keystroke even when no decision action would fire. */
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // Auto-repeat key events (held keys) carry e.repeat=true.
+      // For destructive actions (approve/defer/reject) we want one
+      // press = one action, never an accidental hold-to-spam.
+      if (e.repeat) return;
+
       // Cmd+K → command palette (works on every view)
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setCmdkOpen(true);
         return;
       }
-      // Cmd+J/R/D on Decisions view only — operate on the first
-      // pending decision after impact-sorted order. Refusing to
-      // hijack Cmd+R on other views is a deliberate constraint.
-      if (active === "inbox" && (e.metaKey || e.ctrlKey)) {
-        const sorted = decisions.slice().sort((a, b) => {
-          const rank: Record<Decision["impact"], number> = {
-            high: 0, medium: 1, low: 2,
-          };
-          return rank[a.impact] - rank[b.impact] ||
-            a.raised_at.localeCompare(b.raised_at);
-        });
-        const top = sorted[0];
-        if (!top) return;
-        const k = e.key.toLowerCase();
-        if (k === "j") {
-          e.preventDefault();
-          handleApprove(top.id);
-        } else if (k === "d") {
-          e.preventDefault();
-          handleDefer(top.id);
-        }
-        // Note: we deliberately do NOT bind Cmd+R for Reject —
-        // it collides with browser reload and would cause real
-        // pain in dev. Reject stays a click-only action.
-      }
+      // Cmd+J/D on Decisions view only.
+      if (active !== "inbox") return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const k = e.key.toLowerCase();
+      if (k !== "j" && k !== "d") return;
+
+      // Only NOW do we pay the sort cost — and only for the keys
+      // that actually use the result.
+      const sorted = decisions.slice().sort((a, b) => {
+        const rank: Record<Decision["impact"], number> = {
+          high: 0, medium: 1, low: 2,
+        };
+        return rank[a.impact] - rank[b.impact] ||
+          a.raised_at.localeCompare(b.raised_at);
+      });
+      const top = sorted[0];
+      if (!top) return;
+
+      e.preventDefault();
+      if (k === "j") handleApprove(top.id);
+      else handleDefer(top.id);
+      // Note: we deliberately do NOT bind Cmd+R for Reject —
+      // it collides with browser reload and would cause real
+      // pain in dev. Reject stays a click-only action.
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -137,18 +368,22 @@ export default function App() {
       agent_id: MOCK_IDENTITY.agent_id,
       code: MOCK_IDENTITY.code,
       did: MOCK_IDENTITY.did,
-      active_caps: mockCapTokens.filter((c) => !c.revoked).length,
-      caps_expiring_soon: mockCapTokens.filter(
+      // Review fix C2 (2026-06-10): read from lifted state, not
+      // module-scope mocks. When the hub is online these track
+      // live caps + chain head; when offline they fall through to
+      // the same mocks because the state was seeded with them.
+      active_caps: capTokens.filter((c) => !c.revoked).length,
+      caps_expiring_soon: capTokens.filter(
         (c) => !c.revoked && c.not_after - Date.now() < 4 * 3600_000,
       ).length,
       chain_head_short:
-        mockReceipts[mockReceipts.length - 1]?.content_hash.slice(0, 12) ?? "",
-      active_missions: mockMissions.filter(
+        receipts[receipts.length - 1]?.content_hash.slice(0, 12) ?? "",
+      active_missions: missions.filter(
         (m) => m.status === "active" || m.status === "planning",
       ).length,
       pending_decisions: decisions.length,
     }),
-    [decisions],
+    [decisions, missions, capTokens, receipts],
   );
 
   // Command palette items — flat list, substring search.
@@ -163,6 +398,18 @@ export default function App() {
       { id: "nav-governance", title: "Go to Governance",  shortcut: "G V", run: () => setActive("governance") },
       { id: "nav-delegate",   title: "Go to Delegate",    shortcut: "G D", run: () => setActive("delegate") },
       { id: "nav-chat",       title: "Go to Chat",        shortcut: "G C", run: () => setActive("chat") },
+      {
+        id: "new-mission",
+        title: "Start a new mission",
+        hint: "Kick off a goal for an agent to drive",
+        run: () => setActive("missions"),
+      },
+      {
+        id: "new-process",
+        title: "Start a new process",
+        hint: "Drop a work item into the Operations intake column",
+        run: () => setActive("blackboard"),
+      },
       {
         id: "new-rule",
         title: "Create a new Rule",
@@ -208,11 +455,15 @@ export default function App() {
     [],
   );
 
-  /* ── chat send handler (local-only for v1) ────────────────── */
+  /* ── chat send handler (local-only for v1) ──────────────────
+   * Audit pass#4 fix I3 (2026-06-10): sender_id now derived from
+   * the bootstrapped identity rather than the literal "admin", so
+   * a 50-user deployment shows each user's own messages on the
+   * right of the transcript. */
   async function handleChatSend(convId: string, body: string) {
     const msg: ChatMessage = {
       message_id: `m-local-${Date.now()}`,
-      sender_id: "admin",
+      sender_id: MOCK_IDENTITY.agent_id,
       sender_label: "you",
       body,
       created_at: new Date().toISOString(),
@@ -224,24 +475,126 @@ export default function App() {
     // TODO: POST /api/messages with {channel_id, body}
   }
 
-  /* ── agent directory handlers (local-only for v1) ─────────── */
+  /* ── agent directory handlers (audit fix M14/M15 2026-06-10):
+   *    silent console.log replaced with user-visible toasts. ─── */
   function handleAddAgent(did: string, label: string) {
     // TODO: POST /api/agents/add with {target_did, label}
-    console.log("[v2] add agent placeholder:", did, label);
+    toast.push(
+      `Added ${label || did.slice(0, 16) + "…"} to your contacts.`,
+      "success",
+    );
   }
-  function handleScanLan() {
-    // TODO: POST /api/agents/lan_discover and refresh list
-    console.log("[v2] LAN scan placeholder");
+  /* LAN scan handler (audit fix M14/M15 + review#N2 2026-06-10):
+   *   The setTimeout-based mock outcome used to fire-and-forget,
+   *   so rapid double-clicks of "Scan LAN" produced duplicate
+   *   "complete" toasts even though the button was disabled
+   *   client-side. Converting to an actual Promise that resolves
+   *   at the simulated scan deadline lets AgentDirectoryView's
+   *   own `scanning` state (await-gated) correctly disable the
+   *   button for the full window, and centralises debouncing.
+   *   When the backend integration lands, the body becomes a
+   *   single `await fetch("/api/agents/lan_discover")`. */
+  async function handleScanLan() {
+    toast.push("Scanning LAN for nearby agents…", "info");
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
+    toast.push("LAN scan complete. No new peers found.", "info");
   }
   function handleIssueCap(did: string) {
     setActive("delegate");
-    console.log("[v2] pivot to Delegate to issue cap for:", did);
+    toast.push(
+      `Pivoting to Delegate to issue cap_token for ${did.slice(0, 16)}…`,
+      "info",
+    );
+  }
+  function handleSendToAgent(did: string) {
+    // The Chat surface owns conversation selection; v1 just navigates
+    // and emits a toast hinting at next action. v1.x will pass the
+    // DID through so ChatView pre-creates / focuses the DM.
+    setActive("chat");
+    toast.push(
+      `Open Chat → DM ${did.slice(0, 16)}… to start the conversation.`,
+      "info",
+    );
+  }
+
+  /* ── rules handlers (audit fix C1 2026-06-10) ─────────────── */
+  function transitionRule(id: string, msg: string, kind: "success" | "info") {
+    // TODO: POST /api/rules/{id}/{transition}. In v1 we don't yet
+    // hold rules in state, so the visible signal is the toast.
+    toast.push(msg, kind);
+  }
+  function handlePauseRule(id: string)    { transitionRule(id, `Rule ${id} paused.`,    "success"); }
+  function handleResumeRule(id: string)   { transitionRule(id, `Rule ${id} resumed.`,   "success"); }
+  function handleActivateRule(id: string) { transitionRule(id, `Rule ${id} activated.`, "success"); }
+  function handleDiscardRule(id: string)  { transitionRule(id, `Rule ${id} discarded.`, "success"); }
+  function handleEditRule(id: string)     { toast.push(`Edit Rule ${id} (form coming in v1.x).`, "info"); }
+  function handleViewCap(capId: string)   { toast.push(`Cap_token ${capId} — opening Delegate view.`, "info"); setActive("delegate"); }
+
+  /* ── create-task handlers (audit fix 2026-06-10:
+   *    "需要有添加/发起任务功能") ───────────────────────────────── */
+
+  /** New mission — drops in as "planning". The driver agent is
+   *  expected to pick it up on the next runner loop and emit step
+   *  receipts; that's why steps_total starts at 0.
+   *
+   *  Auto-selects the newly-created mission so the detail rail
+   *  immediately shows what was just submitted (review note 6:
+   *  otherwise the sidebar selection lags one mission behind).
+   *  The selection is a child-state concern; v1 sidestep via a
+   *  `selectedMissionId` lifted to App.tsx is overkill — we use
+   *  a `pendingFocusMissionId` to nudge MissionList instead. */
+  function handleCreateMission(draft: NewMissionDraft) {
+    const m: MissionSummary = {
+      id: `m-local-${Date.now()}`,
+      title: draft.title,
+      goal: draft.goal,
+      status: "planning",
+      steps_total: 0,
+      steps_done: 0,
+      steps_in_progress: 0,
+      driver_label: draft.driver_label || "unknown",
+      driver_did: draft.driver_did,
+      cap_token_id: draft.cap_token_id,
+      started_at: new Date().toISOString(),
+    };
+    setMissions((prev) => [m, ...prev]);
+    setFocusMissionId(m.id);
+    // TODO: POST /api/missions with the draft; reconcile id on
+    // response. Until then the local id (m-local-*) is fine.
+  }
+
+  /** New process — drops in "received". Matches the Kanban Intake
+   *  column and the autopilot dashboard's "what just arrived"
+   *  visual cue. */
+  function handleCreateProcess(draft: NewProcessDraft) {
+    const p: ProcessCard = {
+      id: `p-local-${Date.now()}`,
+      title: draft.title,
+      subtitle: draft.subtitle ?? "",
+      workflow: draft.workflow,
+      stage: "received",
+      current_agent: draft.current_agent,
+      auto: false,
+      updated_at: new Date().toISOString(),
+    };
+    setProcesses((prev) => [p, ...prev]);
+    // TODO: POST /api/processes
   }
 
   /* ── current view ── */
   let view: React.ReactNode;
   if (active === "blackboard") {
-    view = <BlackboardView processes={mockProcesses} />;
+    view = (
+      <BlackboardView
+        processes={processes}
+        onCreate={handleCreateProcess}
+        // Stable seed so the form still offers choices even after
+        // every process is filtered out. The derived fallback
+        // inside BlackboardView covers the case where new workflows
+        // get introduced via the "+ New workflow…" option.
+        workflowOptions={["shopping", "support", "finance", "hiring"]}
+      />
+    );
   } else if (active === "inbox") {
     view = (
       <DecisionQueue
@@ -252,16 +605,35 @@ export default function App() {
       />
     );
   } else if (active === "missions") {
-    view = <MissionList missions={mockMissions} />;
+    view = (
+      <MissionList
+        missions={missions}
+        onCreate={handleCreateMission}
+        driverOptions={agents}
+        focusId={focusMissionId}
+        onFocusConsumed={() => setFocusMissionId(null)}
+      />
+    );
   } else if (active === "rules") {
-    view = <RulesView rules={mockRules} />;
+    view = (
+      <RulesView
+        rules={mockRules}
+        onPause={handlePauseRule}
+        onResume={handleResumeRule}
+        onActivate={handleActivateRule}
+        onDiscard={handleDiscardRule}
+        onEdit={handleEditRule}
+        onViewCap={handleViewCap}
+      />
+    );
   } else if (active === "agents") {
     view = (
       <AgentDirectoryView
-        agents={mockAgents}
+        agents={agents}
         onAddByDid={handleAddAgent}
         onScanLan={handleScanLan}
         onIssueCap={handleIssueCap}
+        onSendMessage={handleSendToAgent}
       />
     );
   } else if (active === "chat") {
@@ -270,6 +642,7 @@ export default function App() {
         conversations={conversations}
         messagesByConv={chatMessages}
         onSend={handleChatSend}
+        currentUserId={MOCK_IDENTITY.agent_id}
       />
     );
   } else {

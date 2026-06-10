@@ -1,11 +1,11 @@
-﻿"""MDNSDiscovery 鈥?mDNS/Bonjour backend for "people nearby".
+﻿"""MDNSDiscovery — mDNS/Bonjour backend for "people nearby".
 
 The plain UDP `LANDiscovery` is great where every peer is on the same
 broadcast domain and broadcast traffic is allowed. Modern networks
 (corporate Wi-Fi, container overlays, isolated VLANs) often drop
-broadcast but still pass multicast 鈥?mDNS is the standard tool for
+broadcast but still pass multicast — mDNS is the standard tool for
 this case, and it's also what other LAN tools (printers, AirDrop,
-Spotify Connect鈥? already use. Adding an mDNS backend means NTH DAO
+Spotify Connect…) already use. Adding an mDNS backend means NTH DAO
 peers find each other on any network where mDNS works.
 
 This module is the optional `[lan]` extra. Install with
@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from .lan import LANPeer  # reuse the same value type 鈥?easy mixing with UDP backend
+from .lan import LANPeer  # reuse the same value type — easy mixing with UDP backend
 
 logger = logging.getLogger("nth_dao.discovery.lan_mdns")
 
@@ -64,7 +64,7 @@ def _require_zeroconf() -> None:
 
 
 def _local_ip() -> str:
-    """Best-effort outbound IP 鈥?used as the mDNS service address.
+    """Best-effort outbound IP — used as the mDNS service address.
 
     Falls back to 127.0.0.1 if no network is reachable. Same trick the
     stdlib examples use; not perfect for multi-homed boxes but adequate

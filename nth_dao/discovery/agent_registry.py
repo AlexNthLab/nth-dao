@@ -89,12 +89,22 @@ class AgentRecord:
         try:
             last = datetime.fromisoformat(self.last_seen)
             delta = (datetime.now() - last).total_seconds()
-            # Reject far-future timestamps (tampered or misconfigured clock)
-            if delta < -FUTURE_STALE_SECONDS:
+            # CRIT-2 fix 2026-06-10: clock skew is asymmetric. It exists
+            # to forgive FUTURE timestamps caused by remote-clock drift
+            # (delta < 0), NOT to widen the stale window. The previous
+            # ``effective = max_stale + SKEW`` meant a heartbeat 119s old
+            # passed when max_stale=90s and SKEW=30s — the agent was
+            # actually dead by the policy.
+            #   Accepted window: [-SKEW, max_stale)
+            #   delta < -SKEW       → future beyond tolerance → reject
+            #   delta >= max_stale  → too old → reject
+            # Note: FUTURE_STALE_SECONDS (300s) is strictly looser than
+            # the SKEW check (30s) so its old purpose — distinguishing
+            # tampered from skewed — is subsumed here. Constant kept
+            # for any external callers that import it.
+            if delta < -CLOCK_SKEW_TOLERANCE_SECONDS:
                 return False
-            # Accept within stale window + clock-skew buffer
-            effective = max_stale_seconds + CLOCK_SKEW_TOLERANCE_SECONDS
-            return delta < effective
+            return delta < max_stale_seconds
         except Exception:
             return False
 
@@ -154,6 +164,14 @@ class AgentRegistry:
         start_heartbeat: bool = True,
     ) -> AgentRecord:
         """Register this agent and (optionally) start a heartbeat thread."""
+        # CRIT-3 fix 2026-06-10: stop the heartbeat thread BEFORE we
+        # take _record_lock. unregister() also stops the heartbeat,
+        # but calling it from inside the lock makes _stop_heartbeat's
+        # join(timeout=2) wait while the heartbeat thread is itself
+        # trying to acquire _record_lock — net 2s of wasted time on
+        # every re-register. _stop_heartbeat is idempotent (None-safe)
+        # so this is safe to call unconditionally.
+        self._stop_heartbeat()
         # Re-registering replaces the prior record (idempotent).
         with self._record_lock:
             if self._record is not None:

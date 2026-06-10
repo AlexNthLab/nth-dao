@@ -18,6 +18,21 @@ import type { Rule } from "../types-v2";
 
 export interface RulesViewProps {
   rules: Rule[];
+  /* Action handlers (audit fix 2026-06-10, finding C1: six buttons
+   * in the Rules detail card were rendered without onClick — the
+   * autopilot story collapses if Pause/Activate/Resume don't do
+   * anything). Each handler receives the rule id and is responsible
+   * for the state transition.
+   *
+   * All optional so existing callers (and tests) continue to work;
+   * a missing handler simply hides its button. The App.tsx wiring
+   * supplies every one. */
+  onPause?: (id: string) => void;
+  onResume?: (id: string) => void;
+  onActivate?: (id: string) => void;
+  onDiscard?: (id: string) => void;
+  onEdit?: (id: string) => void;
+  onViewCap?: (capTokenId: string) => void;
 }
 
 function statusPill(s: Rule["status"]): "ok" | "wait" | "dim" {
@@ -26,7 +41,9 @@ function statusPill(s: Rule["status"]): "ok" | "wait" | "dim" {
   return "dim";
 }
 
-export function RulesView({ rules }: RulesViewProps) {
+export function RulesView({
+  rules, onPause, onResume, onActivate, onDiscard, onEdit, onViewCap,
+}: RulesViewProps) {
   const sorted = useMemo(
     () =>
       rules.slice().sort((a, b) => {
@@ -156,25 +173,87 @@ export function RulesView({ rules }: RulesViewProps) {
                 <div className="decision-card-actions">
                   {selected.status === "active" ? (
                     <>
-                      <button className="btn btn-secondary">Pause</button>
-                      <button className="btn btn-ghost">Edit</button>
+                      {onPause && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => onPause(selected.id)}
+                        >
+                          Pause
+                        </button>
+                      )}
+                      {onEdit && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => onEdit(selected.id)}
+                        >
+                          Edit
+                        </button>
+                      )}
                     </>
                   ) : selected.status === "draft" ? (
                     <>
-                      <button className="btn btn-primary">
-                        <IconZap size={14} /> Activate
-                      </button>
-                      <button className="btn btn-ghost">Edit</button>
-                      <button className="btn btn-danger">Discard</button>
+                      {onActivate && (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => onActivate(selected.id)}
+                        >
+                          <IconZap size={14} /> Activate
+                        </button>
+                      )}
+                      {onEdit && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => onEdit(selected.id)}
+                        >
+                          Edit
+                        </button>
+                      )}
+                      {onDiscard && (
+                        <button
+                          type="button"
+                          className="btn btn-danger"
+                          onClick={() => onDiscard(selected.id)}
+                        >
+                          Discard
+                        </button>
+                      )}
                     </>
                   ) : (
                     <>
-                      <button className="btn btn-primary">Resume</button>
-                      <button className="btn btn-ghost">Edit</button>
+                      {onResume && (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => onResume(selected.id)}
+                        >
+                          Resume
+                        </button>
+                      )}
+                      {onEdit && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => onEdit(selected.id)}
+                        >
+                          Edit
+                        </button>
+                      )}
                     </>
                   )}
                   <span style={{ flex: 1 }} />
-                  <button className="btn btn-ghost">View linked cap_token</button>
+                  {onViewCap && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => onViewCap(selected.cap_token_id)}
+                    >
+                      View linked cap_token
+                    </button>
+                  )}
                 </div>
               </article>
             </>

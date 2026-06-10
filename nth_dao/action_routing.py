@@ -383,7 +383,16 @@ class ActionRouter:
             return True
         if not request.sig:
             return False
-        assert self._pubkey_lookup is not None
+        # CRIT-1 fix 2026-06-10: explicit None check survives `python -O`
+        # (assert vanishes under optimisation). The next try/except WOULD
+        # catch the resulting TypeError so this isn't a bypass, but a
+        # ConfigError surfaces the integrator's setup mistake far earlier
+        # and with a useful message rather than a logged "verify reject".
+        if self._pubkey_lookup is None:
+            raise RuntimeError(
+                "ActionRouter._pubkey_lookup is None but _verify_enabled "
+                "is True — caller must wire a lookup callable.",
+            )
         # C-9 fix: pubkey_lookup is an arbitrary integrator-provided callable.
         # If it raises (network error, malformed registry record, ...) we
         # must NOT let the exception propagate out of the handle() path -
@@ -402,7 +411,12 @@ class ActionRouter:
                 request.short_id, request.from_agent,
             )
             return False
-        assert self._identity is not None
+        # CRIT-1 fix 2026-06-10: see explanation above.
+        if self._identity is None:
+            raise RuntimeError(
+                "ActionRouter._identity is None but _verify_enabled "
+                "is True — caller must wire an Identity instance.",
+            )
         try:
             return self._identity.verify_json(
                 request.signable_dict(),

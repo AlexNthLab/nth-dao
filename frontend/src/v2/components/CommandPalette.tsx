@@ -78,9 +78,48 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
     }
   }
 
+  /* Focus trap (audit review#2, 2026-06-10): the input element is
+   * the only natural tab stop inside the palette, so Tab from the
+   * input lets focus escape to the page behind the overlay. ARIA
+   * aria-modal="true" requires the implementation to confine
+   * focus. We trap by intercepting Tab at the panel level and
+   * routing it back to the input — single tab stop = simplest
+   * possible trap. */
+  function handleTrapTab(e: React.KeyboardEvent) {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    inputRef.current?.focus();
+  }
+
+  /* A11y wiring (audit fix 2026-06-10, finding C2 a11y batch
+   *   + review#N1 self-rebound 2026-06-10):
+   *   - role="dialog" + aria-modal="true" announces the modal
+   *   - The result list is a listbox; each item has role="option"
+   *     and aria-selected on the highlighted row, so arrow-key
+   *     navigation reads the focused command aloud
+   *   - Critical (N1): the overlay div MUST NOT carry
+   *     aria-hidden="true". aria-hidden propagates to ALL
+   *     descendants per ARIA spec, which would have masked the
+   *     dialog, listbox, and every option underneath — making
+   *     the entire palette invisible to screen readers. The
+   *     overlay's only purpose is the click-to-dismiss target;
+   *     it doesn't need to opt out of accessibility because the
+   *     <div> isn't focusable to begin with.
+   */
   return (
-    <div className="cmdk-overlay" onClick={onClose}>
-      <div className="cmdk-panel" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="cmdk-overlay"
+      onClick={onClose}
+    >
+      <div
+        className="cmdk-panel"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleTrapTab}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        tabIndex={-1}
+      >
         <div style={{ position: "relative" }}>
           <div
             style={{
@@ -102,15 +141,32 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKey}
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="cmdk-results"
+            aria-autocomplete="list"
+            aria-activedescendant={
+              filtered[highlight]
+                ? `cmdk-item-${filtered[highlight].id}`
+                : undefined
+            }
           />
         </div>
-        <div className="cmdk-list">
+        <div
+          id="cmdk-results"
+          className="cmdk-list"
+          role="listbox"
+          aria-label="Matching commands"
+        >
           {filtered.length === 0 && (
             <div className="cmdk-empty">No matching command.</div>
           )}
           {filtered.map((it, i) => (
             <button
               key={it.id}
+              id={`cmdk-item-${it.id}`}
+              role="option"
+              aria-selected={i === highlight}
               className={`cmdk-item ${i === highlight ? "active" : ""}`}
               onMouseEnter={() => setHighlight(i)}
               onClick={() => {

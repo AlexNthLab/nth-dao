@@ -42,6 +42,24 @@ export interface Decision {
   /** When the cap_token authorizing the proposed action expires.
    *  Drives the urgency badge on the sidebar item. */
   cap_expires_at?: string;
+
+  /* Multi-user routing fields (audit pass#4 fix C2, 2026-06-10):
+   * In a 50-person deployment "whose queue is this?" must have an
+   * answer at the type level. v1 mock data leaves these undefined
+   * so a single-user shell still renders everything; v1.x with
+   * real backend MUST populate them.                              */
+  /** Which human user must approve. When omitted, the decision is
+   *  visible to every approver of the org (legacy single-user
+   *  behaviour). When set, the queue filters by current identity. */
+  assignee_user_did?: string;
+  /** Routing model: "personal" = only assignee_user_did sees it;
+   *  "any-approver" = anyone with the cap can approve;
+   *  "specific-role" = filtered by role membership. */
+  routing_policy?: "personal" | "any-approver" | "specific-role";
+  /** Optional version / etag for optimistic-lock collision detect.
+   *  When another user resolves the decision the server-stamped
+   *  version moves forward; submitting a stale version returns 409. */
+  version?: number;
 }
 
 /** A running Mission as the UI cares about it.
@@ -65,6 +83,13 @@ export interface MissionSummary {
   /** Optional next actionable step description (the bridge already
    *  exposes this via tasks/get enrichment). */
   next_actionable?: string;
+  /** Which human user initiated / owns this mission (audit pass#4
+   *  fix I2, 2026-06-10). At N=50 the mission board shows missions
+   *  driven by various people — without an owner, accountability
+   *  is ambiguous and cancellation authority is unclear. v1 mock
+   *  leaves it undefined; v1.x populates from the originating
+   *  POST /api/missions request. */
+  owner_user_did?: string;
 }
 
 /** Past receipt as the UI summarizes for the audit feed. */
@@ -80,6 +105,14 @@ export interface ReceiptSummary {
    *  timeline's leading entry. */
   summary: string;
   issued_at: string;
+  /** Human user on whose behalf the agent acted (audit pass#4 fix
+   *  I4, 2026-06-10). At N=50 the same `billing-helper` agent may
+   *  sign receipts for many users on the same day. Without this
+   *  field the audit feed can't answer "show me only receipts
+   *  issued on my behalf". The signing chain itself is unchanged;
+   *  this is a UI / filter affordance derived from the cap_token
+   *  used to sign. */
+  principal_user_did?: string;
 }
 
 /** Cap_token row for the Delegate panel. */
@@ -183,6 +216,14 @@ export interface Conversation {
   last_at: string;
   unread: number;
   kind: "channel" | "dm";
+  /** Participant DIDs — humans + agents (audit pass#4 fix M1,
+   *  2026-06-10). At N=50 the Chat surface needs to enforce DM
+   *  privacy: user A must NOT see user B's DM with their HR
+   *  helper agent even when both DMs sit on the same shared
+   *  Conversations server. Frontend treats this as authoritative
+   *  filter input; backend MUST also enforce on the wire — never
+   *  trust client-side filtering as a security boundary. */
+  participant_dids?: string[];
 }
 
 /** Blackboard operational state — what a one-person company's
@@ -242,6 +283,15 @@ export interface Rule {
   fired_30d: number;
   /** When the user last updated the rule. */
   updated_at: string;
+  /** Author of the rule (audit pass#4 fix M2, 2026-06-10).
+   *  At N=50 rules are shared org policy — accountability needs
+   *  to be attached. Editing UI also needs to know who's
+   *  allowed to modify ("you created this, you can edit"). */
+  created_by_user_did?: string;
+  /** Optimistic-lock version. Edit form opens at version=N;
+   *  submitting at version<server returns 409 conflict. v1.x
+   *  edit flow MUST read this on open and send it on PATCH. */
+  version?: number;
 }
 
 /** Cmd+K command definition. */

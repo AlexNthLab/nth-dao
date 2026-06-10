@@ -45,12 +45,19 @@ export function DecisionQueue({ decisions, onApprove, onReject, onDefer }: Decis
     sorted[0]?.id ?? null,
   );
 
-  // Keep selected valid after queue mutations.
+  // Keep selected valid after queue mutations (audit fix 2026-
+  // 06-10, finding M7): the previous deps `[sorted, selectedId]`
+  // re-fired the effect on every selectedId change, causing a
+  // double render. The functional updater reads the previous
+  // selectedId from React's state queue without participating in
+  // the deps list — effect now fires only when `sorted` changes.
   useEffect(() => {
-    if (!sorted.some((d) => d.id === selectedId)) {
-      setSelectedId(sorted[0]?.id ?? null);
-    }
-  }, [sorted, selectedId]);
+    setSelectedId((prev) =>
+      prev && sorted.some((d) => d.id === prev)
+        ? prev
+        : sorted[0]?.id ?? null,
+    );
+  }, [sorted]);
 
   const selected = sorted.find((d) => d.id === selectedId) ?? null;
 

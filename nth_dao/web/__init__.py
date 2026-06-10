@@ -653,6 +653,21 @@ def create_app(
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
 
+        # Phase 1 v2 read endpoints (2026-06-10): the local hub
+        # console v2 surface is a read-only mirror of public
+        # operational state (processes, missions, decisions,
+        # receipts, rules, agents — same things the operator can
+        # already see in the v1 dashboard). Bound to 127.0.0.1
+        # only via the server bind. Tagged anonymous so the v2
+        # SPA — which loads in a browser tab that does NOT have
+        # the console_token — can populate without forcing the
+        # operator into a login dance for a localhost preview.
+        # Phase 2 will introduce per-action cap_token checks at
+        # each POST/PATCH endpoint; the read surface stays open.
+        if request.url.path.startswith("/api/v2/"):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
         if not require_console_auth:
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
@@ -2417,6 +2432,18 @@ def create_app(
     assets_dir = STATIC_DIR / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    # v2 console read endpoints (Phase 1 of the local-hub plan,
+    # 2026-06-10): register BEFORE the catch-all SPA fallback so
+    # /api/v2/* gets matched as a real API route. See
+    # nth_dao/web/v2_api.py for the contract.
+    try:
+        from . import v2_api as _v2_api
+        _v2_api.register_v2_routes(app)
+    except Exception as exc:  # noqa: BLE001
+        # Don't take down the whole console because v2 routes failed
+        # to register — the v1 dashboard still works.
+        logger.warning("v2 api routes could not register: %s", exc)
 
     @app.get("/", response_class=HTMLResponse, response_model=None)
     def index():
