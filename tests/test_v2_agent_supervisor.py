@@ -1,14 +1,19 @@
 """
-Phase 3a tests — supervised agent runtime.
+Phase 3a/3b tests — supervised agent runtime.
 
 Covers:
   AgentSupervisor + InMemoryRunner unit tests (fast)
-    - spawn returns a record with fresh did + agent_id
+    - spawn returns a record with real did:key + agent_id
     - spawn twice → two distinct dids + records
     - stop removes from registry + returns True; second stop False
     - list_agents reflects registry; alive flag follows runner
     - on_event(heartbeat) bumps last_seen
     - shutdown stops everything best-effort
+
+  Phase 3b additions
+    - InMemoryRunner returns a real-shape did:key (decodes via did_key)
+    - spawn() with cap_token_issuer stamps cap_token_id on record
+    - cap_token_issuer raising tears down the child and re-raises
 
   FastAPI integration via TestClient (uses InMemoryRunner injected)
     - POST /api/v2/agents/spawn returns 201 + AgentEntry shape
@@ -16,10 +21,13 @@ Covers:
     - POST /api/v2/agents/{id}/stop returns 200, agent disappears
     - POST /api/v2/agents/{unknown}/stop returns 404
     - Spawned agents are deduped by did against the disk/seed list
+    - Phase 3b: spawn issues a cap_token persisted in the store
+    - Phase 3b: spawn 503 when node_identity missing
 
   Real subprocess smoke (kept fast)
     - SubprocessRunner.start spawns nth_dao.web.dummy_agent
-    - The child writes an "agent_started" line to stdout within 5s
+    - The child writes an "agent_started" line with a real did:key
+    - SubprocessRunner.start blocks until handshake, returns the did
     - stop terminates the child cleanly
 
 Run: pytest tests/test_v2_agent_supervisor.py -q
@@ -45,15 +53,196 @@ from nth_dao.web.agent_supervisor import (
 # ─────────────────────────────────────────────────────────────
 
 def test_spawn_returns_record_with_fresh_did() -> None:
+    # Phase 3b: did is now a REAL W3C did:key (z6Mk… for Ed25519),
+    # not the Phase 3a ``did:nth-hub-stub:`` placeholder.
     sup = AgentSupervisor(InMemoryRunner())
     r = sup.spawn(kind="mock", label="test-1", capabilities=["nth-dao.chat"])
     assert r.agent_id
-    assert r.did.startswith("did:nth-hub-stub:")
+    assert r.did.startswith("did:key:z6Mk"), (
+        f"expected a did:key Ed25519 multibase prefix, got {r.did!r}"
+    )
     assert r.kind == "mock"
     assert r.label == "test-1"
     assert r.capabilities == ["nth-dao.chat"]
     assert r.alive is True
     assert r.pid is not None
+    # Phase 3b: with no cap_token_issuer the field stays None — the
+    # supervisor doesn't manufacture tokens on its own.
+    assert r.cap_token_id is None
+
+
+def test_inmemory_runner_did_decodes_as_real_didkey() -> None:
+    """Phase 3b: the InMemoryRunner's generated DID must round-trip
+    through the project's own did:key codec, so test code that
+    feeds it into cap_token.sign_cap_token (which validates the
+    subject_did) doesn't have to special-case test runners. """
+    from nth_dao.did_key import decode_ed25519_did_key, is_did_key
+    sup = AgentSupervisor(InMemoryRunner())
+    r = sup.spawn(kind="mock", label="x")
+    assert is_did_key(r.did)
+    pubkey = decode_ed25519_did_key(r.did)
+    assert len(pubkey) == 32  # Ed25519 pubkey size
+
+
+def test_spawn_with_cap_token_issuer_stamps_token_id() -> None:
+    """Phase 3b: when spawn() is given a cap_token_issuer callback,
+    the returned record carries the issued token_id. The supervisor
+    invokes the callback with the child's DID + capabilities. """
+    sup = AgentSupervisor(InMemoryRunner())
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_issuer(did: str, caps: list[str]) -> dict:
+        calls.append((did, list(caps)))
+        return {"token_id": "tok-" + did[-8:], "subject_did": did}
+
+    r = sup.spawn(
+        kind="mock", label="t",
+        capabilities=["nth-dao.chat"],
+        cap_token_issuer=fake_issuer,
+    )
+    assert r.cap_token_id == "tok-" + r.did[-8:]
+    assert len(calls) == 1
+    issued_did, issued_caps = calls[0]
+    assert issued_did == r.did
+    assert issued_caps == ["nth-dao.chat"]
+
+
+def test_spawn_warns_when_issuer_returns_dict_without_token_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """H-2 fix (review round Phase 3b R1): if a cap_token_issuer
+    returns SOMETHING but no usable ``token_id``, the supervisor
+    must log a loud WARNING. Without this, a contract drift in
+    sign_cap_token (renamed field, swapped key) would silently
+    park unauthorised agents in the registry. """
+    import logging
+
+    sup = AgentSupervisor(InMemoryRunner())
+
+    def issuer_missing_token_id(_did: str, _caps: list[str]) -> dict:
+        # Dict-shaped but no token_id — exactly the contract-drift
+        # case the WARNING is meant to catch.
+        return {"subject_did": _did, "capabilities": list(_caps)}
+
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        r = sup.spawn(
+            kind="mock", label="weird-issuer",
+            capabilities=[],
+            cap_token_issuer=issuer_missing_token_id,
+        )
+
+    # Agent is still registered — supervisor didn't fail-closed
+    # on this (the issuer didn't raise, just returned an odd dict);
+    # but the WARNING gives the operator a chance to notice.
+    assert r.cap_token_id is None
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("without a valid 'token_id'" in w for w in warnings), (
+        f"expected a WARNING about missing token_id, got: {warnings!r}"
+    )
+
+
+def test_spawn_kills_child_when_cap_token_issuer_raises() -> None:
+    """Phase 3b: if the issuer raises, the supervisor must tear
+    the child down BEFORE re-raising — otherwise the caller gets a
+    500 while an unauthorised agent quietly runs in the background. """
+    runner = InMemoryRunner()
+    sup = AgentSupervisor(runner)
+
+    class Boom(RuntimeError):
+        pass
+
+    def angry_issuer(_did: str, _caps: list[str]) -> dict:
+        raise Boom("issuer rejected this subject_did")
+
+    with pytest.raises(Boom):
+        sup.spawn(
+            kind="mock", label="t",
+            capabilities=[],
+            cap_token_issuer=angry_issuer,
+        )
+
+    # No record left behind, runner.is_alive must be False for every
+    # known id (the InMemoryRunner.stop flips the alive flag).
+    assert sup.list_agents() == []
+    # The InMemoryRunner reuses agent_ids of stopped children in its
+    # _alive dict; assert every alive flag is False.
+    all_alive = list(runner._alive.values())  # type: ignore[attr-defined]
+    assert not any(all_alive), (
+        f"runner should have torn the child down; alive flags: {all_alive!r}"
+    )
+
+
+def test_spawn_warns_when_issuer_returns_non_dict(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """N-1 fix (review round Phase 3b R2): if a cap_token_issuer
+    returns a non-dict truthy value (list, str, custom object),
+    the supervisor must emit a clear WARNING naming the actual
+    type instead of relying on a downstream AttributeError to
+    blow up the spawn. The agent still registers — same posture
+    as H-2's missing-token_id branch. """
+    import logging
+
+    sup = AgentSupervisor(InMemoryRunner())
+
+    def issuer_returns_list(_did: str, _caps: list[str]) -> list:
+        # Wrong shape — pretend a refactor renamed sign_cap_token's
+        # return into a list-of-tokens. The supervisor shouldn't
+        # crash trying to call .get() on it.
+        return [{"token_id": "tok-001"}]  # type: ignore[return-value]
+
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        r = sup.spawn(
+            kind="mock", label="non-dict-issuer",
+            capabilities=[],
+            cap_token_issuer=issuer_returns_list,  # type: ignore[arg-type]
+        )
+
+    assert r.cap_token_id is None
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("returned list instead of a dict" in w for w in warnings), (
+        f"expected a WARNING naming the bad return type, got: {warnings!r}"
+    )
+
+
+def test_spawn_kills_child_when_post_handshake_assembly_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-1 fix (review round Phase 3b R1): the runner gives us a
+    live child the moment start() returns. ANY exception from
+    issuer / AgentRecord construction / self._agents insert before
+    we mark the spawn complete must trigger runner.stop() in a
+    finally — otherwise the subprocess is orphaned.
+
+    Forcing the failure: monkeypatch AgentRecord to raise inside
+    spawn's try block. The supervisor must then call runner.stop().
+    """
+    from nth_dao.web import agent_supervisor as supmod
+
+    runner = InMemoryRunner()
+    sup = AgentSupervisor(runner)
+
+    class _Boom(RuntimeError):
+        pass
+
+    def explosive_record(*_args: object, **_kwargs: object) -> None:
+        raise _Boom("simulated post-handshake assembly failure")
+
+    monkeypatch.setattr(supmod, "AgentRecord", explosive_record)
+
+    with pytest.raises(_Boom):
+        sup.spawn(kind="mock", label="t", capabilities=[])
+
+    # Runner.stop() flipped the alive flag for the doomed agent.
+    # Every recorded alive value must be False — no orphan.
+    all_alive = list(runner._alive.values())  # type: ignore[attr-defined]
+    assert not any(all_alive), (
+        f"runner should have stopped the child; alive flags: {all_alive!r}"
+    )
+    # And no leftover record in the supervisor either.
+    assert sup.list_agents() == []
 
 
 def test_spawn_twice_distinct() -> None:
@@ -144,14 +333,20 @@ def test_spawn_endpoint_returns_201(hub_client: TestClient) -> None:
     })
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["did"].startswith("did:nth-hub-stub:")
+    # Phase 3b: real W3C did:key, not the Phase 3a stub.
+    assert body["did"].startswith("did:key:z6Mk")
     assert body["kind"] == "mock"
     assert body["label"] == "test-agent"
+    # Phase 3b: hub issued a cap_token on spawn; the response carries
+    # the token_id so the UI can splice it into /api/v2/cap_tokens.
+    assert body["cap_token_id"], "cap_token_id must be set on Phase 3b spawn"
     entry = body["agent"]
     assert entry["source"] == "local"
     assert entry["supervised"] is True
     assert entry["alive"] is True
     assert entry["capabilities"] == ["nth-dao.chat"]
+    # has_active_cap must follow cap_token_id presence.
+    assert entry["has_active_cap"] is True
 
 
 def test_supervised_agents_appear_in_get(hub_client: TestClient) -> None:
@@ -197,6 +392,72 @@ def test_seed_has_no_internal_duplicates(hub_client: TestClient) -> None:
     listing = hub_client.get("/api/v2/agents").json()
     dids = [a["did"] for a in listing]
     assert len(set(dids)) == len(dids)
+
+
+def test_spawn_persists_cap_token_in_store(hub_client: TestClient) -> None:
+    """Phase 3b end-to-end: the issued token must land in
+    state.cap_tokens, with the child's DID as subject_did and
+    nth:receipt_sign present. Without this, the operator's audit
+    log would be missing the records that justified granting
+    receipt-signing authority to a freshly-spawned agent. """
+    from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN
+
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "auth-test",
+        "capabilities": ["nth-dao.chat"],
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    token_id = body["cap_token_id"]
+    spawned_did = body["did"]
+
+    # The app object the fixture built has state.nth.cap_tokens —
+    # pull it out to verify the audit record on disk.
+    app = hub_client.app
+    store = app.state.nth.cap_tokens
+    record = store.get(token_id)
+    assert record is not None, (
+        f"cap_token {token_id!r} not found in store after spawn"
+    )
+    assert record["subject_did"] == spawned_did
+    assert CAP_NTH_RECEIPT_SIGN in record["capabilities"]
+    # nth-dao.chat is NOT in KNOWN_CAPABILITIES so it must be
+    # filtered out (defensive — typos in the request shouldn't
+    # produce phantom caps).
+    assert "nth-dao.chat" not in record["capabilities"]
+
+
+def test_spawn_503_when_node_identity_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3b fail-closed: if state.node_identity is absent the
+    hub MUST refuse to spawn — bringing up a child without an
+    issuer would mean no cap_token, no audit trail. 503 is the
+    same posture Phase 2 uses for receipt signing. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    # Pre-seat InMemoryRunner so this test can't accidentally fork
+    # a real child even if the failure path lets us through.
+    app.state.v2_supervisor = AgentSupervisor(InMemoryRunner())
+    # Strip the identity that create_app bootstrapped, simulating
+    # an early-deploy state where the workspace doesn't yet have
+    # a keypair.
+    app.state.nth.node_identity = None
+    client = TestClient(app)
+
+    r = client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "no-identity", "capabilities": [],
+    })
+    assert r.status_code == 503, r.text
+    assert "signer identity unavailable" in r.json()["detail"]
 
 
 def test_supervisor_wins_dedup_against_seed(
@@ -317,36 +578,57 @@ _SMOKE_TIMEOUT = 5.0
 
 def test_subprocess_runner_smoke() -> None:
     """One end-to-end check that SubprocessRunner can spawn
-    nth_dao.web.dummy_agent, that the child prints its
-    "agent_started" line, and that stop() terminates it cleanly.
+    nth_dao.web.dummy_agent, that the child generates an Ed25519
+    keypair + reports its real DID, and that stop() terminates
+    it cleanly.
 
-    Skipped on platforms where subprocess.Popen with stdout=PIPE
-    is unreliable in pytest's stdout capture (rare). """
+    Phase 3b: start() is synchronous w.r.t. the identity handshake,
+    so by the time it returns we already have the child's did. No
+    polling loop on the events list needed — that was a Phase 3a
+    workaround for the fire-and-forget Popen.
+    """
     import uuid
+    from nth_dao.did_key import is_did_key
     events: list[dict] = []
-    runner = SubprocessRunner(on_event=lambda _id, e: events.append(e))
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
     # N-6 fix (2026-06-11): random agent_id so pytest-xdist parallel
     # workers don't collide on the same SubprocessRunner key when
     # someone someday runs `pytest -n auto`.
     agent_id = f"smoke-{uuid.uuid4().hex[:12]}"
-    pid = runner.start(agent_id, kind="mock")
+    pid, did = runner.start(agent_id, kind="mock")
     if pid is None:
         pytest.skip("subprocess could not start (CI sandboxing?)")
     try:
-        # Wait up to _SMOKE_TIMEOUT seconds for the "agent_started" event.
-        deadline = time.time() + _SMOKE_TIMEOUT
+        # Phase 3b: start() blocked until the handshake event, so
+        # this assert is about the result of the handshake — not
+        # a race with the reader thread.
+        assert is_did_key(did), (
+            f"expected a W3C did:key from the child, got {did!r}"
+        )
+        # The corresponding agent_started event must have been
+        # forwarded to on_event already (the reader sets the
+        # handshake event AFTER stashing did/pubkey AND BEFORE
+        # forwarding — see _read_stdout_loop). Give the reader a
+        # brief tick if the OS has only just scheduled it.
+        deadline = time.time() + 1.0
         while time.time() < deadline:
             if any(e.get("event") == "agent_started" for e in events):
                 break
-            time.sleep(0.1)
+            time.sleep(0.05)
         kinds = {e.get("event") for e in events}
         assert "agent_started" in kinds, f"events seen: {kinds!r}"
+        # The forwarded event must carry the same did the runner
+        # returned — they're the same source.
+        started = next(e for e in events if e.get("event") == "agent_started")
+        assert started.get("did") == did
         assert runner.is_alive(agent_id), "agent should be alive"
     finally:
         runner.stop(agent_id)
         # L-5 fix (2026-06-11): no magic sleep — runner.stop()
         # already wait()s with a 2s+1s timeout, so by the time it
         # returns the process is guaranteed to have exited (or
-        # been kill()ed). The previous time.sleep(0.3) was racing
-        # an event already settled.
+        # been kill()ed).
         assert not runner.is_alive(agent_id), "agent should be dead after stop"

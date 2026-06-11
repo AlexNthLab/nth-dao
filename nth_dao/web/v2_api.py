@@ -74,6 +74,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1027,13 +1028,19 @@ class AgentEntryM(_Model):
 
 
 class SpawnResponseM(_Model):
-    """POST /api/v2/agents/spawn response shape. Phase 3b will add
-    a ``cap_token`` field carrying the cap_token issued at spawn. """
+    """POST /api/v2/agents/spawn response shape.
+
+    Phase 3b (2026-06-11): ``cap_token_id`` carries the token_id of
+    the cap_token the hub issued for the freshly-spawned agent. The
+    full token isn't returned in the body — the operator's UI loads
+    it from /api/v2/cap_tokens. ``did`` is now a real W3C did:key
+    (was ``did:nth-hub-stub:`` in Phase 3a). """
     agent_id: str
     did: str
     kind: str
     label: str
     pid: Optional[int] = None
+    cap_token_id: Optional[str] = None
     agent: AgentEntryM
 
 
@@ -1127,7 +1134,13 @@ def _state_blackboard(request: Request) -> Optional[Any]:
         return None
 
 
-# Phase 3a: agent supervisor accessor + spawn request model
+# Phase 3a/3b: agent supervisor accessor + spawn request model.
+# Module-level lock that serialises the first-access build of
+# app.state.v2_supervisor. Cheap to allocate, lives for the
+# process lifetime, and only contended on cold start.
+_SUPERVISOR_BUILD_LOCK = threading.Lock()
+
+
 def _state_supervisor(request: Request) -> Optional[Any]:
     """Return the lazy-built per-app agent supervisor.
 
@@ -1136,22 +1149,24 @@ def _state_supervisor(request: Request) -> Optional[Any]:
     a SubprocessRunner. Stored on app.state.v2_supervisor — same
     pattern as v2_decisions_store.
 
-    Thread-safety note: the check-then-set is not atomic. Two
-    concurrent first-requests could each construct a supervisor
-    and the second would clobber the first (orphaning the first
-    supervisor's subprocess pool — real leak risk in a hot
-    cold-start race). Same hub-single-user assumption as
-    _decisions_store applies: uvicorn's default single worker
-    serialises requests within asyncio. Phase 3 multi-worker
-    deployments must move this to module-level construction or
-    add a one-time-init lock. """
+    L-2 fix (review round Phase 3b R1): the check-then-set is
+    serialised by ``_SUPERVISOR_BUILD_LOCK`` with a double-checked
+    pattern (cheap path: attribute lookup, no lock; slow path:
+    lock + re-check + build). Two concurrent first-requests on a
+    multi-worker deployment can no longer each construct a
+    supervisor and clobber the first one — the second waits at
+    the lock and sees the populated attribute on re-check. """
     state = request.app.state
     sup = getattr(state, "v2_supervisor", None)
-    if sup is None:
-        from .agent_supervisor import build_default_supervisor
-        sup = build_default_supervisor()
-        state.v2_supervisor = sup
-        logger.info("v2_api: built default agent supervisor")
+    if sup is not None:
+        return sup
+    with _SUPERVISOR_BUILD_LOCK:
+        sup = getattr(state, "v2_supervisor", None)
+        if sup is None:
+            from .agent_supervisor import build_default_supervisor
+            sup = build_default_supervisor()
+            state.v2_supervisor = sup
+            logger.info("v2_api: built default agent supervisor")
     return sup
 
 
@@ -1167,8 +1182,23 @@ class SpawnAgentBody(_Model):
     )
     capabilities: List[str] = Field(
         default_factory=list,
-        description="Advertised capabilities (e.g. ['nth-dao.chat']).",
+        description=(
+            "Capabilities the spawned agent should be granted via its "
+            "cap_token. Unknown caps (not in cap_token.KNOWN_CAPABILITIES) "
+            "are silently dropped; nth:receipt_sign is always added so "
+            "the agent can sign receipts even with an empty request."
+        ),
     )
+
+
+def _state_cap_tokens_store(request: Request) -> Optional[Any]:
+    """CapTokenStore from app.state.nth.cap_tokens. Returns None if
+    the workspace hasn't been bootstrapped (mirrors the pattern of
+    _state_receipts_store + _state_node_identity)."""
+    try:
+        return request.app.state.nth.cap_tokens
+    except AttributeError:
+        return None
 
 
 def _state_workspace(request: Request) -> Optional[Path]:
@@ -1455,21 +1485,95 @@ def register_v2_routes(app: FastAPI) -> None:
         body: SpawnAgentBody,
         request: Request,
     ) -> Dict[str, Any]:
-        """Phase 3a: ask the supervisor to bring up a new agent.
-        Returns the AgentEntry the freshly-spawned agent will be
-        rendered as. Phase 3b will additionally issue a cap_token
-        and attach it before returning. """
+        """Phase 3b: ask the supervisor to bring up a new agent and
+        issue a cap_token bound to the child's freshly-generated DID.
+
+        Sequence:
+          1. Child process starts, generates Ed25519 keypair, emits
+             ``agent_started`` event with its W3C did:key. Supervisor
+             blocks until that handshake event arrives (≤10s).
+          2. Hub signs a cap_token with ``state.node_identity`` as
+             issuer + the child's did as subject_did. The token grants
+             ``nth:receipt_sign`` plus any KNOWN_CAPABILITIES the
+             client requested.
+          3. Cap_token is persisted via ``state.cap_tokens`` for
+             audit + revocation.
+          4. AgentRecord stamped with ``cap_token_id``.
+
+        Failure modes:
+          503 — supervisor / node_identity / cap_token store missing.
+                Fail-closed: we never bring up an unauthorised agent.
+          500 — runner spawn or cap_token issuance failed AFTER the
+                child started. Supervisor has already torn the child
+                down before this point.
+        """
         sup = _state_supervisor(request)
         if sup is None:
             raise HTTPException(
                 status_code=503,
                 detail="agent supervisor unavailable",
             )
+        identity = _state_node_identity(request)
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "signer identity unavailable; cannot issue cap_token "
+                    "for spawned agent. Bootstrap the workspace identity first."
+                ),
+            )
+        cap_tokens_store = _state_cap_tokens_store(request)
+        if cap_tokens_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "cap_token store unavailable; cannot record issued "
+                    "token. Bootstrap the workspace cap_tokens dir first."
+                ),
+            )
+
+        # Closures over identity + store. The supervisor calls this
+        # AFTER the child has reported its DID, so subject_did is the
+        # child's real W3C did:key.
+        from nth_dao.cap_token import (
+            CAP_NTH_RECEIPT_SIGN, KNOWN_CAPABILITIES,
+            sign_cap_token,
+        )
+
+        def _issue_cap_token(
+            subject_did: str, requested_caps: List[str],
+        ) -> Dict[str, Any]:
+            # Filter to KNOWN_CAPABILITIES so a typo (e.g. "nth:rceipt_sign")
+            # doesn't end up as an issued cap that no verifier recognises.
+            # CAP_NTH_RECEIPT_SIGN is always included — without it the
+            # child can't sign anything, defeating Phase 3b's purpose.
+            caps: List[str] = [CAP_NTH_RECEIPT_SIGN]
+            for c in requested_caps:
+                if c in KNOWN_CAPABILITIES and c not in caps:
+                    caps.append(c)
+            token = sign_cap_token(
+                issuer=identity,
+                subject_did=subject_did,
+                capabilities=caps,
+            )
+            try:
+                cap_tokens_store.record(token)
+            except Exception as exc:
+                # Audit-store failure is fatal: the operator's
+                # revocation/audit trail must be consistent.
+                logger.exception(
+                    "v2_api: cap_token audit-record failed for %s: %s",
+                    subject_did, exc,
+                )
+                raise
+            return token
+
         try:
             record = sup.spawn(
                 kind=body.kind,
                 label=body.label,
                 capabilities=body.capabilities,
+                cap_token_issuer=_issue_cap_token,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("v2_api: spawn failed: %s", exc)
@@ -1483,6 +1587,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "kind": record.kind,
             "label": record.label,
             "pid": record.pid,
+            "cap_token_id": record.cap_token_id,
             "agent": record.to_agent_entry(),
         }
 
