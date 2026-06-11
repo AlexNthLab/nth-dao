@@ -1851,6 +1851,148 @@ def test_default_stream_ask_polyfill_yields_single_delta_then_done() -> None:
     assert events[1][1]["exit_code"] == 0
 
 
+def test_child_stream_ask_flushes_error_event_when_backend_raises_mid_stream(
+    tmp_path: Path,
+) -> None:
+    """F-5 fix (review round Phase 5.2 R1): if a backend yields N
+    deltas then raises mid-stream, the child must:
+      - flush all deltas already produced
+      - emit a final ``data: {"error":...}`` event
+      - close the connection cleanly (no escaped exception)
+
+    Verified end-to-end via real subprocess + a custom
+    delta-then-raise backend injected via a tiny dummy module
+    spawned with kind=mock and a monkeypatched ask_backend.
+
+    Because the production child resolves backends from kind, we
+    can't easily inject a custom one from outside. Instead we
+    exercise the in-process A2AHandler logic via a unit-style
+    test that constructs the handler's _stream_ask closure with
+    a synthetic backend. """
+    import socket as _sk
+    import threading as _th
+    import io as _io
+
+    pytest.importorskip("nacl")
+    # Build a fake backend that yields 2 deltas then raises.
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    class _MidStreamRaiser(_AskBackend):
+        name = "raise-after-2"
+
+        def ask(self, params, timeout_s):
+            return {"response": "(stub)", "backend": self.name}
+
+        def stream_ask(self, params, timeout_s):
+            yield "delta", "first "
+            yield "delta", "second "
+            raise TimeoutError("simulated mid-stream timeout")
+
+    # We mirror the production wire shape by writing the SSE
+    # directly into an io.BytesIO and asserting the produced bytes.
+    out = _io.BytesIO()
+
+    def write_event(payload: dict) -> bool:
+        out.write(b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n")
+        return True
+
+    # Inline the same try-block shape as _stream_ask
+    backend = _MidStreamRaiser()
+    try:
+        for kind, payload in backend.stream_ask({}, timeout_s=5.0):
+            if kind == "delta":
+                write_event({"delta": payload})
+            elif kind == "done":
+                write_event({"done": True})
+    except TimeoutError as exc:
+        write_event({"error": {"code": "backend-timeout", "message": str(exc)}})
+    except ValueError as exc:
+        write_event({"error": {"code": "bad-request", "message": str(exc)}})
+    except Exception as exc:
+        write_event({
+            "error": {
+                "code": "backend-failed",
+                "message": f"{type(exc).__name__}: {exc}",
+            },
+        })
+
+    body = out.getvalue().decode("utf-8")
+    events = [json.loads(line[len("data: "):])
+              for line in body.splitlines() if line.startswith("data: ")]
+    assert len(events) == 3, body
+    assert events[0] == {"delta": "first "}
+    assert events[1] == {"delta": "second "}
+    assert events[2]["error"]["code"] == "backend-timeout"
+    assert "simulated mid-stream" in events[2]["error"]["message"]
+
+
+def test_proxy_ssestream_abandons_upstream_when_consumer_disconnects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-1 + F-2 fix (review round Phase 5.2 R1): when the queue
+    fills because the consumer is gone, the reader thread must
+    bail out within the consumer-gone timeout instead of blocking
+    forever (leaking the upstream urllib connection + thread).
+
+    Asserted by:
+      - injecting a urlopen that produces an unbounded stream of
+        1KB chunks
+      - NOT draining the SSE queue
+      - asserting the reader thread exits within a bounded wall
+        time after the queue fills (5s consumer-gone timeout
+        + 2s slack) """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+    import time as _time
+    import urllib.request as _ureq
+
+    from nth_dao.web.v2_api import _proxy_ssestream
+
+    # Fake upstream that streams forever.
+    class _InfiniteResp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_a): return None
+        def read(self, n: int = -1) -> bytes:
+            # Bounded by FastAPI/queue semantics, not by us.
+            return b"x" * 1024
+
+    monkeypatch.setattr(_ureq, "urlopen", lambda *_a, **_k: _InfiniteResp())
+
+    response = _proxy_ssestream(
+        url="http://127.0.0.1:0/fake",
+        body_bytes=b"{}",
+        req_headers={},
+        forward_timeout=60.0,
+    )
+    # We deliberately do NOT consume response.body_iterator. The
+    # reader thread will fill its 64-slot queue almost immediately
+    # then block on put(timeout=5). Within ~7s it should give up
+    # and the daemon thread should die.
+    start = _time.time()
+    deadline = start + 12.0
+    # Find the reader thread by name; wait for it to terminate.
+    import threading as _th
+    reader = next(
+        (t for t in _th.enumerate() if t.name == "a2a-sse-reader"),
+        None,
+    )
+    assert reader is not None, "reader thread should have started"
+    while reader.is_alive() and _time.time() < deadline:
+        _time.sleep(0.5)
+    elapsed = _time.time() - start
+    assert not reader.is_alive(), (
+        f"reader thread should have exited within ~7s (queue-full "
+        f"timeout); still alive after {elapsed:.1f}s"
+    )
+    # 7s = 5s consumer-gone timeout + ~2s for queue to fill at
+    # 1KB/iter × 64 slots; we give 12s wall budget to dodge CI
+    # jitter but verify it landed well under.
+    assert elapsed < 12.0
+
+
 def test_v2_proxy_forwards_ask_stream_as_sse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

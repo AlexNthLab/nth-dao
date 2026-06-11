@@ -1385,6 +1385,25 @@ def _proxy_ssestream(
 
     chunk_queue: "_queue.Queue[Optional[bytes]]" = _queue.Queue(maxsize=64)
 
+    # F-1 + F-2 fix (review round Phase 5.2 R1): when the consumer
+    # (operator's browser) disconnects, FastAPI cancels the
+    # async generator → queue stops draining → unbounded put()
+    # would block the reader thread forever, holding the upstream
+    # connection + leaking API spend on a stream nobody is reading.
+    # Bounded put with timeout makes the reader notice abandonment
+    # within 5s and bail out, releasing the urllib connection.
+    _CONSUMER_GONE_TIMEOUT_S = 5.0
+
+    def _safe_put(payload: Optional[bytes]) -> bool:
+        """Returns True if the put landed, False if the consumer
+        is gone (queue full for too long). Caller treats False as
+        "abandon and exit the reader loop". """
+        try:
+            chunk_queue.put(payload, timeout=_CONSUMER_GONE_TIMEOUT_S)
+            return True
+        except _queue.Full:
+            return False
+
     def _reader_thread() -> None:
         try:
             req = urllib.request.Request(
@@ -1395,10 +1414,12 @@ def _proxy_ssestream(
             ) as resp:
                 if resp.status != 200:
                     err_body = resp.read()
-                    chunk_queue.put(
-                        b"data: " + err_body + b"\n\n"
-                    )
-                    chunk_queue.put(None)
+                    # F-4 fix (review round Phase 5.2 R1): only one
+                    # in-line put — the sentinel in ``finally`` is
+                    # the single source of truth. The previous code
+                    # double-put None which under F-1's backpressure
+                    # scenario doubled the deadlock window.
+                    _safe_put(b"data: " + err_body + b"\n\n")
                     return
                 # Drain incrementally — read(N) blocks until ANY
                 # data is available, so this drives forward whenever
@@ -1407,10 +1428,15 @@ def _proxy_ssestream(
                     chunk = resp.read(1024)
                     if not chunk:
                         break
-                    chunk_queue.put(chunk)
+                    if not _safe_put(chunk):
+                        # Consumer gone — abandon the upstream call
+                        # so the SDK / child can free their side
+                        # too (urllib closes the response on the
+                        # ``with`` exit).
+                        return
         except urllib.error.HTTPError as exc:
             body = exc.read() if hasattr(exc, "read") else b""
-            chunk_queue.put(
+            _safe_put(
                 b"data: " + json.dumps({
                     "error": {
                         "code": f"upstream-{exc.code}",
@@ -1419,7 +1445,7 @@ def _proxy_ssestream(
                 }).encode("utf-8") + b"\n\n"
             )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            chunk_queue.put(
+            _safe_put(
                 b"data: " + json.dumps({
                     "error": {
                         "code": "proxy-failed",
@@ -1429,7 +1455,9 @@ def _proxy_ssestream(
             )
         finally:
             # Sentinel — async generator stops when it sees None.
-            chunk_queue.put(None)
+            # Best-effort; if the queue is full for >5s the
+            # consumer is definitely gone and our sentinel is moot.
+            _safe_put(None)
 
     _threading.Thread(
         target=_reader_thread,

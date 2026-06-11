@@ -996,31 +996,46 @@ def _start_a2a_server(
             self.send_header("Connection", "close")
             self.end_headers()
 
-            def write_event(payload: Dict[str, Any]) -> None:
+            # F-3 fix (review round Phase 5.2 R1): if the client
+            # disconnects mid-stream, ``wfile.write`` raises
+            # BrokenPipeError / ConnectionResetError. The original
+            # code caught those under ``Exception`` then called
+            # write_event AGAIN which re-raised the same error,
+            # escaping the handler and surfacing as a 500 noise
+            # log. Return ``True`` on success / ``False`` on
+            # dead-socket so callers can stop emitting.
+            def write_event(payload: Dict[str, Any]) -> bool:
                 line = (
                     "data: "
                     + json.dumps(payload, ensure_ascii=False)
                     + "\n\n"
                 )
-                self.wfile.write(line.encode("utf-8"))
-                self.wfile.flush()
+                try:
+                    self.wfile.write(line.encode("utf-8"))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return False
+                return True
 
             try:
                 for kind, payload in backend.stream_ask(params, effective):
                     if kind == "delta":
-                        write_event({"delta": str(payload)})
+                        if not write_event({"delta": str(payload)}):
+                            return  # client gone — stop iterating
                     elif kind == "done":
                         meta = dict(payload) if isinstance(payload, dict) else {}
                         meta["done"] = True
                         meta["caller_did"] = token.get("subject_did", "")
                         meta["agent_did"] = state_snapshot["did"]
-                        write_event(meta)
+                        if not write_event(meta):
+                            return
                     else:
                         # Future-proof: unknown kinds get forwarded
                         # verbatim so a Phase 6 backend can extend
                         # the protocol without the agent shell
                         # needing a patch.
-                        write_event({"kind": kind, "payload": payload})
+                        if not write_event({"kind": kind, "payload": payload}):
+                            return
             except TimeoutError as exc:
                 write_event({
                     "error": {
