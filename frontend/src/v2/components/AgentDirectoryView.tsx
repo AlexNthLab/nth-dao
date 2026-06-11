@@ -39,6 +39,19 @@ export interface AgentDirectoryViewProps {
    *  finding C5: "Send message" button was decorative). When
    *  omitted the button is hidden rather than render a no-op. */
   onSendMessage?: (did: string) => void;
+  /** Phase 3f (2026-06-11): ping a supervised agent via the hub
+   *  proxy (GET /api/v2/agents/{did}/ping). Returns the parsed
+   *  identity card on success; throws on 404/502. The button is
+   *  hidden when omitted OR when the agent isn't supervised. */
+  onPingAgent?: (did: string) => Promise<unknown>;
+  /** Phase 3f: call /a2a/echo on a supervised agent via the hub
+   *  proxy. The frontend sends without Authorization (no access to
+   *  the hub's signing key from the browser); the demonstrated
+   *  outcome is a 401 from the child's auth check. The UI renders
+   *  both 200 and 401 paths so the operator can see the wire +
+   *  the auth rejection. */
+  onA2AEcho?: (did: string, params: Record<string, unknown>) =>
+    Promise<{ status: number; body: unknown }>;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -61,6 +74,7 @@ type Filter = "all" | AgentSource;
 
 export function AgentDirectoryView({
   agents, onAddByDid, onScanLan, onIssueCap, onSendMessage,
+  onPingAgent, onA2AEcho,
 }: AgentDirectoryViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -71,6 +85,75 @@ export function AgentDirectoryView({
   const [selectedDid, setSelectedDid] = useState<string | null>(
     agents[0]?.did ?? null,
   );
+  /** Phase 3f: per-agent test result — last /ping or /a2a/echo outcome.
+   *  Keyed by DID so each row's button has its own state without us
+   *  carrying an "active row" ref. The Map is replaced (not mutated)
+   *  so React sees a referentially-new value and re-renders. */
+  type ProbeResult = {
+    kind: "ping" | "echo";
+    status: number;
+    body: unknown;
+    at: number;
+  };
+  const [probes, setProbes] = useState<Map<string, ProbeResult>>(
+    new Map(),
+  );
+  const [busyDid, setBusyDid] = useState<string | null>(null);
+
+  async function handlePing(did: string) {
+    if (!onPingAgent) return;
+    setBusyDid(did);
+    try {
+      const body = await onPingAgent(did);
+      setProbes((m) => {
+        const next = new Map(m);
+        next.set(did, { kind: "ping", status: 200, body, at: Date.now() });
+        return next;
+      });
+    } catch (e) {
+      setProbes((m) => {
+        const next = new Map(m);
+        next.set(did, {
+          kind: "ping",
+          status: 0,
+          body: { error: String(e) },
+          at: Date.now(),
+        });
+        return next;
+      });
+    } finally {
+      setBusyDid(null);
+    }
+  }
+
+  async function handleA2A(did: string) {
+    if (!onA2AEcho) return;
+    setBusyDid(did);
+    try {
+      const { status, body } = await onA2AEcho(did, {
+        hello: "from-v2-console",
+        at: new Date().toISOString(),
+      });
+      setProbes((m) => {
+        const next = new Map(m);
+        next.set(did, { kind: "echo", status, body, at: Date.now() });
+        return next;
+      });
+    } catch (e) {
+      setProbes((m) => {
+        const next = new Map(m);
+        next.set(did, {
+          kind: "echo",
+          status: 0,
+          body: { error: String(e) },
+          at: Date.now(),
+        });
+        return next;
+      });
+    } finally {
+      setBusyDid(null);
+    }
+  }
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -321,6 +404,53 @@ export function AgentDirectoryView({
                           <IconZap size={12} />
                         </span>
                       )}
+                      {/* Phase 3f live badges — only meaningful for
+                          hub-supervised agents. Three independent
+                          signals: supervised (we own the process),
+                          alive (it's actually running), a2a_port
+                          (HTTP surface is reachable). Each is its
+                          own pill so the operator can spot a
+                          "supervised but dead" or "supervised but
+                          A2A-bind-failed" agent at a glance. */}
+                      {a.supervised && a.alive && (
+                        <span
+                          className="pill ok"
+                          title="Subprocess is alive"
+                          style={{ fontSize: 10 }}
+                        >
+                          live
+                        </span>
+                      )}
+                      {a.supervised && a.alive === false && (
+                        <span
+                          className="pill bad"
+                          title="Subprocess has died"
+                          style={{ fontSize: 10 }}
+                        >
+                          dead
+                        </span>
+                      )}
+                      {a.kind && (
+                        <span
+                          className="pill dim"
+                          title={`Backend kind: ${a.kind}`}
+                          style={{ fontSize: 10 }}
+                        >
+                          {a.kind}
+                        </span>
+                      )}
+                      {typeof a.a2a_port === "number" && (
+                        <code
+                          className="mono"
+                          title="Localhost A2A port the child is serving on"
+                          style={{
+                            fontSize: 10,
+                            color: "var(--fg-tertiary)",
+                          }}
+                        >
+                          :{a.a2a_port}
+                        </code>
+                      )}
                     </h3>
                     <div
                       style={{
@@ -403,7 +533,100 @@ export function AgentDirectoryView({
                       <IconSend size={12} /> Send message
                     </button>
                   )}
+                  {/* Phase 3f: live wire test buttons. Only shown
+                      for supervised agents that have an a2a_port —
+                      contact / LAN / disk-only agents don't have a
+                      hub-routable HTTP surface. */}
+                  {onPingAgent && a.supervised && a.alive
+                   && typeof a.a2a_port === "number" && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busyDid === a.did}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handlePing(a.did);
+                      }}
+                      title="GET /api/v2/agents/{did}/ping"
+                    >
+                      Ping
+                    </button>
+                  )}
+                  {onA2AEcho && a.supervised && a.alive
+                   && typeof a.a2a_port === "number" && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busyDid === a.did}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleA2A(a.did);
+                      }}
+                      title={
+                        "POST /api/v2/agents/{did}/a2a/echo " +
+                        "(no Authorization — expect 401 to prove " +
+                        "the auth check is live)"
+                      }
+                    >
+                      A2A echo
+                    </button>
+                  )}
                 </div>
+
+                {/* Phase 3f: probe result preview. Color-coded by
+                    HTTP status so the operator can scan the wire
+                    state without opening the inspector. */}
+                {probes.get(a.did) && (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      padding: 8,
+                      borderTop: "1px solid var(--border)",
+                      fontSize: 11,
+                      fontFamily: "var(--t-mono)",
+                    }}
+                  >
+                    {(() => {
+                      const p = probes.get(a.did)!;
+                      const okStatus = p.status >= 200 && p.status < 300;
+                      const color = okStatus
+                        ? "var(--ok, #2ea44f)"
+                        : p.status >= 400 && p.status < 500
+                          ? "var(--warn, #d97706)"
+                          : "var(--danger, #cf222e)";
+                      return (
+                        <>
+                          <span
+                            className="mono"
+                            style={{ color, fontWeight: 600 }}
+                          >
+                            {p.kind} {p.status || "ERR"}
+                          </span>
+                          <span
+                            className="muted"
+                            style={{ marginLeft: 8 }}
+                          >
+                            {new Date(p.at).toLocaleTimeString()}
+                          </span>
+                          <pre
+                            style={{
+                              marginTop: 6,
+                              marginBottom: 0,
+                              maxHeight: 120,
+                              overflow: "auto",
+                              background: "var(--bg-elevated)",
+                              padding: 6,
+                              borderRadius: 4,
+                              fontSize: 10,
+                            }}
+                          >
+                            {JSON.stringify(p.body, null, 2)}
+                          </pre>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
               </article>
             ))}
           </div>

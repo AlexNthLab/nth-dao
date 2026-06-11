@@ -60,6 +60,17 @@ export interface Decision {
    *  When another user resolves the decision the server-stamped
    *  version moves forward; submitting a stale version returns 409. */
   version?: number;
+
+  /** Phase 3d (2026-06-11): where the decision came from.
+   *  ``operator`` = seed / hand-raised by a human.
+   *  ``agent``    = a hub-supervised child emitted ``decision_raised``;
+   *                 the hub stamped attribution from the AgentRecord
+   *                 lookup so the proposer_did is the agent's real
+   *                 did:key, NOT something the child could spoof. */
+  source?: {
+    type: "agent" | "operator";
+    agent_id?: string;
+  };
 }
 
 /** A running Mission as the UI cares about it.
@@ -188,6 +199,30 @@ export interface AgentEntry {
   has_active_cap: boolean;
   /** Full A2A AgentCard JSON if we fetched it. */
   agent_card?: Record<string, unknown>;
+
+  /* ── Phase 3a/3b/3d hub-supervised additions (2026-06-11) ──
+   * These are populated for agents the local hub spawned via
+   * /api/v2/agents/spawn. For ContactBook / LAN / disk-only
+   * agents they're undefined. The UI uses them to show a "live"
+   * badge, hide stop-buttons for non-local agents, and route
+   * /ping + /a2a/echo through the hub proxy. */
+
+  /** True when the agent is under hub supervision (we have a
+   *  process handle for it). Distinct from "alive" — supervised
+   *  agents can be dead if their subprocess crashed. */
+  supervised?: boolean;
+  /** Whether the supervised subprocess is currently running.
+   *  Updates within ~1s of process death via the supervisor's
+   *  is_alive check on each /api/v2/agents response. */
+  alive?: boolean;
+  /** Backend kind label the operator chose at spawn time
+   *  ("mock", "claude-code", "hermes", ...). */
+  kind?: string;
+  /** Ephemeral localhost port where the child serves its A2A
+   *  HTTP surface (GET /ping, POST /a2a/<method>). Undefined when
+   *  the child failed to bind (degraded state) or for non-local
+   *  agents. */
+  a2a_port?: number;
 }
 
 /** A single chat message inside a conversation. Aligns with the

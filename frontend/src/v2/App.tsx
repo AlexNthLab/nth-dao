@@ -24,9 +24,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
-  fetchAgents, fetchCapTokens, fetchConversations, fetchDecisions,
-  fetchMessages, fetchMissions, fetchProcesses, fetchReceipts,
-  probeHub, resolveDecisionApi,
+  a2aEchoApi, fetchAgents, fetchCapTokens, fetchConversations,
+  fetchDecisions, fetchMessages, fetchMissions, fetchProcesses,
+  fetchReceipts, pingAgentApi, probeHub, resolveDecisionApi,
 } from "./api";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
@@ -675,6 +675,11 @@ function AppInner() {
         onScanLan={handleScanLan}
         onIssueCap={handleIssueCap}
         onSendMessage={handleSendToAgent}
+        /* Phase 3f: route ping + a2a/echo through the typed
+           fetchers. Failures throw — AgentDirectoryView catches
+           and renders the error inside the per-row result box. */
+        onPingAgent={(did) => pingAgentApi(did)}
+        onA2AEcho={(did, params) => a2aEchoApi(did, params)}
       />
     );
   } else if (active === "chat") {

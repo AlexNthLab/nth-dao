@@ -40,7 +40,27 @@ export function DecisionCard({ decision, onApprove, onReject, onDefer }: Decisio
     <article className="decision-card">
       <div className="decision-card-head">
         <div>
-          <h3 className="decision-card-title">{decision.title}</h3>
+          <h3 className="decision-card-title">
+            {decision.title}
+            {/* Phase 3f (2026-06-11): attribution badge for
+                child-raised decisions. The hub stamps source.type
+                from the decision_raiser closure, so this badge
+                proves attribution at the API layer — the child
+                can't spoof it (Phase 3d H-1 fix). */}
+            {decision.source?.type === "agent" && (
+              <span
+                className="pill dim"
+                title={
+                  "Raised by a supervised agent (not by the operator). " +
+                  "Hub-stamped attribution — proposer_did matches the " +
+                  "agent's real did:key from the AgentRecord."
+                }
+                style={{ marginLeft: 8, fontSize: 10 }}
+              >
+                agent
+              </span>
+            )}
+          </h3>
           <div className="decision-card-subject">
             <span>{decision.proposer_label}</span>
             <span className="muted">·</span>

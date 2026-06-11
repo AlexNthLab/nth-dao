@@ -170,3 +170,94 @@ export function resolveDecisionApi(
     `/decisions/${encodeURIComponent(id)}/${transition}`,
   );
 }
+
+/* ── Phase 3f: A2A proxy fetchers ─────────────────────────────
+ * The hub at /api/v2/agents/{did}/{ping|a2a/<method>} forwards
+ * to the child's localhost HTTP surface. /ping requires no auth
+ * and returns the child's identity card. /a2a/echo (and future
+ * methods) requires Authorization: CapToken; without it the
+ * child returns 401 — which is itself a useful demonstration
+ * that the auth wire is live.
+ *
+ * The frontend doesn't sign its OWN cap_token (no access to the
+ * hub's private key from the browser), so the A2A test button
+ * sends an unsigned request. The expected outcome is a 401 with
+ * a structured error body; the UI renders both the success and
+ * the rejection paths so the operator can see the auth flow.
+ */
+
+/** Result shape of GET /api/v2/agents/{did}/ping —
+ *  the child's identity card with live uptime. */
+export interface A2APingResult {
+  agent_id: string;
+  kind: string;
+  did: string;
+  pubkey_hex: string;
+  started_at: number;
+  uptime_ms: number;
+}
+
+/** Result shape of POST /api/v2/agents/{did}/a2a/echo —
+ *  either ``result`` (200) or ``error`` (4xx/5xx forwarded). */
+export interface A2AEchoEnvelope {
+  /** Set when the call succeeded. */
+  result?: {
+    method: string;
+    received_params: Record<string, unknown>;
+    caller_did: string;
+    agent_did: string;
+  };
+  /** Set when the child or hub rejected the call. */
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+/** Shape of what ``a2aEchoApi`` resolves with — the parsed body
+ *  + the HTTP status so the UI can color-code success vs auth-
+ *  rejection vs upstream failure. */
+export interface A2ACallResponse {
+  status: number;
+  body: A2AEchoEnvelope | Record<string, unknown>;
+}
+
+export async function pingAgentApi(
+  did: string, signal?: AbortSignal,
+): Promise<A2APingResult> {
+  return getJson<A2APingResult>(
+    `/agents/${encodeURIComponent(did)}/ping`,
+    signal,
+  );
+}
+
+export async function a2aEchoApi(
+  did: string,
+  params: Record<string, unknown>,
+  opts?: { authorization?: string; signal?: AbortSignal },
+): Promise<A2ACallResponse> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+  if (opts?.authorization) {
+    headers["Authorization"] = opts.authorization;
+  }
+  const res = await fetch(
+    `${BASE}/agents/${encodeURIComponent(did)}/a2a/echo`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body: JSON.stringify(params),
+      signal: opts?.signal,
+    },
+  );
+  let body: A2AEchoEnvelope | Record<string, unknown>;
+  try {
+    body = (await res.json()) as A2AEchoEnvelope;
+  } catch {
+    body = { error: { code: "parse-failed", message: "non-JSON response" } };
+  }
+  return { status: res.status, body };
+}
