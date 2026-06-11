@@ -1025,6 +1025,13 @@ class AgentEntryM(_Model):
     supervised: Optional[bool] = None
     alive: Optional[bool] = None
     kind: Optional[str] = None
+    # Phase 3d (2026-06-11): the child's localhost A2A HTTP port,
+    # advertised on agent_started.a2a_port and stamped by the
+    # supervisor at spawn time. None when the child didn't bind
+    # (degraded state) or for disk / seed entries (no live process).
+    # The v2 console uses this to surface a "/ping → :PORT" badge
+    # and to invoke /api/v2/agents/{did}/ping.
+    a2a_port: Optional[int] = None
 
 
 class SpawnResponseM(_Model):
@@ -1034,13 +1041,18 @@ class SpawnResponseM(_Model):
     the cap_token the hub issued for the freshly-spawned agent. The
     full token isn't returned in the body — the operator's UI loads
     it from /api/v2/cap_tokens. ``did`` is now a real W3C did:key
-    (was ``did:nth-hub-stub:`` in Phase 3a). """
+    (was ``did:nth-hub-stub:`` in Phase 3a).
+
+    Phase 3d (2026-06-11): ``a2a_port`` is the child's localhost
+    HTTP port (None if the bind failed in the child — degraded
+    state, agent is up but not reachable via the A2A proxy). """
     agent_id: str
     did: str
     kind: str
     label: str
     pid: Optional[int] = None
     cap_token_id: Optional[str] = None
+    a2a_port: Optional[int] = None
     agent: AgentEntryM
 
 
@@ -1199,9 +1211,77 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                     return
                 receipts.save(receipt)
 
+            # Phase 3d: decision_raiser closure — inserts the
+            # child-proposed decision into the in-process
+            # decisions store. The store is the same dict the
+            # GET /api/v2/decisions endpoint reads from, so a
+            # raised decision is immediately visible to the
+            # operator's v2 console without a refresh push.
+            #
+            # The hub fills the fields the child doesn't (or
+            # shouldn't) supply:
+            #   id              — uniqueness + format is a hub concern
+            #   proposer_did    — looked up from the supervisor's
+            #                     record (the child knows its own DID
+            #                     but routing through the agent_id key
+            #                     keeps the v2 API consistent)
+            #   proposer_label  — same, derived from AgentRecord.label
+            #   rationale       — schema requires it; default to a
+            #                     stock string so the schema validates
+            #                     even when the child doesn't bother
+            #   source          — stamps "type": "agent" so the v2
+            #                     console can render the right badge
+            #   raised_at       — server-side clock
+            def _decision_raiser(
+                agent_id: str, decision: Dict[str, Any],
+            ) -> None:
+                store = getattr(state, "v2_decisions_store", None)
+                if store is None:
+                    logger.warning(
+                        "v2_api: agent %s raised a decision but "
+                        "state.v2_decisions_store is unavailable "
+                        "— dropping",
+                        agent_id,
+                    )
+                    return
+                supervisor = getattr(state, "v2_supervisor", None)
+                rec = supervisor.get(agent_id) if supervisor is not None else None
+                proposer_did = rec.did if rec is not None else ""
+                proposer_label = (
+                    rec.label if rec is not None and rec.label
+                    else agent_id[:8]
+                )
+
+                decision_id = decision.get("id")
+                if not isinstance(decision_id, str) or not decision_id:
+                    decision_id = f"agent-{agent_id[:8]}-{os.urandom(4).hex()}"
+                decision["id"] = decision_id
+                # H-1 fix (review round Phase 3d R1): attribution
+                # is the HUB's authority to stamp. Using setdefault
+                # would let a child emit a decision claiming
+                # proposer_did=<someone-else> and the hub would
+                # honour the lie. Today the child is our own
+                # trusted dummy_agent, but the moment a third-
+                # party agent ships (Phase 4+) this becomes a real
+                # impersonation vector. Direct assignment wins.
+                # ``rationale`` keeps setdefault — it's CONTENT
+                # (the child's explanation of why), not attribution.
+                decision.setdefault(
+                    "rationale",
+                    f"Decision raised by supervised agent {proposer_label}",
+                )
+                decision["proposer_did"] = proposer_did
+                decision["proposer_label"] = proposer_label
+                decision["source"] = {
+                    "type": "agent", "agent_id": agent_id,
+                }
+                decision["raised_at"] = _iso_now()
+                store[decision_id] = decision
+
             sup = build_default_supervisor(
                 cap_token_dir=cap_token_dir,
                 receipt_persistor=_receipt_persistor,
+                decision_raiser=_decision_raiser,
             )
             state.v2_supervisor = sup
             logger.info(
@@ -1630,6 +1710,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "label": record.label,
             "pid": record.pid,
             "cap_token_id": record.cap_token_id,
+            "a2a_port": record.a2a_port,
             "agent": record.to_agent_entry(),
         }
 
@@ -1653,6 +1734,87 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail=f"agent {agent_id!r} not under supervision",
             )
         return {"agent_id": agent_id, "stopped": True}
+
+    @app.get("/api/v2/agents/{did}/ping")
+    def v2_agents_ping(did: str, request: Request) -> Dict[str, Any]:
+        """Phase 3d: A2A proxy — forward a GET /ping to the
+        supervised agent identified by ``did``. The hub looks up
+        the agent's ``a2a_port`` from the supervisor, then makes a
+        localhost-only HTTP call to ``127.0.0.1:<port>/ping`` and
+        returns whatever the child answered (typically the agent's
+        identity card + uptime).
+
+        Status codes:
+          404 — no supervised agent with that DID, OR the agent
+                exists but has no a2a_port (bind failed in child).
+          502 — the child's HTTP server didn't answer within 2s.
+          503 — supervisor unavailable.
+
+        Phase 3e will generalize to a JSON-RPC POST /a2a forwarder
+        with method + body. For now /ping is enough to prove the
+        wire works end-to-end. """
+        import urllib.error
+        import urllib.request
+
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(
+                status_code=503,
+                detail="agent supervisor unavailable",
+            )
+        matching = [
+            r for r in sup.list_agents()
+            if r.did == did and r.a2a_port is not None and r.alive
+        ]
+        if not matching:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no live supervised agent for did={did!r} with "
+                    "an a2a_port. Verify the agent is up via "
+                    "GET /api/v2/agents."
+                ),
+            )
+        rec = matching[0]
+        url = f"http://127.0.0.1:{rec.a2a_port}/ping"
+        try:
+            with urllib.request.urlopen(url, timeout=2.0) as resp:  # noqa: S310
+                if resp.status != 200:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"child returned HTTP {resp.status} from "
+                            f"/ping at {url}"
+                        ),
+                    )
+                raw = resp.read()
+        except urllib.error.URLError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"A2A proxy could not reach {url}: {exc}",
+            )
+        except (TimeoutError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"A2A proxy timed out / failed at {url}: {exc}",
+            )
+        # H-2 fix (review round Phase 3d R1): malformed responses
+        # (non-UTF-8 bytes, invalid JSON) used to bubble up as 500
+        # because the decode + parse happened outside the
+        # urllib-error try/except. A misbehaving / mis-coded child
+        # is an UPSTREAM failure; surface it as 502 so the
+        # operator's debugging starts at the right layer.
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"A2A proxy received malformed response from "
+                    f"{url}: {type(exc).__name__}: {exc}"
+                ),
+            )
+        return data
 
     @app.get("/api/v2/cap_tokens", response_model=List[CapTokenSummaryM])
     def v2_cap_tokens(request: Request) -> List[Dict[str, Any]]:

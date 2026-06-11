@@ -64,6 +64,7 @@ import socketserver
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -151,7 +152,15 @@ def _start_a2a_server(
     try:
         # Port 0 → kernel picks a free ephemeral port; we then read
         # back via .server_address.
-        server = socketserver.TCPServer(("127.0.0.1", 0), PingHandler)
+        # Phase 3d: ThreadingHTTPServer (one thread per request)
+        # replaces the single-threaded TCPServer so concurrent
+        # /ping or future A2A method calls don't serialise. The
+        # daemon-thread classmethod marks worker threads as daemons
+        # so process exit takes them down.
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), PingHandler,
+        )
+        server.daemon_threads = True
     except OSError as exc:
         _print_error(
             event="a2a_bind_failed",
@@ -436,10 +445,52 @@ def main(argv: list[str] | None = None) -> int:
                     a2a_port=a2a_port,
                 )
                 if receipt is not None:
+                    # M-3 fix (review round Phase 3c R2): persist
+                    # the receipt to disk BEFORE emitting it on
+                    # stdout so a crash between sign and parent
+                    # pipe-read leaves a recovery artifact. Phase
+                    # 3e will sweep these on hub startup; for now
+                    # the file is removed alongside cap_token.json
+                    # when the supervisor stops the agent.
+                    recovery_path = (
+                        Path(cap_token_path).parent / "last_receipt.json"
+                    )
+                    try:
+                        with open(recovery_path, "w", encoding="utf-8") as f:
+                            json.dump(
+                                receipt, f, ensure_ascii=False, indent=2,
+                            )
+                    except OSError as exc:
+                        _print_error(
+                            event="recovery_write_failed",
+                            agent_id=args.id,
+                            path=str(recovery_path),
+                            detail=f"{type(exc).__name__}: {exc}",
+                        )
                     _print_event(
                         event="receipt_signed",
                         agent_id=args.id,
                         receipt=receipt,
+                    )
+                    # Phase 3d: also raise a decision asking the
+                    # operator to acknowledge the agent is live.
+                    # Hub assigns id + source — child only proposes.
+                    _print_event(
+                        event="decision_raised",
+                        agent_id=args.id,
+                        decision={
+                            "title": (
+                                f"Acknowledge agent {args.id[:8]} is live "
+                                f"(kind={args.kind})"
+                            ),
+                            "impact": "low",
+                            "preview_receipt": {
+                                "kind": "nth.agent_attestation",
+                                "agent_id": args.id,
+                                "did": did,
+                            },
+                            "mission_id": "",
+                        },
                     )
         # Sleep in small slices so SIGTERM is responsive — a long
         # sleep would leave the process alive for the whole window.

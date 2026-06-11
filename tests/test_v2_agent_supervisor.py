@@ -859,7 +859,9 @@ def test_stop_cleanup_survives_unlink_failure(
     assert sup.get(r.agent_id) is None  # still removed
     warnings = [w.getMessage() for w in caplog.records
                 if w.levelno == logging.WARNING]
-    assert any("failed to remove cap_token file" in w for w in warnings)
+    assert any(
+        "failed to remove cap_token.json" in w for w in warnings
+    ), f"expected the unlink-failure WARNING; got {warnings!r}"
 
 
 def test_spawn_skips_file_write_when_no_cap_token_dir(
@@ -1028,6 +1030,349 @@ def test_agent_started_logs_a2a_port_when_advertised(
 
 
 # ─────────────────────────────────────────────────────────────
+# Phase 3d — a2a_port stamping, decision_raiser, A2A proxy
+# ─────────────────────────────────────────────────────────────
+
+def test_inmemory_runner_handshake_data_is_empty() -> None:
+    """Phase 3d: InMemoryRunner has no real handshake so its
+    handshake_data is empty. Tests that need a port can fake it
+    via a custom runner subclass. """
+    runner = InMemoryRunner()
+    assert runner.handshake_data("any-id") == {}
+
+
+def test_spawn_stamps_a2a_port_from_handshake_data() -> None:
+    """Phase 3d: when a runner's handshake_data exposes ``a2a_port``,
+    spawn() must copy it onto the AgentRecord at construct time
+    (NOT via on_event — that races against spawn's own insert). """
+
+    class _PortyRunner(InMemoryRunner):
+        def __init__(self, port: int) -> None:
+            super().__init__()
+            self._port = port
+
+        def handshake_data(self, _aid: str) -> dict:
+            return {"a2a_port": self._port}
+
+    sup = AgentSupervisor(_PortyRunner(47123))
+    r = sup.spawn(kind="mock", label="x", capabilities=[])
+    assert r.a2a_port == 47123
+    # And the field round-trips through to_agent_entry for the
+    # /api/v2/agents response.
+    entry = r.to_agent_entry()
+    assert entry["a2a_port"] == 47123
+
+
+def test_spawn_ignores_garbage_a2a_port_from_handshake() -> None:
+    """Phase 3d: defensive — non-int / non-positive ports get
+    dropped. Avoids a misbehaving runner injecting "5432" (str) or
+    -1 into the record. """
+
+    class _BadPortRunner(InMemoryRunner):
+        def __init__(self, port_value: object) -> None:
+            super().__init__()
+            self._port = port_value
+
+        def handshake_data(self, _aid: str) -> dict:
+            return {"a2a_port": self._port}
+
+    for bad in ("47000", 0, -5, None, [47000]):
+        sup = AgentSupervisor(_BadPortRunner(bad))
+        r = sup.spawn(kind="mock", label="x", capabilities=[])
+        assert r.a2a_port is None, (
+            f"a2a_port should be None for bad input {bad!r}; got {r.a2a_port!r}"
+        )
+
+
+def test_decision_raiser_called_on_decision_raised_event() -> None:
+    """Phase 3d: supervisor.on_event for decision_raised forwards
+    the decision to the configured raiser. """
+    raised: list[tuple[str, dict]] = []
+
+    def raiser(agent_id: str, decision: dict) -> None:
+        raised.append((agent_id, decision))
+
+    sup = AgentSupervisor(InMemoryRunner(), decision_raiser=raiser)
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    fake_decision = {
+        "title": "Acknowledge me",
+        "impact": "low",
+        "preview_receipt": {"kind": "nth.agent_attestation"},
+    }
+    sup.on_event(r.agent_id, {
+        "event": "decision_raised",
+        "agent_id": r.agent_id,
+        "decision": fake_decision,
+    })
+    assert raised == [(r.agent_id, fake_decision)]
+
+
+def test_decision_raiser_failure_logs_warning_keeps_agent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3d: a raiser that raises must NOT kill the agent —
+    matches the receipt_persistor posture. """
+    import logging
+
+    def angry_raiser(_aid: str, _decision: dict) -> None:
+        raise RuntimeError("store offline")
+
+    sup = AgentSupervisor(InMemoryRunner(), decision_raiser=angry_raiser)
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        sup.on_event(r.agent_id, {
+            "event": "decision_raised",
+            "agent_id": r.agent_id,
+            "decision": {"title": "x"},
+        })
+    assert sup.get(r.agent_id) is not None
+    warnings = [w.getMessage() for w in caplog.records
+                if w.levelno == logging.WARNING]
+    assert any("decision_raiser failed" in w for w in warnings)
+
+
+def test_decision_raised_without_dict_payload_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3d: defensive — a non-dict decision payload (child
+    bug, contract drift) gets a clear WARNING + drop. """
+    import logging
+
+    sup = AgentSupervisor(InMemoryRunner(), decision_raiser=lambda _a, _d: None)
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        sup.on_event(r.agent_id, {
+            "event": "decision_raised",
+            "decision": "not a dict",
+        })
+    warnings = [w.getMessage() for w in caplog.records
+                if w.levelno == logging.WARNING]
+    assert any("without a dict 'decision'" in w for w in warnings)
+
+
+def test_v2_decision_raiser_assigns_id_and_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3d end-to-end: when a child raises a decision (no id,
+    no source), the v2_api closure assigns both and inserts into
+    the in-process decisions store. The decision then appears in
+    GET /api/v2/decisions. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    client = TestClient(app)
+    # Force the lazy supervisor build by triggering a GET.
+    client.get("/api/v2/agents")
+    sup = app.state.v2_supervisor
+    # Force the lazy decisions_store build by triggering its GET.
+    client.get("/api/v2/decisions")
+
+    r = sup.spawn(kind="mock", label="raiser-test", capabilities=[])
+    sup.on_event(r.agent_id, {
+        "event": "decision_raised",
+        "agent_id": r.agent_id,
+        "decision": {
+            "title": "Acknowledge me",
+            "impact": "low",
+            "preview_receipt": {"kind": "nth.agent_attestation"},
+            "mission_id": "",
+        },
+    })
+
+    listing = client.get("/api/v2/decisions").json()
+    matching = [d for d in listing if d.get("title") == "Acknowledge me"]
+    assert len(matching) == 1, (
+        f"expected the raised decision in the listing; got {listing!r}"
+    )
+    raised = matching[0]
+    # Hub-assigned id starts with the agent-<first8>- prefix.
+    assert raised["id"].startswith(f"agent-{r.agent_id[:8]}-")
+    # Source surfaces "type": "agent" + agent_id.
+    src = raised.get("source")
+    assert isinstance(src, dict)
+    assert src["type"] == "agent"
+    assert src["agent_id"] == r.agent_id
+    assert "raised_at" in raised
+
+
+def test_v2_decision_raiser_overwrites_child_attribution_claims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-1 fix (review round Phase 3d R1): a child that emits a
+    decision claiming to be a different DID must NOT have that
+    attribution honoured. The hub stamps proposer_did /
+    proposer_label / source / raised_at from the AgentRecord
+    lookup regardless of what the child sent. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    client = TestClient(app)
+    client.get("/api/v2/agents")
+    client.get("/api/v2/decisions")
+    sup = app.state.v2_supervisor
+    r = sup.spawn(kind="mock", label="legit-agent", capabilities=[])
+
+    # Simulate a malicious child trying to claim someone else's
+    # identity + a forged source. All four fields are attribution
+    # — the hub MUST overwrite them.
+    forged = {
+        "title": "Acknowledge me",
+        "impact": "low",
+        "preview_receipt": {"kind": "nth.agent_attestation"},
+        "mission_id": "",
+        "proposer_did": "did:key:zForgedAttacker",
+        "proposer_label": "Admin",
+        "source": {"type": "operator", "agent_id": "fake-admin"},
+        "raised_at": "1970-01-01T00:00:00+00:00",
+    }
+    sup.on_event(r.agent_id, {
+        "event": "decision_raised",
+        "agent_id": r.agent_id,
+        "decision": forged,
+    })
+
+    listing = client.get("/api/v2/decisions").json()
+    matching = [d for d in listing if d["title"] == "Acknowledge me"]
+    assert len(matching) == 1
+    raised = matching[0]
+    # Hub-stamped attribution wins — NOT the forged values.
+    assert raised["proposer_did"] == r.did, (
+        f"hub must overwrite proposer_did; child sent forged value "
+        f"but stored as {raised['proposer_did']!r}"
+    )
+    assert raised["proposer_label"] == r.label
+    assert raised["source"] == {"type": "agent", "agent_id": r.agent_id}
+    # raised_at must NOT be the forged 1970 value.
+    assert raised["raised_at"] != "1970-01-01T00:00:00+00:00"
+
+
+def test_v2_a2a_proxy_502_on_malformed_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-2 fix (review round Phase 3d R1): if the child returns
+    bytes that don't decode as JSON / UTF-8, the proxy must
+    surface 502 (upstream garbage), not 500 (hub bug). """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    # Seat a supervisor with an agent that has an a2a_port, but
+    # don't actually run a child — the test monkeypatches urlopen
+    # to return garbage on its behalf.
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    forged_did = "did:key:z6MkForgedForProxyTest"
+    forged = AgentRecord(
+        agent_id="proxy-test",
+        kind="mock",
+        label="proxy-test",
+        did=forged_did,
+        capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True,
+        pid=1,
+        a2a_port=51999,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["proxy-test"] = forged  # type: ignore[attr-defined]
+    # Trick InMemoryRunner.is_alive — we want list_agents to keep
+    # the record as alive even though no real child exists.
+    sup._runner._alive["proxy-test"] = True  # type: ignore[attr-defined]
+
+    import urllib.request as _ureq
+
+    class _FakeResp:
+        status = 200
+        def __enter__(self) -> "_FakeResp": return self
+        def __exit__(self, *_a: object) -> None: return None
+        def read(self) -> bytes:
+            # Non-JSON bytes — would crash json.loads.
+            return b"<html>oops i'm not json</html>"
+
+    def fake_urlopen(_url: str, **_kw: object) -> _FakeResp:
+        return _FakeResp()
+
+    monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+    client = TestClient(app)
+    resp = client.get(f"/api/v2/agents/{forged_did}/ping")
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert "malformed response" in detail
+
+
+def test_v2_a2a_proxy_404_when_did_not_supervised(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3d A2A proxy: unknown DIDs get 404 with a helpful
+    diagnostic. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    client = TestClient(app)
+    r = client.get(
+        "/api/v2/agents/did:key:z6MkNotSupervised/ping"
+    )
+    assert r.status_code == 404, r.text
+    detail = r.json()["detail"]
+    assert "did:key:z6MkNotSupervised" in detail
+
+
+def test_v2_a2a_proxy_404_when_agent_has_no_a2a_port(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3d: an InMemoryRunner-spawned agent has a2a_port=None
+    (no real HTTP surface). The proxy correctly excludes it. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    app.state.v2_supervisor = AgentSupervisor(InMemoryRunner())
+    client = TestClient(app)
+    sup = app.state.v2_supervisor
+    r = sup.spawn(kind="mock", label="no-port", capabilities=[])
+
+    resp = client.get(f"/api/v2/agents/{r.did}/ping")
+    assert resp.status_code == 404, resp.text
+
+
+# ─────────────────────────────────────────────────────────────
 # Real subprocess smoke
 # ─────────────────────────────────────────────────────────────
 
@@ -1120,6 +1465,31 @@ def test_subprocess_runner_smoke() -> None:
         # returns the process is guaranteed to have exited (or
         # been kill()ed).
         assert not runner.is_alive(agent_id), "agent should be dead after stop"
+
+
+def test_supervisor_stamps_a2a_port_on_real_subprocess_spawn() -> None:
+    """Phase 3d end-to-end: spawn via AgentSupervisor + real
+    SubprocessRunner (no cap_token issuer needed for this check)
+    and assert the AgentRecord carries the child's advertised port.
+    Then verify list_agents + to_agent_entry round-trip it. """
+    sup = AgentSupervisor(SubprocessRunner(handshake_timeout=_SMOKE_TIMEOUT))
+    try:
+        r = sup.spawn(kind="mock", label="port-3d", capabilities=[])
+    except RuntimeError as exc:
+        pytest.skip(f"subprocess could not start: {exc}")
+    try:
+        assert r.a2a_port is not None and r.a2a_port > 1024, (
+            f"expected a stamped ephemeral a2a_port, got {r.a2a_port!r}"
+        )
+        # Same value must come back via list_agents (snapshot copy).
+        listed = sup.list_agents()
+        assert len(listed) == 1
+        assert listed[0].a2a_port == r.a2a_port
+        # And via to_agent_entry (what /api/v2/agents serialises).
+        entry = listed[0].to_agent_entry()
+        assert entry["a2a_port"] == r.a2a_port
+    finally:
+        sup.stop(r.agent_id)
 
 
 def test_subprocess_runner_rejects_mismatched_subject_did(

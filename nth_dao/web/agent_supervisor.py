@@ -99,6 +99,13 @@ class AgentRecord:
     # Reserved for Phase 3b — populated when the hub issues a
     # cap_token on spawn.
     cap_token_id: Optional[str] = None
+    # Phase 3d (2026-06-11): the child's localhost A2A HTTP port,
+    # advertised on agent_started.a2a_port and stamped by the
+    # supervisor's on_event handler. None when the child didn't
+    # bind (degraded state) or for InMemoryRunner where no real
+    # server exists. The hub's A2A proxy uses this to route a
+    # request to the child.
+    a2a_port: Optional[int] = None
 
     def to_agent_entry(self) -> Dict[str, Any]:
         """Translate to the dict shape /api/v2/agents returns.
@@ -120,6 +127,9 @@ class AgentRecord:
             "supervised": True,
             "alive": self.alive,
             "kind": self.kind,
+            # Phase 3d: surface the A2A port so the v2 console can
+            # show a "reachable on :PORT" badge / call the proxy.
+            "a2a_port": self.a2a_port,
         }
 
 
@@ -170,6 +180,14 @@ class AgentRunner(Protocol):
         ...
 
     def is_alive(self, agent_id: str) -> bool:
+        ...
+
+    def handshake_data(self, agent_id: str) -> Dict[str, Any]:
+        """Return a shallow copy of any structured handshake
+        metadata captured at start() time (Phase 3d). At minimum
+        the SubprocessRunner stores ``did``, ``pubkey_hex``, and
+        ``a2a_port`` if the child advertised one. InMemoryRunner
+        returns an empty dict since there's no real handshake. """
         ...
 
 
@@ -260,6 +278,11 @@ class InMemoryRunner:
 
     def is_alive(self, agent_id: str) -> bool:
         return self._alive.get(agent_id, False)
+
+    def handshake_data(self, agent_id: str) -> Dict[str, Any]:
+        # No real handshake happens for the in-memory runner —
+        # tests that need a port can construct a custom subclass.
+        return {}
 
 
 class SubprocessRunner:
@@ -460,6 +483,12 @@ class SubprocessRunner:
             return False
         return proc.poll() is None
 
+    def handshake_data(self, agent_id: str) -> Dict[str, Any]:
+        # Phase 3d: return a copy so callers can mutate freely
+        # without poisoning the runner's internal slot.
+        with self._lock:
+            return dict(self._handshake_data.get(agent_id, {}))
+
     def _read_stdout_loop(self, agent_id: str, proc: subprocess.Popen) -> None:
         """Drain the child's stdout, forwarding parsed JSON events
         to the supervisor's callback. Quietly exits on EOF.
@@ -501,6 +530,15 @@ class SubprocessRunner:
                             slot["pubkey_hex"] = str(
                                 event.get("pubkey_hex") or ""
                             )
+                            # Phase 3d: stash a2a_port here so spawn()
+                            # can stamp it on the AgentRecord at
+                            # construct time — avoids the race that
+                            # would otherwise exist between this
+                            # reader thread firing on_event and
+                            # spawn() inserting the record.
+                            port = event.get("a2a_port")
+                            if isinstance(port, int) and port > 0:
+                                slot["a2a_port"] = port
                     if ev is not None:
                         ev.set()
                 if self._on_event is not None:
@@ -616,12 +654,18 @@ class AgentSupervisor:
         *,
         cap_token_dir: Optional[Path] = None,
         receipt_persistor: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        decision_raiser: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> None:
         self._runner = runner
         self._agents: Dict[str, AgentRecord] = {}
         self._lock = threading.Lock()
         self._cap_token_dir = cap_token_dir
         self._receipt_persistor = receipt_persistor
+        # Phase 3d: invoked when a child emits ``decision_raised``.
+        # v2_api wires this to insert the decision into the v2
+        # decisions store (and assign an id if the child didn't).
+        # None → INFO-log + drop, same pattern as receipt_persistor.
+        self._decision_raiser = decision_raiser
 
     def spawn(
         self,
@@ -687,6 +731,26 @@ class AgentSupervisor:
         pid, did = self._runner.start(
             agent_id, kind,
             cap_token_file_path=cap_token_file_path,
+        )
+        # Phase 3d: pull post-handshake metadata BEFORE checking
+        # success — the runner's handshake_data is populated atomically
+        # with the DID, so a non-empty ``did`` implies the data is
+        # ready. handshake_data() returns {} for InMemoryRunner / for
+        # runners that don't implement the protocol method (the dict
+        # default keeps the access safe in both cases).
+        try:
+            handshake_meta = self._runner.handshake_data(agent_id)
+        except Exception as exc:  # noqa: BLE001
+            # A custom runner that raises here shouldn't block the
+            # spawn — we already have did + pid. Log + treat as empty.
+            logger.warning(
+                "agent_supervisor: runner.handshake_data raised for "
+                "%s: %s — proceeding without metadata", agent_id, exc,
+            )
+            handshake_meta = {}
+        raw_port = handshake_meta.get("a2a_port")
+        a2a_port: Optional[int] = (
+            raw_port if isinstance(raw_port, int) and raw_port > 0 else None
         )
         if not did:
             # Runner already cleaned up; nothing for us to undo.
@@ -788,6 +852,7 @@ class AgentSupervisor:
                 alive=True,
                 pid=pid,
                 cap_token_id=cap_token_id,
+                a2a_port=a2a_port,
             )
             with self._lock:
                 self._agents[agent_id] = record
@@ -868,16 +933,21 @@ class AgentSupervisor:
         # we won't accidentally nuke them.
         if self._cap_token_dir is not None:
             agent_dir = self._cap_token_dir / agent_id
-            cap_token_file = agent_dir / "cap_token.json"
-            try:
-                if cap_token_file.exists():
-                    cap_token_file.unlink()
-            except OSError as exc:
-                logger.warning(
-                    "agent_supervisor: failed to remove cap_token "
-                    "file for stopped agent %s at %s: %s",
-                    agent_id, cap_token_file, exc,
-                )
+            # Phase 3d: also remove last_receipt.json — the child's
+            # crash-recovery copy written before emitting
+            # receipt_signed (M-3 fix). Without this the per-agent
+            # dir would never be empty enough for rmdir to succeed.
+            for fname in ("cap_token.json", "last_receipt.json"):
+                fpath = agent_dir / fname
+                try:
+                    if fpath.exists():
+                        fpath.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "agent_supervisor: failed to remove %s for "
+                        "stopped agent %s: %s",
+                        fname, agent_id, exc,
+                    )
             try:
                 if agent_dir.exists():
                     agent_dir.rmdir()
@@ -932,6 +1002,7 @@ class AgentSupervisor:
                     pid=current.pid,
                     alive=alive_map.get(current.agent_id, False),
                     cap_token_id=current.cap_token_id,
+                    a2a_port=current.a2a_port,
                 )
                 out.append(snap)
         return out
@@ -962,10 +1033,11 @@ class AgentSupervisor:
                 if record is not None:
                     record.last_seen = _now_iso()
         elif kind == "agent_started":
-            # Phase 3c: include a2a_port in the log line when the
-            # child advertised one. Phase 3d will stamp it on the
-            # AgentRecord so the routing layer can reach the child;
-            # for now logging is enough to verify the wiring.
+            # Phase 3d: a2a_port stamping happens at spawn time
+            # (pulled from runner.handshake_data) — race-free
+            # because the reader populates the slot BEFORE setting
+            # the handshake event that unblocks start(). This
+            # branch only logs.
             a2a_port = event.get("a2a_port")
             if isinstance(a2a_port, int) and a2a_port > 0:
                 logger.info(
@@ -980,6 +1052,41 @@ class AgentSupervisor:
                 )
         elif kind == "agent_stopping":
             logger.info("agent_supervisor: %s reported stopping", agent_id)
+        elif kind == "decision_raised":
+            # Phase 3d: child is asking the operator to act on
+            # something. Validate shape, then forward to the
+            # configured raiser (v2_api wires it into the decisions
+            # store). Failure → WARNING + survive, same posture as
+            # receipt_persistor: a transient store failure shouldn't
+            # take an otherwise healthy agent offline.
+            decision = event.get("decision")
+            if not isinstance(decision, dict):
+                logger.warning(
+                    "agent_supervisor: %s emitted decision_raised "
+                    "without a dict 'decision' field — dropping. "
+                    "Payload type: %s",
+                    agent_id, type(decision).__name__,
+                )
+            elif self._decision_raiser is None:
+                logger.info(
+                    "agent_supervisor: %s emitted decision_raised "
+                    "(title=%r) but no raiser configured — dropping",
+                    agent_id, decision.get("title", "?"),
+                )
+            else:
+                try:
+                    self._decision_raiser(agent_id, decision)
+                    logger.info(
+                        "agent_supervisor: %s raised decision "
+                        "(title=%r)",
+                        agent_id, decision.get("title", "?"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "agent_supervisor: decision_raiser failed "
+                        "for %s (title=%r): %s",
+                        agent_id, decision.get("title", "?"), exc,
+                    )
         elif kind == "receipt_signed":
             # Phase 3c: child has signed a receipt with its own
             # AgentIdentity (typically the nth.agent_attestation
@@ -1052,6 +1159,7 @@ def build_default_supervisor(
     *,
     cap_token_dir: Optional[Path] = None,
     receipt_persistor: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    decision_raiser: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> AgentSupervisor:
     """Production supervisor — uses SubprocessRunner. Tests
     construct their own with InMemoryRunner.
@@ -1094,6 +1202,7 @@ def build_default_supervisor(
         runner,
         cap_token_dir=cap_token_dir,
         receipt_persistor=receipt_persistor,
+        decision_raiser=decision_raiser,
     )
     holder.append(supervisor)
     return supervisor
