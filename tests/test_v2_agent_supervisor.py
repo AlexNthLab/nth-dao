@@ -1826,40 +1826,138 @@ def test_mock_ask_backend_no_prompt_returns_help_text() -> None:
     assert "no prompt" in out["response"].lower()
 
 
-def test_resolve_ask_backend_picks_by_kind() -> None:
-    """Phase 4: ``_resolve_ask_backend`` maps the agent kind to a
-    concrete backend instance. Unknown kinds fall back to mock with
-    a structured stderr event. """
+def test_resolve_ask_backend_picks_by_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 4/5.1: ``_resolve_ask_backend`` maps the agent kind to
+    a concrete backend instance. For ``claude-code``: SDK when
+    ANTHROPIC_API_KEY is set, CLI when not. Unknown kinds fall back
+    to mock with a structured stderr event. """
     from nth_dao.web.dummy_agent import (
-        _ClaudeCodeAskBackend, _MockAskBackend, _resolve_ask_backend,
+        _AnthropicSdkAskBackend, _ClaudeCliAskBackend,
+        _MockAskBackend, _resolve_ask_backend,
     )
 
     assert isinstance(_resolve_ask_backend("mock"), _MockAskBackend)
+    # No key → CLI backend (Phase 4 default).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert isinstance(
-        _resolve_ask_backend("claude-code"), _ClaudeCodeAskBackend,
+        _resolve_ask_backend("claude-code"), _ClaudeCliAskBackend,
     )
-    # Unknown → mock fallback.
+    # Key present → SDK backend (Phase 5.1 preferred).
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+    assert isinstance(
+        _resolve_ask_backend("claude-code"), _AnthropicSdkAskBackend,
+    )
+    # Unknown → mock fallback regardless of key.
     assert isinstance(_resolve_ask_backend("not-a-real-kind"), _MockAskBackend)
 
 
 def test_claude_code_backend_rejects_empty_prompt() -> None:
     """Phase 4: claude-code is stricter than mock — empty prompt
     raises ValueError (caller gets 400, not a wasted CLI invocation). """
-    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     with pytest.raises(ValueError, match="requires a 'prompt'"):
-        _ClaudeCodeAskBackend().ask({"prompt": "   "}, timeout_s=1.0)
+        _ClaudeCliAskBackend().ask({"prompt": "   "}, timeout_s=1.0)
 
 
 def test_claude_code_backend_rejects_oversized_prompt() -> None:
     """Phase 4: 32KB cap on prompts forwarded to claude — prevents
     a misconfigured peer from burning huge API context on the
     operator's behalf. """
-    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     big = "x" * (40 * 1024)
     with pytest.raises(ValueError, match="prompt too long"):
-        _ClaudeCodeAskBackend().ask({"prompt": big}, timeout_s=1.0)
+        _ClaudeCliAskBackend().ask({"prompt": big}, timeout_s=1.0)
+
+
+def test_anthropic_sdk_backend_rejects_empty_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.1: empty prompt → ValueError → 400 at the handler.
+    No SDK call attempted (cheap fail). """
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    with pytest.raises(ValueError, match="requires a 'prompt'"):
+        _AnthropicSdkAskBackend().ask({"prompt": "  "}, timeout_s=5.0)
+
+
+def test_anthropic_sdk_backend_rejects_oversized_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.1: 32KB cap on prompts — matches the CLI backend so
+    a misbehaving peer can't burn API context. """
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    with pytest.raises(ValueError, match="prompt too long"):
+        _AnthropicSdkAskBackend().ask(
+            {"prompt": "x" * 40000}, timeout_s=5.0,
+        )
+
+
+def test_anthropic_sdk_backend_raises_when_api_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.1: missing key surfaces a clear error pointing at
+    the env var BEFORE we attempt to construct the SDK client. """
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY not set"):
+        _AnthropicSdkAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
+
+
+def test_anthropic_sdk_backend_invokes_messages_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.1: when the key is set, the backend calls
+    ``client.messages.create`` and returns the concatenated text
+    blocks. Verified by monkeypatching the SDK client. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    captured: dict = {}
+
+    class _FakeUsage:
+        input_tokens = 7
+        output_tokens = 12
+
+    class _FakeTextBlock:
+        text = "PONG"
+
+    class _FakeMsg:
+        content = [_FakeTextBlock()]
+        usage = _FakeUsage()
+        stop_reason = "end_turn"
+
+    class _FakeMessages:
+        def create(self, **kwargs: object) -> "_FakeMsg":
+            captured.update(kwargs)
+            return _FakeMsg()
+
+    class _FakeClient:
+        def __init__(self, **kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    out = _AnthropicSdkAskBackend().ask(
+        {"prompt": "ping"}, timeout_s=10.0,
+    )
+    assert out["response"] == "PONG"
+    assert out["backend"] == "claude-code"
+    assert out["model"] == "claude-sonnet-4-6"
+    assert out["input_tokens"] == 7
+    assert out["output_tokens"] == 12
+    # Verify what we sent to the SDK is the expected shape.
+    assert captured["max_tokens"] == 1024
+    assert captured["messages"] == [{"role": "user", "content": "ping"}]
 
 
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
@@ -1874,7 +1972,7 @@ def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
     import shutil
     import subprocess as _sp
 
-    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     # Build a fake claude install layout under tmp_path so the
     # candidate .exe check succeeds.
@@ -1904,7 +2002,7 @@ def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
 
     monkeypatch.setattr(_sp, "run", fake_run)
 
-    out = _ClaudeCodeAskBackend().ask(
+    out = _ClaudeCliAskBackend().ask(
         {"prompt": "hello"}, timeout_s=5.0,
     )
     assert out["response"] == "ok"
@@ -1927,7 +2025,7 @@ def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(
     then be misattributed to the CLI bug). Raise a targeted error
     pointing at the broken install layout. """
     import shutil
-    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     # Lay down only the .ps1, NOT the vendored .exe.
     npm_dir = tmp_path / "npm-global"
@@ -1937,7 +2035,7 @@ def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(
     monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
 
     with pytest.raises(RuntimeError, match="install layout may be broken"):
-        _ClaudeCodeAskBackend().ask(
+        _ClaudeCliAskBackend().ask(
             {"prompt": "hi"}, timeout_s=5.0,
         )
 
@@ -2045,7 +2143,7 @@ def test_claude_code_backend_translates_windows_access_violation(
     import shutil
     import subprocess as _sp
 
-    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     # Pretend the binary IS on PATH (skip the not-on-PATH branch).
     monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/claude.exe")
@@ -2059,7 +2157,7 @@ def test_claude_code_backend_translates_windows_access_violation(
         _sp, "run", lambda *_a, **_k: _FakeCompleted(),
     )
     with pytest.raises(RuntimeError, match="ACCESS_VIOLATION") as exc_info:
-        _ClaudeCodeAskBackend().ask(
+        _ClaudeCliAskBackend().ask(
             {"prompt": "hi"}, timeout_s=1.0,
         )
     # Verify the message points at the kind=mock workaround.
@@ -2075,11 +2173,11 @@ def test_claude_code_backend_raises_when_binary_missing(
     """Phase 4: when ``claude`` isn't on PATH the backend raises a
     clear RuntimeError pointing at the install / fallback path. """
     import shutil
-    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="not on PATH"):
-        _ClaudeCodeAskBackend().ask(
+        _ClaudeCliAskBackend().ask(
             {"prompt": "hi"}, timeout_s=1.0,
         )
 

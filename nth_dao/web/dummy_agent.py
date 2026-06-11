@@ -274,7 +274,104 @@ class _MockAskBackend(_AskBackend):
         }
 
 
-class _ClaudeCodeAskBackend(_AskBackend):
+class _AnthropicSdkAskBackend(_AskBackend):
+    """Phase 5.1: real backend via the Anthropic Python SDK.
+
+    Why this exists: the Claude Code CLI ``-p`` mode crashes with
+    ACCESS_VIOLATION when stdout is piped on Windows (see
+    ``_ClaudeCliAskBackend`` for the gory details). The Anthropic
+    SDK talks to the API directly — no subprocess, no TTY, no
+    Windows-specific dance — so this is the path that actually
+    answers prompts end-to-end on the dev box.
+
+    Auth: reads ``ANTHROPIC_API_KEY`` from the env on first call.
+    The SDK client itself does the same lookup; we surface a clear
+    error here so the operator sees ``no API key`` rather than the
+    SDK's deeper auth error.
+
+    Model: defaults to ``claude-sonnet-4-6`` (good balance of speed
+    + capability for agent attestation prompts). Caller can override
+    via ``params["model"]`` for one-off bigger or cheaper calls. """
+
+    name = "claude-code"
+    DEFAULT_TIMEOUT_S = 60.0
+    DEFAULT_MODEL = "claude-sonnet-4-6"
+    DEFAULT_MAX_TOKENS = 1024
+
+    def ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> Dict[str, Any]:
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("anthropic backend requires a 'prompt' param")
+        # Match the CLI backend's 32KB cap. The SDK accepts much
+        # more but a 100KB+ prompt from an A2A peer is almost
+        # certainly a bug.
+        if len(prompt) > 32 * 1024:
+            raise ValueError(
+                f"prompt too long ({len(prompt)} chars); 32KB cap"
+            )
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY not set — anthropic SDK backend "
+                "needs an API key. Set the env var on the hub process "
+                "or fall back to kind=mock."
+            )
+
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError(
+                "anthropic SDK not installed — run "
+                "'pip install anthropic' or switch to kind=mock"
+            ) from exc
+
+        model = str(params.get("model") or self.DEFAULT_MODEL)
+        raw_max = params.get("max_tokens")
+        if isinstance(raw_max, int) and 16 <= raw_max <= 8192:
+            max_tokens = raw_max
+        else:
+            max_tokens = self.DEFAULT_MAX_TOKENS
+
+        # The SDK's timeout is honoured per-request; we forward the
+        # caller-provided budget so a slow prompt fails cleanly
+        # rather than holding the hub thread forever.
+        client = anthropic.Anthropic(timeout=max(5.0, timeout_s))
+        try:
+            msg = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic.APITimeoutError as exc:
+            raise TimeoutError(
+                f"anthropic API did not respond within "
+                f"{timeout_s:.1f}s for prompt[{len(prompt)}]"
+            ) from exc
+        except anthropic.AuthenticationError as exc:
+            raise RuntimeError(
+                f"anthropic API rejected the key ({exc}); "
+                "verify ANTHROPIC_API_KEY"
+            ) from exc
+
+        # The SDK returns a list of content blocks; for plain text
+        # prompts there's exactly one TextBlock. Concatenate text
+        # blocks defensively in case the model returns structured
+        # output (tool_use blocks etc. — Phase 6 territory).
+        response_text = "".join(
+            getattr(b, "text", "") for b in (msg.content or [])
+        )
+        return {
+            "response": response_text,
+            "backend": self.name,
+            "model": model,
+            "input_tokens": getattr(msg.usage, "input_tokens", 0),
+            "output_tokens": getattr(msg.usage, "output_tokens", 0),
+            "stop_reason": msg.stop_reason or "",
+        }
+
+
+class _ClaudeCliAskBackend(_AskBackend):
     """Phase 4: real backend — invokes the local Claude Code CLI
     with ``claude -p <prompt>`` (synchronous, blocking) and captures
     its stdout as the response.
@@ -436,11 +533,20 @@ class _ClaudeCodeAskBackend(_AskBackend):
 def _resolve_ask_backend(kind: str) -> _AskBackend:
     """Pick the backend implementation for a given agent kind.
 
-    Unknown kinds fall back to the mock backend with a warning to
-    stderr so the operator can see they typoed the --backend arg
-    (the supervisor passes kind verbatim into --kind). """
+    Phase 5.1 (2026-06-11): for ``kind=claude-code`` the dispatcher
+    prefers the Anthropic SDK backend when ``ANTHROPIC_API_KEY`` is
+    set — it bypasses the CLI's Windows ACCESS_VIOLATION quirk
+    entirely. Without a key it falls back to the CLI backend, which
+    on Windows will fail clearly with the documented hint to switch
+    to mock or set the API key.
+
+    Unknown kinds fall back to the mock backend with a structured
+    stderr event so the operator can see they typoed the --backend
+    arg (the supervisor passes kind verbatim into --kind). """
     if kind == "claude-code":
-        return _ClaudeCodeAskBackend()
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return _AnthropicSdkAskBackend()
+        return _ClaudeCliAskBackend()
     if kind == "mock":
         return _MockAskBackend()
     # L-2 fix (review round Phase 4 R3): drop pointless f-prefix.
