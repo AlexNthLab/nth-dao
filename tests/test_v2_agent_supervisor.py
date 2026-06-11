@@ -2031,6 +2031,152 @@ def test_anthropic_sdk_backend_rejects_whitespace_only_key(
         _AnthropicSdkAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
 
 
+def test_anthropic_sdk_backend_maps_api_timeout_to_TimeoutError(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-2 fix (review round Phase 5.1 R2): the SDK's
+    ``APITimeoutError`` must be translated to a stdlib
+    ``TimeoutError`` so the A2A handler routes it to 504
+    backend-timeout (not the generic 502 backend-failed). """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    class _FakeMessages:
+        def create(self, **_kw: object) -> object:
+            # The SDK's APITimeoutError signature requires a
+            # request object, but our error handling only checks
+            # the type — pass a stub.
+            raise _anth.APITimeoutError(request=object())  # type: ignore[arg-type]
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    with pytest.raises(TimeoutError, match="did not respond within"):
+        _AnthropicSdkAskBackend().ask(
+            {"prompt": "slow"}, timeout_s=7.0,
+        )
+
+
+def test_anthropic_sdk_backend_maps_auth_error_to_RuntimeError(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-2 fix (review round Phase 5.1 R2): the SDK's
+    ``AuthenticationError`` (bad/expired key) must surface as a
+    RuntimeError telling the operator to verify the env var, not
+    a generic 502. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-bad")
+
+    class _FakeRequest:
+        method = "POST"
+        url = "https://api.anthropic.com/v1/messages"
+
+    class _FakeResponse:
+        status_code = 401
+        headers: dict = {}
+        request = _FakeRequest()
+
+    class _FakeMessages:
+        def create(self, **_kw: object) -> object:
+            # Real signature is AuthenticationError(message, response, body)
+            raise _anth.AuthenticationError(
+                "Invalid API key",
+                response=_FakeResponse(),  # type: ignore[arg-type]
+                body=None,
+            )
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    with pytest.raises(RuntimeError, match="verify ANTHROPIC_API_KEY"):
+        _AnthropicSdkAskBackend().ask(
+            {"prompt": "hi"}, timeout_s=5.0,
+        )
+
+
+def test_resolve_ask_backend_falls_back_to_cli_when_anthropic_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """BUG-3 fix (review round Phase 5.1 R2): if ANTHROPIC_API_KEY
+    is set but the ``anthropic`` package isn't importable, the
+    dispatcher must cleanly fall back to the CLI backend rather
+    than constructing an unusable SDK backend that fails on first
+    use. """
+    import builtins
+    from nth_dao.web.dummy_agent import (
+        _ClaudeCliAskBackend, _resolve_ask_backend,
+    )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    # Make the anthropic import fail by removing it from sys.modules
+    # and patching __import__ to refuse it.
+    import sys
+    sys.modules.pop("anthropic", None)
+    original_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "anthropic":
+            raise ImportError("simulated missing anthropic package")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    backend = _resolve_ask_backend("claude-code")
+    assert isinstance(backend, _ClaudeCliAskBackend), (
+        f"expected fallback to CLI backend; got {type(backend).__name__}"
+    )
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+    reason=(
+        "BUG-1 fix (review round Phase 5.1 R2): live API integration "
+        "test — set ANTHROPIC_API_KEY to run. Catches model-id drift "
+        "(e.g. claude-sonnet-4-6 deprecated / renamed) that no mock "
+        "test can detect."
+    ),
+)
+def test_anthropic_sdk_backend_real_api_round_trip_validates_model_id() -> None:
+    """BUG-1 fix (review round Phase 5.1 R2): integration probe.
+
+    Mock-based tests can never validate that ``DEFAULT_MODEL`` is a
+    model name the live API actually accepts. This test makes a
+    real round-trip with a tiny prompt + low max_tokens (cents at
+    worst) to confirm the model id resolves end-to-end. Skipped
+    when ANTHROPIC_API_KEY isn't set, so CI without credentials
+    isn't blocked. """
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    out = _AnthropicSdkAskBackend().ask(
+        {
+            "prompt": "Reply with exactly the four letters PONG. Nothing else.",
+            "max_tokens": 16,
+        },
+        timeout_s=30.0,
+    )
+    # The model should answer at all (token counts > 0); we don't
+    # assert the exact response text because LLMs sometimes add
+    # extra punctuation.
+    assert out["backend"] == "claude-code"
+    assert out["model"] == _AnthropicSdkAskBackend.DEFAULT_MODEL
+    assert out["input_tokens"] > 0, "model rejected the request"
+    assert out["output_tokens"] > 0, "model returned empty response"
+    assert "PONG" in out["response"].upper(), (
+        f"model didn't follow basic instruction; got: {out['response']!r}"
+    )
+
+
 def test_anthropic_sdk_backend_honours_widened_max_tokens_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

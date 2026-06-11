@@ -579,8 +579,30 @@ def _resolve_ask_backend(kind: str) -> _AskBackend:
     stderr event so the operator can see they typoed the --backend
     arg (the supervisor passes kind verbatim into --kind). """
     if kind == "claude-code":
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            return _AnthropicSdkAskBackend()
+        # BUG-3 fix (review round Phase 5.1 R2): the dispatcher
+        # used to construct ``_AnthropicSdkAskBackend`` whenever
+        # the key was present, even if the ``anthropic`` package
+        # wasn't installed. The unusable backend then failed at
+        # first ``ask`` with ImportError-wrapped RuntimeError.
+        # Check availability up front so we either return a
+        # working SDK backend OR cleanly fall back to the CLI
+        # backend (which has its own clear "switch to mock" hint
+        # on Windows). A structured stderr event names the gap.
+        key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if key:
+            try:
+                import anthropic  # noqa: F401 — availability probe
+                return _AnthropicSdkAskBackend()
+            except ImportError:
+                _print_error(
+                    event="anthropic_sdk_unavailable",
+                    detail=(
+                        "ANTHROPIC_API_KEY is set but the "
+                        "'anthropic' Python package is not "
+                        "installed; falling back to CLI backend. "
+                        "Run: pip install anthropic"
+                    ),
+                )
         return _ClaudeCliAskBackend()
     if kind == "mock":
         return _MockAskBackend()
