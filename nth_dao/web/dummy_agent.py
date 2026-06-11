@@ -297,6 +297,27 @@ class _AnthropicSdkAskBackend(_AskBackend):
     DEFAULT_TIMEOUT_S = 60.0
     DEFAULT_MODEL = "claude-sonnet-4-6"
     DEFAULT_MAX_TOKENS = 1024
+    # M-2 fix (review round Phase 5.1 R1): widen from 8192 to
+    # 32768. Claude Sonnet 4.6 and Opus 4.8 support significantly
+    # more output tokens at the API; the previous cap forced
+    # unnecessary truncation on legitimately long responses. 32K is
+    # the current per-call ceiling for sonnet/opus 4.x.
+    MAX_TOKENS_CEILING = 32768
+
+    def __init__(self) -> None:
+        # M-1 fix (review round Phase 5.1 R1): cache the SDK client
+        # so a child handling repeated /a2a/ask calls reuses the
+        # httpx connection pool. Timeout is set per-request via
+        # ``client.messages.create(timeout=...)`` so the cached
+        # client doesn't pin a stale value across calls.
+        self._client: Optional[Any] = None
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        import anthropic
+        self._client = anthropic.Anthropic()
+        return self._client
 
     def ask(
         self, params: Dict[str, Any], timeout_s: float,
@@ -311,7 +332,13 @@ class _AnthropicSdkAskBackend(_AskBackend):
             raise ValueError(
                 f"prompt too long ({len(prompt)} chars); 32KB cap"
             )
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        # L-1 fix (review round Phase 5.1 R1): also reject
+        # whitespace-only keys so an operator typo (trailing space)
+        # gets the "not set" diagnostic instead of the SDK's
+        # AuthenticationError, which would have surfaced as
+        # "verify ANTHROPIC_API_KEY" — misleading because the
+        # value IS present, just blank.
+        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
             raise RuntimeError(
                 "ANTHROPIC_API_KEY not set — anthropic SDK backend "
                 "needs an API key. Set the env var on the hub process "
@@ -328,20 +355,22 @@ class _AnthropicSdkAskBackend(_AskBackend):
 
         model = str(params.get("model") or self.DEFAULT_MODEL)
         raw_max = params.get("max_tokens")
-        if isinstance(raw_max, int) and 16 <= raw_max <= 8192:
+        if isinstance(raw_max, int) and 16 <= raw_max <= self.MAX_TOKENS_CEILING:
             max_tokens = raw_max
         else:
             max_tokens = self.DEFAULT_MAX_TOKENS
 
-        # The SDK's timeout is honoured per-request; we forward the
+        # The SDK's timeout is honoured per-request — forward the
         # caller-provided budget so a slow prompt fails cleanly
-        # rather than holding the hub thread forever.
-        client = anthropic.Anthropic(timeout=max(5.0, timeout_s))
+        # rather than holding the hub thread forever. The cached
+        # client's own constructor timeout is irrelevant here.
+        client = self._get_client()
         try:
             msg = client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
+                timeout=timeout_s,
             )
         except anthropic.APITimeoutError as exc:
             raise TimeoutError(
@@ -361,12 +390,18 @@ class _AnthropicSdkAskBackend(_AskBackend):
         response_text = "".join(
             getattr(b, "text", "") for b in (msg.content or [])
         )
+        # M-3 fix (review round Phase 5.1 R1): direct attribute
+        # access on msg.usage — the SDK guarantees these fields
+        # on a successful response. A future SDK rename should
+        # surface loudly as AttributeError (caller sees a real
+        # error, receipts don't silently record "0 tokens" as
+        # fact) rather than being papered over with getattr(..., 0).
         return {
             "response": response_text,
             "backend": self.name,
             "model": model,
-            "input_tokens": getattr(msg.usage, "input_tokens", 0),
-            "output_tokens": getattr(msg.usage, "output_tokens", 0),
+            "input_tokens": msg.usage.input_tokens,
+            "output_tokens": msg.usage.output_tokens,
             "stop_reason": msg.stop_reason or "",
         }
 

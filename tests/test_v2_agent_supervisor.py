@@ -1923,7 +1923,8 @@ def test_anthropic_sdk_backend_invokes_messages_create(
     from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    captured: dict = {}
+    captured_create: dict = {}
+    captured_init: list[dict] = []
 
     class _FakeUsage:
         input_tokens = 7
@@ -1939,11 +1940,12 @@ def test_anthropic_sdk_backend_invokes_messages_create(
 
     class _FakeMessages:
         def create(self, **kwargs: object) -> "_FakeMsg":
-            captured.update(kwargs)
+            captured_create.update(kwargs)
             return _FakeMsg()
 
     class _FakeClient:
         def __init__(self, **kw: object) -> None:
+            captured_init.append(dict(kw))
             self.messages = _FakeMessages()
 
     monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
@@ -1955,9 +1957,132 @@ def test_anthropic_sdk_backend_invokes_messages_create(
     assert out["model"] == "claude-sonnet-4-6"
     assert out["input_tokens"] == 7
     assert out["output_tokens"] == 12
-    # Verify what we sent to the SDK is the expected shape.
-    assert captured["max_tokens"] == 1024
-    assert captured["messages"] == [{"role": "user", "content": "ping"}]
+    # M-4 fix (review round Phase 5.1 R1): verify the per-request
+    # timeout is FORWARDED to messages.create (where the SDK
+    # actually honours it), NOT pinned to the cached client's
+    # constructor. Without this assert a regression hardcoding
+    # the SDK timeout would pass silently.
+    assert captured_create["timeout"] == 10.0, captured_create
+    assert captured_create["max_tokens"] == 1024
+    assert captured_create["messages"] == [{"role": "user", "content": "ping"}]
+
+
+def test_anthropic_sdk_backend_caches_client_across_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-1 fix (review round Phase 5.1 R1): repeated ``ask`` calls
+    on the same backend instance must reuse the SDK client (so the
+    httpx connection pool persists). Asserted by counting how many
+    times the patched ``Anthropic`` constructor fires. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    construct_count = 0
+
+    class _FakeUsage:
+        input_tokens = 1
+        output_tokens = 1
+
+    class _FakeBlock:
+        text = "ok"
+
+    class _FakeMsg:
+        content = [_FakeBlock()]
+        usage = _FakeUsage()
+        stop_reason = "end_turn"
+
+    class _FakeMessages:
+        def create(self, **_kw: object) -> "_FakeMsg":
+            return _FakeMsg()
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            nonlocal construct_count
+            construct_count += 1
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+
+    backend = _AnthropicSdkAskBackend()
+    backend.ask({"prompt": "a"}, timeout_s=10.0)
+    backend.ask({"prompt": "b"}, timeout_s=10.0)
+    backend.ask({"prompt": "c"}, timeout_s=10.0)
+
+    assert construct_count == 1, (
+        f"expected the SDK client to be cached and reused; "
+        f"got {construct_count} constructions"
+    )
+
+
+def test_anthropic_sdk_backend_rejects_whitespace_only_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L-1 fix (review round Phase 5.1 R1): a key value of only
+    whitespace (operator typo with trailing space) should yield
+    the "not set" diagnostic, NOT the SDK's later AuthenticationError
+    which would have said "verify ANTHROPIC_API_KEY" — misleading
+    because the env var IS present, just blank. """
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY not set"):
+        _AnthropicSdkAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
+
+
+def test_anthropic_sdk_backend_honours_widened_max_tokens_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-2 fix (review round Phase 5.1 R1): the max_tokens upper
+    bound widened from 8192 → 32768 to match current Sonnet 4.6 /
+    Opus 4.8 API limits. Verify 16384 (previously rejected, now
+    accepted) actually propagates to messages.create. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    captured: dict = {}
+
+    class _FakeUsage:
+        input_tokens = 1
+        output_tokens = 1
+
+    class _FakeBlock:
+        text = "ok"
+
+    class _FakeMsg:
+        content = [_FakeBlock()]
+        usage = _FakeUsage()
+        stop_reason = "end_turn"
+
+    class _FakeMessages:
+        def create(self, **kw: object) -> "_FakeMsg":
+            captured.update(kw)
+            return _FakeMsg()
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+
+    _AnthropicSdkAskBackend().ask(
+        {"prompt": "longish", "max_tokens": 16384},
+        timeout_s=10.0,
+    )
+    assert captured["max_tokens"] == 16384, captured
+
+    # And anything above the new ceiling still falls back to the
+    # default — defense against a peer requesting astronomical
+    # output budgets.
+    captured.clear()
+    _AnthropicSdkAskBackend().ask(
+        {"prompt": "huge", "max_tokens": 100_000},
+        timeout_s=10.0,
+    )
+    assert captured["max_tokens"] == 1024  # DEFAULT_MAX_TOKENS
 
 
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
