@@ -1150,6 +1150,53 @@ def test_decision_raised_without_dict_payload_logs_warning(
     assert any("without a dict 'decision'" in w for w in warnings)
 
 
+def test_v2_decision_raiser_works_before_decisions_endpoint_touched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live walk-through bug regression (2026-06-11): the
+    decision_raiser closure must lazy-build v2_decisions_store on
+    first use, not only when GET /api/v2/decisions has populated
+    it. A child can raise BEFORE the operator hits the decisions
+    endpoint — and used to silently drop the decision in that case
+    because the store didn't exist yet. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    client = TestClient(app)
+    # Force the supervisor build but NOT the decisions store.
+    client.get("/api/v2/agents")
+    sup = app.state.v2_supervisor
+    assert not hasattr(app.state, "v2_decisions_store"), (
+        "precondition: decisions store must not yet exist"
+    )
+
+    r = sup.spawn(kind="mock", label="prelaunch", capabilities=[])
+    sup.on_event(r.agent_id, {
+        "event": "decision_raised",
+        "agent_id": r.agent_id,
+        "decision": {
+            "title": "Pre-endpoint test",
+            "impact": "low",
+            "preview_receipt": {"kind": "nth.agent_attestation"},
+            "mission_id": "",
+        },
+    })
+
+    listing = client.get("/api/v2/decisions").json()
+    matching = [d for d in listing if d["title"] == "Pre-endpoint test"]
+    assert len(matching) == 1, (
+        f"agent-raised decision must appear even when decisions "
+        f"endpoint wasn't hit first; got {[d['title'] for d in listing]!r}"
+    )
+
+
 def test_v2_decision_raiser_assigns_id_and_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1235,15 +1235,17 @@ def _state_supervisor(request: Request) -> Optional[Any]:
             def _decision_raiser(
                 agent_id: str, decision: Dict[str, Any],
             ) -> None:
+                # Walk-through bug fix (2026-06-11): if the operator
+                # hasn't hit GET /api/v2/decisions yet, the lazy
+                # store doesn't exist — but a child can still raise
+                # before the UI fetches. Lazy-build here too so the
+                # decision-raise wire works even on a freshly-built
+                # supervisor whose decisions endpoint hasn't been
+                # touched. Mirrors _decisions_store's seed pattern.
                 store = getattr(state, "v2_decisions_store", None)
                 if store is None:
-                    logger.warning(
-                        "v2_api: agent %s raised a decision but "
-                        "state.v2_decisions_store is unavailable "
-                        "— dropping",
-                        agent_id,
-                    )
-                    return
+                    store = {d["id"]: d for d in _seed_decisions()}
+                    state.v2_decisions_store = store
                 supervisor = getattr(state, "v2_supervisor", None)
                 rec = supervisor.get(agent_id) if supervisor is not None else None
                 proposer_did = rec.did if rec is not None else ""
