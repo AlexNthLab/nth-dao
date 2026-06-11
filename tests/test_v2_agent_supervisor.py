@@ -1799,6 +1799,24 @@ def test_mock_ask_backend_echoes_prompt() -> None:
     assert out["backend"] == "mock"
 
 
+def test_mock_ask_backend_signals_truncation_for_long_prompts() -> None:
+    """L-1 fix (review round Phase 4 R3): the mock backend caps
+    its echoed prompt at 512 chars. The cap was previously silent;
+    now the response carries an explicit ``…[+N chars truncated]``
+    suffix so a caller can spot the truncation. """
+    from nth_dao.web.dummy_agent import _MockAskBackend
+
+    short = _MockAskBackend().ask({"prompt": "abc"}, timeout_s=1.0)
+    assert "truncated" not in short["response"], short
+
+    long_prompt = "x" * 1000
+    long = _MockAskBackend().ask(
+        {"prompt": long_prompt}, timeout_s=1.0,
+    )
+    assert "truncated" in long["response"]
+    assert "+488 chars" in long["response"], long["response"]
+
+
 def test_mock_ask_backend_no_prompt_returns_help_text() -> None:
     """Phase 4: missing prompt is friendly for the mock backend
     (not an error). The claude-code backend treats it as ValueError. """
@@ -2004,33 +2022,51 @@ def test_a2a_post_rejects_non_dict_body(
         runner.stop(agent_id)
 
 
+@pytest.mark.parametrize(
+    "rc, label",
+    [
+        (3221225477, "unsigned-DWORD"),
+        (-1073741819, "signed-long"),
+    ],
+)
 def test_claude_code_backend_translates_windows_access_violation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, rc: int, label: str,
 ) -> None:
     """Phase 4: when claude.exe crashes with 0xC0000005
     (ACCESS_VIOLATION — known Windows + piped-stdout issue), the
     backend must raise a targeted RuntimeError telling the operator
-    to switch to kind=mock, not a generic 'exited 3221225477'. """
+    to switch to kind=mock, not a generic 'exited 3221225477'.
+
+    R-1 fix (review round Phase 4 R3): parametrize over BOTH the
+    unsigned (3221225477) and signed (-1073741819) representations
+    of 0xC0000005 — the original R2 test only covered the unsigned
+    case, which let a Python build that surfaces the signed form
+    slip past the hint translation. """
     import shutil
     import subprocess as _sp
 
     from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
 
     # Pretend the binary IS on PATH (skip the not-on-PATH branch).
-    monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/claude")
+    monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/claude.exe")
 
     class _FakeCompleted:
-        returncode = 3221225477  # 0xC0000005
+        returncode = rc
         stdout = ""
         stderr = ""
 
     monkeypatch.setattr(
         _sp, "run", lambda *_a, **_k: _FakeCompleted(),
     )
-    with pytest.raises(RuntimeError, match="ACCESS_VIOLATION"):
+    with pytest.raises(RuntimeError, match="ACCESS_VIOLATION") as exc_info:
         _ClaudeCodeAskBackend().ask(
             {"prompt": "hi"}, timeout_s=1.0,
         )
+    # Verify the message points at the kind=mock workaround.
+    assert "kind=mock" in str(exc_info.value), (
+        f"[{label}] expected the operator-facing hint; got: "
+        f"{exc_info.value}"
+    )
 
 
 def test_claude_code_backend_raises_when_binary_missing(

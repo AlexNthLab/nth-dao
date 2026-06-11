@@ -260,8 +260,16 @@ class _MockAskBackend(_AskBackend):
                             "backend just echoes back what you send.",
                 "backend": self.name,
             }
+        # L-1 fix (review round Phase 4 R3): make the 512-char cap
+        # visible to the caller so a wire test with a longer prompt
+        # doesn't silently see less than what they sent. Suffix
+        # ``…[+N chars truncated]`` when we cut.
+        truncated = prompt[:512]
+        suffix = ""
+        if len(prompt) > 512:
+            suffix = f"…[+{len(prompt) - 512} chars truncated]"
         return {
-            "response": f"(mock) ack: {prompt[:512]}",
+            "response": f"(mock) ack: {truncated}{suffix}",
             "backend": self.name,
         }
 
@@ -394,13 +402,20 @@ class _ClaudeCodeAskBackend(_AskBackend):
             # Windows ACCESS_VIOLATION (see Known Windows quirk note
             # in docstring). Surface a targeted message so the
             # operator knows to switch to kind=mock for now.
-            # BUG-2 fix (review round Phase 4 R2): drop the
-            # ``-1073741819`` signed-form match — Python 3
-            # subprocess.Popen on Windows uses GetExitCodeProcess
-            # which returns DWORD (unsigned); the returncode is
-            # always the unsigned 3221225477. The signed form was
-            # dead-code defensiveness.
-            if completed.returncode == 3221225477:
+            # R-1 fix (review round Phase 4 R3): RESTORE the dual
+            # check (unsigned + signed). My R2 "simplification"
+            # was wrong — even though on this dev box's Python
+            # 3.14 64-bit Windows ``GetExitCodeProcess`` surfaces
+            # as the unsigned 3221225477, other build flavours
+            # (32-bit Python, older CPython that stored it as a
+            # C signed long, WSL hybrids) can produce the signed
+            # form -1073741819. Both are the SAME underlying
+            # DWORD 0xC0000005, just interpreted differently. The
+            # defensive cost of checking both is one ``in`` op;
+            # the cost of MISSING the match is the operator hunts
+            # through generic-exit-code logs instead of seeing
+            # the "Use kind=mock" hint.
+            if completed.returncode in (3221225477, -1073741819):
                 raise RuntimeError(
                     "claude CLI crashed with ACCESS_VIOLATION "
                     "(0xC0000005) — known Windows + piped-stdout "
@@ -428,10 +443,11 @@ def _resolve_ask_backend(kind: str) -> _AskBackend:
         return _ClaudeCodeAskBackend()
     if kind == "mock":
         return _MockAskBackend()
+    # L-2 fix (review round Phase 4 R3): drop pointless f-prefix.
     _print_error(
         event="unknown_backend_kind",
         kind=kind,
-        detail=f"falling back to mock backend",
+        detail="falling back to mock backend",
     )
     return _MockAskBackend()
 
