@@ -74,6 +74,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -449,7 +450,6 @@ def _seed_agents() -> List[Dict[str, Any]]:
 
 def _seed_cap_tokens() -> List[Dict[str, Any]]:
     """Mirrors mock.ts mockCapTokens — 2 entries cap-bnHs82Lq, cap-3xQ1pTaM. """
-    import time
     now_ms = int(time.time() * 1000)
     return [
         {
@@ -955,6 +955,72 @@ class AgentEntryM(_Model):
     agent_card: Optional[Dict[str, Any]] = None
 
 
+# ─────────────────────────────────────────────────────────────
+# Phase 2 — decision store + receipt-signing for POST endpoints.
+#
+# The decision queue is in-process: a dict on ``app.state`` seeded
+# from ``_seed_decisions()`` on first access. Mutations (approve /
+# reject / defer remove the id) live in process memory. Receipts
+# go to disk via ``state.receipts`` (the existing ReceiptStore).
+#
+# Phase 3 will replace the in-memory store with a real persistent
+# decision queue and add cap_token-gated authorization. For Phase
+# 2 the hub is 127.0.0.1-only and treats POST as operator-privileged
+# (same posture as v1's /api/cap_tokens/issue path).
+# ─────────────────────────────────────────────────────────────
+
+
+def _decisions_store(request: Request) -> Dict[str, Dict[str, Any]]:
+    """Lazy per-app singleton — keyed by decision id.
+
+    Thread-safety (S4 note 2026-06-10): the check-then-set on
+    ``v2_decisions_store`` is NOT atomic — two concurrent first
+    requests could both build a fresh store and the second one
+    would clobber the first. The Phase 2 hub is single-user
+    local-bound, so the TOCTOU is academic; uvicorn's default
+    single-worker config also serialises requests within the
+    asyncio event loop. Phase 3 (multi-user / multi-worker) MUST
+    move this to a process-shared store (SQLite / Redis) with
+    proper locking. """
+    state = request.app.state
+    store = getattr(state, "v2_decisions_store", None)
+    if store is None:
+        store = {d["id"]: d for d in _seed_decisions()}
+        state.v2_decisions_store = store
+    return store
+
+
+def _state_node_identity(request: Request) -> Optional[Any]:
+    """Signing identity from app.state.nth (set up in __init__.py
+    by _bootstrap). Returns None if not initialised — endpoints
+    handling that case must fail closed (503), never return an
+    unsigned receipt. """
+    try:
+        return request.app.state.nth.node_identity
+    except AttributeError:
+        return None
+
+
+def _state_receipts_store(request: Request) -> Optional[Any]:
+    """ReceiptStore from app.state.nth.receipts. Returns None if
+    state isn't wired. """
+    try:
+        return request.app.state.nth.receipts
+    except AttributeError:
+        return None
+
+
+# NOTE: prev_content_hash lookup goes through the canonical
+# ``ReceiptStore.head_content_hash(signer_did)`` method
+# (execution_receipt.py:844) which has documented tie-breaking
+# semantics. Review pass#2 fix C1 2026-06-10: the earlier
+# `_compute_prev_hash` helper duplicated that logic with a
+# subtly-wrong sort (it sorted by issued_at + receipt_id; uuid4
+# fallback would chain to a random receipt under timestamp ties).
+# Delegating to head_content_hash also pulls in any future
+# chain_heads.json index for free when ReceiptStore gets one.
+
+
 def _state_blackboard(request: Request) -> Optional[Any]:
     """Pull live Blackboard from app.state if present, else None.
 
@@ -993,6 +1059,161 @@ def _state_workspace(request: Request) -> Optional[Path]:
         return None
 
 
+def _resolve_decision(
+    decision_id: str,
+    request: Request,
+    *,
+    sign: bool,
+) -> Dict[str, Any]:
+    """Shared body for approve / reject / defer.
+
+    sign=True  → build a TimelineEntry from the decision's
+                 preview_receipt + a synthetic approval entry,
+                 chain-link to the signer's previous content_hash,
+                 sign with state.node_identity, save via
+                 state.receipts. Return the ReceiptSummary.
+    sign=False → just remove. Return {removed: True}.
+
+    Phase 2 caveats (documented for future hardening):
+      - No cap_token enforcement: anyone reaching 127.0.0.1 can hit
+        these. v1 already has the same posture for /api/cap_tokens/issue
+        which uses the console_token; the v2 routes are anonymous on
+        the local-only bind so this is the same trust model in
+        practice. Phase 3 will add cap_token gating.
+      - Decision store is in-process. A hub restart resets the queue
+        from seed. Persisting is Phase 3 (or whenever a real backend
+        emits decisions instead of seeding them).
+      - Mission_id mapping: when the decision carries one, use it as
+        ``goal_id`` so the receipt links to the mission. Else use
+        the decision id itself.
+    """
+    # Lazy imports — execution_receipt module is heavy.
+    from nth_dao.execution_receipt import (
+        TimelineEntry, sign_receipt,
+    )
+
+    store = _decisions_store(request)
+    decision = store.get(decision_id)
+    if decision is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"decision {decision_id!r} not found in queue "
+                   "(already resolved, or never existed)",
+        )
+
+    if not sign:
+        # reject / defer — no receipt, just remove.
+        store.pop(decision_id, None)
+        return {
+            "decision_id": decision_id,
+            "removed": True,
+            "signed": False,
+        }
+
+    # sign=True path
+    identity = _state_node_identity(request)
+    if identity is None or not getattr(identity, "can_sign", False):
+        raise HTTPException(
+            status_code=503,
+            detail="signer identity unavailable; cannot sign receipt. "
+                   "Bootstrap the workspace identity first.",
+        )
+
+    # Review fix #4 2026-06-10: previously a missing receipts_store
+    # let sign_receipt run and then SKIPPED save (the receipts_store
+    # is None check before save() was a silent-discard, not a
+    # fail-closed). The UI got back signed=True but nothing landed
+    # on disk — silent data loss. Treat the missing store the same
+    # as a missing signer: 503 BEFORE we sign anything.
+    receipts_store = _state_receipts_store(request)
+    if receipts_store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="receipt store unavailable; cannot persist receipt. "
+                   "Bootstrap the workspace receipts dir first.",
+        )
+
+    signer_did = identity.as_did() if hasattr(identity, "as_did") else ""
+    try:
+        prev_hash = receipts_store.head_content_hash(signer_did)
+    except Exception as ex:
+        logger.warning("v2_api: head_content_hash failed: %s", ex)
+        prev_hash = ""
+
+    # Build the timeline.
+    # Required: at least one substantive entry beyond chain_link.
+    # Pull the decision's preview_receipt as the payload of an
+    # `nth.decision_approved` entry — this lets verify_receipt see
+    # exactly what the user authorised.
+    now_ms = int(time.time() * 1000)
+    preview = decision.get("preview_receipt") or {}
+    timeline = [
+        TimelineEntry(
+            timestamp=now_ms,
+            type="nth.decision_approved",
+            payload={
+                "decision_id": decision_id,
+                "title": decision.get("title", ""),
+                "impact": decision.get("impact", ""),
+                "preview_kind": preview.get("kind", ""),
+                "preview": preview,
+            },
+        ),
+    ]
+
+    goal_id = decision.get("mission_id") or decision_id
+    receipt = sign_receipt(
+        timeline,
+        identity,
+        goal_id=goal_id,
+        prev_content_hash=prev_hash,
+    )
+
+    # Save BEFORE removing the decision: if save fails the user
+    # should be able to retry the same approval. (receipts_store
+    # is guaranteed non-None here by the 503 guard above.)
+    #
+    # Chain-gap caveat (review pass#2 note 2026-06-10): if save
+    # fails mid-batch (5 approves in a row, #3 fails) the chain
+    # has a gap — receipt #4's prev_content_hash points to #2.
+    # ``verify_receipt_chain`` still accepts this because every
+    # prev pointer resolves within the on-disk set, but the
+    # operator's audit log will show 4 receipts where they
+    # expected 5. Documenting; not fixing in Phase 2.
+    try:
+        receipts_store.save(receipt)
+    except Exception as exc:
+        logger.exception("v2_api: receipts_store.save failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"signed receipt could not be persisted: {exc}",
+        )
+
+    # Remove the decision from the queue only after the receipt has
+    # landed on disk.
+    store.pop(decision_id, None)
+
+    # Shape matches ReceiptSummary so the frontend can splice it
+    # into its receipts state without a /api/v2/receipts refetch.
+    summary: Dict[str, Any] = {
+        "id": receipt.get("receipt_id", ""),
+        "signer_did": receipt.get("signer_did", ""),
+        "signer_label": "you",
+        "goal_id": goal_id,
+        "content_hash": receipt.get("content_hash", ""),
+        "prev_content_hash": prev_hash,
+        "has_cap_token": bool(receipt.get("authorizing_cap_token")),
+        "summary": decision.get("title", decision_id),
+        "issued_at": receipt.get("issued_at", ""),
+    }
+    return {
+        "decision_id": decision_id,
+        "removed": True,
+        "signed": True,
+        "receipt": summary,
+    }
+
+
 def register_v2_routes(app: FastAPI) -> None:
     """Attach the /api/v2/* read endpoints to ``app``.
 
@@ -1015,9 +1236,46 @@ def register_v2_routes(app: FastAPI) -> None:
         return _seed_identity()
 
     @app.get("/api/v2/decisions", response_model=List[DecisionM])
-    def v2_decisions() -> List[Dict[str, Any]]:
-        # No disk source yet — decision queue is built in Phase 2.
-        return _seed_decisions()
+    def v2_decisions(request: Request) -> List[Dict[str, Any]]:
+        # Phase 2: served from the mutable in-memory store so the
+        # queue shrinks as the user approves / rejects / defers.
+        return list(_decisions_store(request).values())
+
+    @app.post("/api/v2/decisions/{decision_id}/approve")
+    def v2_decisions_approve(
+        decision_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Sign + persist a receipt for ``decision_id``, then remove
+        it from the queue. Returns the new ReceiptSummary so the
+        frontend can update its chain_head without a refetch.
+
+        Failure modes:
+          404 — id not in queue (already resolved, never existed)
+          503 — signer identity not available (fail closed; we
+                NEVER return an unsigned receipt)
+          500 — receipt save failed AFTER signing (unexpected;
+                the decision is NOT removed so the user can retry) """
+        return _resolve_decision(decision_id, request, sign=True)
+
+    @app.post("/api/v2/decisions/{decision_id}/reject")
+    def v2_decisions_reject(
+        decision_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Drop the decision from the queue. No receipt is signed —
+        rejection is non-actionable. Returns {removed: true}. """
+        return _resolve_decision(decision_id, request, sign=False)
+
+    @app.post("/api/v2/decisions/{decision_id}/defer")
+    def v2_decisions_defer(
+        decision_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Drop the decision from the queue. Phase 3 will move it to
+        a "deferred" bucket with a follow-up timer; Phase 2 just
+        removes it. """
+        return _resolve_decision(decision_id, request, sign=False)
 
     @app.get("/api/v2/missions", response_model=List[MissionSummaryM])
     def v2_missions() -> List[Dict[str, Any]]:

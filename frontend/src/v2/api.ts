@@ -110,3 +110,63 @@ export const fetchConversations = (s?: AbortSignal) =>
   getJson<Conversation[]>("/conversations", s);
 export const fetchMessages      = (convId: string, s?: AbortSignal) =>
   getJson<ChatMessage[]>(`/messages/${encodeURIComponent(convId)}`, s);
+
+/* ── Phase 2: decision resolve POSTs ──────────────────────────
+ * Approve / reject / defer. The hub signs a receipt on approve
+ * (chain-linked to the operator's previous content_hash) and
+ * returns a ReceiptSummary so the UI can splice it into its
+ * receipts state without a /receipts refetch.
+ *
+ * The shape:
+ *   { decision_id, removed: true, signed: true, receipt: ReceiptSummary }
+ *   { decision_id, removed: true, signed: false }      // reject / defer
+ *
+ * Failure surfaces as a thrown Error with the HTTP status — the
+ * caller's try/catch in App.tsx maps that to a rollback + toast.
+ */
+export interface ResolveDecisionResult {
+  decision_id: string;
+  removed: boolean;
+  signed: boolean;
+  receipt?: ReceiptSummary;
+}
+
+/** S1 fix (2026-06-10): originally this helper had no body
+ *  parameter at all despite being named ``postJson``. The next
+ *  contributor reading the signature would have reached for it to
+ *  send a request body and gotten a silently-empty POST. Body is
+ *  now optional but the helper sets ``Content-Type: application/json``
+ *  + ``JSON.stringify`` when present, so the name is no longer a
+ *  lie. Phase 2 endpoints don't carry a body (id is path param),
+ *  but Phase 3 issue-cap / create-mission will. */
+async function postJson<T>(path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = {
+    method: "POST",
+    credentials: "same-origin",
+    headers: body === undefined
+      ? { Accept: "application/json" }
+      : { Accept: "application/json", "Content-Type": "application/json" },
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${BASE}${path}`, init);
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const errBody = await res.json();
+      detail = errBody?.detail ?? detail;
+    } catch { /* body wasn't JSON; keep status */ }
+    throw new Error(`POST ${path} → HTTP ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as T;
+}
+
+export function resolveDecisionApi(
+  id: string,
+  transition: "approve" | "reject" | "defer",
+): Promise<ResolveDecisionResult> {
+  return postJson<ResolveDecisionResult>(
+    `/decisions/${encodeURIComponent(id)}/${transition}`,
+  );
+}

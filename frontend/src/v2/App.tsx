@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchAgents, fetchCapTokens, fetchConversations, fetchDecisions,
   fetchMessages, fetchMissions, fetchProcesses, fetchReceipts,
-  probeHub,
+  probeHub, resolveDecisionApi,
 } from "./api";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
@@ -93,6 +93,15 @@ function AppInner() {
    * switch to Decisions; the badge + Cmd+K make that one keypress. */
   const [active, setActive] = useState<NavId>("blackboard");
   const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
+  /* S5 fix (2026-06-10): track in-flight resolves by id and pass
+   * the Set down to DecisionQueue so the main-head renders a
+   * "Signing N receipt(s)…" banner during the optimistic-remove
+   * → success-toast gap. aria-live polite on the banner so
+   * screen readers announce the pending action without
+   * interrupting other speech. */
+  const [resolvingIds, setResolvingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [cmdkOpen, setCmdkOpen] = useState(false);
   // Chat state — local-only for v1; flips to /api/messages on
   // backend integration. The shape (Record<convId, Message[]>)
@@ -281,12 +290,34 @@ function AppInner() {
     const target = decisions.find((d) => d.id === id);
     if (!target) return;
 
+    setResolvingIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
     setDecisions((prev) => prev.filter((d) => d.id !== id));
     try {
-      // TODO: await fetch(`/api/decisions/${id}/${transition}`, { method: "POST" })
-      //   then check response.ok / status === 409.
-      // For v1 the body is empty; no throw is possible today.
-      await Promise.resolve(transition);
+      /* Phase 2 (2026-06-10): real POST instead of Promise.resolve.
+       * The hub signs a chain-linked receipt on approve, returns it,
+       * and the frontend splices it into receipts state so the
+       * StatusBar's chain_head_short updates without a refetch. */
+      const result = await resolveDecisionApi(id, transition);
+      // Extract receipt to a local so TS narrows it inside the
+      // setReceipts callback without a non-null assertion (review
+      // pass#2 polish 2026-06-10).
+      const receipt = result.receipt;
+      if (result.signed && receipt) {
+        setReceipts((prev) => [...prev, receipt]);
+        // R1 fix (2026-06-10): content_hash is typed `string` but a
+        // server bug could return "" — slice produces "" and the
+        // toast reads "Receipt  signed." with a stray double space.
+        // Fallback to "(no hash)" so the user sees something useful.
+        const shortHash = receipt.content_hash.slice(0, 12) || "(no hash)";
+        toast.push(
+          `Approved. Receipt ${shortHash} signed.`,
+          "success",
+        );
+      }
     } catch (err) {
       // Re-insert only if it isn't already back (e.g., a server
       // push notification reverted the removal in the meantime).
@@ -299,6 +330,15 @@ function AppInner() {
         `It may have already been resolved by another user.`,
         "error",
       );
+    } finally {
+      // S5 cleanup: clear the inflight marker on success AND error
+      // so a retry can re-enter the flow.
+      setResolvingIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   }
   function handleApprove(id: string) { void resolveDecision(id, "approve"); }
@@ -602,6 +642,7 @@ function AppInner() {
         onApprove={handleApprove}
         onReject={handleReject}
         onDefer={handleDefer}
+        resolvingIds={resolvingIds}
       />
     );
   } else if (active === "missions") {

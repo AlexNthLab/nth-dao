@@ -96,7 +96,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -404,7 +404,12 @@ def sign_receipt(
         "goal_id": goal_id,
         "signer_did": identity.as_did(),
         "signer_pubkey_hex": identity.pubkey_hex,
-        "issued_at": datetime.now().isoformat(),
+        # Review pass#2 fix C2 2026-06-10: was naive local time.
+        # head_content_hash sorts receipts by this string to find
+        # the chain head — DST shifts / timezone changes / cross-
+        # machine sync could silently reorder the chain. UTC-aware
+        # ISO is unambiguous and the field is still 'display only'.
+        "issued_at": datetime.now(timezone.utc).isoformat(),
         # ── motebit core (what gets verified) ─────────────────────
         "timeline": entry_dicts,
         "content_hash": content_hash,

@@ -22,6 +22,12 @@ export interface DecisionQueueProps {
   onApprove: (id: string) => Promise<void> | void;
   onReject: (id: string) => Promise<void> | void;
   onDefer: (id: string) => Promise<void> | void;
+  /** S5 fix (2026-06-10): decision ids currently in flight to the
+   *  hub. Used to render a small banner so the operator gets visual
+   *  feedback during the optimistic-remove → success-toast window.
+   *  Optional so existing callers (and the v1 mock-only path)
+   *  continue to compile. */
+  resolvingIds?: Set<string>;
 }
 
 const IMPACT_ORDER: Record<Decision["impact"], number> = {
@@ -30,7 +36,10 @@ const IMPACT_ORDER: Record<Decision["impact"], number> = {
   low: 2,
 };
 
-export function DecisionQueue({ decisions, onApprove, onReject, onDefer }: DecisionQueueProps) {
+export function DecisionQueue({
+  decisions, onApprove, onReject, onDefer, resolvingIds,
+}: DecisionQueueProps) {
+  const inflight = resolvingIds ? resolvingIds.size : 0;
   const sorted = useMemo(
     () =>
       decisions.slice().sort(
@@ -104,6 +113,28 @@ export function DecisionQueue({ decisions, onApprove, onReject, onDefer }: Decis
             behalf. Approving signs a receipt; the cryptographic chain
             preserves the audit trail forever.
           </p>
+          {/* S5 banner — visible while the hub is signing one or more
+              receipts. Closes the optimistic-remove → success-toast
+              gap that otherwise looks like silent UI. aria-live so
+              screen readers announce the pending action. */}
+          {inflight > 0 && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                marginTop: 8,
+                padding: "6px 12px",
+                background: "var(--accent-muted)",
+                color: "var(--accent)",
+                borderRadius: 6,
+                fontSize: 12,
+                fontFamily: "var(--t-mono)",
+                display: "inline-block",
+              }}
+            >
+              Signing {inflight} receipt{inflight === 1 ? "" : "s"}…
+            </div>
+          )}
         </div>
 
         <div className="main-body">
