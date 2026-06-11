@@ -77,7 +77,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -840,9 +840,73 @@ def _map_agent_dir(subdir: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+def _parse_issued_at(ts: str) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp into a UTC-aware datetime.
+
+    Returns None for empty / malformed inputs so the caller can
+    skip or place those receipts deterministically rather than
+    let a bogus string land in the middle of a lex sort.
+
+    Handles three observed formats:
+      "2026-06-09T11:20:00Z"          — seed literal (Z suffix)
+      "2026-06-11T15:00:00.123+00:00" — datetime.now(timezone.utc)
+      "2026-06-11T07:00:00+08:00"     — imported / cross-timezone
+    All normalised to UTC for cross-form comparison. """
+    if not ts:
+        return None
+    try:
+        # Python 3.11+ datetime.fromisoformat handles "Z"; for older
+        # interpreters swap Z → +00:00 before parsing. The project
+        # uses 3.14 so the swap is belt-and-braces.
+        normalised = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+        dt = datetime.fromisoformat(normalised)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        # Naive datetime — treat as UTC. This matches the design
+        # commitment in the issued_at docstring (UTC-aware), but
+        # be defensive in case an older record bypassed that.
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _read_receipts_from_disk(workspace: Optional[Path] = None) -> List[Dict[str, Any]]:
-    return _read_from_disk(workspace, "team_receipts",
-                           mapper=_map_receipt, label="receipt")
+    out = _read_from_disk(workspace, "team_receipts",
+                          mapper=_map_receipt, label="receipt")
+    # Sort by issued_at ascending so the LAST entry is the
+    # chronological chain head. Filename ASCII order (what
+    # _safe_iter returns) is wrong here because Phase 2 mints
+    # receipts under uuid-hex filenames that sort BEFORE Phase
+    # 1.5 seed names like "rcpt-aaa2.json" — the newest signed
+    # receipt would sit in the middle, and StatusBar's chain
+    # head would silently show stale data.
+    #
+    # Sort key uses _parse_issued_at to normalise across formats
+    # (review fix 2026-06-11): string lex sort silently lies for
+    # mixed timezone offsets — "2026-06-11T07:00:00+08:00"
+    # (== 23:00 UTC) sorts BEFORE "2026-06-11T15:00:00+00:00" by
+    # lex but is 8 hours LATER in UTC. Parsing to a UTC datetime
+    # is the only safe key once cross-timezone receipts become
+    # possible.
+    #
+    # Empty / malformed issued_at → datetime.min so those records
+    # sort to the FRONT (i.e. NEVER end up at receipts[-1] when
+    # there's at least one well-formed entry). This matches
+    # ReceiptStore.head_content_hash which effectively skips
+    # un-timestamped entries (they fail the `issued > ""` check).
+    #
+    # Tie-breaking: when normalised UTC instants match exactly,
+    # secondary key is content_hash ASCENDING — Python's ascending
+    # sort places the LEX-GREATEST hash LAST, matching
+    # head_content_hash's documented "lex-greatest wins".
+    #
+    # Bug discovered during Phase 2 browser walk-through 2026-06-11.
+    _MIN_TS = datetime.min.replace(tzinfo=timezone.utc)
+    def _sort_key(r: Dict[str, Any]) -> Tuple[datetime, str]:
+        parsed = _parse_issued_at(str(r.get("issued_at", "")))
+        return (parsed or _MIN_TS, str(r.get("content_hash", "")))
+    out.sort(key=_sort_key)
+    return out
 
 
 def _read_cap_tokens_from_disk(workspace: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -953,6 +1017,24 @@ class AgentEntryM(_Model):
     has_active_cap: bool
     last_seen: Optional[str] = None
     agent_card: Optional[Dict[str, Any]] = None
+    # Phase 3a additions (2026-06-11): present on supervisor-spawned
+    # agents, absent on disk / seed / contact entries. extra="allow"
+    # would let these through anyway but declaring them makes the
+    # schema honest and the spawn endpoint's response_model valid.
+    supervised: Optional[bool] = None
+    alive: Optional[bool] = None
+    kind: Optional[str] = None
+
+
+class SpawnResponseM(_Model):
+    """POST /api/v2/agents/spawn response shape. Phase 3b will add
+    a ``cap_token`` field carrying the cap_token issued at spawn. """
+    agent_id: str
+    did: str
+    kind: str
+    label: str
+    pid: Optional[int] = None
+    agent: AgentEntryM
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1043,6 +1125,50 @@ def _state_blackboard(request: Request) -> Optional[Any]:
             "serving seed data. WebState may not be initialised.",
         )
         return None
+
+
+# Phase 3a: agent supervisor accessor + spawn request model
+def _state_supervisor(request: Request) -> Optional[Any]:
+    """Return the lazy-built per-app agent supervisor.
+
+    The supervisor is constructed on first access so a test that
+    only hits read endpoints doesn't pay the cost of spinning up
+    a SubprocessRunner. Stored on app.state.v2_supervisor — same
+    pattern as v2_decisions_store.
+
+    Thread-safety note: the check-then-set is not atomic. Two
+    concurrent first-requests could each construct a supervisor
+    and the second would clobber the first (orphaning the first
+    supervisor's subprocess pool — real leak risk in a hot
+    cold-start race). Same hub-single-user assumption as
+    _decisions_store applies: uvicorn's default single worker
+    serialises requests within asyncio. Phase 3 multi-worker
+    deployments must move this to module-level construction or
+    add a one-time-init lock. """
+    state = request.app.state
+    sup = getattr(state, "v2_supervisor", None)
+    if sup is None:
+        from .agent_supervisor import build_default_supervisor
+        sup = build_default_supervisor()
+        state.v2_supervisor = sup
+        logger.info("v2_api: built default agent supervisor")
+    return sup
+
+
+class SpawnAgentBody(_Model):
+    """POST /api/v2/agents/spawn request body. """
+    kind: str = Field(
+        ...,
+        description="Backend kind label, e.g. 'mock', 'claude-code'.",
+    )
+    label: str = Field(
+        default="",
+        description="Human-readable name; defaults to kind if empty.",
+    )
+    capabilities: List[str] = Field(
+        default_factory=list,
+        description="Advertised capabilities (e.g. ['nth-dao.chat']).",
+    )
 
 
 def _state_workspace(request: Request) -> Optional[Path]:
@@ -1299,8 +1425,87 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/agents", response_model=List[AgentEntryM])
     def v2_agents(request: Request) -> List[Dict[str, Any]]:
-        live = _read_agents_from_disk(_state_workspace(request))
-        return live if live else _seed_agents()
+        # Phase 3a: prepend supervised agents (kind=local, live) ahead
+        # of the disk-or-seed list so the UI surfaces them first.
+        # The supervisor view is the source-of-truth for "agents I
+        # spawned this session"; disk reflects identities written by
+        # other parts of the stack; seed is the fallback for demo.
+        sup = _state_supervisor(request)
+        supervised: List[Dict[str, Any]] = []
+        if sup is not None:
+            try:
+                for rec in sup.list_agents():
+                    supervised.append(rec.to_agent_entry())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("v2_api: supervisor list_agents failed: %s", exc)
+        disk = _read_agents_from_disk(_state_workspace(request))
+        base = disk if disk else _seed_agents()
+        # Dedup by did so a hub restart that re-reads a supervised
+        # agent's identity from disk doesn't double-render it.
+        seen_dids = {a["did"] for a in supervised}
+        merged = supervised + [a for a in base if a.get("did") not in seen_dids]
+        return merged
+
+    @app.post(
+        "/api/v2/agents/spawn",
+        status_code=201,
+        response_model=SpawnResponseM,
+    )
+    def v2_agents_spawn(
+        body: SpawnAgentBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Phase 3a: ask the supervisor to bring up a new agent.
+        Returns the AgentEntry the freshly-spawned agent will be
+        rendered as. Phase 3b will additionally issue a cap_token
+        and attach it before returning. """
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(
+                status_code=503,
+                detail="agent supervisor unavailable",
+            )
+        try:
+            record = sup.spawn(
+                kind=body.kind,
+                label=body.label,
+                capabilities=body.capabilities,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("v2_api: spawn failed: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=f"spawn failed: {exc}",
+            )
+        return {
+            "agent_id": record.agent_id,
+            "did": record.did,
+            "kind": record.kind,
+            "label": record.label,
+            "pid": record.pid,
+            "agent": record.to_agent_entry(),
+        }
+
+    @app.post("/api/v2/agents/{agent_id}/stop")
+    def v2_agents_stop(
+        agent_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Phase 3a: stop a supervised agent. Idempotent — repeated
+        stops return 404 to avoid masking client retry logic. """
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(
+                status_code=503,
+                detail="agent supervisor unavailable",
+            )
+        ok = sup.stop(agent_id)
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail=f"agent {agent_id!r} not under supervision",
+            )
+        return {"agent_id": agent_id, "stopped": True}
 
     @app.get("/api/v2/cap_tokens", response_model=List[CapTokenSummaryM])
     def v2_cap_tokens(request: Request) -> List[Dict[str, Any]]:

@@ -209,3 +209,152 @@ def test_receipt_verifies_via_existing_verifier(hub_client: TestClient) -> None:
     # (ok, reason). Handle both.
     ok = result[0] if isinstance(result, tuple) else result
     assert ok, f"verify_receipt failed: {result!r}"
+
+
+def test_receipts_endpoint_returns_chronological_order(tmp_path: Path) -> None:
+    """Bug discovered during Phase 2 browser walk-through 2026-06-11:
+    ``_read_receipts_from_disk`` returned filename-ASCII order, so a
+    mix of uuid-hex receipt ids (from Phase 2 POST /approve) and
+    rcpt-aaa* names (from Phase 1.5 seed_workspace) put the newest
+    signed receipt in the middle of the list. StatusBar's chain head
+    computation (``receipts[-1].content_hash``) silently showed stale
+    data. The disk reader now sorts by issued_at ascending.
+
+    Test does NOT spin up the FastAPI app — calls the disk reader
+    directly to keep it focused on the sort guarantee. """
+    from nth_dao.web.v2_api import _read_receipts_from_disk
+
+    rdir = tmp_path / "team_receipts"
+    rdir.mkdir()
+
+    # Three receipts, deliberately ordered so filename-ASCII sort
+    # would produce a WRONG chronological tail.
+    fixtures = [
+        # filename                  issued_at                    content_hash
+        ("rcpt-aaa1.json",          "2026-06-09T11:20:00Z",      "aaaa0001"),  # OLDEST
+        ("zzz-newest-receipt.json", "2026-06-11T15:00:00Z",      "ffff9999"),  # NEWEST chronologically
+        ("rcpt-aaa2.json",          "2026-06-09T13:45:00Z",      "bbbb0002"),  # MIDDLE
+    ]
+    for fn, ts, ch in fixtures:
+        (rdir / fn).write_text(json.dumps({
+            "id": fn[:-5],
+            "content_hash": ch,
+            "issued_at": ts,
+            "signer_did": "did:key:test",
+            "goal_id": "g",
+            "prev_content_hash": "",
+            "summary": "s",
+        }), encoding="utf-8")
+
+    # Filename ASCII sort would put "rcpt-aaa2.json" last (the
+    # MIDDLE receipt). Verify our chronological sort puts the
+    # NEWEST receipt last.
+    result = _read_receipts_from_disk(tmp_path)
+    assert len(result) == 3
+    assert result[0]["content_hash"] == "aaaa0001", "oldest should be first"
+    assert result[1]["content_hash"] == "bbbb0002", "middle should be middle"
+    assert result[2]["content_hash"] == "ffff9999", (
+        "newest should be LAST; "
+        "regression: ASCII filename sort would put 'rcpt-aaa2' here"
+    )
+
+
+def test_receipts_sort_tie_breaks_on_content_hash(tmp_path: Path) -> None:
+    """When two receipts share an issued_at (sub-ms collision or
+    seed dup), break the tie on content_hash ascending so the
+    LEX-GREATEST hash ends up at receipts[-1] — matching
+    ReceiptStore.head_content_hash's documented convention. """
+    from nth_dao.web.v2_api import _read_receipts_from_disk
+
+    rdir = tmp_path / "team_receipts"
+    rdir.mkdir()
+
+    # Two receipts at the same instant — only content_hash distinguishes.
+    for fn, ts, ch in [
+        ("z.json", "2026-06-11T15:00:00Z", "ffff"),
+        ("a.json", "2026-06-11T15:00:00Z", "0000"),
+    ]:
+        (rdir / fn).write_text(json.dumps({
+            "id": fn[:-5], "content_hash": ch, "issued_at": ts,
+            "signer_did": "x", "goal_id": "g",
+            "prev_content_hash": "", "summary": "s",
+        }), encoding="utf-8")
+
+    result = _read_receipts_from_disk(tmp_path)
+    assert [r["content_hash"] for r in result] == ["0000", "ffff"]
+    # The chain head shown by the frontend is result[-1] — must be
+    # the lex-greatest hash to match head_content_hash.
+    assert result[-1]["content_hash"] == "ffff"
+
+
+def test_receipts_sort_mixed_timezone_offsets(tmp_path: Path) -> None:
+    """Review fix 2026-06-11: lex sort on ISO strings silently
+    LIES when offset suffixes differ. Worked example where lex
+    and true-UTC ordering DISAGREE:
+
+      R1: "2026-06-11T05:00:00+00:00" → UTC 05:00
+      R2: "2026-06-11T20:00:00+08:00" → UTC 12:00  (20 - 8 = 12)
+      R3: "2026-06-11T18:00:00+00:00" → UTC 18:00
+
+      Lex order (broken):  R1(05) < R3(18) < R2(20)   → tail = R2 wrong
+      UTC order (correct): R1(05) < R2(12) < R3(18)   → tail = R3 right
+
+    _parse_issued_at normalises to UTC so the sort key reflects
+    true instants. """
+    from nth_dao.web.v2_api import _read_receipts_from_disk
+
+    rdir = tmp_path / "team_receipts"
+    rdir.mkdir()
+
+    for fn, ts, ch in [
+        ("R3.json", "2026-06-11T18:00:00+00:00", "ccc"),  # UTC 18:00 — newest
+        ("R2.json", "2026-06-11T20:00:00+08:00", "bbb"),  # UTC 12:00 — middle
+        ("R1.json", "2026-06-11T05:00:00+00:00", "aaa"),  # UTC 05:00 — oldest
+    ]:
+        (rdir / fn).write_text(json.dumps({
+            "id": fn[:-5], "content_hash": ch, "issued_at": ts,
+            "signer_did": "x", "goal_id": "g",
+            "prev_content_hash": "", "summary": "s",
+        }), encoding="utf-8")
+
+    result = _read_receipts_from_disk(tmp_path)
+    hashes = [r["content_hash"] for r in result]
+    # UTC chronology: 05:00 < 12:00 < 18:00 → aaa, bbb, ccc.
+    # Naive lex sort would put bbb LAST (because "20:00..." > "18:00...").
+    assert hashes == ["aaa", "bbb", "ccc"], (
+        f"timezone normalisation failed: got {hashes} "
+        "(naive lex would put 'bbb' last because '20' > '18')"
+    )
+    # Specifically, the tail MUST be R3 (UTC 18:00) — the
+    # StatusBar's chain head must show R3, not R2.
+    assert result[-1]["content_hash"] == "ccc"
+
+
+def test_receipts_sort_empty_issued_at_lands_at_front(tmp_path: Path) -> None:
+    """Empty / malformed issued_at sorts to the FRONT (not the
+    middle of the lex order, which would corrupt receipts[-1]).
+    Aligns with ReceiptStore.head_content_hash which effectively
+    skips un-timestamped entries. """
+    from nth_dao.web.v2_api import _read_receipts_from_disk
+
+    rdir = tmp_path / "team_receipts"
+    rdir.mkdir()
+
+    for fn, ts, ch in [
+        ("good.json",    "2026-06-11T15:00:00Z", "good"),
+        ("nots.json",    "",                     "nots"),  # missing
+        ("malformed.json", "not-a-date",         "malf"),
+    ]:
+        (rdir / fn).write_text(json.dumps({
+            "id": fn[:-5], "content_hash": ch, "issued_at": ts,
+            "signer_did": "x", "goal_id": "g",
+            "prev_content_hash": "", "summary": "s",
+        }), encoding="utf-8")
+
+    result = _read_receipts_from_disk(tmp_path)
+    # The good one MUST be at the tail so the StatusBar chain head
+    # picks it up. Order of the bad ones at the front is
+    # implementation-defined but they MUST NOT be at the tail.
+    assert result[-1]["content_hash"] == "good"
+    front_hashes = {r["content_hash"] for r in result[:-1]}
+    assert front_hashes == {"nots", "malf"}
