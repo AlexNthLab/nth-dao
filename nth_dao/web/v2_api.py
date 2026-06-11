@@ -1441,9 +1441,16 @@ def _proxy_ssestream(
             # browser would then buffer. ``hasattr(exc, "read")``
             # is redundant — urllib.error.HTTPError ALWAYS has a
             # ``read`` method (it's a file-like response wrapper).
+            # R2-5 fix (review round Phase 5.2 R3): narrow the catch
+            # to the realistic failure modes for exc.read on an
+            # already-broken HTTPError stream. OSError covers
+            # socket.timeout / ConnectionResetError; ValueError
+            # covers http.client's framing errors. Anything else
+            # (TypeError from passing wrong arg) is a real bug we
+            # want surfaced, not swallowed.
             try:
                 body = exc.read(4096)
-            except Exception:  # noqa: BLE001 — best-effort error path
+            except (OSError, ValueError):
                 body = b""
             _safe_put(
                 b"data: " + json.dumps({

@@ -2341,20 +2341,31 @@ def test_anthropic_sdk_backend_maps_api_timeout_to_TimeoutError(
     [
         ("RateLimitError", TimeoutError, "rate-limited"),
         ("APIConnectionError", RuntimeError, "unreachable"),
-        ("BadRequestError", RuntimeError, "rejected the request"),
+        # R2-3 (review round Phase 5.2 R3): BadRequestError now
+        # maps to ValueError (handler routes → 400 bad-request)
+        # to match our own input-validation pattern.
+        ("BadRequestError", ValueError, "rejected the request"),
+        # R2-4 (review round Phase 5.2 R3): APIStatusError fallback
+        # for any other status-based SDK error.
+        ("PermissionDeniedError", RuntimeError, "returned status"),
+        ("NotFoundError", RuntimeError, "returned status"),
     ],
 )
+@pytest.mark.parametrize("method", ["ask", "stream_ask"])
 def test_anthropic_sdk_backend_maps_extended_sdk_errors(
     monkeypatch: pytest.MonkeyPatch,
     exc_cls: str,
     expected_exc: type,
     expected_match: str,
+    method: str,
 ) -> None:
-    """H-1 fix (review round Phase 5.2 R2): the extra SDK error
-    classes (RateLimitError → 504 retry hint, APIConnectionError
-    → 502 network diag, BadRequestError → 502 request-shape diag)
-    each need their own translation. Parametrized so a future SDK
-    rename that drops one of these surfaces here. """
+    """H-1 + R2-1 + R2-3 + R2-4 fix (review rounds Phase 5.2 R2 + R3):
+    every extended SDK error class is exercised through BOTH the
+    buffered ``ask`` AND the streaming ``stream_ask`` paths. The
+    streaming dimension (R2-1) was previously uncovered — the fake
+    client only had ``create``, not ``stream``. Now ``stream`` is
+    a context manager whose ``__enter__`` raises the same exception
+    so the streaming except-set is exercised identically. """
     pytest.importorskip("anthropic")
     import anthropic as _anth
     from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
@@ -2372,29 +2383,49 @@ def test_anthropic_sdk_backend_maps_extended_sdk_errors(
 
     cls = getattr(_anth, exc_cls)
 
+    def _raise() -> None:
+        # APIConnectionError takes ``request=``; everything else
+        # takes ``(message, response, body)`` like AuthenticationError.
+        if exc_cls == "APIConnectionError":
+            raise cls(message="boom", request=_FakeRequest())
+        raise cls(
+            message="boom",
+            response=_FakeResponse(),  # type: ignore[arg-type]
+            body=None,
+        )
+
+    class _FakeStream:
+        # R2-1 fix: streaming-path counterpart. The production code
+        # does ``with client.messages.stream(...) as stream`` then
+        # iterates ``stream.text_stream``. Raising at ``__enter__``
+        # exercises the same except-set as the buffered path.
+        def __enter__(self) -> "_FakeStream":
+            _raise()
+            return self  # unreachable
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
     class _FakeMessages:
         def create(self, **_kw: object) -> object:
-            # All three accept (message, response, body) — same as
-            # AuthenticationError. APIConnectionError differs (takes
-            # ``request=`` instead). Branch on which one we're
-            # raising so the constructor matches the SDK signature.
-            if exc_cls == "APIConnectionError":
-                raise cls(message="boom", request=_FakeRequest())
-            raise cls(
-                message="boom",
-                response=_FakeResponse(),  # type: ignore[arg-type]
-                body=None,
-            )
+            _raise()
+
+        def stream(self, **_kw: object) -> "_FakeStream":
+            return _FakeStream()
 
     class _FakeClient:
         def __init__(self, **_kw: object) -> None:
             self.messages = _FakeMessages()
 
     monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    backend = _AnthropicSdkAskBackend()
     with pytest.raises(expected_exc, match=expected_match):
-        _AnthropicSdkAskBackend().ask(
-            {"prompt": "hi"}, timeout_s=5.0,
-        )
+        if method == "ask":
+            backend.ask({"prompt": "hi"}, timeout_s=5.0)
+        else:
+            # Stream is a generator — fully consume to drive the
+            # exception through.
+            list(backend.stream_ask({"prompt": "hi"}, timeout_s=5.0))
 
 
 def test_anthropic_sdk_backend_maps_auth_error_to_RuntimeError(

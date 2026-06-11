@@ -347,11 +347,19 @@ class _AnthropicSdkAskBackend(_AskBackend):
     via ``params["model"]`` for one-off bigger or cheaper calls. """
 
     name = "claude-code"
-    # M-1 fix (review round Phase 5.2 R2): bumped 60 → 120. Streaming
-    # generations on Sonnet 4.6 can stretch past 60s for longer
-    # outputs; 120s gives the SDK headroom without exceeding the
-    # hub proxy's per-method ceiling (_A2A_METHOD_TIMEOUTS:
-    # ask=65s, ask-stream=125s — both still > 120s backend budget).
+    # M-1 fix (review round Phase 5.2 R2): bumped 60 → 120.
+    # Streaming generations on Sonnet 4.6 can stretch past 60s for
+    # longer outputs.
+    # R2-2 correction (review round Phase 5.2 R3): the proxy ceilings
+    # in _A2A_METHOD_TIMEOUTS are ask=65s and ask-stream=125s. So:
+    #   - ask-stream (125s > 120s) → SDK budget dominates; backend
+    #     hits its own TimeoutError first, surfaced as 504
+    #   - ask (65s < 120s) → PROXY budget dominates; the proxy
+    #     times out and returns 502 before the SDK reaches its
+    #     own 120s limit. The SDK's 120s is never observed on the
+    #     buffered path.
+    # That asymmetry is fine — buffered ask is by design for
+    # short prompts; long outputs should use ask-stream.
     DEFAULT_TIMEOUT_S = 120.0
     DEFAULT_MODEL = "claude-sonnet-4-6"
     DEFAULT_MAX_TOKENS = 1024
@@ -455,9 +463,28 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 "check network / proxy / DNS"
             ) from exc
         except anthropic.BadRequestError as exc:
-            raise RuntimeError(
+            # R2-3 fix (review round Phase 5.2 R3): BadRequestError
+            # is by definition a CALLER mistake (bad model name,
+            # malformed messages, exceeded max_tokens range). Route
+            # to ValueError so the A2A handler returns 400
+            # bad-request, consistent with our own input validation
+            # (empty prompt / oversized prompt also raise ValueError).
+            raise ValueError(
                 f"anthropic API rejected the request ({exc}); "
                 "check model name / max_tokens / prompt shape"
+            ) from exc
+        except anthropic.APIStatusError as exc:
+            # R2-4 fix (review round Phase 5.2 R3): catch-all for
+            # any other status-based SDK error
+            # (PermissionDeniedError 403, NotFoundError 404,
+            # APIError 500). These are rare (account / API-version
+            # / Anthropic-side outages) but without this branch
+            # they'd fall to the generic ``Exception`` catch
+            # in the A2A handler with "backend-failed", losing
+            # the actionable HTTP status code from the SDK.
+            raise RuntimeError(
+                f"anthropic API returned status {exc.status_code}: "
+                f"{exc}"
             ) from exc
 
         # The SDK returns a list of content blocks; for plain text
@@ -553,9 +580,28 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 "check network / proxy / DNS"
             ) from exc
         except anthropic.BadRequestError as exc:
-            raise RuntimeError(
+            # R2-3 fix (review round Phase 5.2 R3): BadRequestError
+            # is by definition a CALLER mistake (bad model name,
+            # malformed messages, exceeded max_tokens range). Route
+            # to ValueError so the A2A handler returns 400
+            # bad-request, consistent with our own input validation
+            # (empty prompt / oversized prompt also raise ValueError).
+            raise ValueError(
                 f"anthropic API rejected the request ({exc}); "
                 "check model name / max_tokens / prompt shape"
+            ) from exc
+        except anthropic.APIStatusError as exc:
+            # R2-4 fix (review round Phase 5.2 R3): catch-all for
+            # any other status-based SDK error
+            # (PermissionDeniedError 403, NotFoundError 404,
+            # APIError 500). These are rare (account / API-version
+            # / Anthropic-side outages) but without this branch
+            # they'd fall to the generic ``Exception`` catch
+            # in the A2A handler with "backend-failed", losing
+            # the actionable HTTP status code from the SDK.
+            raise RuntimeError(
+                f"anthropic API returned status {exc.status_code}: "
+                f"{exc}"
             ) from exc
 
         yield "done", {
