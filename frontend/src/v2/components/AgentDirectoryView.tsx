@@ -168,12 +168,16 @@ export function AgentDirectoryView({
         at: Date.now(),
       });
     } finally {
-      // Only clear the slot if it still points at OUR controller —
-      // a newer call may have replaced it.
+      // N-1 fix (review round Phase 3f R2): markBusy(false) must
+      // ALSO be gated on still-owning the slot. The original code
+      // ran it unconditionally, which under double-click sequences
+      // re-enabled the button while the new request was still in
+      // flight. Now both the slot delete AND the busy clear only
+      // happen when we still own the controller.
       if (inflight.current.get(did) === ctrl) {
         inflight.current.delete(did);
+        markBusy(did, false);
       }
-      markBusy(did, false);
     }
   }
 
@@ -200,10 +204,14 @@ export function AgentDirectoryView({
         at: Date.now(),
       });
     } finally {
+      // N-1 fix (review round Phase 3f R2): same as handlePing —
+      // gate the busy clear on still-owning the slot, otherwise
+      // a stale finally from the previous request re-enables the
+      // button while the newer one is still in flight.
       if (inflight.current.get(did) === ctrl) {
         inflight.current.delete(did);
+        markBusy(did, false);
       }
-      markBusy(did, false);
     }
   }
 
