@@ -50,6 +50,13 @@ import type {
 const helperA = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A";
 const helperB = "did:key:z6MkpQ8eF1xRzL3tJyN5sWvD9XbA2C7uYkP4hM8kT6f3B";
 
+/* Phase 3f note (BUG-6, review round R1): mock seeds deliberately
+ * OMIT the optional ``source`` field — only agent-raised decisions
+ * (via the supervisor's decision_raiser closure) carry that field,
+ * so the seed shape matches what _seed_decisions() returns from the
+ * backend. Don't be surprised that the "agent" badge in DecisionCard
+ * never appears in mock / dev-mode; you need a real running agent
+ * raising a real decision_raised event to see it. */
 export const mockDecisions: Decision[] = [
   {
     id: "dec-001",

@@ -676,10 +676,14 @@ function AppInner() {
         onIssueCap={handleIssueCap}
         onSendMessage={handleSendToAgent}
         /* Phase 3f: route ping + a2a/echo through the typed
-           fetchers. Failures throw — AgentDirectoryView catches
-           and renders the error inside the per-row result box. */
-        onPingAgent={(did) => pingAgentApi(did)}
-        onA2AEcho={(did, params) => a2aEchoApi(did, params)}
+           fetchers. Both return {status, body} regardless of HTTP
+           status so the UI can color-code 404/502/etc separately
+           (R1 BUG-2 fix). The signal lets the component cancel
+           on unmount / re-test (R1 BUG-3 fix). */
+        onPingAgent={(did, signal) => pingAgentApi(did, signal)}
+        onA2AEcho={(did, params, signal) =>
+          a2aEchoApi(did, params, { signal })
+        }
       />
     );
   } else if (active === "chat") {

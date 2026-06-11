@@ -18,7 +18,7 @@
  * "where do agents come from" answer must be one click away.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   IconSearch, IconSend, IconUserPlus, IconUsers, IconWifi, IconZap,
 } from "./Icons";
@@ -40,18 +40,25 @@ export interface AgentDirectoryViewProps {
    *  omitted the button is hidden rather than render a no-op. */
   onSendMessage?: (did: string) => void;
   /** Phase 3f (2026-06-11): ping a supervised agent via the hub
-   *  proxy (GET /api/v2/agents/{did}/ping). Returns the parsed
-   *  identity card on success; throws on 404/502. The button is
-   *  hidden when omitted OR when the agent isn't supervised. */
-  onPingAgent?: (did: string) => Promise<unknown>;
+   *  proxy (GET /api/v2/agents/{did}/ping). Returns ``{status,
+   *  body}`` regardless of HTTP status so the UI can color-code
+   *  404 vs 502 vs success separately (BUG-2 fix R1). The signal
+   *  cancels the in-flight fetch on unmount / re-test (BUG-3
+   *  fix R1). The button is hidden when omitted OR when the
+   *  agent isn't supervised. */
+  onPingAgent?: (did: string, signal?: AbortSignal) =>
+    Promise<{ status: number; body: unknown }>;
   /** Phase 3f: call /a2a/echo on a supervised agent via the hub
    *  proxy. The frontend sends without Authorization (no access to
    *  the hub's signing key from the browser); the demonstrated
    *  outcome is a 401 from the child's auth check. The UI renders
    *  both 200 and 401 paths so the operator can see the wire +
    *  the auth rejection. */
-  onA2AEcho?: (did: string, params: Record<string, unknown>) =>
-    Promise<{ status: number; body: unknown }>;
+  onA2AEcho?: (
+    did: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<{ status: number; body: unknown }>;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -98,60 +105,105 @@ export function AgentDirectoryView({
   const [probes, setProbes] = useState<Map<string, ProbeResult>>(
     new Map(),
   );
-  const [busyDid, setBusyDid] = useState<string | null>(null);
+  /** BUG-1 fix (review round Phase 3f R1): SET of busy DIDs, not a
+   *  single string. The previous single-value state allowed a click
+   *  on agent B's button to "free" agent A's still-in-flight ping,
+   *  re-enabling A's button mid-request. With a Set, each agent has
+   *  its own busy lifecycle. */
+  const [busyDids, setBusyDids] = useState<Set<string>>(new Set());
+  /** BUG-3 fix (review round Phase 3f R1): one AbortController per
+   *  agent so unmount / re-test cancels the in-flight request
+   *  instead of leaking a setState into a dead component. The ref
+   *  lifetime equals the component's; effect-time cleanup aborts
+   *  everything outstanding. */
+  const inflight = useRef<Map<string, AbortController>>(new Map());
+  useEffect(() => {
+    const map = inflight.current;
+    return () => {
+      for (const ctrl of map.values()) ctrl.abort();
+      map.clear();
+    };
+  }, []);
+
+  function markBusy(did: string, busy: boolean) {
+    setBusyDids((s) => {
+      const next = new Set(s);
+      if (busy) next.add(did);
+      else next.delete(did);
+      return next;
+    });
+  }
+
+  function setProbe(did: string, p: ProbeResult) {
+    setProbes((m) => {
+      const next = new Map(m);
+      next.set(did, p);
+      return next;
+    });
+  }
 
   async function handlePing(did: string) {
     if (!onPingAgent) return;
-    setBusyDid(did);
+    // Cancel any previous in-flight probe for this same DID so a
+    // double-click doesn't race two responses into setProbe.
+    inflight.current.get(did)?.abort();
+    const ctrl = new AbortController();
+    inflight.current.set(did, ctrl);
+    markBusy(did, true);
     try {
-      const body = await onPingAgent(did);
-      setProbes((m) => {
-        const next = new Map(m);
-        next.set(did, { kind: "ping", status: 200, body, at: Date.now() });
-        return next;
+      const result = await onPingAgent(did, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      setProbe(did, {
+        kind: "ping",
+        status: result.status,
+        body: result.body,
+        at: Date.now(),
       });
     } catch (e) {
-      setProbes((m) => {
-        const next = new Map(m);
-        next.set(did, {
-          kind: "ping",
-          status: 0,
-          body: { error: String(e) },
-          at: Date.now(),
-        });
-        return next;
+      if (ctrl.signal.aborted) return;
+      setProbe(did, {
+        kind: "ping",
+        status: 0,
+        body: { error: String(e) },
+        at: Date.now(),
       });
     } finally {
-      setBusyDid(null);
+      // Only clear the slot if it still points at OUR controller —
+      // a newer call may have replaced it.
+      if (inflight.current.get(did) === ctrl) {
+        inflight.current.delete(did);
+      }
+      markBusy(did, false);
     }
   }
 
   async function handleA2A(did: string) {
     if (!onA2AEcho) return;
-    setBusyDid(did);
+    inflight.current.get(did)?.abort();
+    const ctrl = new AbortController();
+    inflight.current.set(did, ctrl);
+    markBusy(did, true);
     try {
-      const { status, body } = await onA2AEcho(did, {
-        hello: "from-v2-console",
-        at: new Date().toISOString(),
-      });
-      setProbes((m) => {
-        const next = new Map(m);
-        next.set(did, { kind: "echo", status, body, at: Date.now() });
-        return next;
-      });
+      const { status, body } = await onA2AEcho(
+        did,
+        { hello: "from-v2-console", at: new Date().toISOString() },
+        ctrl.signal,
+      );
+      if (ctrl.signal.aborted) return;
+      setProbe(did, { kind: "echo", status, body, at: Date.now() });
     } catch (e) {
-      setProbes((m) => {
-        const next = new Map(m);
-        next.set(did, {
-          kind: "echo",
-          status: 0,
-          body: { error: String(e) },
-          at: Date.now(),
-        });
-        return next;
+      if (ctrl.signal.aborted) return;
+      setProbe(did, {
+        kind: "echo",
+        status: 0,
+        body: { error: String(e) },
+        at: Date.now(),
       });
     } finally {
-      setBusyDid(null);
+      if (inflight.current.get(did) === ctrl) {
+        inflight.current.delete(did);
+      }
+      markBusy(did, false);
     }
   }
 
@@ -542,7 +594,7 @@ export function AgentDirectoryView({
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      disabled={busyDid === a.did}
+                      disabled={busyDids.has(a.did)}
                       onClick={(e) => {
                         e.stopPropagation();
                         void handlePing(a.did);
@@ -557,7 +609,7 @@ export function AgentDirectoryView({
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      disabled={busyDid === a.did}
+                      disabled={busyDids.has(a.did)}
                       onClick={(e) => {
                         e.stopPropagation();
                         void handleA2A(a.did);

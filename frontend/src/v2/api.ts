@@ -222,13 +222,33 @@ export interface A2ACallResponse {
   body: A2AEchoEnvelope | Record<string, unknown>;
 }
 
+/** Phase 3f BUG-2 fix (review round R1): return ``{status, body}``
+ *  rather than throwing on non-2xx — same shape as ``a2aEchoApi``
+ *  so the UI handler can color-code 404/502/503 separately instead
+ *  of collapsing all failures to "ping ERR" with status 0. The
+ *  body parse is best-effort; on a non-JSON response we still
+ *  surface the HTTP status. */
 export async function pingAgentApi(
   did: string, signal?: AbortSignal,
-): Promise<A2APingResult> {
-  return getJson<A2APingResult>(
-    `/agents/${encodeURIComponent(did)}/ping`,
-    signal,
+): Promise<A2ACallResponse> {
+  const res = await fetch(
+    `${BASE}/agents/${encodeURIComponent(did)}/ping`,
+    {
+      signal,
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+    },
   );
+  let body: A2AEchoEnvelope | Record<string, unknown>;
+  try {
+    // Both A2APingResult (success) and the hub's error envelope
+    // are valid object shapes; cast through the union for the
+    // typed return without per-field narrowing here.
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    body = { error: { code: "parse-failed", message: "non-JSON response" } };
+  }
+  return { status: res.status, body };
 }
 
 export async function a2aEchoApi(
