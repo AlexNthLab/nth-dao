@@ -1155,7 +1155,14 @@ def _state_supervisor(request: Request) -> Optional[Any]:
     lock + re-check + build). Two concurrent first-requests on a
     multi-worker deployment can no longer each construct a
     supervisor and clobber the first one — the second waits at
-    the lock and sees the populated attribute on re-check. """
+    the lock and sees the populated attribute on re-check.
+
+    Phase 3c (2026-06-11): the lazy build now wires the
+    workspace-scoped ``cap_token_dir`` and a ``receipt_persistor``
+    closure that forwards child-signed receipts into the hub's
+    ReceiptStore. Without these the supervisor falls back to
+    Phase 3b semantics (cap_token issued + audited, but never
+    delivered to the child; receipts INFO-logged + dropped). """
     state = request.app.state
     sup = getattr(state, "v2_supervisor", None)
     if sup is not None:
@@ -1164,9 +1171,44 @@ def _state_supervisor(request: Request) -> Optional[Any]:
         sup = getattr(state, "v2_supervisor", None)
         if sup is None:
             from .agent_supervisor import build_default_supervisor
-            sup = build_default_supervisor()
+
+            # Capture workspace-scoped cap_token dir if available.
+            # When the workspace isn't bootstrapped (early dev
+            # state), the supervisor still works for Phase 3a/3b
+            # semantics — it just skips the file-delivery path.
+            cap_token_dir: Optional[Path] = None
+            workspace = _state_workspace(request)
+            if workspace is not None:
+                cap_token_dir = workspace / "sandbox" / "agents"
+
+            # Receipt persistor closure — looks up state.receipts
+            # FRESH each call so a hub that bootstraps the receipts
+            # store AFTER the supervisor is built (rare but
+            # possible) still works.
+            def _receipt_persistor(
+                agent_id: str, receipt: Dict[str, Any],
+            ) -> None:
+                receipts = getattr(state.nth, "receipts", None)
+                if receipts is None:
+                    logger.warning(
+                        "v2_api: agent %s signed a receipt but "
+                        "state.nth.receipts is unavailable — "
+                        "dropping",
+                        agent_id,
+                    )
+                    return
+                receipts.save(receipt)
+
+            sup = build_default_supervisor(
+                cap_token_dir=cap_token_dir,
+                receipt_persistor=_receipt_persistor,
+            )
             state.v2_supervisor = sup
-            logger.info("v2_api: built default agent supervisor")
+            logger.info(
+                "v2_api: built default agent supervisor "
+                "(cap_token_dir=%s, persistor=on)",
+                cap_token_dir,
+            )
     return sup
 
 

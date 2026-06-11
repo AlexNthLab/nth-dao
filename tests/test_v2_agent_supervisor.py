@@ -1,5 +1,5 @@
 """
-Phase 3a/3b tests — supervised agent runtime.
+Phase 3a/3b/3c tests — supervised agent runtime.
 
 Covers:
   AgentSupervisor + InMemoryRunner unit tests (fast)
@@ -34,6 +34,8 @@ Run: pytest tests/test_v2_agent_supervisor.py -q
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -427,6 +429,57 @@ def test_spawn_persists_cap_token_in_store(hub_client: TestClient) -> None:
     assert "nth-dao.chat" not in record["capabilities"]
 
 
+def test_v2_receipt_persistor_drops_when_receipts_store_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """H-1 fix (review round Phase 3c R1): when the v2_api receipt
+    persistor closure runs but ``state.nth.receipts`` has been
+    cleared (early dev state, post-shutdown), the receipt MUST be
+    dropped with a clear WARNING. Without this coverage a future
+    refactor that renames ``state.nth.receipts`` would silently
+    drop every child-signed receipt — the only signal would be a
+    WARNING buried in logs. """
+    import logging
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    # Force the lazy supervisor build by accessing it (any GET that
+    # touches it works; use the agents listing).
+    client = TestClient(app)
+    client.get("/api/v2/agents")
+    sup = app.state.v2_supervisor
+    # Spawn an agent so we have a record to attach the receipt to.
+    r = sup.spawn(kind="mock", label="receipt-test", capabilities=[])
+    # Knock out the receipts store AFTER spawn, then fire a
+    # receipt_signed event through the supervisor. The persistor
+    # closure looks up state.nth.receipts FRESH each call.
+    app.state.nth.receipts = None
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.v2_api"):
+        sup.on_event(r.agent_id, {
+            "event": "receipt_signed",
+            "agent_id": r.agent_id,
+            "receipt": {
+                "receipt_id": "r-h1",
+                "signer_did": r.did,
+                "content_hash": "h-test",
+            },
+        })
+    msgs = [w.getMessage() for w in caplog.records
+            if w.levelno == logging.WARNING]
+    assert any("state.nth.receipts is unavailable" in m for m in msgs), (
+        f"expected a WARNING when receipts store is missing; got {msgs!r}"
+    )
+
+
 def test_spawn_503_when_node_identity_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -568,6 +621,318 @@ def test_supervisor_thread_safety_smoke() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+# Phase 3c — env-var timeout
+# ─────────────────────────────────────────────────────────────
+
+def test_handshake_timeout_env_var_positive_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3c: NTH_AGENT_HANDSHAKE_TIMEOUT_S overrides the
+    module default when set to a positive float. """
+    monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", "3.5")
+    runner = SubprocessRunner()
+    assert runner._handshake_timeout == 3.5  # type: ignore[attr-defined]
+
+
+def test_handshake_timeout_env_var_falls_back_on_bad_input(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3c: malformed env values must log a WARNING and fall
+    back to the 10s default — silently inheriting bad values would
+    hide ops mistakes. """
+    import logging
+    monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", "not-a-number")
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        runner = SubprocessRunner()
+    assert runner._handshake_timeout == 10.0  # type: ignore[attr-defined]
+    assert any(
+        "is not a number" in r.getMessage() for r in caplog.records
+    ), f"expected a WARNING about the bad env value; got {caplog.records!r}"
+
+
+def test_handshake_timeout_env_var_rejects_non_positive(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3c: zero / negative values are nonsensical for a
+    timeout. WARNING + default. """
+    import logging
+    monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", "0")
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        runner = SubprocessRunner()
+    assert runner._handshake_timeout == 10.0  # type: ignore[attr-defined]
+    assert any(
+        "must be positive" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_explicit_handshake_timeout_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit kwarg always wins over the env var — useful in
+    tests that pin a fast timeout regardless of operator config. """
+    monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", "99.0")
+    runner = SubprocessRunner(handshake_timeout=2.0)
+    assert runner._handshake_timeout == 2.0  # type: ignore[attr-defined]
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 3c — cap_token file delivery + receipt persistor wiring
+# ─────────────────────────────────────────────────────────────
+
+def test_spawn_writes_cap_token_file_at_expected_path(
+    tmp_path: Path,
+) -> None:
+    """Phase 3c: when cap_token_dir + issuer are both set, spawn
+    atomic-writes the issued token JSON to
+    ``<cap_token_dir>/<agent_id>/cap_token.json`` so a real child
+    could poll + load it. """
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        cap_token_dir=tmp_path / "agents",
+    )
+    issued: dict = {}
+
+    def fake_issuer(did: str, _caps: list[str]) -> dict:
+        token = {
+            "token_id": "tok-abc123",
+            "subject_did": did,
+            "capabilities": ["nth:receipt_sign"],
+        }
+        issued.update(token)
+        return token
+
+    r = sup.spawn(
+        kind="mock", label="t", capabilities=[],
+        cap_token_issuer=fake_issuer,
+    )
+
+    expected = tmp_path / "agents" / r.agent_id / "cap_token.json"
+    assert expected.exists(), f"cap_token file not written at {expected}"
+    import json
+    on_disk = json.loads(expected.read_text(encoding="utf-8"))
+    assert on_disk["token_id"] == "tok-abc123"
+    assert on_disk["subject_did"] == r.did
+
+
+def test_spawn_survives_cap_token_file_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C-1 fix (review round Phase 3c R1): if the cap_token file
+    write fails (disk full, permission denied, etc.) the agent
+    must stay alive AND registered — the audit-store entry for
+    the token is already valid; killing the agent here would
+    orphan it. Operator gets a WARNING explaining the situation. """
+    import logging
+    from nth_dao.web import agent_supervisor as supmod
+
+    # Force every _atomic_write_json call to raise OSError, as if
+    # the cap_token directory's filesystem hit a quota.
+    def boom_writer(_path: str, _payload: dict) -> None:
+        raise OSError("simulated ENOSPC")
+
+    monkeypatch.setattr(supmod, "_atomic_write_json", boom_writer)
+
+    runner = InMemoryRunner()
+    sup = AgentSupervisor(runner, cap_token_dir=tmp_path / "agents")
+
+    def fake_issuer(did: str, _caps: list[str]) -> dict:
+        return {
+            "token_id": "tok-survive",
+            "subject_did": did,
+            "capabilities": ["nth:receipt_sign"],
+        }
+
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        r = sup.spawn(
+            kind="mock", label="t", capabilities=[],
+            cap_token_issuer=fake_issuer,
+        )
+
+    # The agent is still alive + registered + the token_id is
+    # stamped — only the file delivery failed.
+    assert r.cap_token_id == "tok-survive"
+    assert sup.get(r.agent_id) is not None
+    assert runner.is_alive(r.agent_id), (
+        "InMemoryRunner.is_alive must remain True — the failed "
+        "file delivery should NOT have triggered rollback"
+    )
+    warnings = [w.getMessage() for w in caplog.records
+                if w.levelno == logging.WARNING]
+    assert any(
+        "failed to deliver cap_token file" in w for w in warnings
+    ), f"expected delivery-failure WARNING; got {warnings!r}"
+
+
+def test_spawn_skips_file_write_when_no_cap_token_dir(
+    tmp_path: Path,
+) -> None:
+    """Phase 3c: supervisor with cap_token_dir=None must NOT
+    attempt to write the file even if an issuer is supplied
+    (Phase 3a/3b behaviour preserved). """
+    sup = AgentSupervisor(InMemoryRunner(), cap_token_dir=None)
+
+    def fake_issuer(did: str, _caps: list[str]) -> dict:
+        return {"token_id": "tok-xyz", "subject_did": did}
+
+    r = sup.spawn(
+        kind="mock", label="t", capabilities=[],
+        cap_token_issuer=fake_issuer,
+    )
+    # Token is still stamped on the record (3b semantics).
+    assert r.cap_token_id == "tok-xyz"
+    # But no agent directory created under tmp_path.
+    assert not any(tmp_path.iterdir()), (
+        "supervisor should not touch the filesystem when "
+        f"cap_token_dir is None; saw {list(tmp_path.iterdir())}"
+    )
+
+
+def test_subprocess_runner_passes_cap_token_file_arg() -> None:
+    """Phase 3c: when cap_token_file_path is provided, the
+    SubprocessRunner constructs a Popen cmd line that includes
+    ``--cap-token-file <path>``. Asserted via Popen monkeypatch
+    so this doesn't spawn a real child.
+
+    M-2 note (review round Phase 3c R1): the SubprocessRunner is
+    constructed OUTSIDE the mock.patch context (the ctor doesn't
+    touch subprocess.Popen — it only allocates dicts and locks).
+    Only ``runner.start()`` enters the patched region, so the
+    fake_popen substitution covers every Popen call this test
+    triggers. """
+    import unittest.mock as mock
+
+    runner = SubprocessRunner(handshake_timeout=0.5)
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        pid = 99999
+        stdout = None
+        stderr = None
+        def poll(self) -> int | None: return None
+        def terminate(self) -> None: pass
+        def kill(self) -> None: pass
+        def wait(self, timeout: float = 0) -> int: return 0
+
+    def fake_popen(cmd: list[str], **_kwargs: object) -> _FakeProc:
+        captured.append(list(cmd))
+        return _FakeProc()
+
+    with mock.patch("subprocess.Popen", side_effect=fake_popen):
+        # The handshake will time out (no stdout reader to set the
+        # event) but that's fine — we only care about the cmd line.
+        pid, did = runner.start(
+            "aid-001", "mock",
+            cap_token_file_path="/tmp/some/cap_token.json",
+        )
+
+    assert captured, "Popen wasn't called"
+    cmd = captured[0]
+    assert "--cap-token-file" in cmd
+    idx = cmd.index("--cap-token-file")
+    assert cmd[idx + 1] == "/tmp/some/cap_token.json"
+
+
+def test_receipt_persistor_called_on_receipt_signed_event() -> None:
+    """Phase 3c: supervisor.on_event for receipt_signed forwards
+    the receipt to the configured persistor. """
+    persisted: list[tuple[str, dict]] = []
+
+    def persistor(agent_id: str, receipt: dict) -> None:
+        persisted.append((agent_id, receipt))
+
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        receipt_persistor=persistor,
+    )
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    fake_receipt = {
+        "receipt_id": "r-001",
+        "signer_did": r.did,
+        "content_hash": "abc123",
+    }
+    sup.on_event(r.agent_id, {
+        "event": "receipt_signed",
+        "agent_id": r.agent_id,
+        "receipt": fake_receipt,
+    })
+    assert persisted == [(r.agent_id, fake_receipt)]
+
+
+def test_receipt_persistor_failure_logs_warning_keeps_agent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3c: a persistor that raises must NOT kill the agent —
+    the supervisor logs and continues. Otherwise a transient disk
+    hiccup would take healthy agents offline. """
+    import logging
+
+    def angry_persistor(_aid: str, _receipt: dict) -> None:
+        raise RuntimeError("disk full")
+
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        receipt_persistor=angry_persistor,
+    )
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        sup.on_event(r.agent_id, {
+            "event": "receipt_signed",
+            "agent_id": r.agent_id,
+            "receipt": {"receipt_id": "r-001", "signer_did": r.did},
+        })
+    # Agent still registered.
+    assert sup.get(r.agent_id) is not None
+    warnings = [w.getMessage() for w in caplog.records
+                if w.levelno == logging.WARNING]
+    assert any("receipt_persistor failed" in w for w in warnings)
+
+
+def test_receipt_signed_without_persistor_logs_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3c: when no persistor is configured the receipt is
+    INFO-logged + dropped (not silently). """
+    import logging
+    sup = AgentSupervisor(InMemoryRunner())  # no persistor
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    with caplog.at_level(logging.INFO, logger="nth_dao.web.agent_supervisor"):
+        sup.on_event(r.agent_id, {
+            "event": "receipt_signed",
+            "agent_id": r.agent_id,
+            "receipt": {"receipt_id": "r-001", "signer_did": r.did},
+        })
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("no persistor configured" in m for m in msgs)
+
+
+def test_agent_started_logs_a2a_port_when_advertised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3c: agent_started with an a2a_port field gets the
+    port included in the INFO log so the operator can verify the
+    child's HTTP surface is reachable. """
+    import logging
+    sup = AgentSupervisor(InMemoryRunner())
+    r = sup.spawn(kind="mock", label="t", capabilities=[])
+    with caplog.at_level(logging.INFO, logger="nth_dao.web.agent_supervisor"):
+        sup.on_event(r.agent_id, {
+            "event": "agent_started",
+            "agent_id": r.agent_id,
+            "pid": 12345,
+            "a2a_port": 54321,
+            "did": r.did,
+        })
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("a2a_port=54321" in m for m in msgs), (
+        f"expected port in log; got {msgs!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # Real subprocess smoke
 # ─────────────────────────────────────────────────────────────
 
@@ -624,7 +989,35 @@ def test_subprocess_runner_smoke() -> None:
         # returned — they're the same source.
         started = next(e for e in events if e.get("event") == "agent_started")
         assert started.get("did") == did
+        # Phase 3c: agent_started must advertise an a2a_port
+        # (kernel-chosen ephemeral port, > 1024 since we bind as
+        # an unprivileged process).
+        a2a_port = started.get("a2a_port")
+        assert isinstance(a2a_port, int) and a2a_port > 1024, (
+            f"expected an ephemeral a2a_port, got {a2a_port!r}"
+        )
         assert runner.is_alive(agent_id), "agent should be alive"
+
+        # Phase 3c: the child's /ping endpoint must answer with the
+        # identity card. Use urllib instead of requests to keep
+        # the test stdlib-only.
+        # L-2 note (review round Phase 3c R1): this assert depends
+        # on the OS scheduling the daemon serve_forever thread and
+        # the TCP socket being reachable inside 2s. A /ping timeout
+        # here is almost certainly an ENVIRONMENT issue (sandbox
+        # rules, slow CI VM, antivirus stalling the bind), not a
+        # protocol regression — file an env bug before assuming
+        # the dummy_agent's A2A surface is broken.
+        import urllib.request
+        with urllib.request.urlopen(  # noqa: S310 — localhost only
+            f"http://127.0.0.1:{a2a_port}/ping", timeout=2.0,
+        ) as resp:
+            assert resp.status == 200
+            body = json.loads(resp.read().decode("utf-8"))
+        assert body["did"] == did
+        assert body["agent_id"] == agent_id
+        assert body["kind"] == "mock"
+        assert "uptime_ms" in body
     finally:
         runner.stop(agent_id)
         # L-5 fix (2026-06-11): no magic sleep — runner.stop()
@@ -632,3 +1025,76 @@ def test_subprocess_runner_smoke() -> None:
         # returns the process is guaranteed to have exited (or
         # been kill()ed).
         assert not runner.is_alive(agent_id), "agent should be dead after stop"
+
+
+def test_subprocess_runner_cap_token_file_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Phase 3c end-to-end: spawn a real child with
+    --cap-token-file <path>, write a cap_token JSON to that path,
+    wait for the child to sign + emit ``receipt_signed``. Verifies:
+      - child polls the file (loads it from disk)
+      - child signs an nth.agent_attestation receipt with its own
+        Ed25519 identity (signer_did matches the handshake DID)
+      - receipt's timeline carries the cap_token_id we wrote
+    """
+    import json as _json
+    import uuid
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"smoke-3c-{uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        # Atomic-write the cap_token to where the child is polling.
+        cap_token = {
+            "token_id": "tok-smoke-001",
+            "subject_did": did,
+            "capabilities": ["nth:receipt_sign"],
+            "issuer_did": "did:key:zFakeIssuerForSmoke",
+        }
+        tmp = cap_token_path.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(cap_token), encoding="utf-8")
+        os.replace(str(tmp), str(cap_token_path))
+
+        # Wait up to _SMOKE_TIMEOUT for the receipt_signed event.
+        deadline = time.time() + _SMOKE_TIMEOUT
+        signed = None
+        while time.time() < deadline:
+            for e in events:
+                if e.get("event") == "receipt_signed":
+                    signed = e
+                    break
+            if signed is not None:
+                break
+            time.sleep(0.1)
+        assert signed is not None, (
+            f"child did not emit receipt_signed within {_SMOKE_TIMEOUT}s; "
+            f"events seen: {[e.get('event') for e in events]!r}"
+        )
+        receipt = signed.get("receipt")
+        assert isinstance(receipt, dict), receipt
+        assert receipt.get("signer_did") == did, (
+            "the receipt must be signed by the child's own DID, not "
+            "the hub's or anyone else's"
+        )
+        # Inspect the timeline payload for the cap_token wiring.
+        timeline = receipt.get("timeline") or []
+        attestations = [
+            e for e in timeline
+            if isinstance(e, dict) and e.get("type") == "nth.agent_attestation"
+        ]
+        assert attestations, f"no attestation entry in timeline: {timeline!r}"
+        payload = attestations[0].get("payload") or {}
+        assert payload.get("cap_token_id") == "tok-smoke-001"
+        assert payload.get("did") == did
+    finally:
+        runner.stop(agent_id)

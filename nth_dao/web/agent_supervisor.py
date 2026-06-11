@@ -1,5 +1,5 @@
 """
-Agent supervisor — Phase 3a/3b of the local-hub plan.
+Agent supervisor — Phase 3a/3b/3c of the local-hub plan.
 
 The supervisor is a per-app singleton (on ``app.state.v2_supervisor``)
 that holds a registry of live agents and a runner-strategy that
@@ -21,21 +21,35 @@ Phase 3a scope:
 Phase 3b (2026-06-11):
   - Runner.start() now returns (pid, did) and is synchronous:
     SubprocessRunner blocks until the child emits its first
-    ``agent_started`` NDJSON event with a ``did`` field; the hub
-    registers the AgentRecord under that real W3C did:key.
+    ``agent_started`` NDJSON event with a ``did`` field.
   - InMemoryRunner generates a real-shape did:key from random
     bytes (no signing key needed — tests never actually sign).
   - Supervisor.spawn() takes an optional ``cap_token_issuer``
     callback. After the child reports its DID, the supervisor
     calls the issuer with (did, capabilities) and stamps the
-    returned token's ``token_id`` on the AgentRecord. If issuance
-    raises, the just-started agent is killed before re-raising
-    so the caller never sees a child running without authority.
+    returned token's ``token_id`` on the AgentRecord. Issuer
+    raising → kill child before re-raise.
 
-Phase 3c/d will add:
-  - Cap_token delivered to the child via tempfile / IPC so it can
-    sign receipts on its own.
-  - A2A localhost HTTP endpoint per agent (random port, advertised)
+Phase 3c (2026-06-11):
+  - Cap_token tempfile delivery: after issuance the supervisor
+    atomic-writes the signed token JSON to
+    ``<cap_token_dir>/<agent_id>/cap_token.json``; the runner
+    passes that path to the child via ``--cap-token-file``.
+    Child polls and loads on next tick, then signs its own
+    ``nth.agent_attestation`` receipt and emits ``receipt_signed``.
+  - Receipt persistor: AgentSupervisor accepts a callback that
+    forwards ``receipt_signed`` events to the hub's ReceiptStore.
+    Without it the receipt is logged at INFO and dropped.
+  - A2A localhost port: the child opens a stdlib HTTP server on
+    a random port and advertises it in ``agent_started.a2a_port``.
+    Phase 3c only LOGS the port; Phase 3d will stamp it on
+    AgentRecord + AgentEntryM for the routing layer to consume.
+  - Handshake timeout is environment-configurable via
+    ``NTH_AGENT_HANDSHAKE_TIMEOUT_S`` (float seconds, positive).
+    Falls back to the 10s module default if absent / malformed.
+
+Phase 3d will add:
+  - a2a_port stamping + a hub-side A2A RPC router that uses it.
   - Decision raising from agent → /api/v2/decisions/raise
 
 Thread safety: the supervisor's ``_lock`` serialises mutations.
@@ -55,6 +69,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 logger = logging.getLogger(__name__)
@@ -126,9 +141,21 @@ class AgentRunner(Protocol):
     is not — they're concurrent. Callers waiting to OBSERVE the
     ``agent_started`` event via ``on_event`` still need a brief
     grace period (see SubprocessRunner._read_stdout_loop and the
-    smoke test's polling window). """
+    smoke test's polling window).
 
-    def start(self, agent_id: str, kind: str) -> Tuple[Optional[int], str]:
+    Phase 3c: ``cap_token_file_path`` lets the supervisor pre-
+    declare where the child should look for its issued cap_token.
+    InMemoryRunner ignores it (tests don't deliver tokens).
+    SubprocessRunner appends ``--cap-token-file <path>`` so the
+    child polls that path on each tick. """
+
+    def start(
+        self,
+        agent_id: str,
+        kind: str,
+        *,
+        cap_token_file_path: Optional[str] = None,
+    ) -> Tuple[Optional[int], str]:
         """Start the agent process and wait for its DID handshake.
 
         Returns ``(pid, did)``. On failure (spawn error, handshake
@@ -152,6 +179,38 @@ class AgentRunner(Protocol):
 # up to a few seconds on first-ever import. 10s is conservative.
 _DEFAULT_HANDSHAKE_TIMEOUT_S = 10.0
 
+# Phase 3c: env-var override. Production hubs on slow filesystems
+# (network-mounted workspaces, Windows AV scanning) may need a
+# bigger window; CI shards may want a smaller one to fail fast on
+# stuck children.
+_HANDSHAKE_TIMEOUT_ENV_VAR = "NTH_AGENT_HANDSHAKE_TIMEOUT_S"
+
+
+def _read_handshake_timeout_from_env() -> float:
+    """Resolve the handshake timeout from the environment.
+
+    Returns the module default if the var is absent, empty, not a
+    valid float, or non-positive. Logs a WARNING in the malformed
+    cases so the operator notices instead of silently falling back. """
+    raw = os.environ.get(_HANDSHAKE_TIMEOUT_ENV_VAR, "").strip()
+    if not raw:
+        return _DEFAULT_HANDSHAKE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "agent_supervisor: %s=%r is not a number; using default %.1fs",
+            _HANDSHAKE_TIMEOUT_ENV_VAR, raw, _DEFAULT_HANDSHAKE_TIMEOUT_S,
+        )
+        return _DEFAULT_HANDSHAKE_TIMEOUT_S
+    if value <= 0:
+        logger.warning(
+            "agent_supervisor: %s=%r must be positive; using default %.1fs",
+            _HANDSHAKE_TIMEOUT_ENV_VAR, raw, _DEFAULT_HANDSHAKE_TIMEOUT_S,
+        )
+        return _DEFAULT_HANDSHAKE_TIMEOUT_S
+    return value
+
 
 class InMemoryRunner:
     """Test runner — no OS process. Spawn flips an alive flag and
@@ -170,7 +229,18 @@ class InMemoryRunner:
         self._counter = 0
         self._lock = threading.Lock()
 
-    def start(self, agent_id: str, kind: str) -> Tuple[Optional[int], str]:
+    def start(
+        self,
+        agent_id: str,
+        kind: str,
+        *,
+        cap_token_file_path: Optional[str] = None,  # noqa: ARG002 — ignored
+    ) -> Tuple[Optional[int], str]:
+        # Phase 3c: ``cap_token_file_path`` is accepted for protocol
+        # parity but ignored — InMemoryRunner has no child to read
+        # from disk. Tests that exercise the file-delivery path use
+        # SubprocessRunner with a tmp_path-scoped cap_token_dir.
+        #
         # Lazy local import — keeps ``did_key`` off the module-load
         # path for the production hub, which only ever instantiates
         # SubprocessRunner via build_default_supervisor(). Tests pay
@@ -204,8 +274,14 @@ class SubprocessRunner:
     def __init__(
         self,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-        handshake_timeout: float = _DEFAULT_HANDSHAKE_TIMEOUT_S,
+        handshake_timeout: Optional[float] = None,
     ) -> None:
+        # Phase 3c: env-var override is consulted ONCE at runner
+        # construction. Per-spawn override would let one wild test
+        # poison another; this way the operator sets the env once at
+        # hub launch and every spawn under that supervisor honours it.
+        if handshake_timeout is None:
+            handshake_timeout = _read_handshake_timeout_from_env()
         self._procs: Dict[str, subprocess.Popen] = {}
         # N-1 fix (2026-06-11): track BOTH stdout and stderr reader
         # threads so a future shutdown / health check can iterate
@@ -225,7 +301,13 @@ class SubprocessRunner:
         self._on_event = on_event
         self._lock = threading.Lock()
 
-    def start(self, agent_id: str, kind: str) -> Tuple[Optional[int], str]:
+    def start(
+        self,
+        agent_id: str,
+        kind: str,
+        *,
+        cap_token_file_path: Optional[str] = None,
+    ) -> Tuple[Optional[int], str]:
         # Spawn `python -m nth_dao.web.dummy_agent --id … --kind …`.
         # Using sys.executable keeps the child on the same interpreter
         # as the hub — important on Windows where multiple Pythons
@@ -235,6 +317,11 @@ class SubprocessRunner:
             "--id", agent_id,
             "--kind", kind,
         ]
+        if cap_token_file_path:
+            # Phase 3c: child polls this path each tick; appears
+            # AFTER the supervisor receives the DID handshake and
+            # invokes the cap_token_issuer.
+            cmd.extend(["--cap-token-file", cap_token_file_path])
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -456,6 +543,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
+    """Write ``payload`` as JSON to ``path`` atomically.
+
+    Used by the supervisor to land cap_token files where the child
+    is polling. Atomic via tmp + os.replace, so the child cannot
+    see a partial / truncated file even if the writer crashes
+    mid-flight. Permissions follow the platform default (POSIX
+    umask; Windows ACL inheritance from the agent dir). """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(str(tmp), str(p))
+
+
 # Phase 3b: signature of the optional ``cap_token_issuer`` callback
 # the supervisor invokes after a child has reported its DID. The
 # callback receives ``(subject_did, capabilities)`` and returns a
@@ -470,12 +575,34 @@ class AgentSupervisor:
 
     Methods are thread-safe; mutations go through ``_lock``. Reads
     of the registry (list_agents, get) make a shallow copy so
-    callers can iterate without holding the lock. """
+    callers can iterate without holding the lock.
 
-    def __init__(self, runner: AgentRunner) -> None:
+    Phase 3c additions:
+      cap_token_dir   — where per-agent cap_token files live. After
+                        the issuer signs a token, ``spawn`` atomic-
+                        writes it under ``<dir>/<agent_id>/cap_token.json``
+                        so the child can read it. None disables the
+                        file-delivery path entirely (Phase 3b semantics).
+      receipt_persistor — invoked with ``(agent_id, receipt_dict)``
+                        whenever a child emits a ``receipt_signed``
+                        event. None → the receipt is INFO-logged and
+                        dropped. Errors from the persistor are caught
+                        + WARNING-logged; they do NOT kill the agent
+                        (a single failed persist shouldn't take an
+                        otherwise healthy agent offline). """
+
+    def __init__(
+        self,
+        runner: AgentRunner,
+        *,
+        cap_token_dir: Optional[Path] = None,
+        receipt_persistor: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> None:
         self._runner = runner
         self._agents: Dict[str, AgentRecord] = {}
         self._lock = threading.Lock()
+        self._cap_token_dir = cap_token_dir
+        self._receipt_persistor = receipt_persistor
 
     def spawn(
         self,
@@ -510,13 +637,13 @@ class AgentSupervisor:
         # gap between start() returning and our self._agents insert
         # is dominated by ``cap_token_issuer`` — in the production
         # path that's ``sign_cap_token()`` + ``CapTokenStore.record()``
-        # (one file write), tens to a few hundred milliseconds. The
-        # child emits heartbeats every ~1s, so it's plausible the
-        # first heartbeat lands in this gap — N-2 fix (review round
-        # Phase 3b R2). ``on_event`` handles that case via
-        # ``self._agents.get(agent_id)`` which is None-safe; the
-        # dropped bump is forgiven the moment the next heartbeat
-        # arrives.
+        # + ``cap_token.json`` write (Phase 3c), tens to a few
+        # hundred milliseconds. The child emits heartbeats every ~1s
+        # so it's plausible the first heartbeat lands in this gap —
+        # N-2 fix (review round Phase 3b R2). ``on_event`` handles
+        # that case via ``self._agents.get(agent_id)`` which is
+        # None-safe; the dropped bump is forgiven the moment the
+        # next heartbeat arrives.
         # C-1 fix (review round Phase 3b R1): no try/except around
         # runner.start() — the runner is responsible for its own
         # cleanup on internal failure (SubprocessRunner.start kills
@@ -525,7 +652,23 @@ class AgentSupervisor:
         # recover from at this layer, so we let it propagate
         # untouched. The previous bare try/except: raise was a
         # refactor leftover that gave a false impression of cleanup.
-        pid, did = self._runner.start(agent_id, kind)
+
+        # Phase 3c: pre-compute the cap_token file path BEFORE
+        # spawning so the runner can pass it to the child via
+        # ``--cap-token-file``. Only meaningful when both a
+        # cap_token_dir and an issuer are configured; otherwise
+        # the child runs without an authority file (Phase 3b
+        # semantics — informational, no signing).
+        cap_token_file_path: Optional[str] = None
+        if cap_token_issuer is not None and self._cap_token_dir is not None:
+            agent_dir = self._cap_token_dir / agent_id
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            cap_token_file_path = str(agent_dir / "cap_token.json")
+
+        pid, did = self._runner.start(
+            agent_id, kind,
+            cap_token_file_path=cap_token_file_path,
+        )
         if not did:
             # Runner already cleaned up; nothing for us to undo.
             raise RuntimeError(
@@ -545,6 +688,16 @@ class AgentSupervisor:
         # construction + dict insert; cleanup_needed flips off only
         # after the record is safely in self._agents.
         cleanup_needed = True
+        # Phase 3c C-1 fix (review round Phase 3c R1): hoist
+        # ``issued_token`` so we can perform the cap_token file
+        # delivery AFTER the agent is safely registered. The
+        # delivery is ancillary — the audit store already has the
+        # token after the issuer returned. A disk-full at delivery
+        # time used to roll back the spawn (cleanup_needed=True →
+        # runner.stop), orphaning the just-recorded audit entry.
+        # Now: delivery happens outside the try/finally, failures
+        # log WARNING and the agent stays alive without its file.
+        issued_token: Optional[Dict[str, Any]] = None
         try:
             cap_token_id: Optional[str] = None
             if cap_token_issuer is not None:
@@ -583,6 +736,9 @@ class AgentSupervisor:
                         tid = token.get("token_id")
                         if isinstance(tid, str) and tid:
                             cap_token_id = tid
+                            # File delivery deferred to after the
+                            # try/finally — see C-1 note above.
+                            issued_token = token
                         else:
                             # H-2 fix (review round Phase 3b R1):
                             # the issuer returned a dict but no
@@ -626,6 +782,27 @@ class AgentSupervisor:
                         "agent_supervisor: rollback stop also failed "
                         "for %s: %s", agent_id, stop_exc,
                     )
+
+        # Phase 3c: deliver the cap_token to the child via the
+        # pre-declared file path. The agent is already registered
+        # in self._agents at this point, so a failure here is
+        # logged + survived rather than killing a healthy spawn
+        # (C-1 fix — review round Phase 3c R1). The audit-store
+        # token remains valid; operator can revoke + re-issue if
+        # the file ever needs to be re-delivered.
+        if issued_token is not None and cap_token_file_path is not None:
+            try:
+                _atomic_write_json(cap_token_file_path, issued_token)
+            except OSError as exc:
+                logger.warning(
+                    "agent_supervisor: failed to deliver cap_token "
+                    "file for %s at %s (token_id=%s is valid and "
+                    "recorded in the audit store, but the child "
+                    "cannot load it — consider revoke + re-issue): "
+                    "%s",
+                    agent_id, cap_token_file_path,
+                    cap_token_id, exc,
+                )
 
         logger.info(
             "agent_supervisor: spawned %s (kind=%s, pid=%s, did=%s, cap_token=%s)",
@@ -738,12 +915,64 @@ class AgentSupervisor:
                 if record is not None:
                     record.last_seen = _now_iso()
         elif kind == "agent_started":
-            logger.info(
-                "agent_supervisor: %s reported started (child pid=%s)",
-                agent_id, event.get("pid"),
-            )
+            # Phase 3c: include a2a_port in the log line when the
+            # child advertised one. Phase 3d will stamp it on the
+            # AgentRecord so the routing layer can reach the child;
+            # for now logging is enough to verify the wiring.
+            a2a_port = event.get("a2a_port")
+            if isinstance(a2a_port, int) and a2a_port > 0:
+                logger.info(
+                    "agent_supervisor: %s reported started "
+                    "(child pid=%s, a2a_port=%d)",
+                    agent_id, event.get("pid"), a2a_port,
+                )
+            else:
+                logger.info(
+                    "agent_supervisor: %s reported started (child pid=%s)",
+                    agent_id, event.get("pid"),
+                )
         elif kind == "agent_stopping":
             logger.info("agent_supervisor: %s reported stopping", agent_id)
+        elif kind == "receipt_signed":
+            # Phase 3c: child has signed a receipt with its own
+            # AgentIdentity (typically the nth.agent_attestation
+            # receipt minted on cap_token load). Forward to the
+            # persistor; failure here is logged + swallowed so a
+            # transient disk hiccup doesn't kill an otherwise
+            # healthy agent.
+            receipt = event.get("receipt")
+            if not isinstance(receipt, dict):
+                logger.warning(
+                    "agent_supervisor: %s emitted receipt_signed "
+                    "without a dict 'receipt' field — dropping. "
+                    "Payload type: %s",
+                    agent_id, type(receipt).__name__,
+                )
+            elif self._receipt_persistor is None:
+                logger.info(
+                    "agent_supervisor: %s emitted receipt_signed "
+                    "(id=%s, signer=%s) but no persistor configured "
+                    "— dropping",
+                    agent_id,
+                    receipt.get("receipt_id", "?"),
+                    str(receipt.get("signer_did", ""))[:24] + "…",
+                )
+            else:
+                try:
+                    self._receipt_persistor(agent_id, receipt)
+                    logger.info(
+                        "agent_supervisor: %s persisted receipt "
+                        "(id=%s)",
+                        agent_id, receipt.get("receipt_id", "?"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "agent_supervisor: receipt_persistor failed "
+                        "for %s (id=%s): %s",
+                        agent_id,
+                        receipt.get("receipt_id", "?"),
+                        exc,
+                    )
         else:
             # N-4 fix (2026-06-11): unknown event types are debug-
             # logged rather than silently dropped. Phase 3b will
@@ -772,9 +1001,23 @@ class AgentSupervisor:
 # ─────────────────────────────────────────────────────────────
 
 
-def build_default_supervisor() -> AgentSupervisor:
+def build_default_supervisor(
+    *,
+    cap_token_dir: Optional[Path] = None,
+    receipt_persistor: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> AgentSupervisor:
     """Production supervisor — uses SubprocessRunner. Tests
     construct their own with InMemoryRunner.
+
+    Phase 3c (2026-06-11):
+      cap_token_dir       — when set, ``spawn`` writes per-agent
+                            cap_token.json files here and tells the
+                            runner to pass the path to the child.
+                            v2_api typically passes
+                            ``<workspace>/sandbox/agents``.
+      receipt_persistor   — forwarded into the supervisor for
+                            ``receipt_signed`` events. v2_api wires
+                            this to ``state.receipts.save``.
 
     M-2 fix (2026-06-11): the previous version relied on Python's
     closure late-binding (``supervisor`` captured by name, not by
@@ -800,6 +1043,10 @@ def build_default_supervisor() -> AgentSupervisor:
             )
 
     runner = SubprocessRunner(on_event=_on_event)
-    supervisor = AgentSupervisor(runner)
+    supervisor = AgentSupervisor(
+        runner,
+        cap_token_dir=cap_token_dir,
+        receipt_persistor=receipt_persistor,
+    )
     holder.append(supervisor)
     return supervisor
