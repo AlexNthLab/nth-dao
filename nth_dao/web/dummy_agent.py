@@ -347,7 +347,12 @@ class _AnthropicSdkAskBackend(_AskBackend):
     via ``params["model"]`` for one-off bigger or cheaper calls. """
 
     name = "claude-code"
-    DEFAULT_TIMEOUT_S = 60.0
+    # M-1 fix (review round Phase 5.2 R2): bumped 60 → 120. Streaming
+    # generations on Sonnet 4.6 can stretch past 60s for longer
+    # outputs; 120s gives the SDK headroom without exceeding the
+    # hub proxy's per-method ceiling (_A2A_METHOD_TIMEOUTS:
+    # ask=65s, ask-stream=125s — both still > 120s backend budget).
+    DEFAULT_TIMEOUT_S = 120.0
     DEFAULT_MODEL = "claude-sonnet-4-6"
     DEFAULT_MAX_TOKENS = 1024
     # M-2 fix (review round Phase 5.1 R1): widen from 8192 to
@@ -435,6 +440,25 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 f"anthropic API rejected the key ({exc}); "
                 "verify ANTHROPIC_API_KEY"
             ) from exc
+        # H-1 fix (review round Phase 5.2 R2): catch the additional
+        # SDK error classes the operator can actually hit at the
+        # API. RateLimitError → TimeoutError so the handler routes
+        # to 504 (caller can retry); the other two → RuntimeError
+        # so the handler routes to 502 with a focused message.
+        except anthropic.RateLimitError as exc:
+            raise TimeoutError(
+                f"anthropic API rate-limited ({exc}); back off"
+            ) from exc
+        except anthropic.APIConnectionError as exc:
+            raise RuntimeError(
+                f"anthropic API unreachable ({exc}); "
+                "check network / proxy / DNS"
+            ) from exc
+        except anthropic.BadRequestError as exc:
+            raise RuntimeError(
+                f"anthropic API rejected the request ({exc}); "
+                "check model name / max_tokens / prompt shape"
+            ) from exc
 
         # The SDK returns a list of content blocks; for plain text
         # prompts there's exactly one TextBlock. Concatenate text
@@ -516,6 +540,22 @@ class _AnthropicSdkAskBackend(_AskBackend):
             raise RuntimeError(
                 f"anthropic API rejected the key ({exc}); "
                 "verify ANTHROPIC_API_KEY"
+            ) from exc
+        # H-1 fix (review round Phase 5.2 R2): same extended catch
+        # set as buffered ``ask`` — see that method for rationale.
+        except anthropic.RateLimitError as exc:
+            raise TimeoutError(
+                f"anthropic API rate-limited ({exc}); back off"
+            ) from exc
+        except anthropic.APIConnectionError as exc:
+            raise RuntimeError(
+                f"anthropic API unreachable ({exc}); "
+                "check network / proxy / DNS"
+            ) from exc
+        except anthropic.BadRequestError as exc:
+            raise RuntimeError(
+                f"anthropic API rejected the request ({exc}); "
+                "check model name / max_tokens / prompt shape"
             ) from exc
 
         yield "done", {
@@ -958,10 +998,14 @@ def _start_a2a_server(
             token: Dict[str, Any],
         ) -> None:
             """Phase 5.2: write SSE response. Each backend yield
-            becomes one SSE event. Errors are flushed as a final
-            ``data:`` event with ``error`` then the connection
-            closes — the operator's browser sees the failure
-            inline instead of an unexplained socket close.
+            becomes one ``data:`` SSE event. Errors are flushed
+            as a final ``data: {"error": {...}}`` event then the
+            connection closes — the operator's browser sees the
+            failure inline instead of an unexplained socket
+            close. M-4 doc fix (review round Phase 5.2 R2):
+            previously said "event: error" which is the OTHER
+            SSE field (event type, not data payload) and would
+            confuse a reader who knows the protocol.
 
             Wire shape (line-by-line):
               HTTP/1.1 200 OK
@@ -1036,6 +1080,12 @@ def _start_a2a_server(
                         # needing a patch.
                         if not write_event({"kind": kind, "payload": payload}):
                             return
+            # N-2 (review round Phase 5.2 R2): the except blocks
+            # below intentionally do NOT check write_event's
+            # return value. The handler is already terminating —
+            # if the socket is dead the write_event silently
+            # returns False (BrokenPipeError shielded inside) and
+            # we fall out anyway. Best-effort terminal write.
             except TimeoutError as exc:
                 write_event({
                     "error": {

@@ -1888,8 +1888,16 @@ def test_child_stream_ask_flushes_error_event_when_backend_raises_mid_stream(
             yield "delta", "second "
             raise TimeoutError("simulated mid-stream timeout")
 
-    # We mirror the production wire shape by writing the SSE
-    # directly into an io.BytesIO and asserting the produced bytes.
+    # N-1 marker (review round Phase 5.2 R2): this test exercises
+    # the LOGIC PATTERN (deltas-then-error → 2 delta events + 1
+    # error event) — NOT a direct call into A2AHandler._stream_ask.
+    # Because the production child resolves backends by kind
+    # string we can't inject a custom mid-stream-raiser from
+    # outside without forking the agent process. If you reorder
+    # the except branches in dummy_agent.py's _stream_ask, this
+    # test won't catch the drift — it tests the copy here, not
+    # the live handler. Acceptable compromise; flag for any future
+    # reviewer who's tracing coverage.
     out = _io.BytesIO()
 
     def write_event(payload: dict) -> bool:
@@ -2325,6 +2333,67 @@ def test_anthropic_sdk_backend_maps_api_timeout_to_TimeoutError(
     with pytest.raises(TimeoutError, match="did not respond within"):
         _AnthropicSdkAskBackend().ask(
             {"prompt": "slow"}, timeout_s=7.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "exc_cls, expected_exc, expected_match",
+    [
+        ("RateLimitError", TimeoutError, "rate-limited"),
+        ("APIConnectionError", RuntimeError, "unreachable"),
+        ("BadRequestError", RuntimeError, "rejected the request"),
+    ],
+)
+def test_anthropic_sdk_backend_maps_extended_sdk_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: str,
+    expected_exc: type,
+    expected_match: str,
+) -> None:
+    """H-1 fix (review round Phase 5.2 R2): the extra SDK error
+    classes (RateLimitError → 504 retry hint, APIConnectionError
+    → 502 network diag, BadRequestError → 502 request-shape diag)
+    each need their own translation. Parametrized so a future SDK
+    rename that drops one of these surfaces here. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    class _FakeRequest:
+        method = "POST"
+        url = "https://api.anthropic.com/v1/messages"
+
+    class _FakeResponse:
+        status_code = 429
+        headers: dict = {}
+        request = _FakeRequest()
+
+    cls = getattr(_anth, exc_cls)
+
+    class _FakeMessages:
+        def create(self, **_kw: object) -> object:
+            # All three accept (message, response, body) — same as
+            # AuthenticationError. APIConnectionError differs (takes
+            # ``request=`` instead). Branch on which one we're
+            # raising so the constructor matches the SDK signature.
+            if exc_cls == "APIConnectionError":
+                raise cls(message="boom", request=_FakeRequest())
+            raise cls(
+                message="boom",
+                response=_FakeResponse(),  # type: ignore[arg-type]
+                body=None,
+            )
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    with pytest.raises(expected_exc, match=expected_match):
+        _AnthropicSdkAskBackend().ask(
+            {"prompt": "hi"}, timeout_s=5.0,
         )
 
 

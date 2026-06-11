@@ -1435,7 +1435,16 @@ def _proxy_ssestream(
                         # ``with`` exit).
                         return
         except urllib.error.HTTPError as exc:
-            body = exc.read() if hasattr(exc, "read") else b""
+            # M-2 + L-2 fix (review round Phase 5.2 R2): bound the
+            # error-body read at 4KB so a misbehaving child can't
+            # blast back a multi-MB error blob the operator's
+            # browser would then buffer. ``hasattr(exc, "read")``
+            # is redundant — urllib.error.HTTPError ALWAYS has a
+            # ``read`` method (it's a file-like response wrapper).
+            try:
+                body = exc.read(4096)
+            except Exception:  # noqa: BLE001 — best-effort error path
+                body = b""
             _safe_put(
                 b"data: " + json.dumps({
                     "error": {
