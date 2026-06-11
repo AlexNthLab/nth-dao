@@ -2640,29 +2640,189 @@ def test_codex_backend_raises_when_binary_missing(
         _CodexCliAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
 
 
-def test_codex_backend_translates_unauthorized_error(
+def test_codex_backend_blocks_flag_injection_via_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 5.4: when the codex OAuth session expires, the CLI
-    returns 401 / "not logged in" in stderr. Surface a targeted
-    RuntimeError pointing at ``codex login`` instead of the
-    raw exit code. """
-    import shutil
+    """CO-1 fix (review round Phase 5.4 R1): a peer with a valid
+    cap_token used to be able to override the backend's model
+    (or any future safety flag) by putting the flag in the
+    prompt text. The ``--`` POSIX separator now sits between the
+    backend's argv flags and the prompt so the CLI parser treats
+    everything after as positional. Verified by capturing the
+    argv handed to subprocess.run. """
     import subprocess as _sp
     from nth_dao.web.dummy_agent import _CodexCliAskBackend
 
-    monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/codex.exe")
+    captured: list[list[str]] = []
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **_kw: object) -> _FakeCompleted:
+        captured.append(list(argv))
+        return _FakeCompleted()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
+
+    # Peer tries to override --model via prompt text.
+    backend.ask(
+        {"prompt": "--model gpt-3.5-turbo Tell me a joke"},
+        timeout_s=30.0,
+    )
+    argv = captured[0]
+    # The "--" separator must appear before the prompt token, so
+    # the model-override-looking text is positional.
+    assert "--" in argv, argv
+    sep_idx = argv.index("--")
+    # Everything after "--" should be the prompt verbatim.
+    assert argv[sep_idx + 1] == "--model gpt-3.5-turbo Tell me a joke"
+    # And there must be NO second "--model" flag injected from the
+    # prompt (the only "--model" possible is the backend's own
+    # before "--" — which there isn't, since the test didn't pass
+    # params["model"]).
+    pre_sep = argv[:sep_idx]
+    assert "--model" not in pre_sep, (
+        f"prompt's --model leaked into argv as a flag: {pre_sep!r}"
+    )
+
+
+def test_codex_backend_arch_aware_arm64_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CO-2 fix (review round Phase 5.4 R1): on ARM64 Windows the
+    vendored binary lives under ``codex-win32-arm64``, not -x64.
+    Verified by faking ``platform.machine()`` to return 'arm64'
+    and constructing the corresponding directory layout. """
+    import platform
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    # Lay down an arm64-shaped fake install.
+    npm = tmp_path / "npm-global"
+    ps1 = npm / "codex.ps1"
+    npm.mkdir()
+    ps1.write_text("# shim", encoding="utf-8")
+    arm_bin = (
+        npm / "node_modules" / "@openai" / "codex-win32-arm64"
+        / "vendor" / "aarch64-pc-windows-msvc" / "bin"
+    )
+    arm_bin.mkdir(parents=True)
+    arm_exe = arm_bin / "codex.exe"
+    arm_exe.write_text("# vendored", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+    monkeypatch.setattr(platform, "machine", lambda: "ARM64")
+
+    resolved = _CodexCliAskBackend()._resolve_binary()
+    assert resolved == str(arm_exe), resolved
+
+
+def test_codex_backend_arch_aware_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CO-2 fix part 2: a 32-bit Windows machine arch must yield
+    a clear error, not silently pick the wrong glob hit. """
+    import platform
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    ps1 = tmp_path / "codex.ps1"
+    ps1.write_text("# shim", encoding="utf-8")
+    monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+    monkeypatch.setattr(platform, "machine", lambda: "x86")
+
+    with pytest.raises(RuntimeError, match="unsupported Windows machine arch"):
+        _CodexCliAskBackend()._resolve_binary()
+
+
+def test_codex_backend_emits_stderr_event_when_max_tokens_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CO-4 fix (review round Phase 5.4 R1): codex CLI ignores
+    ``max_tokens``; if a caller sent one they probably think
+    they're capping the budget. Emit a structured stderr event so
+    it lands in the supervisor's WARNING log instead of being
+    silently dropped. """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
+    backend.ask({"prompt": "hi", "max_tokens": 4096}, timeout_s=30.0)
+    err = capsys.readouterr().err
+    assert "codex_max_tokens_ignored" in err, err
+    assert "4096" in err
+
+
+def test_codex_backend_timeout_message_hints_tool_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CO-6 fix (review round Phase 5.4 R1): when codex hangs
+    (most likely cause: tool-use approval waiting on a closed
+    stdin), the TimeoutError message must hint at it rather than
+    just saying "didn't respond". """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    def fake_run(*_a: object, **_kw: object) -> object:
+        raise _sp.TimeoutExpired(cmd=["codex"], timeout=30.0)
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
+    with pytest.raises(TimeoutError, match="tool use|approval"):
+        backend.ask({"prompt": "hi"}, timeout_s=30.0)
+
+
+@pytest.mark.parametrize("stderr_msg", [
+    "401 Unauthorized",
+    "Not logged in. Run: codex login",
+    "Auth failed. Please run codex login to refresh.",
+])
+def test_codex_backend_translates_unauthorized_error(
+    monkeypatch: pytest.MonkeyPatch,
+    stderr_msg: str,
+) -> None:
+    """Phase 5.4: when the codex OAuth session expires, the CLI
+    can surface the failure in several phrasings (401 /
+    "not logged in" / "please run codex login"). All three must
+    route to the same targeted RuntimeError so the operator sees
+    the actionable hint regardless of version drift. """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
 
     class _FakeCompleted:
         returncode = 1
         stdout = ""
-        stderr = "401 Unauthorized: please run codex login"
+        stderr = stderr_msg
 
     monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
     backend = _CodexCliAskBackend()
-    backend._binary = "C:/fake/codex.exe"  # bypass _resolve_binary
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
     with pytest.raises(RuntimeError, match="codex login"):
-        backend.ask({"prompt": "hi"}, timeout_s=5.0)
+        backend.ask({"prompt": "hi"}, timeout_s=30.0)
 
 
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(

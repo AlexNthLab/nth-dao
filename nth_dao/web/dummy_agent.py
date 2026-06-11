@@ -793,51 +793,65 @@ class _CodexCliAskBackend(_AskBackend):
     DEFAULT_TIMEOUT_S = 90.0  # Codex is slower than Claude SDK
     DEFAULT_MAX_TOKENS = 0    # codex doesn't take max_tokens on CLI
 
-    def __init__(self) -> None:
-        # Cache the resolved binary path so we don't re-walk the
-        # npm-global tree every call. None until first ask.
-        self._binary: Optional[str] = None
-
     def _resolve_binary(self) -> str:
-        if self._binary is not None:
-            return self._binary
+        """Resolve the codex binary path each call.
+
+        CO-8 (review round Phase 5.4 R1): no caching — matches the
+        Claude CLI backend's pattern. ``shutil.which`` is cheap (a
+        dict lookup against a cached PATHEXT walk inside Python's
+        implementation) so re-resolving per spawn avoids a stale
+        cache after ``npm update``. """
         import shutil
 
-        # First check PATH for the shim — if present we walk to
-        # the vendored .exe directly (same pattern as the Claude
-        # CLI backend's .ps1 → .exe walk). codex.ps1 wraps an
-        # npm-installed package layout that bundles the actual
-        # binary under node_modules.
         shim = shutil.which("codex")
         if not shim:
             raise RuntimeError(
                 "codex CLI not on PATH — install with "
                 "'npm i -g @openai/codex' or switch agent to kind=mock"
             )
-        if shim.lower().endswith(".ps1"):
-            import glob
-            import os as _os
-            # Walk to the platform-specific vendored binary. On
-            # Windows that's
-            #   .../node_modules/@openai/codex-win32-x64/vendor/
-            #   x86_64-pc-windows-msvc/bin/codex.exe
-            shim_dir = _os.path.dirname(shim)
-            candidates = glob.glob(
-                _os.path.join(
-                    shim_dir, "node_modules", "@openai",
-                    "codex-*-x64", "vendor", "*", "bin", "codex.exe",
-                ),
-            )
-            if candidates:
-                self._binary = candidates[0]
-                return self._binary
+        if not shim.lower().endswith(".ps1"):
+            return shim
+        # CO-2 fix (review round Phase 5.4 R1): arch-aware glob.
+        # npm publishes the vendored binary under
+        # ``codex-<os>-<arch>``. On Windows that's
+        # ``codex-win32-x64`` for amd64 + ``codex-win32-arm64`` for
+        # ARM64. Hard-coding ``-x64`` was correct for the dev box
+        # but broke for any ARM64 user. Use platform.machine() to
+        # pick the right suffix; vendor/<rust-triple>/bin glob
+        # uses the matching rust triple stem to avoid
+        # cross-architecture picking on a multi-arch install.
+        import glob
+        import os as _os
+        import platform
+        mach = platform.machine().lower()
+        if mach in ("amd64", "x86_64", "x64"):
+            arch_suffix = "x64"
+            rust_triple = "x86_64-pc-windows-msvc"
+        elif mach in ("arm64", "aarch64"):
+            arch_suffix = "arm64"
+            rust_triple = "aarch64-pc-windows-msvc"
+        else:
+            # 32-bit Windows isn't supported by the codex npm pkg;
+            # surface a clear error instead of silently picking the
+            # first glob hit.
             raise RuntimeError(
-                f"found {shim} but no vendored codex.exe under its "
-                "node_modules — npm install may be incomplete; "
-                "run 'npm i -g @openai/codex' again"
+                f"codex CLI: unsupported Windows machine arch "
+                f"{platform.machine()!r}. The npm package vendors "
+                "x64 + arm64 only."
             )
-        self._binary = shim
-        return self._binary
+        shim_dir = _os.path.dirname(shim)
+        candidate = _os.path.join(
+            shim_dir, "node_modules", "@openai",
+            f"codex-win32-{arch_suffix}", "vendor", rust_triple,
+            "bin", "codex.exe",
+        )
+        if _os.path.isfile(candidate):
+            return candidate
+        raise RuntimeError(
+            f"found {shim} but no vendored codex.exe at "
+            f"{candidate} — npm install for {arch_suffix} may be "
+            "incomplete; run 'npm i -g @openai/codex' again"
+        )
 
     def ask(
         self, params: Dict[str, Any], timeout_s: float,
@@ -851,6 +865,21 @@ class _CodexCliAskBackend(_AskBackend):
             raise ValueError(
                 f"prompt too long ({len(prompt)} chars); 32KB cap"
             )
+        # CO-4 fix (review round Phase 5.4 R1): codex CLI doesn't
+        # accept ``--max-tokens``; if a caller sent ``max_tokens``
+        # they probably think they're capping the budget. Surface
+        # a structured stderr event so the operator sees it in the
+        # supervisor log, rather than silently ignoring the param.
+        if "max_tokens" in params:
+            _print_error(
+                event="codex_max_tokens_ignored",
+                detail=(
+                    "codex CLI has no --max-tokens flag; "
+                    "params['max_tokens']={!r} ignored. Use the "
+                    "anthropic or hermes backend if you need a "
+                    "hub-side token budget cap."
+                ).format(params["max_tokens"]),
+            )
 
         binary = self._resolve_binary()
         argv = [binary, "exec", "--skip-git-repo-check"]
@@ -858,6 +887,16 @@ class _CodexCliAskBackend(_AskBackend):
         model_override = params.get("model")
         if isinstance(model_override, str) and model_override.strip():
             argv.extend(["--model", model_override.strip()])
+        # CO-1 fix (review round Phase 5.4 R1): POSIX-style ``--``
+        # separator BEFORE the prompt so anything inside the prompt
+        # (e.g. ``--model gpt-3.5-turbo`` or a future
+        # ``--dangerously-bypass-approvals``) is treated as a
+        # positional argument by the CLI parser, NOT as another
+        # flag override. Without this a peer with a valid
+        # cap_token could inject flags via the prompt text and
+        # override our model / budget / safety settings. Verified
+        # exploitable on codex-cli v0.137.0.
+        argv.append("--")
         argv.append(prompt)
 
         # CREATE_NO_WINDOW (Windows-only) to suppress console flash;
@@ -872,21 +911,51 @@ class _CodexCliAskBackend(_AskBackend):
                 stdin=_sp.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=max(10.0, timeout_s),
+                # CO-3 fix (review round Phase 5.4 R1): drop the
+                # ``max(10.0, ...)`` floor — caller's effective
+                # budget passes through verbatim, matching the
+                # Claude CLI + Anthropic SDK backends. The 90s
+                # DEFAULT_TIMEOUT_S already accounts for codex's
+                # cold-start cost; the floor was double-protecting
+                # at the wrong layer and let a 5s caller override
+                # silently become 10s.
+                timeout=timeout_s,
                 check=False,
                 creationflags=creation_flags,
             )
         except _sp.TimeoutExpired as exc:
+            # CO-6 fix (review round Phase 5.4 R1): the common
+            # cause of a codex exec timeout when stdin=DEVNULL is
+            # that the LLM tried to use a tool, codex paused for
+            # interactive approval, and our DEVNULL means it
+            # waits forever. Surface that hypothesis in the error
+            # so the operator knows to either narrow the prompt
+            # to a no-tool answer or (Phase 5.5+) wire an approval
+            # pipe. We can't peek partial stdout here because the
+            # TimeoutExpired exception's partial buffers may be
+            # unset on Windows.
             raise TimeoutError(
                 f"codex CLI did not respond within "
-                f"{exc.timeout:.1f}s for prompt[{len(prompt)}]"
+                f"{exc.timeout:.1f}s for prompt[{len(prompt)}]. "
+                "If the prompt would trigger tool use (file edits, "
+                "shell commands) codex may be blocked waiting for "
+                "interactive approval — stdin is /dev/null here. "
+                "Try a no-tool prompt, raise timeout_s, or use "
+                "kind=anthropic/hermes for tool-heavy work."
             ) from exc
 
         if completed.returncode != 0:
-            err = (completed.stderr or "").strip()[:2048]
+            # CO-7 fix (review round Phase 5.4 R1): subprocess.run
+            # with text=True + capture_output=True guarantees
+            # stderr is a str — drop the ``or ""`` deadcode.
+            err = completed.stderr.strip()[:2048]
             # codex emits "401 Unauthorized" or "Not logged in"
-            # when the OAuth session expires.
-            if "401" in err or "not logged in" in err.lower():
+            # when the OAuth session expires. Both phrasings have
+            # been seen across versions; check separately so a
+            # future-version-only phrasing still routes correctly.
+            err_lower = err.lower()
+            if "401" in err or "not logged in" in err_lower \
+                    or "please run codex login" in err_lower:
                 raise RuntimeError(
                     "codex CLI returned 401 / not-logged-in — "
                     "run 'codex login' to refresh credentials"
