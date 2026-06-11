@@ -1844,6 +1844,166 @@ def test_claude_code_backend_rejects_oversized_prompt() -> None:
         _ClaudeCodeAskBackend().ask({"prompt": big}, timeout_s=1.0)
 
 
+def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-5 fix (review round Phase 4 R2): when ``shutil.which``
+    returns the npm ``claude.ps1`` shim, the backend must walk to
+    the adjacent vendored ``claude.exe`` rather than invoking the
+    broken .ps1 path. Verifies the argv that's handed to
+    subprocess.run starts with the .exe, not the .ps1. """
+    import shutil
+    import subprocess as _sp
+
+    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+
+    # Build a fake claude install layout under tmp_path so the
+    # candidate .exe check succeeds.
+    npm_dir = tmp_path / "npm-global"
+    ps1 = npm_dir / "claude.ps1"
+    npm_dir.mkdir()
+    ps1.write_text("# shim", encoding="utf-8")
+    exe_dir = (
+        npm_dir / "node_modules" / "@anthropic-ai" / "claude-code" / "bin"
+    )
+    exe_dir.mkdir(parents=True)
+    exe = exe_dir / "claude.exe"
+    exe.write_text("# vendored binary", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+
+    captured: list[list[str]] = []
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **_kw: object) -> _FakeCompleted:
+        captured.append(list(argv))
+        return _FakeCompleted()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+
+    out = _ClaudeCodeAskBackend().ask(
+        {"prompt": "hello"}, timeout_s=5.0,
+    )
+    assert out["response"] == "ok"
+    assert captured, "subprocess.run was not invoked"
+    # First arg of argv must be the resolved .exe, NOT the .ps1.
+    invoked = captured[0][0]
+    assert invoked == str(exe), (
+        f"expected {exe} to be invoked; got {invoked!r}"
+    )
+
+
+def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-3 fix (review round Phase 4 R2): if shutil.which finds
+    claude.ps1 but the vendored claude.exe is missing (broken npm
+    install), don't silently fall through to the .ps1 path (which
+    triggers ACCESS_VIOLATION on Windows + piped stdout — and would
+    then be misattributed to the CLI bug). Raise a targeted error
+    pointing at the broken install layout. """
+    import shutil
+    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+
+    # Lay down only the .ps1, NOT the vendored .exe.
+    npm_dir = tmp_path / "npm-global"
+    npm_dir.mkdir()
+    ps1 = npm_dir / "claude.ps1"
+    ps1.write_text("# shim", encoding="utf-8")
+    monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+
+    with pytest.raises(RuntimeError, match="install layout may be broken"):
+        _ClaudeCodeAskBackend().ask(
+            {"prompt": "hi"}, timeout_s=5.0,
+        )
+
+
+def test_a2a_post_rejects_non_dict_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-1 fix (review round Phase 4 R2): a JSON body that
+    parses to something other than an object (list / string /
+    number / bool / null) must return 400 with a clear diagnostic.
+    Pre-fix this would have hit AttributeError on
+    ``params.get(...)`` and bubbled to 500. Exercised via the
+    real subprocess so we cover the child handler's path, not
+    a mock. """
+    pytest.importorskip("nacl")
+    import urllib.error
+    import urllib.request as _ureq
+    import uuid as _uuid
+
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN,
+        encode_authorization_header, sign_cap_token,
+    )
+    from nth_dao.identity import AgentIdentity
+
+    issuer = AgentIdentity.generate(label="test-non-dict-body")
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"non-dict-{_uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, child_did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        child_token = sign_cap_token(
+            issuer=issuer, subject_did=child_did,
+            capabilities=[CAP_NTH_RECEIPT_SIGN],
+        )
+        from nth_dao.web.agent_supervisor import _atomic_write_json
+        _atomic_write_json(str(cap_token_path), child_token)
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            if any(e.get("event") == "agent_started" for e in events):
+                break
+            time.sleep(0.1)
+        started = next(e for e in events if e.get("event") == "agent_started")
+        port = started["a2a_port"]
+
+        peer = AgentIdentity.generate(label="non-dict-peer")
+        peer_token = sign_cap_token(
+            issuer=issuer, subject_did=peer.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+        )
+        auth = "CapToken " + encode_authorization_header(peer_token)
+
+        # Top-level JSON array — valid JSON, not a dict.
+        req = _ureq.Request(
+            url=f"http://127.0.0.1:{port}/a2a/ask",
+            data=json.dumps(["not", "an", "object"]).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": auth,
+            },
+            method="POST",
+        )
+        try:
+            with _ureq.urlopen(req, timeout=3.0):  # noqa: S310
+                pytest.fail("expected 400 for non-dict body")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400, exc.code
+            body = json.loads(exc.read().decode("utf-8"))
+            assert body["error"]["code"] == "bad-request"
+            assert "JSON object" in body["error"]["message"]
+    finally:
+        runner.stop(agent_id)
+
+
 def test_claude_code_backend_translates_windows_access_violation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -342,6 +342,22 @@ class _ClaudeCodeAskBackend(_AskBackend):
             )
             if _os.path.isfile(candidate):
                 binary = candidate
+            else:
+                # BUG-3 fix (review round Phase 4 R2): don't
+                # silently fall through to ``claude.ps1`` — that
+                # path crashes with ACCESS_VIOLATION when stdout
+                # is piped (the same Windows quirk we translate
+                # below), which would mislead the operator into
+                # thinking it's the CLI bug rather than a missing
+                # vendored .exe. Raise a targeted error pointing
+                # at the broken install layout.
+                raise RuntimeError(
+                    f"found {binary} but expected vendored "
+                    f"claude.exe at {candidate} does not exist — "
+                    "Claude Code install layout may be broken; "
+                    "reinstall the npm package or switch the "
+                    "agent to kind=mock."
+                )
         argv = [binary, "-p", prompt]
 
         # M-2 fix (review round Phase 4 R1): on Windows, suppress
@@ -352,9 +368,15 @@ class _ClaudeCodeAskBackend(_AskBackend):
         creation_flags = getattr(_sp, "CREATE_NO_WINDOW", 0) \
             if sys.platform.startswith("win") else 0
         try:
+            # BUG-4 fix (review round Phase 4 R2): explicit
+            # ``stdin=DEVNULL`` instead of ``input=""``. Both
+            # signal EOF immediately on the child's first stdin
+            # read, but ``input=""`` is misleading — it suggests
+            # we're writing something. DEVNULL also avoids the
+            # implicit pipe allocation that input= performs.
             completed = _sp.run(
                 argv,
-                input="",  # no stdin — prompt is on the CLI arg
+                stdin=_sp.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=max(5.0, timeout_s),
@@ -372,7 +394,13 @@ class _ClaudeCodeAskBackend(_AskBackend):
             # Windows ACCESS_VIOLATION (see Known Windows quirk note
             # in docstring). Surface a targeted message so the
             # operator knows to switch to kind=mock for now.
-            if completed.returncode in (3221225477, -1073741819):
+            # BUG-2 fix (review round Phase 4 R2): drop the
+            # ``-1073741819`` signed-form match — Python 3
+            # subprocess.Popen on Windows uses GetExitCodeProcess
+            # which returns DWORD (unsigned); the returncode is
+            # always the unsigned 3221225477. The signed form was
+            # dead-code defensiveness.
+            if completed.returncode == 3221225477:
                 raise RuntimeError(
                     "claude CLI crashed with ACCESS_VIOLATION "
                     "(0xC0000005) — known Windows + piped-stdout "
@@ -501,6 +529,19 @@ def _start_a2a_server(
                 self._json_error(
                     400, "bad-request",
                     f"body is not valid JSON: {exc}",
+                )
+                return
+            # BUG-1 fix (review round Phase 4 R2): JSON allows
+            # top-level arrays / strings / numbers, but every
+            # downstream call site (params.get("prompt"), etc.)
+            # assumes a dict. A caller posting ``["hi"]`` used to
+            # hit AttributeError → 500. Validate up-front and
+            # return 400 with a clear diagnostic.
+            if not isinstance(params, dict):
+                self._json_error(
+                    400, "bad-request",
+                    f"body must be a JSON object; got "
+                    f"{type(params).__name__}",
                 )
                 return
             # Auth: parse "Authorization: CapToken <encoded>"
