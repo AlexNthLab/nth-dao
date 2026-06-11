@@ -767,6 +767,101 @@ def test_spawn_survives_cap_token_file_write_failure(
     ), f"expected delivery-failure WARNING; got {warnings!r}"
 
 
+def test_atomic_write_json_restricts_to_owner_on_posix(
+    tmp_path: Path,
+) -> None:
+    """H-2 fix (review round Phase 3c R2): cap_token files are
+    bearer tokens. On POSIX the file must end up at mode 0o600 —
+    world-readable would let any local user present the token as
+    authority. Skipped on Windows where POSIX mode isn't honoured
+    (per-user ACL on the workspace path covers it there). """
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX mode bits don't apply on Windows")
+    from nth_dao.web import agent_supervisor as supmod
+
+    target = tmp_path / "cap_token.json"
+    supmod._atomic_write_json(str(target), {"token_id": "x"})
+    mode = os.stat(str(target)).st_mode & 0o777
+    assert mode == 0o600, (
+        f"cap_token file at {target} ended up at mode {oct(mode)}; "
+        "expected 0o600 (owner-only). G-1 reminder: chmod must "
+        "land on tmp BEFORE os.replace so the FINAL file inherits "
+        "the restricted mode."
+    )
+
+
+def test_stop_removes_cap_token_file_and_agent_dir(
+    tmp_path: Path,
+) -> None:
+    """H-1 fix (review round Phase 3c R2): stop() must delete the
+    cap_token file + remove the per-agent dir so disk-fill and
+    stale-token sprawl don't accumulate across thousands of spawn/
+    stop cycles. """
+    cap_token_dir = tmp_path / "agents"
+    sup = AgentSupervisor(InMemoryRunner(), cap_token_dir=cap_token_dir)
+
+    def fake_issuer(did: str, _caps: list[str]) -> dict:
+        return {"token_id": "tok-cleanup", "subject_did": did}
+
+    r = sup.spawn(
+        kind="mock", label="t", capabilities=[],
+        cap_token_issuer=fake_issuer,
+    )
+    agent_dir = cap_token_dir / r.agent_id
+    cap_token_file = agent_dir / "cap_token.json"
+    assert cap_token_file.exists(), "precondition: file should be written"
+
+    assert sup.stop(r.agent_id) is True
+    assert not cap_token_file.exists(), (
+        "cap_token file should be removed after stop"
+    )
+    assert not agent_dir.exists(), (
+        "per-agent dir should be removed after stop (rmdir on empty)"
+    )
+
+
+def test_stop_cleanup_survives_unlink_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """H-1 fix part 2: if unlink raises (read-only fs, permission
+    issue), stop() still returns True, the agent is still removed
+    from the registry, and a WARNING is logged. The operator
+    can sweep manually — but a stuck unlink should never block
+    the supervisor's stop path. """
+    import logging
+    from pathlib import Path as _Path
+
+    cap_token_dir = tmp_path / "agents"
+    sup = AgentSupervisor(InMemoryRunner(), cap_token_dir=cap_token_dir)
+
+    def fake_issuer(did: str, _caps: list[str]) -> dict:
+        return {"token_id": "tok-survive", "subject_did": did}
+
+    r = sup.spawn(
+        kind="mock", label="t", capabilities=[],
+        cap_token_issuer=fake_issuer,
+    )
+
+    real_unlink = _Path.unlink
+
+    def boom_unlink(self: _Path, *args: object, **kwargs: object) -> None:
+        if self.name == "cap_token.json":
+            raise OSError("simulated EROFS")
+        return real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_Path, "unlink", boom_unlink)
+
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        ok = sup.stop(r.agent_id)
+    assert ok is True
+    assert sup.get(r.agent_id) is None  # still removed
+    warnings = [w.getMessage() for w in caplog.records
+                if w.levelno == logging.WARNING]
+    assert any("failed to remove cap_token file" in w for w in warnings)
+
+
 def test_spawn_skips_file_write_when_no_cap_token_dir(
     tmp_path: Path,
 ) -> None:
@@ -1025,6 +1120,61 @@ def test_subprocess_runner_smoke() -> None:
         # returns the process is guaranteed to have exited (or
         # been kill()ed).
         assert not runner.is_alive(agent_id), "agent should be dead after stop"
+
+
+def test_subprocess_runner_rejects_mismatched_subject_did(
+    tmp_path: Path,
+) -> None:
+    """M-1 fix (review round Phase 3c R2): if a cap_token's
+    subject_did doesn't match the child's own DID, the child must
+    refuse to sign an attestation. Spawns a real child, writes a
+    deliberately mismatched cap_token to the polled path, waits
+    for ~1.5 heartbeats, and asserts NO receipt_signed event was
+    emitted (the child observed the mismatch and bailed). """
+    import uuid as _uuid
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"smoke-m1-{_uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        # Deliberately mismatched subject_did — a DIFFERENT did:key,
+        # not the child's own. The child must refuse.
+        cap_token = {
+            "token_id": "tok-mismatch",
+            "subject_did": "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSrEEa2NDsR9ZS6sj6kk",
+            "capabilities": ["nth:receipt_sign"],
+            "issuer_did": "did:key:zFakeIssuer",
+        }
+        tmp = cap_token_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cap_token), encoding="utf-8")
+        os.replace(str(tmp), str(cap_token_path))
+
+        # Wait ~1.5 heartbeats so the child has at LEAST polled
+        # the file once. If it were going to sign, it would have
+        # by now. The 1.5s window is the same magnitude as the
+        # smoke test's _SMOKE_TIMEOUT polling.
+        deadline = time.time() + 2.5
+        while time.time() < deadline:
+            if any(e.get("event") == "receipt_signed" for e in events):
+                break
+            time.sleep(0.1)
+
+        signed = [e for e in events if e.get("event") == "receipt_signed"]
+        assert not signed, (
+            "child must NOT sign an attestation for a cap_token "
+            f"whose subject_did doesn't match its own DID; got: {signed!r}"
+        )
+    finally:
+        runner.stop(agent_id)
 
 
 def test_subprocess_runner_cap_token_file_round_trip(

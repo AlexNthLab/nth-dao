@@ -544,13 +544,24 @@ def _now_iso() -> str:
 
 
 def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
-    """Write ``payload`` as JSON to ``path`` atomically.
+    """Write ``payload`` as JSON to ``path`` atomically + restrictively.
 
     Used by the supervisor to land cap_token files where the child
     is polling. Atomic via tmp + os.replace, so the child cannot
     see a partial / truncated file even if the writer crashes
-    mid-flight. Permissions follow the platform default (POSIX
-    umask; Windows ACL inheritance from the agent dir). """
+    mid-flight.
+
+    H-2 fix (review round Phase 3c R2): cap_token files are bearer
+    tokens, so we ``chmod 0o600`` BEFORE the os.replace. POSIX
+    ``os.replace`` preserves the REPLACING file's permissions
+    (the tmp), not the replaced file's — G-1 detail from the
+    meta-review. Setting 0o600 on the final path AFTER replace
+    would leave a small window where the file inherited the tmp's
+    umask-defaulted mode. Windows ignores POSIX bits but raises
+    no error, and the workspace path is per-user-ACL'd there
+    anyway. chmod failures (FAT, network mounts without POSIX
+    mode) are best-effort logged + survived rather than aborting
+    the delivery — the alternative is no token file at all. """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
@@ -558,6 +569,14 @@ def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    try:
+        os.chmod(str(tmp), 0o600)
+    except OSError as exc:
+        logger.debug(
+            "agent_supervisor: chmod 0o600 on %s not supported (%s); "
+            "delivery proceeds with default permissions",
+            tmp, exc,
+        )
     os.replace(str(tmp), str(p))
 
 
@@ -838,6 +857,34 @@ class AgentSupervisor:
         self._runner.stop(agent_id)
         with self._lock:
             self._agents.pop(agent_id, None)
+        # H-1 fix (review round Phase 3c R2): remove the cap_token
+        # file + per-agent dir. cap_tokens are bearer authority;
+        # leaving them on disk past the agent's lifetime is an
+        # audit + security gap. Best-effort: filesystem failures
+        # log WARNING but don't propagate (we already stopped the
+        # child — the operator should be able to call stop() and
+        # have it return). rmdir only succeeds on an empty dir, so
+        # if a future phase puts other files alongside cap_token.json
+        # we won't accidentally nuke them.
+        if self._cap_token_dir is not None:
+            agent_dir = self._cap_token_dir / agent_id
+            cap_token_file = agent_dir / "cap_token.json"
+            try:
+                if cap_token_file.exists():
+                    cap_token_file.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "agent_supervisor: failed to remove cap_token "
+                    "file for stopped agent %s at %s: %s",
+                    agent_id, cap_token_file, exc,
+                )
+            try:
+                if agent_dir.exists():
+                    agent_dir.rmdir()
+            except OSError:
+                # Non-empty (future phases) or transient — leave
+                # the empty dir for an operator sweep.
+                pass
         logger.info("agent_supervisor: stopped %s", agent_id)
         return True
 

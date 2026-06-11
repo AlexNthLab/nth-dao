@@ -404,7 +404,28 @@ def main(argv: list[str] | None = None) -> int:
         # a new token_id).
         if cap_token_path and not cap_token_loaded:
             token = _try_load_cap_token(cap_token_path)
-            if token is not None:
+            if token is None:
+                pass  # not yet — try next tick
+            elif token.get("subject_did") != did:
+                # M-1 fix (review round Phase 3c R2): defense in
+                # depth. The supervisor controls the file path so
+                # under normal operation subject_did MATCHES, but
+                # a misconfigured path or future bug routing the
+                # wrong token to this child would otherwise have
+                # us sign a false "I hold this token" attestation.
+                # Refuse, emit a structured stderr event so the
+                # operator can grep for it, and mark the slot
+                # loaded so we don't spin re-reading the same
+                # mismatched file.
+                cap_token_loaded = True
+                _print_error(
+                    event="cap_token_subject_mismatch",
+                    agent_id=args.id,
+                    expected_did=did,
+                    actual_subject_did=str(token.get("subject_did", "")),
+                    token_id=str(token.get("token_id", "")),
+                )
+            else:
                 cap_token_loaded = True
                 receipt = _sign_attestation_receipt(
                     identity=identity,
