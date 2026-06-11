@@ -1888,6 +1888,190 @@ def test_claude_code_backend_raises_when_binary_missing(
         )
 
 
+def test_hub_proxy_ask_uses_per_method_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-1 fix (review round Phase 4 R1): the hub proxy must read
+    its forward timeout from ``_A2A_METHOD_TIMEOUTS[method]`` so the
+    /a2a/ask path isn't capped at the snappy /ping default. Verified
+    by intercepting urlopen and asserting it was called with the
+    map's value for "ask" (65.0s) — NOT the 2.0s default."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+    from nth_dao.web import v2_api as _v2
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:key:z6MkAskTimeoutProbe"
+    rec = AgentRecord(
+        agent_id="ask-probe", kind="mock", label="ask-probe",
+        did=target_did, capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, a2a_port=51999,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["ask-probe"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["ask-probe"] = True  # type: ignore[attr-defined]
+
+    import urllib.request as _ureq
+    seen_timeouts: list[float] = []
+
+    class _FakeResp:
+        status = 200
+        def __enter__(self) -> "_FakeResp": return self
+        def __exit__(self, *_a: object) -> None: return None
+        def read(self) -> bytes:
+            return json.dumps({"result": {"ok": True}}).encode("utf-8")
+
+    def fake_urlopen(_req: object, *, timeout: float = 0) -> _FakeResp:
+        seen_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+    client = TestClient(app)
+    # First confirm the map carries the expected value (so a future
+    # rename of "ask" or constant fails this test loudly).
+    assert _v2._A2A_METHOD_TIMEOUTS["ask"] == 65.0
+
+    resp = client.post(
+        f"/api/v2/agents/{target_did}/a2a/ask",
+        json={"prompt": "hi"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen_timeouts == [65.0], (
+        f"expected per-method timeout 65.0 for 'ask', got {seen_timeouts!r}"
+    )
+
+    # And a non-mapped method falls back to the snappy default.
+    seen_timeouts.clear()
+    resp2 = client.post(
+        f"/api/v2/agents/{target_did}/a2a/echo",
+        json={"x": 1},
+    )
+    assert resp2.status_code == 200, resp2.text
+    assert seen_timeouts == [2.0], (
+        f"expected default timeout 2.0 for 'echo', got {seen_timeouts!r}"
+    )
+
+
+def test_hub_proxy_ask_end_to_end_through_real_subprocess(
+    tmp_path: Path,
+) -> None:
+    """H-2 fix (review round Phase 4 R1): the existing Phase 4 ask
+    test bypasses the hub by posting to 127.0.0.1:<port> directly,
+    so a bug in the hub proxy (e.g. the H-1 timeout regression) was
+    invisible. This test goes through the hub's
+    POST /api/v2/agents/{did}/a2a/ask endpoint to a REAL spawned
+    child running the mock backend — verifying the full
+    operator-facing path works end-to-end. """
+    pytest.importorskip("nacl")
+    import uuid as _uuid
+
+    from nth_dao.cap_token import (
+        CAP_NTH_RECEIPT_SIGN,
+        sign_cap_token,
+    )
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import (
+        SubprocessRunner, _atomic_write_json,
+    )
+
+    issuer = AgentIdentity.generate(label="test-hub-proxy-ask")
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"hub-ask-{_uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, child_did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        child_token = sign_cap_token(
+            issuer=issuer, subject_did=child_did,
+            capabilities=[CAP_NTH_RECEIPT_SIGN],
+        )
+        _atomic_write_json(str(cap_token_path), child_token)
+
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            if any(e.get("event") == "agent_started" for e in events):
+                break
+            time.sleep(0.1)
+        started = next(e for e in events if e.get("event") == "agent_started")
+        port = started["a2a_port"]
+
+        # Stand up a FastAPI app + supervisor seeded with the real
+        # AgentRecord so the proxy resolves the DID.
+        app = create_app(
+            workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+            require_console_auth=False,
+        )
+        sup = AgentSupervisor(InMemoryRunner())
+        from nth_dao.web.agent_supervisor import AgentRecord
+        with sup._lock:  # type: ignore[attr-defined]
+            sup._agents[agent_id] = AgentRecord(  # type: ignore[attr-defined]
+                agent_id=agent_id, kind="mock", label="hub-proxy-test",
+                did=child_did, capabilities=[],
+                started_at="2026-06-11T00:00:00+00:00",
+                last_seen="2026-06-11T00:00:00+00:00",
+                alive=True, pid=pid, a2a_port=port,
+            )
+        sup._runner._alive[agent_id] = True  # type: ignore[attr-defined]
+        app.state.v2_supervisor = sup
+
+        client = TestClient(app)
+        # No Authorization header → child rejects with 401 (proves
+        # the auth wire is live through the proxy too).
+        resp_noauth = client.post(
+            f"/api/v2/agents/{child_did}/a2a/ask",
+            json={"prompt": "hub-proxy hello"},
+        )
+        assert resp_noauth.status_code == 401, resp_noauth.text
+
+        # With a same-issuer peer cap_token the proxy forwards and
+        # the child's mock backend echoes back.
+        from nth_dao.cap_token import (
+            CAP_A2A_MESSAGE_SEND, encode_authorization_header,
+        )
+        peer = AgentIdentity.generate(label="proxy-peer")
+        peer_token = sign_cap_token(
+            issuer=issuer, subject_did=peer.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+        )
+        auth = "CapToken " + encode_authorization_header(peer_token)
+
+        resp = client.post(
+            f"/api/v2/agents/{child_did}/a2a/ask",
+            json={"prompt": "hub-proxy hello"},
+            headers={"Authorization": auth},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["result"]["backend"] == "mock"
+        assert "hub-proxy hello" in body["result"]["response"]
+        assert body["result"]["caller_did"] == peer.as_did()
+        assert body["result"]["agent_did"] == child_did
+    finally:
+        runner.stop(agent_id)
+
+
 def test_subprocess_real_a2a_ask_mock_backend(
     tmp_path: Path,
 ) -> None:

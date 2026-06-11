@@ -229,9 +229,16 @@ class _AskBackend:
     """Minimal backend interface. Implementations take a params
     dict (the body of POST /a2a/ask) and return ``{response: str}``
     on success or raise on failure. Errors are caught in the A2A
-    handler and surfaced as ``{"error": {...}}``. """
+    handler and surfaced as ``{"error": {...}}``.
+
+    M-1 fix (review round Phase 4 R1): ``DEFAULT_TIMEOUT_S`` is the
+    backend-suggested upper bound for one ``ask`` call. The handler
+    reads it via ``getattr(backend, 'DEFAULT_TIMEOUT_S', ...)`` so
+    tweaking the constant in a subclass actually propagates instead
+    of being shadowed by a hardcoded handler literal. """
 
     name: str = "(abstract)"
+    DEFAULT_TIMEOUT_S: float = 30.0
 
     def ask(self, params: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
         raise NotImplementedError
@@ -243,6 +250,7 @@ class _MockAskBackend(_AskBackend):
     is configured. Keeps Phase 3a-3e demos working unchanged. """
 
     name = "mock"
+    DEFAULT_TIMEOUT_S = 5.0
 
     def ask(self, params: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
         prompt = str(params.get("prompt") or "")
@@ -336,6 +344,13 @@ class _ClaudeCodeAskBackend(_AskBackend):
                 binary = candidate
         argv = [binary, "-p", prompt]
 
+        # M-2 fix (review round Phase 4 R1): on Windows, suppress
+        # the console-window flash that subprocess.run would
+        # otherwise create per claude.exe invocation. CREATE_NO_WINDOW
+        # = 0x08000000. On POSIX the flag is irrelevant (no console
+        # concept) so we fall back to 0.
+        creation_flags = getattr(_sp, "CREATE_NO_WINDOW", 0) \
+            if sys.platform.startswith("win") else 0
         try:
             completed = _sp.run(
                 argv,
@@ -344,6 +359,7 @@ class _ClaudeCodeAskBackend(_AskBackend):
                 text=True,
                 timeout=max(5.0, timeout_s),
                 check=False,
+                creationflags=creation_flags,
             )
         except _sp.TimeoutExpired as exc:
             raise TimeoutError(
@@ -518,8 +534,23 @@ def _start_a2a_server(
                 # rather than HTTP exceptions so the caller sees a
                 # clean JSON shape.
                 try:
+                    # M-1 fix (review round Phase 4 R1): pull the
+                    # backend-suggested timeout via getattr so the
+                    # class constant actually propagates. Mock = 5s,
+                    # claude-code = 60s. A caller can override via
+                    # params["timeout_s"] (bounded) for one-off
+                    # long-running prompts.
+                    backend_default = float(
+                        getattr(ask_backend, "DEFAULT_TIMEOUT_S", 30.0),
+                    )
+                    caller_override = params.get("timeout_s")
+                    if isinstance(caller_override, (int, float)) and \
+                            5.0 <= caller_override <= 300.0:
+                        effective = float(caller_override)
+                    else:
+                        effective = backend_default
                     result = ask_backend.ask(
-                        params, timeout_s=60.0,
+                        params, timeout_s=effective,
                     )
                 except TimeoutError as exc:
                     self._json_error(

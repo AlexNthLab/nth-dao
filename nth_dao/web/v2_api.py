@@ -1153,6 +1153,18 @@ def _state_blackboard(request: Request) -> Optional[Any]:
 _SUPERVISOR_BUILD_LOCK = threading.Lock()
 
 
+# H-1 fix (review round Phase 4 R1): per-method proxy timeout. The
+# original 2s blanket was fine for /ping + /a2a/echo (instant) but
+# silently broke the /a2a/ask path with the claude-code backend
+# (the CLI takes ~30s on cold sessions). Methods not in this map
+# inherit ``_A2A_DEFAULT_TIMEOUT_S`` — keeps the snappy default for
+# wire-test calls while letting ``ask`` honour its real backend cost.
+_A2A_DEFAULT_TIMEOUT_S = 2.0
+_A2A_METHOD_TIMEOUTS: Dict[str, float] = {
+    "ask": 65.0,    # claude-code backend default is 60s + 5s slack
+}
+
+
 def _state_supervisor(request: Request) -> Optional[Any]:
     """Return the lazy-built per-app agent supervisor.
 
@@ -1961,12 +1973,22 @@ def register_v2_routes(app: FastAPI) -> None:
         # the child to reply.
         import asyncio
 
+        # H-1 fix (review round Phase 4 R1): use the per-method
+        # timeout so slow backends (claude-code, future Hermes,
+        # etc.) aren't capped at the snappy default that was sized
+        # for /ping + /echo. Unknown methods inherit the default.
+        forward_timeout = _A2A_METHOD_TIMEOUTS.get(
+            method, _A2A_DEFAULT_TIMEOUT_S,
+        )
+
         def _do_forward() -> Tuple[int, bytes]:
             req = urllib.request.Request(
                 url, data=body_bytes, headers=req_headers, method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=2.0) as resp:  # noqa: S310
+                with urllib.request.urlopen(  # noqa: S310
+                    req, timeout=forward_timeout,
+                ) as resp:
                     return resp.status, resp.read()
             except urllib.error.HTTPError as http_exc:
                 # Child returned non-2xx — forward status + body.
