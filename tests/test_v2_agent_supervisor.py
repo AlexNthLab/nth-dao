@@ -2597,6 +2597,74 @@ def test_anthropic_sdk_backend_honours_widened_max_tokens_cap(
     assert captured["max_tokens"] == 1024  # DEFAULT_MAX_TOKENS
 
 
+def test_resolve_ask_backend_picks_codex_for_kind_codex() -> None:
+    """Phase 5.4: ``_resolve_ask_backend("codex")`` returns the
+    Codex CLI backend regardless of ANTHROPIC_API_KEY (codex has
+    its own OAuth session, unrelated to Anthropic). """
+    from nth_dao.web.dummy_agent import (
+        _CodexCliAskBackend, _resolve_ask_backend,
+    )
+    assert isinstance(_resolve_ask_backend("codex"), _CodexCliAskBackend)
+
+
+def test_codex_backend_rejects_empty_prompt() -> None:
+    """Phase 5.4: empty prompt → ValueError → 400 at the handler. """
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    with pytest.raises(ValueError, match="requires a 'prompt'"):
+        _CodexCliAskBackend().ask({"prompt": "   "}, timeout_s=5.0)
+
+
+def test_codex_backend_rejects_oversized_prompt() -> None:
+    """Phase 5.4: 32KB cap matches the Anthropic + Claude CLI
+    backends so a misbehaving peer can't burn LLM context. """
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    with pytest.raises(ValueError, match="prompt too long"):
+        _CodexCliAskBackend().ask(
+            {"prompt": "x" * 40000}, timeout_s=5.0,
+        )
+
+
+def test_codex_backend_raises_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4: clean error when ``codex`` isn't on PATH —
+    operator sees the install hint instead of a generic
+    FileNotFoundError. """
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="not on PATH"):
+        _CodexCliAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
+
+
+def test_codex_backend_translates_unauthorized_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4: when the codex OAuth session expires, the CLI
+    returns 401 / "not logged in" in stderr. Surface a targeted
+    RuntimeError pointing at ``codex login`` instead of the
+    raw exit code. """
+    import shutil
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/codex.exe")
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "401 Unauthorized: please run codex login"
+
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    backend._binary = "C:/fake/codex.exe"  # bypass _resolve_binary
+    with pytest.raises(RuntimeError, match="codex login"):
+        backend.ask({"prompt": "hi"}, timeout_s=5.0)
+
+
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

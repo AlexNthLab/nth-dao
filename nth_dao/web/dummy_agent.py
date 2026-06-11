@@ -772,6 +772,136 @@ class _ClaudeCliAskBackend(_AskBackend):
         }
 
 
+class _CodexCliAskBackend(_AskBackend):
+    """Phase 5.4: real backend via the OpenAI Codex CLI
+    (``codex exec <prompt>``). Unlike Claude Code's CLI, codex.exe
+    on Windows survives piped stdout cleanly — no ACCESS_VIOLATION
+    quirk — so we can run it through ``subprocess.run`` without
+    PTY scaffolding.
+
+    Auth: codex stores its OAuth/API credentials under
+    ``%USERPROFILE%\\.codex\\`` after ``codex login``. If the
+    operator hasn't logged in we surface a clear RuntimeError so
+    they switch to ``codex login`` rather than hunt through the
+    subprocess output.
+
+    Model selection: codex picks its own default (``gpt-5.5``
+    at v0.137.0); we forward ``params["model"]`` via
+    ``--model <name>`` when present, otherwise let codex choose. """
+
+    name = "codex"
+    DEFAULT_TIMEOUT_S = 90.0  # Codex is slower than Claude SDK
+    DEFAULT_MAX_TOKENS = 0    # codex doesn't take max_tokens on CLI
+
+    def __init__(self) -> None:
+        # Cache the resolved binary path so we don't re-walk the
+        # npm-global tree every call. None until first ask.
+        self._binary: Optional[str] = None
+
+    def _resolve_binary(self) -> str:
+        if self._binary is not None:
+            return self._binary
+        import shutil
+
+        # First check PATH for the shim — if present we walk to
+        # the vendored .exe directly (same pattern as the Claude
+        # CLI backend's .ps1 → .exe walk). codex.ps1 wraps an
+        # npm-installed package layout that bundles the actual
+        # binary under node_modules.
+        shim = shutil.which("codex")
+        if not shim:
+            raise RuntimeError(
+                "codex CLI not on PATH — install with "
+                "'npm i -g @openai/codex' or switch agent to kind=mock"
+            )
+        if shim.lower().endswith(".ps1"):
+            import glob
+            import os as _os
+            # Walk to the platform-specific vendored binary. On
+            # Windows that's
+            #   .../node_modules/@openai/codex-win32-x64/vendor/
+            #   x86_64-pc-windows-msvc/bin/codex.exe
+            shim_dir = _os.path.dirname(shim)
+            candidates = glob.glob(
+                _os.path.join(
+                    shim_dir, "node_modules", "@openai",
+                    "codex-*-x64", "vendor", "*", "bin", "codex.exe",
+                ),
+            )
+            if candidates:
+                self._binary = candidates[0]
+                return self._binary
+            raise RuntimeError(
+                f"found {shim} but no vendored codex.exe under its "
+                "node_modules — npm install may be incomplete; "
+                "run 'npm i -g @openai/codex' again"
+            )
+        self._binary = shim
+        return self._binary
+
+    def ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> Dict[str, Any]:
+        import subprocess as _sp
+
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("codex backend requires a 'prompt' param")
+        if len(prompt) > 32 * 1024:
+            raise ValueError(
+                f"prompt too long ({len(prompt)} chars); 32KB cap"
+            )
+
+        binary = self._resolve_binary()
+        argv = [binary, "exec", "--skip-git-repo-check"]
+        # Optional model override — codex accepts ``--model <name>``.
+        model_override = params.get("model")
+        if isinstance(model_override, str) and model_override.strip():
+            argv.extend(["--model", model_override.strip()])
+        argv.append(prompt)
+
+        # CREATE_NO_WINDOW (Windows-only) to suppress console flash;
+        # same pattern as the Claude CLI backend (M-2 fix).
+        creation_flags = (
+            getattr(_sp, "CREATE_NO_WINDOW", 0)
+            if sys.platform.startswith("win") else 0
+        )
+        try:
+            completed = _sp.run(
+                argv,
+                stdin=_sp.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=max(10.0, timeout_s),
+                check=False,
+                creationflags=creation_flags,
+            )
+        except _sp.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"codex CLI did not respond within "
+                f"{exc.timeout:.1f}s for prompt[{len(prompt)}]"
+            ) from exc
+
+        if completed.returncode != 0:
+            err = (completed.stderr or "").strip()[:2048]
+            # codex emits "401 Unauthorized" or "Not logged in"
+            # when the OAuth session expires.
+            if "401" in err or "not logged in" in err.lower():
+                raise RuntimeError(
+                    "codex CLI returned 401 / not-logged-in — "
+                    "run 'codex login' to refresh credentials"
+                )
+            raise RuntimeError(
+                f"codex CLI exited {completed.returncode}: {err}"
+            )
+        response = (completed.stdout or "").strip()
+        return {
+            "response": response,
+            "backend": self.name,
+            "exit_code": completed.returncode,
+        }
+
+
 def _resolve_ask_backend(kind: str) -> _AskBackend:
     """Pick the backend implementation for a given agent kind.
 
@@ -785,6 +915,14 @@ def _resolve_ask_backend(kind: str) -> _AskBackend:
     Unknown kinds fall back to the mock backend with a structured
     stderr event so the operator can see they typoed the --backend
     arg (the supervisor passes kind verbatim into --kind). """
+    if kind == "codex":
+        # Phase 5.4 (2026-06-11): OpenAI Codex CLI backend. No
+        # SDK / API-key branching needed — codex stores its OAuth
+        # session under ``%USERPROFILE%\\.codex\\`` and the CLI
+        # handles auth itself. If the operator hasn't run
+        # ``codex login`` the backend's ``ask`` raises a clear
+        # RuntimeError pointing at the fix.
+        return _CodexCliAskBackend()
     if kind == "claude-code":
         # BUG-3 fix (review round Phase 5.1 R2): the dispatcher
         # used to construct ``_AnthropicSdkAskBackend`` whenever
