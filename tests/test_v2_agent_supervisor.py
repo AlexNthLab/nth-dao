@@ -1786,6 +1786,185 @@ def test_dummy_agent_verify_a2a_auth_rejects_before_own_token_loaded() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+# Phase 4 — pluggable ask backend (mock + claude-code)
+# ─────────────────────────────────────────────────────────────
+
+def test_mock_ask_backend_echoes_prompt() -> None:
+    """Phase 4: the mock backend acks the prompt back. Used as the
+    default + the wire-test path. """
+    from nth_dao.web.dummy_agent import _MockAskBackend
+
+    out = _MockAskBackend().ask({"prompt": "hello world"}, timeout_s=1.0)
+    assert "hello world" in out["response"]
+    assert out["backend"] == "mock"
+
+
+def test_mock_ask_backend_no_prompt_returns_help_text() -> None:
+    """Phase 4: missing prompt is friendly for the mock backend
+    (not an error). The claude-code backend treats it as ValueError. """
+    from nth_dao.web.dummy_agent import _MockAskBackend
+
+    out = _MockAskBackend().ask({}, timeout_s=1.0)
+    assert "no prompt" in out["response"].lower()
+
+
+def test_resolve_ask_backend_picks_by_kind() -> None:
+    """Phase 4: ``_resolve_ask_backend`` maps the agent kind to a
+    concrete backend instance. Unknown kinds fall back to mock with
+    a structured stderr event. """
+    from nth_dao.web.dummy_agent import (
+        _ClaudeCodeAskBackend, _MockAskBackend, _resolve_ask_backend,
+    )
+
+    assert isinstance(_resolve_ask_backend("mock"), _MockAskBackend)
+    assert isinstance(
+        _resolve_ask_backend("claude-code"), _ClaudeCodeAskBackend,
+    )
+    # Unknown → mock fallback.
+    assert isinstance(_resolve_ask_backend("not-a-real-kind"), _MockAskBackend)
+
+
+def test_claude_code_backend_rejects_empty_prompt() -> None:
+    """Phase 4: claude-code is stricter than mock — empty prompt
+    raises ValueError (caller gets 400, not a wasted CLI invocation). """
+    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+
+    with pytest.raises(ValueError, match="requires a 'prompt'"):
+        _ClaudeCodeAskBackend().ask({"prompt": "   "}, timeout_s=1.0)
+
+
+def test_claude_code_backend_rejects_oversized_prompt() -> None:
+    """Phase 4: 32KB cap on prompts forwarded to claude — prevents
+    a misconfigured peer from burning huge API context on the
+    operator's behalf. """
+    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+
+    big = "x" * (40 * 1024)
+    with pytest.raises(ValueError, match="prompt too long"):
+        _ClaudeCodeAskBackend().ask({"prompt": big}, timeout_s=1.0)
+
+
+def test_claude_code_backend_translates_windows_access_violation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 4: when claude.exe crashes with 0xC0000005
+    (ACCESS_VIOLATION — known Windows + piped-stdout issue), the
+    backend must raise a targeted RuntimeError telling the operator
+    to switch to kind=mock, not a generic 'exited 3221225477'. """
+    import shutil
+    import subprocess as _sp
+
+    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+
+    # Pretend the binary IS on PATH (skip the not-on-PATH branch).
+    monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/claude")
+
+    class _FakeCompleted:
+        returncode = 3221225477  # 0xC0000005
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(
+        _sp, "run", lambda *_a, **_k: _FakeCompleted(),
+    )
+    with pytest.raises(RuntimeError, match="ACCESS_VIOLATION"):
+        _ClaudeCodeAskBackend().ask(
+            {"prompt": "hi"}, timeout_s=1.0,
+        )
+
+
+def test_claude_code_backend_raises_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 4: when ``claude`` isn't on PATH the backend raises a
+    clear RuntimeError pointing at the install / fallback path. """
+    import shutil
+    from nth_dao.web.dummy_agent import _ClaudeCodeAskBackend
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="not on PATH"):
+        _ClaudeCodeAskBackend().ask(
+            {"prompt": "hi"}, timeout_s=1.0,
+        )
+
+
+def test_subprocess_real_a2a_ask_mock_backend(
+    tmp_path: Path,
+) -> None:
+    """Phase 4 end-to-end on the mock backend: spawn a real child
+    with kind=mock, write cap_token, then POST /a2a/ask DIRECTLY
+    against the child's port with a peer cap_token signed by the
+    same issuer. The child's ``ask`` handler should route to the
+    mock backend and echo the prompt back. """
+    pytest.importorskip("nacl")
+    import urllib.request as _ureq
+    import uuid as _uuid
+
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN,
+        encode_authorization_header, sign_cap_token,
+    )
+    from nth_dao.identity import AgentIdentity
+
+    issuer = AgentIdentity.generate(label="test-hub-ask")
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"ask-{_uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, child_did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        child_token = sign_cap_token(
+            issuer=issuer, subject_did=child_did,
+            capabilities=[CAP_NTH_RECEIPT_SIGN],
+        )
+        from nth_dao.web.agent_supervisor import _atomic_write_json
+        _atomic_write_json(str(cap_token_path), child_token)
+
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            if any(e.get("event") == "receipt_signed" for e in events):
+                break
+            time.sleep(0.1)
+        started = next(e for e in events if e.get("event") == "agent_started")
+        port = started["a2a_port"]
+
+        peer = AgentIdentity.generate(label="peer-ask")
+        peer_token = sign_cap_token(
+            issuer=issuer, subject_did=peer.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+        )
+        auth = "CapToken " + encode_authorization_header(peer_token)
+
+        req = _ureq.Request(
+            url=f"http://127.0.0.1:{port}/a2a/ask",
+            data=json.dumps({"prompt": "ping from test"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": auth,
+            },
+            method="POST",
+        )
+        with _ureq.urlopen(req, timeout=3.0) as resp:  # noqa: S310
+            assert resp.status == 200
+            body = json.loads(resp.read().decode("utf-8"))
+        result = body["result"]
+        assert result["method"] == "ask"
+        assert result["backend"] == "mock"
+        assert "ping from test" in result["response"]
+        assert result["caller_did"] == peer.as_did()
+    finally:
+        runner.stop(agent_id)
+
+
+# ─────────────────────────────────────────────────────────────
 # Real subprocess smoke
 # ─────────────────────────────────────────────────────────────
 

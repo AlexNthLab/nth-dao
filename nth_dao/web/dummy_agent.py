@@ -153,8 +153,14 @@ class _CapTokenHolder:
 
 # Phase 3e: which method requires which cap. Method "echo" is the
 # MVP demonstration; later methods would map to richer caps.
+# Phase 4: ``ask`` is the first method that delegates to a real
+# backend (mock / claude-code). Reuses ``a2a:message_send`` because
+# at the protocol layer it's still "peer sends a message to this
+# agent and gets a response" — Phase 5+ could introduce a richer
+# ``a2a:invoke_llm`` or per-backend cap if needed.
 _A2A_METHOD_CAPABILITIES: Dict[str, str] = {
     "echo": "a2a:message_send",
+    "ask": "a2a:message_send",
 }
 
 
@@ -216,12 +222,183 @@ def _verify_a2a_auth(
     return True, "", token
 
 
+# ─── Phase 4: pluggable "ask" backend ────────────────────────────
+
+
+class _AskBackend:
+    """Minimal backend interface. Implementations take a params
+    dict (the body of POST /a2a/ask) and return ``{response: str}``
+    on success or raise on failure. Errors are caught in the A2A
+    handler and surfaced as ``{"error": {...}}``. """
+
+    name: str = "(abstract)"
+
+    def ask(self, params: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class _MockAskBackend(_AskBackend):
+    """Default backend — returns a synthetic acknowledgement. Used
+    as a smoke / wire test and as a stand-in when no real backend
+    is configured. Keeps Phase 3a-3e demos working unchanged. """
+
+    name = "mock"
+
+    def ask(self, params: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
+        prompt = str(params.get("prompt") or "")
+        if not prompt:
+            return {
+                "response": "(mock) no prompt given — Phase 4 mock "
+                            "backend just echoes back what you send.",
+                "backend": self.name,
+            }
+        return {
+            "response": f"(mock) ack: {prompt[:512]}",
+            "backend": self.name,
+        }
+
+
+class _ClaudeCodeAskBackend(_AskBackend):
+    """Phase 4: real backend — invokes the local Claude Code CLI
+    with ``claude -p <prompt>`` (synchronous, blocking) and captures
+    its stdout as the response.
+
+    Design notes:
+      - The CLI binary path is resolved via ``shutil.which("claude")``
+        each call so a child started before the CLI was installed
+        won't keep failing forever once it lands on PATH.
+      - On Windows ``shutil.which`` returns ``claude.ps1`` (the npm
+        shim); we walk to the vendored ``claude.exe`` directly so
+        we don't go through PowerShell.
+      - Timeout enforced via ``subprocess.run(timeout=...)``; on
+        expiry we raise ``TimeoutError`` so the A2A handler surfaces
+        a 504-equivalent error envelope.
+      - stderr is captured and included in the error path so the
+        operator can debug auth failures, rate limits, etc. without
+        digging through the hub log.
+
+    Known Windows quirk (2026-06-11): ``claude.exe -p <prompt>``
+    crashes with exit code 0xC0000005 (ACCESS_VIOLATION) when stdout
+    is piped (i.e. when invoked from any non-tty parent — Python
+    subprocess.run, conhost.exe, child supervisor, etc.). The same
+    binary works fine when stdout is attached to a real terminal.
+    This is a Claude Code CLI issue, not a Python integration bug;
+    a pywinpty / ConPTY wrapper is the conventional fix but is out
+    of Phase 4 scope. We detect the specific exit code and raise a
+    targeted error so the operator can immediately switch the agent
+    to ``kind=mock`` instead of hunting through generic logs. """
+
+    name = "claude-code"
+
+    # Conservative default — Claude Code can take ~30s for non-
+    # trivial prompts on a cold session. The supervisor's request
+    # timeout (2s in the hub proxy) is too tight for real LLM
+    # responses; Phase 4f could lift it or add streaming.
+    DEFAULT_TIMEOUT_S = 60.0
+
+    def ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> Dict[str, Any]:
+        import shutil
+        import subprocess as _sp
+
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("claude-code backend requires a 'prompt' param")
+        if len(prompt) > 32 * 1024:
+            # Claude CLI accepts much more, but a 100KB+ prompt
+            # over A2A is almost certainly a bug / abuse. Bound
+            # what we forward.
+            raise ValueError(
+                f"prompt too long ({len(prompt)} chars); 32KB cap"
+            )
+
+        binary = shutil.which("claude")
+        if not binary:
+            raise RuntimeError(
+                "claude CLI not on PATH — install Claude Code or "
+                "switch agent to kind=mock"
+            )
+
+        # On Windows ``shutil.which`` may return ``claude.ps1`` (the
+        # npm shim). PowerShell + .ps1 + arbitrary args has a
+        # documented ACCESS_VIOLATION quirk (exit 0xC0000005); the
+        # adjacent ``claude.exe`` (vendor binary) is what the .ps1
+        # ultimately invokes, so we prefer it directly when present.
+        if binary.lower().endswith(".ps1"):
+            import os as _os
+            candidate = _os.path.join(
+                _os.path.dirname(binary),
+                "node_modules", "@anthropic-ai", "claude-code",
+                "bin", "claude.exe",
+            )
+            if _os.path.isfile(candidate):
+                binary = candidate
+        argv = [binary, "-p", prompt]
+
+        try:
+            completed = _sp.run(
+                argv,
+                input="",  # no stdin — prompt is on the CLI arg
+                capture_output=True,
+                text=True,
+                timeout=max(5.0, timeout_s),
+                check=False,
+            )
+        except _sp.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"claude CLI did not respond within "
+                f"{exc.timeout:.1f}s for prompt[{len(prompt)}]"
+            ) from exc
+
+        if completed.returncode != 0:
+            err = (completed.stderr or "").strip()[:2048]
+            # Windows ACCESS_VIOLATION (see Known Windows quirk note
+            # in docstring). Surface a targeted message so the
+            # operator knows to switch to kind=mock for now.
+            if completed.returncode in (3221225477, -1073741819):
+                raise RuntimeError(
+                    "claude CLI crashed with ACCESS_VIOLATION "
+                    "(0xC0000005) — known Windows + piped-stdout "
+                    "quirk in claude.exe. Use kind=mock for this "
+                    "agent until a ConPTY wrapper lands."
+                )
+            raise RuntimeError(
+                f"claude CLI exited {completed.returncode}: {err}"
+            )
+        response = (completed.stdout or "").strip()
+        return {
+            "response": response,
+            "backend": self.name,
+            "exit_code": completed.returncode,
+        }
+
+
+def _resolve_ask_backend(kind: str) -> _AskBackend:
+    """Pick the backend implementation for a given agent kind.
+
+    Unknown kinds fall back to the mock backend with a warning to
+    stderr so the operator can see they typoed the --backend arg
+    (the supervisor passes kind verbatim into --kind). """
+    if kind == "claude-code":
+        return _ClaudeCodeAskBackend()
+    if kind == "mock":
+        return _MockAskBackend()
+    _print_error(
+        event="unknown_backend_kind",
+        kind=kind,
+        detail=f"falling back to mock backend",
+    )
+    return _MockAskBackend()
+
+
 # ─── Phase 3c: A2A localhost HTTP server ─────────────────────────
 
 
 def _start_a2a_server(
     identity_card: Dict[str, Any],
     cap_token_holder: "_CapTokenHolder",
+    ask_backend: "_AskBackend",
 ) -> Tuple[Optional[int], Optional[socketserver.BaseServer]]:
     """Bind a stdlib HTTP server on 127.0.0.1:<random port> and
     serve ``identity_card`` from GET /ping plus a JSON-RPC-style
@@ -321,18 +498,57 @@ def _start_a2a_server(
                     reason, f"A2A auth failed for /a2a/{method}: {reason}",
                 )
                 return
-            # Method dispatch — Phase 3e supports only "echo".
+            # Method dispatch — Phase 4: "echo" wire test + "ask"
+            # real-backend call.
             if method == "echo":
                 response = {"result": {
                     "method": method,
                     "received_params": params,
-                    "caller_did": (token or {}).get("subject_did", ""),
+                    "caller_did": token.get("subject_did", ""),
+                    "agent_did": state_snapshot["did"],
+                }}
+            elif method == "ask":
+                # Phase 4: delegate to the configured backend. The
+                # backend may take significant time (claude CLI =
+                # 30-60s on cold sessions); the hub's proxy has its
+                # own 2s timeout though, so for the demo path the
+                # operator should call the child's port directly
+                # OR Phase 4f will lift the hub timeout. Errors
+                # are turned into structured 502 envelopes here
+                # rather than HTTP exceptions so the caller sees a
+                # clean JSON shape.
+                try:
+                    result = ask_backend.ask(
+                        params, timeout_s=60.0,
+                    )
+                except TimeoutError as exc:
+                    self._json_error(
+                        504, "backend-timeout", str(exc),
+                    )
+                    return
+                except ValueError as exc:
+                    self._json_error(
+                        400, "bad-request", str(exc),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._json_error(
+                        502, "backend-failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+                response = {"result": {
+                    "method": method,
+                    "backend": ask_backend.name,
+                    "response": result.get("response", ""),
+                    "caller_did": token.get("subject_did", ""),
                     "agent_did": state_snapshot["did"],
                 }}
             else:
                 self._json_error(
                     404, "method-not-found",
-                    f"method {method!r} not supported (Phase 3e: echo only)",
+                    f"method {method!r} not supported "
+                    "(Phase 4: echo, ask)",
                 )
                 return
             self._respond(
@@ -564,6 +780,9 @@ def main(argv: list[str] | None = None) -> int:
     # (which sets the token after cap_token_file loads) and the
     # A2A HTTP server's auth check.
     cap_token_holder = _CapTokenHolder()
+    # Phase 4: resolve the ask backend from kind. Unknown kinds
+    # fall back to mock (with a structured stderr event).
+    ask_backend = _resolve_ask_backend(args.kind)
 
     # Phase 3c: open the A2A surface BEFORE emitting agent_started
     # so the advertised port is the one we'll actually serve on.
@@ -576,6 +795,7 @@ def main(argv: list[str] | None = None) -> int:
             "started_at": started_at,
         },
         cap_token_holder,
+        ask_backend,
     )
 
     # SIGTERM is the conventional shutdown signal on POSIX; on
