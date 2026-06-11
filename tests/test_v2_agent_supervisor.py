@@ -1799,6 +1799,130 @@ def test_mock_ask_backend_echoes_prompt() -> None:
     assert out["backend"] == "mock"
 
 
+def test_mock_ask_backend_stream_emits_deltas_then_done() -> None:
+    """Phase 5.2: ``stream_ask`` on the mock backend yields a
+    sequence of ``(delta, str)`` tuples followed by exactly one
+    ``(done, dict)`` terminating tuple. Verified deterministically
+    via the ``_no_sleep`` hatch. """
+    from nth_dao.web.dummy_agent import _MockAskBackend
+
+    events = list(_MockAskBackend().stream_ask(
+        {"prompt": "abc", "_no_sleep": True}, timeout_s=1.0,
+    ))
+    kinds = [k for k, _ in events]
+    assert kinds[-1] == "done"
+    assert all(k == "delta" for k in kinds[:-1])
+    # Reassembled deltas equal the full buffered response.
+    reassembled = "".join(p for k, p in events if k == "delta")
+    full = _MockAskBackend().ask({"prompt": "abc"}, timeout_s=1.0)
+    assert reassembled == full["response"]
+    # Done payload carries backend metadata.
+    done_meta = events[-1][1]
+    assert done_meta["backend"] == "mock"
+    assert "input_tokens" in done_meta
+    assert "output_tokens" in done_meta
+
+
+def test_default_stream_ask_polyfill_yields_single_delta_then_done() -> None:
+    """Phase 5.2: a backend that doesn't override ``stream_ask``
+    gets a polyfill that calls the buffered ``ask`` and re-emits
+    as ONE delta + ONE done. Verifies the default implementation
+    on the base class. """
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    class _LegacyBackend(_AskBackend):
+        name = "legacy"
+
+        def ask(self, params, timeout_s):
+            return {
+                "response": "all at once",
+                "backend": self.name,
+                "exit_code": 0,
+            }
+
+    events = list(_LegacyBackend().stream_ask({}, timeout_s=1.0))
+    assert len(events) == 2
+    assert events[0] == ("delta", "all at once")
+    assert events[1][0] == "done"
+    # ``response`` key should be stripped from the done meta so
+    # the operator's view doesn't see it twice.
+    assert "response" not in events[1][1]
+    assert events[1][1]["backend"] == "legacy"
+    assert events[1][1]["exit_code"] == 0
+
+
+def test_v2_proxy_forwards_ask_stream_as_sse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.2: the hub proxy returns ``text/event-stream`` for
+    ``ask-stream`` and forwards the child's chunked body verbatim.
+    Uses a fake urllib that returns a multi-chunk body to verify
+    incremental forwarding. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:key:z6MkStreamProbe"
+    rec = AgentRecord(
+        agent_id="streamer", kind="mock", label="streamer",
+        did=target_did, capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, a2a_port=51990,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["streamer"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["streamer"] = True  # type: ignore[attr-defined]
+
+    sse_body = (
+        b'data: {"delta":"hello"}\n\n'
+        b'data: {"delta":" world"}\n\n'
+        b'data: {"done":true,"input_tokens":5,"output_tokens":2}\n\n'
+    )
+
+    import urllib.request as _ureq
+
+    class _FakeResp:
+        status = 200
+        _consumed = False
+        def __enter__(self) -> "_FakeResp": return self
+        def __exit__(self, *_a: object) -> None: return None
+        def read(self, n: int = -1) -> bytes:
+            if self._consumed:
+                return b""
+            self._consumed = True
+            return sse_body
+
+    monkeypatch.setattr(_ureq, "urlopen", lambda *_a, **_k: _FakeResp())
+
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        f"/api/v2/agents/{target_did}/a2a/ask-stream",
+        json={"prompt": "hi"},
+    ) as resp:
+        assert resp.status_code == 200, resp.text
+        ct = resp.headers["content-type"]
+        assert ct.startswith("text/event-stream"), ct
+        chunks = b""
+        for raw in resp.iter_bytes():
+            chunks += raw
+    # Order-preserving, all 3 events visible to the caller.
+    assert b'"delta":"hello"' in chunks
+    assert b'"delta":" world"' in chunks
+    assert b'"done":true' in chunks
+
+
 def test_mock_ask_backend_signals_truncation_for_long_prompts() -> None:
     """L-1 fix (review round Phase 4 R3): the mock backend caps
     its echoed prompt at 512 chars. The cap was previously silent;
@@ -2633,6 +2757,123 @@ def test_hub_proxy_ask_end_to_end_through_real_subprocess(
         assert "hub-proxy hello" in body["result"]["response"]
         assert body["result"]["caller_did"] == peer.as_did()
         assert body["result"]["agent_did"] == child_did
+    finally:
+        runner.stop(agent_id)
+
+
+def test_subprocess_real_a2a_ask_stream_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Phase 5.2 end-to-end: spawn a real child with kind=mock,
+    deliver a cap_token, then POST /a2a/ask-stream directly to the
+    child's port and read the SSE response line-by-line. Verifies:
+      - child emits Content-Type: text/event-stream
+      - at least 2 ``data: {"delta":...}`` events arrive before done
+      - terminating ``data: {"done":true,...}`` event closes the stream
+      - reassembled deltas equal the buffered mock response """
+    pytest.importorskip("nacl")
+    import socket
+    import uuid as _uuid
+
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN,
+        encode_authorization_header, sign_cap_token,
+    )
+    from nth_dao.identity import AgentIdentity
+
+    issuer = AgentIdentity.generate(label="test-stream-issuer")
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"stream-{_uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, child_did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        child_token = sign_cap_token(
+            issuer=issuer, subject_did=child_did,
+            capabilities=[CAP_NTH_RECEIPT_SIGN],
+        )
+        from nth_dao.web.agent_supervisor import _atomic_write_json
+        _atomic_write_json(str(cap_token_path), child_token)
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            if any(e.get("event") == "agent_started" for e in events):
+                break
+            time.sleep(0.1)
+        started = next(e for e in events if e.get("event") == "agent_started")
+        port = started["a2a_port"]
+
+        # Wait for the child to load its OWN cap_token (proven by
+        # the receipt_signed event firing) — otherwise the A2A
+        # auth check rejects with "not-yet-authorized" because
+        # the holder slot hasn't been populated.
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            if any(e.get("event") == "receipt_signed" for e in events):
+                break
+            time.sleep(0.1)
+        assert any(e.get("event") == "receipt_signed" for e in events), (
+            "child should have loaded its own cap_token + signed an "
+            "attestation by now"
+        )
+
+        peer = AgentIdentity.generate(label="stream-peer")
+        peer_token = sign_cap_token(
+            issuer=issuer, subject_did=peer.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+        )
+        auth = "CapToken " + encode_authorization_header(peer_token)
+        body = json.dumps({
+            "prompt": "streamtest",
+            "_no_sleep": True,
+        }).encode("utf-8")
+
+        # Raw socket so we can read the SSE chunks as they land
+        # without urllib buffering. Localhost only.
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+            req = (
+                f"POST /a2a/ask-stream HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Authorization: {auth}\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("utf-8") + body
+            s.sendall(req)
+            buf = b""
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        text = buf.decode("utf-8", errors="replace")
+        assert "text/event-stream" in text.lower(), text[:300]
+        # Strip headers, keep body.
+        body_text = text.split("\r\n\r\n", 1)[-1]
+        # Parse SSE events.
+        data_events = [
+            line[len("data: "):]
+            for line in body_text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert len(data_events) >= 2, (
+            f"expected ≥2 SSE events; got {data_events!r}"
+        )
+        parsed = [json.loads(d) for d in data_events]
+        assert parsed[-1].get("done") is True
+        deltas = [p["delta"] for p in parsed if "delta" in p]
+        assert deltas, f"no delta events; got {parsed!r}"
+        reassembled = "".join(deltas)
+        # Mock backend's response shape: "(mock) ack: streamtest"
+        assert "streamtest" in reassembled
     finally:
         runner.stop(agent_id)
 

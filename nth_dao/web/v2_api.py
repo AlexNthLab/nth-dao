@@ -1162,6 +1162,10 @@ _SUPERVISOR_BUILD_LOCK = threading.Lock()
 _A2A_DEFAULT_TIMEOUT_S = 2.0
 _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     "ask": 65.0,    # claude-code backend default is 60s + 5s slack
+    # Phase 5.2: streaming variant gets a longer window because the
+    # caller may keep the connection open while the model generates.
+    # 125s = 120s backend allowance + 5s for hub round-trip overhead.
+    "ask-stream": 125.0,
 }
 
 
@@ -1352,6 +1356,105 @@ class SpawnAgentBody(_Model):
 # ─────────────────────────────────────────────────────────────
 # Phase 3e: small helpers shared by the A2A POST proxy
 # ─────────────────────────────────────────────────────────────
+
+
+def _proxy_ssestream(
+    *,
+    url: str,
+    body_bytes: bytes,
+    req_headers: Dict[str, str],
+    forward_timeout: float,
+) -> Any:
+    """Phase 5.2: stream an SSE response from the child to the
+    operator's browser through a queue-bridged async generator.
+
+    Why a queue+thread instead of httpx async: the project doesn't
+    have an async HTTP client as a hard dep yet, and the stdlib
+    ``urllib`` blocks at ``resp.read(N)``. We run the blocking
+    reader on a daemon thread, push raw chunks onto a thread-safe
+    queue, and let the StreamingResponse's async generator drain
+    it. One thread per request — fine for single-operator localhost.
+
+    Phase 5.2f could swap to ``httpx.AsyncClient`` if a multi-user
+    deployment makes the per-request thread cost matter. """
+    import queue as _queue
+    import threading as _threading
+    import urllib.error
+    import urllib.request
+    from starlette.responses import StreamingResponse
+
+    chunk_queue: "_queue.Queue[Optional[bytes]]" = _queue.Queue(maxsize=64)
+
+    def _reader_thread() -> None:
+        try:
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=req_headers, method="POST",
+            )
+            with urllib.request.urlopen(  # noqa: S310
+                req, timeout=forward_timeout,
+            ) as resp:
+                if resp.status != 200:
+                    err_body = resp.read()
+                    chunk_queue.put(
+                        b"data: " + err_body + b"\n\n"
+                    )
+                    chunk_queue.put(None)
+                    return
+                # Drain incrementally — read(N) blocks until ANY
+                # data is available, so this drives forward whenever
+                # the child flushes a chunk.
+                while True:
+                    chunk = resp.read(1024)
+                    if not chunk:
+                        break
+                    chunk_queue.put(chunk)
+        except urllib.error.HTTPError as exc:
+            body = exc.read() if hasattr(exc, "read") else b""
+            chunk_queue.put(
+                b"data: " + json.dumps({
+                    "error": {
+                        "code": f"upstream-{exc.code}",
+                        "message": body.decode("utf-8", errors="replace"),
+                    },
+                }).encode("utf-8") + b"\n\n"
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            chunk_queue.put(
+                b"data: " + json.dumps({
+                    "error": {
+                        "code": "proxy-failed",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    },
+                }).encode("utf-8") + b"\n\n"
+            )
+        finally:
+            # Sentinel — async generator stops when it sees None.
+            chunk_queue.put(None)
+
+    _threading.Thread(
+        target=_reader_thread,
+        name="a2a-sse-reader",
+        daemon=True,
+    ).start()
+
+    async def _async_gen():
+        import asyncio
+        while True:
+            chunk = await asyncio.to_thread(chunk_queue.get)
+            if chunk is None:
+                break
+            yield chunk
+
+    return StreamingResponse(
+        _async_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "close",
+            # Hint to browsers / proxies not to buffer.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _decode_or_passthrough(raw: bytes) -> Any:
@@ -1877,7 +1980,7 @@ def register_v2_routes(app: FastAPI) -> None:
     @app.post("/api/v2/agents/{did}/a2a/{method}")
     async def v2_agents_a2a(
         did: str, method: str, request: Request,
-    ) -> JSONResponse:
+    ) -> Any:
         """Phase 3e: A2A JSON-RPC-style POST forwarder.
 
         Body is forwarded verbatim to the child's ``POST /a2a/<method>``
@@ -1980,6 +2083,19 @@ def register_v2_routes(app: FastAPI) -> None:
         forward_timeout = _A2A_METHOD_TIMEOUTS.get(
             method, _A2A_DEFAULT_TIMEOUT_S,
         )
+
+        # Phase 5.2: SSE streaming proxy. We dispatch to a separate
+        # forwarder because the buffered path uses ``asyncio.to_thread``
+        # for a one-shot call, while the streaming path needs a
+        # queue-bridged async generator so the operator's browser
+        # sees deltas as they arrive at the hub.
+        if method == "ask-stream":
+            return _proxy_ssestream(
+                url=f"http://127.0.0.1:{rec.a2a_port}/a2a/{method}",
+                body_bytes=body_bytes,
+                req_headers=req_headers,
+                forward_timeout=forward_timeout,
+            )
 
         def _do_forward() -> Tuple[int, bytes]:
             req = urllib.request.Request(

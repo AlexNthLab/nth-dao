@@ -65,7 +65,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 
 _STOP = False
@@ -161,6 +161,10 @@ class _CapTokenHolder:
 _A2A_METHOD_CAPABILITIES: Dict[str, str] = {
     "echo": "a2a:message_send",
     "ask": "a2a:message_send",
+    # Phase 5.2: SSE-streaming variant. Same cap as ``ask`` — the
+    # protocol-layer act ("peer sends a message to this agent and
+    # gets a response") is identical; only the transport differs.
+    "ask-stream": "a2a:message_send",
 }
 
 
@@ -235,13 +239,36 @@ class _AskBackend:
     backend-suggested upper bound for one ``ask`` call. The handler
     reads it via ``getattr(backend, 'DEFAULT_TIMEOUT_S', ...)`` so
     tweaking the constant in a subclass actually propagates instead
-    of being shadowed by a hardcoded handler literal. """
+    of being shadowed by a hardcoded handler literal.
+
+    Phase 5.2 (2026-06-11): ``stream_ask`` is the streaming variant.
+    Yields ``(kind, payload)`` pairs:
+      - ``("delta", str)``  — one text chunk
+      - ``("done", dict)``  — terminal metadata (input_tokens etc.)
+    The A2A handler wraps each pair into one SSE event. Backends
+    that don't implement streaming get a default polyfill that
+    yields the buffered ``ask`` result as a single delta + done. """
 
     name: str = "(abstract)"
     DEFAULT_TIMEOUT_S: float = 30.0
 
     def ask(self, params: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
         raise NotImplementedError
+
+    def stream_ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> "Iterator[Tuple[str, Any]]":
+        """Phase 5.2 default polyfill: call the buffered ``ask``
+        and re-emit as ``(delta, full_text)`` + ``(done, meta)``.
+        Real streaming backends override this to yield incremental
+        deltas as the model produces them. """
+        result = self.ask(params, timeout_s)
+        text = str(result.get("response", ""))
+        yield "delta", text
+        # Strip the response text from the done metadata so the
+        # SSE consumer doesn't see the same content twice.
+        meta = {k: v for k, v in result.items() if k != "response"}
+        yield "done", meta
 
 
 class _MockAskBackend(_AskBackend):
@@ -271,6 +298,32 @@ class _MockAskBackend(_AskBackend):
         return {
             "response": f"(mock) ack: {truncated}{suffix}",
             "backend": self.name,
+        }
+
+    def stream_ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> Iterator[Tuple[str, Any]]:
+        """Phase 5.2: emit the same response as the buffered ``ask``
+        but chunk-by-chunk so the operator can see the wire stream.
+        A tiny sleep between chunks demonstrates the streaming UX
+        without polluting tests with timing-sensitive assertions
+        (sleep is bypassable via ``params['_no_sleep']`` for the
+        regression suite). """
+        full = self.ask(params, timeout_s)
+        text = str(full["response"])
+        no_sleep = bool(params.get("_no_sleep"))
+        # Stream ~8 chars per chunk so a short prompt produces a
+        # handful of visible events.
+        step = 8
+        for i in range(0, len(text), step):
+            yield "delta", text[i:i + step]
+            if not no_sleep:
+                time.sleep(0.02)
+        yield "done", {
+            "backend": self.name,
+            "input_tokens": len(str(params.get("prompt") or "")) // 4,
+            "output_tokens": len(text) // 4,
+            "stop_reason": "end_turn",
         }
 
 
@@ -403,6 +456,74 @@ class _AnthropicSdkAskBackend(_AskBackend):
             "input_tokens": msg.usage.input_tokens,
             "output_tokens": msg.usage.output_tokens,
             "stop_reason": msg.stop_reason or "",
+        }
+
+    def stream_ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> Iterator[Tuple[str, Any]]:
+        """Phase 5.2: stream Claude's response token-by-token via
+        ``client.messages.stream``. The SDK exposes ``text_stream``
+        (text deltas only) — we yield each chunk as ``(delta, str)``
+        and emit a final ``(done, usage_meta)`` once the stream
+        terminates so the operator's view ends with the same
+        token counts the buffered ``ask`` returns. """
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("anthropic backend requires a 'prompt' param")
+        if len(prompt) > 32 * 1024:
+            raise ValueError(
+                f"prompt too long ({len(prompt)} chars); 32KB cap"
+            )
+        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY not set — anthropic SDK backend "
+                "needs an API key. Set the env var on the hub process "
+                "or fall back to kind=mock."
+            )
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError(
+                "anthropic SDK not installed — run "
+                "'pip install anthropic' or switch to kind=mock"
+            ) from exc
+
+        model = str(params.get("model") or self.DEFAULT_MODEL)
+        raw_max = params.get("max_tokens")
+        if isinstance(raw_max, int) and 16 <= raw_max <= self.MAX_TOKENS_CEILING:
+            max_tokens = raw_max
+        else:
+            max_tokens = self.DEFAULT_MAX_TOKENS
+
+        client = self._get_client()
+        try:
+            with client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout_s,
+            ) as stream:
+                for text in stream.text_stream:
+                    if text:
+                        yield "delta", text
+                final = stream.get_final_message()
+        except anthropic.APITimeoutError as exc:
+            raise TimeoutError(
+                f"anthropic API did not respond within "
+                f"{timeout_s:.1f}s for prompt[{len(prompt)}]"
+            ) from exc
+        except anthropic.AuthenticationError as exc:
+            raise RuntimeError(
+                f"anthropic API rejected the key ({exc}); "
+                "verify ANTHROPIC_API_KEY"
+            ) from exc
+
+        yield "done", {
+            "backend": self.name,
+            "model": model,
+            "input_tokens": final.usage.input_tokens,
+            "output_tokens": final.usage.output_tokens,
+            "stop_reason": final.stop_reason or "",
         }
 
 
@@ -795,11 +916,20 @@ def _start_a2a_server(
                     "caller_did": token.get("subject_did", ""),
                     "agent_did": state_snapshot["did"],
                 }}
+            elif method == "ask-stream":
+                # Phase 5.2: SSE streaming. Write headers + each
+                # delta as we get it. Errors mid-stream are emitted
+                # as a final ``event: error`` so the operator's
+                # browser sees the failure inline instead of an
+                # unexplained disconnect. Return early to bypass
+                # the buffered _respond at the bottom.
+                self._stream_ask(ask_backend, params, token)
+                return
             else:
                 self._json_error(
                     404, "method-not-found",
                     f"method {method!r} not supported "
-                    "(Phase 4: echo, ask)",
+                    "(Phase 5.2: echo, ask, ask-stream)",
                 )
                 return
             self._respond(
@@ -820,6 +950,98 @@ def _start_a2a_server(
                 ensure_ascii=False,
             ).encode("utf-8")
             self._respond(status, body)
+
+        def _stream_ask(
+            self,
+            backend: "_AskBackend",
+            params: Dict[str, Any],
+            token: Dict[str, Any],
+        ) -> None:
+            """Phase 5.2: write SSE response. Each backend yield
+            becomes one SSE event. Errors are flushed as a final
+            ``data:`` event with ``error`` then the connection
+            closes — the operator's browser sees the failure
+            inline instead of an unexplained socket close.
+
+            Wire shape (line-by-line):
+              HTTP/1.1 200 OK
+              Content-Type: text/event-stream
+              Cache-Control: no-cache
+              Connection: close
+              <blank>
+              data: {"delta":"hello"}
+              <blank>
+              data: {"delta":" world"}
+              <blank>
+              data: {"done":true,"input_tokens":...}
+              <blank>
+            """
+            # Backend-suggested per-call budget — matches the
+            # buffered ask handler so streaming inherits the same
+            # ceiling. Caller can override via params["timeout_s"]
+            # in the 5-300s window.
+            backend_default = float(
+                getattr(backend, "DEFAULT_TIMEOUT_S", 30.0),
+            )
+            caller_override = params.get("timeout_s")
+            if isinstance(caller_override, (int, float)) and \
+                    5.0 <= caller_override <= 300.0:
+                effective = float(caller_override)
+            else:
+                effective = backend_default
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def write_event(payload: Dict[str, Any]) -> None:
+                line = (
+                    "data: "
+                    + json.dumps(payload, ensure_ascii=False)
+                    + "\n\n"
+                )
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+
+            try:
+                for kind, payload in backend.stream_ask(params, effective):
+                    if kind == "delta":
+                        write_event({"delta": str(payload)})
+                    elif kind == "done":
+                        meta = dict(payload) if isinstance(payload, dict) else {}
+                        meta["done"] = True
+                        meta["caller_did"] = token.get("subject_did", "")
+                        meta["agent_did"] = state_snapshot["did"]
+                        write_event(meta)
+                    else:
+                        # Future-proof: unknown kinds get forwarded
+                        # verbatim so a Phase 6 backend can extend
+                        # the protocol without the agent shell
+                        # needing a patch.
+                        write_event({"kind": kind, "payload": payload})
+            except TimeoutError as exc:
+                write_event({
+                    "error": {
+                        "code": "backend-timeout",
+                        "message": str(exc),
+                    },
+                })
+            except ValueError as exc:
+                write_event({
+                    "error": {
+                        "code": "bad-request",
+                        "message": str(exc),
+                    },
+                })
+            except Exception as exc:  # noqa: BLE001
+                write_event({
+                    "error": {
+                        "code": "backend-failed",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    },
+                })
 
     try:
         # Port 0 → kernel picks a free ephemeral port; we then read
