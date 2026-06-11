@@ -82,6 +82,32 @@ def _print_event(**fields: object) -> None:
     print(json.dumps(fields, ensure_ascii=False), flush=True)
 
 
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    """Write ``payload`` to ``path`` atomically via tmp + replace.
+
+    M-1 fix (review round Phase 3d R1): the Phase 3c recovery
+    file (``last_receipt.json``) and any future hub-readable
+    child file MUST be atomic so a recovery sweep doesn't pick
+    up a half-written JSON. Same wire-format as the supervisor's
+    ``_atomic_write_json``; deliberately reimplemented here to
+    keep the child a single-file CLI with no nth_dao.web import
+    coupling (Phase 4 may package the child separately). """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(str(tmp), str(path))
+    except OSError:
+        # M-2 echo: clean up tmp on replace failure so the agent
+        # dir doesn't accumulate orphan tmp files across runs.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _print_error(**fields: object) -> None:
     """Emit one NDJSON line to stderr (operator log). Stdout is
     reserved for the protocol stream so a startup failure must
@@ -98,14 +124,108 @@ def _print_error(**fields: object) -> None:
     )
 
 
+# ─── Phase 3e: cap_token holder + method → required-cap map ─────
+
+
+class _CapTokenHolder:
+    """Thread-safe slot holding the child's own cap_token after it
+    loads from disk. The A2A server reads ``issuer_did`` from this
+    to validate incoming tokens are signed by the SAME hub.
+
+    Before the child loads its own token, ``token`` is None and
+    every A2A POST returns 401 ("not-yet-authorized") — defense in
+    depth so a fast peer can't slip in before the handshake. """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._token: Optional[Dict[str, Any]] = None
+
+    def set(self, token: Dict[str, Any]) -> None:
+        with self._lock:
+            self._token = dict(token)
+
+    def get_issuer_did(self) -> Optional[str]:
+        with self._lock:
+            if self._token is None:
+                return None
+            return str(self._token.get("issuer_did") or "") or None
+
+
+# Phase 3e: which method requires which cap. Method "echo" is the
+# MVP demonstration; later methods would map to richer caps.
+_A2A_METHOD_CAPABILITIES: Dict[str, str] = {
+    "echo": "a2a:message_send",
+}
+
+
+def _verify_a2a_auth(
+    auth_header: str,
+    holder: _CapTokenHolder,
+    method: str,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Verify an incoming A2A request's Authorization header.
+
+    Returns ``(ok, reason, token)``. On success ``reason`` is "" and
+    ``token`` is the parsed cap_token dict. On failure ``reason`` is
+    a machine-readable string mirroring cap_token.REJECT_* values
+    plus a few A2A-specific ones (``no-auth``, ``bad-scheme``,
+    ``issuer-mismatch``, ``not-yet-authorized``, ``method-unknown``).
+
+    Checks performed:
+      1. Header must be ``CapToken <encoded>``.
+      2. Token must parse + verify against its claimed issuer.
+      3. Token's issuer_did must match the CHILD's OWN cap_token's
+         issuer_did — a peer presenting a token signed by some
+         other hub is rejected outright.
+      4. Token must carry the capability required by ``method``. """
+    if not auth_header:
+        return False, "no-auth", None
+    parts = auth_header.split(None, 1)
+    if len(parts) != 2 or parts[0] != "CapToken":
+        return False, "bad-scheme", None
+    encoded = parts[1].strip()
+
+    # Lazy import — cap_token pulls in nacl + canonical_json, which
+    # the child shouldn't pay for if no A2A request ever arrives.
+    try:
+        from nth_dao.cap_token import (
+            decode_authorization_value, verify_cap_token,
+        )
+    except ImportError:
+        return False, "crypto-unavailable", None
+
+    token = decode_authorization_value(encoded)
+    if token is None or not isinstance(token, dict):
+        return False, "sig-decode-failed", None
+
+    own_issuer = holder.get_issuer_did()
+    if own_issuer is None:
+        return False, "not-yet-authorized", None
+    if token.get("issuer_did") != own_issuer:
+        return False, "issuer-mismatch", token
+
+    required_cap = _A2A_METHOD_CAPABILITIES.get(method)
+    if required_cap is None:
+        return False, "method-unknown", token
+
+    ok, reason = verify_cap_token(
+        token, required_capabilities=[required_cap],
+    )
+    if not ok:
+        return False, reason or "verify-failed", token
+    return True, "", token
+
+
 # ─── Phase 3c: A2A localhost HTTP server ─────────────────────────
 
 
 def _start_a2a_server(
     identity_card: Dict[str, Any],
+    cap_token_holder: "_CapTokenHolder",
 ) -> Tuple[Optional[int], Optional[socketserver.BaseServer]]:
     """Bind a stdlib HTTP server on 127.0.0.1:<random port> and
-    serve ``identity_card`` from GET /ping.
+    serve ``identity_card`` from GET /ping plus a JSON-RPC-style
+    POST /a2a/<method> surface (Phase 3e).
 
     Returns ``(port, server)`` on success, ``(None, None)`` if
     the bind fails. Bind failure is non-fatal — the agent runs
@@ -117,15 +237,15 @@ def _start_a2a_server(
     state_snapshot: Dict[str, Any] = dict(identity_card)
     state_lock = threading.Lock()
 
-    # L-3 pushback (review round Phase 3c R1): PingHandler is
+    # L-3 pushback (review round Phase 3c R1): A2AHandler is
     # defined inline because it CLOSES OVER state_snapshot +
-    # state_lock. Hoisting it to module level would force per-agent
-    # state through class attributes (mutable global state shared
-    # across agents) or a factory pattern — both worse than a
-    # closure for state encapsulation. ``_start_a2a_server`` is
-    # called once per agent lifetime, so the class-rebuild cost
-    # is irrelevant.
-    class PingHandler(http.server.BaseHTTPRequestHandler):
+    # state_lock + cap_token_holder. Hoisting it to module level
+    # would force per-agent state through class attributes
+    # (mutable global state shared across agents) or a factory
+    # pattern — both worse than a closure for state encapsulation.
+    # ``_start_a2a_server`` is called once per agent lifetime, so
+    # the class-rebuild cost is irrelevant.
+    class A2AHandler(http.server.BaseHTTPRequestHandler):
         # Quiet the per-request stderr line — the parent already
         # forwards meaningful events via the supervisor's
         # _read_stderr_loop, and access logs from a localhost
@@ -135,7 +255,7 @@ def _start_a2a_server(
 
         def do_GET(self) -> None:  # noqa: N802 — stdlib API
             if self.path.rstrip("/") != "/ping":
-                self.send_error(404, "only /ping is implemented")
+                self.send_error(404, "only /ping is implemented for GET")
                 return
             with state_lock:
                 payload = json.dumps(
@@ -143,11 +263,96 @@ def _start_a2a_server(
                      int(time.time() * 1000) - state_snapshot["started_at"]},
                     ensure_ascii=False,
                 ).encode("utf-8")
-            self.send_response(200)
+            self._respond(200, payload)
+
+        def do_POST(self) -> None:  # noqa: N802 — stdlib API
+            """Phase 3e: JSON-RPC-style POST /a2a/<method>.
+
+            Body is the raw params dict; response is
+            ``{"result": ...}`` on success or ``{"error": {...}}``
+            on failure. Auth required via ``Authorization: CapToken
+            <base64url-canonical-token>`` header. """
+            if not self.path.startswith("/a2a/"):
+                self.send_error(404, "only /a2a/<method> is implemented for POST")
+                return
+            method = self.path[len("/a2a/"):].strip("/")
+            if not method:
+                self._json_error(400, "bad-request", "missing method in path")
+                return
+            # Body: bounded read so a misbehaving peer can't OOM
+            # the child by claiming Content-Length: 1GB.
+            # H-1 fix (review round Phase 3e R1): parse defensively —
+            # a malformed Content-Length (e.g. "abc") used to raise
+            # ValueError out of the int() call → 500 from
+            # BaseHTTPRequestHandler. Bad client input belongs on
+            # the 400 path, not 500.
+            cl_header = self.headers.get("Content-Length") or "0"
+            try:
+                content_length = int(cl_header)
+            except ValueError:
+                self._json_error(
+                    400, "bad-request",
+                    f"Content-Length is not an integer: {cl_header!r}",
+                )
+                return
+            if content_length < 0 or content_length > 1024 * 1024:
+                self._json_error(
+                    413, "payload-too-large",
+                    f"Content-Length {content_length} exceeds 1MB cap",
+                )
+                return
+            body_bytes = self.rfile.read(content_length) if content_length else b""
+            try:
+                params = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._json_error(
+                    400, "bad-request",
+                    f"body is not valid JSON: {exc}",
+                )
+                return
+            # Auth: parse "Authorization: CapToken <encoded>"
+            auth_header = self.headers.get("Authorization", "")
+            ok, reason, token = _verify_a2a_auth(
+                auth_header, cap_token_holder, method,
+            )
+            if not ok:
+                self._json_error(
+                    401 if reason != "cap-insufficient" else 403,
+                    reason, f"A2A auth failed for /a2a/{method}: {reason}",
+                )
+                return
+            # Method dispatch — Phase 3e supports only "echo".
+            if method == "echo":
+                response = {"result": {
+                    "method": method,
+                    "received_params": params,
+                    "caller_did": (token or {}).get("subject_did", ""),
+                    "agent_did": state_snapshot["did"],
+                }}
+            else:
+                self._json_error(
+                    404, "method-not-found",
+                    f"method {method!r} not supported (Phase 3e: echo only)",
+                )
+                return
+            self._respond(
+                200,
+                json.dumps(response, ensure_ascii=False).encode("utf-8"),
+            )
+
+        def _respond(self, status: int, body: bytes) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(payload)
+            self.wfile.write(body)
+
+        def _json_error(self, status: int, code: str, message: str) -> None:
+            body = json.dumps(
+                {"error": {"code": code, "message": message}},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self._respond(status, body)
 
     try:
         # Port 0 → kernel picks a free ephemeral port; we then read
@@ -158,7 +363,7 @@ def _start_a2a_server(
         # daemon-thread classmethod marks worker threads as daemons
         # so process exit takes them down.
         server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", 0), PingHandler,
+            ("127.0.0.1", 0), A2AHandler,
         )
         server.daemon_threads = True
     except OSError as exc:
@@ -355,15 +560,23 @@ def main(argv: list[str] | None = None) -> int:
 
     started_at = int(time.time() * 1000)
 
+    # Phase 3e: holder is shared between the main polling loop
+    # (which sets the token after cap_token_file loads) and the
+    # A2A HTTP server's auth check.
+    cap_token_holder = _CapTokenHolder()
+
     # Phase 3c: open the A2A surface BEFORE emitting agent_started
     # so the advertised port is the one we'll actually serve on.
-    a2a_port, _server = _start_a2a_server({
-        "agent_id": args.id,
-        "kind": args.kind,
-        "did": did,
-        "pubkey_hex": pubkey_hex,
-        "started_at": started_at,
-    })
+    a2a_port, _server = _start_a2a_server(
+        {
+            "agent_id": args.id,
+            "kind": args.kind,
+            "did": did,
+            "pubkey_hex": pubkey_hex,
+            "started_at": started_at,
+        },
+        cap_token_holder,
+    )
 
     # SIGTERM is the conventional shutdown signal on POSIX; on
     # Windows the supervisor falls back to terminate() which fires
@@ -436,6 +649,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 cap_token_loaded = True
+                # Phase 3e: hand the token to the A2A auth slot so
+                # incoming requests with peer cap_tokens issued by
+                # the same hub start being honored.
+                cap_token_holder.set(token)
                 receipt = _sign_attestation_receipt(
                     identity=identity,
                     agent_id=args.id,
@@ -448,18 +665,18 @@ def main(argv: list[str] | None = None) -> int:
                     # M-3 fix (review round Phase 3c R2): persist
                     # the receipt to disk BEFORE emitting it on
                     # stdout so a crash between sign and parent
-                    # pipe-read leaves a recovery artifact. Phase
-                    # 3e will sweep these on hub startup; for now
-                    # the file is removed alongside cap_token.json
-                    # when the supervisor stops the agent.
+                    # pipe-read leaves a recovery artifact. The
+                    # Phase 3e recovery sweep on hub startup picks
+                    # up any such files; the supervisor's stop()
+                    # cleanup removes them alongside cap_token.json
+                    # when the agent shuts down cleanly.
+                    # M-1 fix (review round Phase 3d R1): atomic
+                    # write so the sweep can't see a partial file.
                     recovery_path = (
                         Path(cap_token_path).parent / "last_receipt.json"
                     )
                     try:
-                        with open(recovery_path, "w", encoding="utf-8") as f:
-                            json.dump(
-                                receipt, f, ensure_ascii=False, indent=2,
-                            )
+                        _atomic_write_json(recovery_path, receipt)
                     except OSError as exc:
                         _print_error(
                             event="recovery_write_failed",

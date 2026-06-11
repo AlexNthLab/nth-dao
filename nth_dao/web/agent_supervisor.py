@@ -187,7 +187,18 @@ class AgentRunner(Protocol):
         metadata captured at start() time (Phase 3d). At minimum
         the SubprocessRunner stores ``did``, ``pubkey_hex``, and
         ``a2a_port`` if the child advertised one. InMemoryRunner
-        returns an empty dict since there's no real handshake. """
+        returns an empty dict since there's no real handshake.
+
+        Contract (A-1 doc, review round Phase 3d R1):
+          - Must be ready by the time ``start()`` returns with a
+            non-empty DID. The supervisor reads this immediately
+            after ``start()`` and expects the data to be populated.
+          - Must be safe to call concurrently with other methods.
+          - Must NOT raise except for ``AttributeError`` on legacy
+            runners that don't implement the method — the
+            supervisor relies on that one allowed exception type
+            to provide a forward-compatible fallback. Any other
+            exception is treated as a bug. """
         ...
 
 
@@ -615,7 +626,20 @@ def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
             "delivery proceeds with default permissions",
             tmp, exc,
         )
-    os.replace(str(tmp), str(p))
+    # M-2 fix (review round Phase 3d R1): if os.replace raises
+    # (cross-device, perm flip, transient EBUSY on Windows), the
+    # tmp file is left behind and would never be cleaned up
+    # because stop()'s cleanup loop only knows about cap_token.json
+    # / last_receipt.json. Try/finally that unlinks the tmp on
+    # replace-failure keeps the agent dir tidy.
+    try:
+        os.replace(str(tmp), str(p))
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 # Phase 3b: signature of the optional ``cap_token_issuer`` callback
@@ -740,12 +764,16 @@ class AgentSupervisor:
         # default keeps the access safe in both cases).
         try:
             handshake_meta = self._runner.handshake_data(agent_id)
-        except Exception as exc:  # noqa: BLE001
-            # A custom runner that raises here shouldn't block the
-            # spawn — we already have did + pid. Log + treat as empty.
-            logger.warning(
-                "agent_supervisor: runner.handshake_data raised for "
-                "%s: %s — proceeding without metadata", agent_id, exc,
+        except AttributeError:
+            # M-3 fix (review round Phase 3d R1): only AttributeError
+            # is the legitimate fall-through (a legacy runner that
+            # predates the Protocol method). Real bugs (TypeError,
+            # threading violations) should surface as 500, not get
+            # swallowed into "no metadata".
+            logger.debug(
+                "agent_supervisor: runner %s does not implement "
+                "handshake_data — proceeding without metadata",
+                type(self._runner).__name__,
             )
             handshake_meta = {}
         raw_port = handshake_meta.get("a2a_port")
@@ -1149,6 +1177,92 @@ class AgentSupervisor:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("shutdown stop failed for %s: %s", aid, exc)
 
+    def recover_orphaned_receipts(self) -> int:
+        """Phase 3e: scan ``cap_token_dir`` for ``last_receipt.json``
+        files left behind by agents that crashed (or that the hub
+        was killed before reading their pipe). For each one:
+
+          1. Parse as JSON. Malformed → log + skip + leave in
+             place (operator can inspect).
+          2. Validate it looks like a receipt dict (has
+             ``signer_did``). If not, log + skip + leave.
+          3. Forward to ``receipt_persistor`` if configured;
+             otherwise log + skip.
+          4. On successful persistence, unlink the file so the
+             next sweep doesn't re-process it.
+
+        Returns the count of receipts successfully recovered.
+        Idempotent — running the sweep twice is a no-op on the
+        second call (already-recovered files are gone).
+
+        No-op if ``cap_token_dir`` is None or doesn't exist. """
+        if self._cap_token_dir is None or not self._cap_token_dir.exists():
+            return 0
+        if self._receipt_persistor is None:
+            logger.info(
+                "agent_supervisor: recovery sweep skipped — no "
+                "receipt_persistor configured (workspace not "
+                "bootstrapped?)",
+            )
+            return 0
+
+        recovered = 0
+        for agent_dir in self._cap_token_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            recovery_path = agent_dir / "last_receipt.json"
+            if not recovery_path.exists():
+                continue
+            try:
+                raw = recovery_path.read_text(encoding="utf-8")
+                receipt = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "agent_supervisor: recovery sweep could not "
+                    "parse %s: %s — leaving in place",
+                    recovery_path, exc,
+                )
+                continue
+            if not isinstance(receipt, dict) or not receipt.get("signer_did"):
+                logger.warning(
+                    "agent_supervisor: recovery file %s doesn't "
+                    "look like a receipt (no signer_did) — leaving",
+                    recovery_path,
+                )
+                continue
+            try:
+                # agent_dir.name IS the agent_id the supervisor
+                # used to create the dir, so forward that as the
+                # routing key even though the agent itself is
+                # already gone.
+                self._receipt_persistor(agent_dir.name, receipt)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "agent_supervisor: recovery persistor failed "
+                    "for %s (receipt_id=%s): %s — leaving file",
+                    agent_dir.name,
+                    receipt.get("receipt_id", "?"), exc,
+                )
+                continue
+            try:
+                recovery_path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "agent_supervisor: persisted receipt %s but "
+                    "could not remove the recovery file: %s",
+                    recovery_path, exc,
+                )
+                # Don't decrement — the receipt IS persisted; the
+                # file lingering is a cleanup issue, not a recovery
+                # failure. Operator can sweep manually if needed.
+            recovered += 1
+            logger.info(
+                "agent_supervisor: recovered orphaned receipt "
+                "(id=%s) for stopped agent %s",
+                receipt.get("receipt_id", "?"), agent_dir.name,
+            )
+        return recovered
+
 
 # ─────────────────────────────────────────────────────────────
 # Convenience factory used by the hub bootstrap
@@ -1173,6 +1287,15 @@ def build_default_supervisor(
       receipt_persistor   — forwarded into the supervisor for
                             ``receipt_signed`` events. v2_api wires
                             this to ``state.receipts.save``.
+
+    Phase 3d (2026-06-11):
+      decision_raiser     — forwarded into the supervisor for
+                            ``decision_raised`` events. v2_api
+                            wires this to insert into the v2
+                            decisions store with hub-stamped
+                            attribution (the child can propose a
+                            decision but cannot claim a foreign
+                            proposer_did).
 
     M-2 fix (2026-06-11): the previous version relied on Python's
     closure late-binding (``supervisor`` captured by name, not by

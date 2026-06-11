@@ -1289,6 +1289,28 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                 "(cap_token_dir=%s, persistor=on)",
                 cap_token_dir,
             )
+            # Phase 3e: one-shot recovery sweep. Picks up any
+            # last_receipt.json files left behind by a prior hub
+            # run that crashed between the child writing and the
+            # parent reading from the pipe. Idempotent — no-op
+            # when the dir doesn't exist or is empty.
+            try:
+                recovered = sup.recover_orphaned_receipts()
+                if recovered:
+                    logger.info(
+                        "v2_api: recovered %d orphaned receipt(s) "
+                        "from prior agent dirs",
+                        recovered,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # Recovery failure must not block the supervisor
+                # build — the hub can still spawn new agents even
+                # if it can't read the old receipts.
+                logger.warning(
+                    "v2_api: receipt recovery sweep failed: %s "
+                    "— continuing without recovered receipts",
+                    exc,
+                )
     return sup
 
 
@@ -1311,6 +1333,28 @@ class SpawnAgentBody(_Model):
             "the agent can sign receipts even with an empty request."
         ),
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 3e: small helpers shared by the A2A POST proxy
+# ─────────────────────────────────────────────────────────────
+
+
+def _decode_or_passthrough(raw: bytes) -> Any:
+    """Decode JSON bytes; on failure return ``{raw_text: <str>}``
+    so the caller still gets SOMETHING readable instead of a 500.
+    """
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        # Truncate for safety — a 1MB binary blob in the JSON
+        # response would be wasteful.
+        text = raw[:1024].decode("utf-8", errors="replace")
+        return {
+            "raw_text_preview": text,
+            "raw_length": len(raw),
+            "note": "child returned non-JSON; preview truncated to 1KB",
+        }
 
 
 def _state_cap_tokens_store(request: Request) -> Optional[Any]:
@@ -1815,6 +1859,134 @@ def register_v2_routes(app: FastAPI) -> None:
                 ),
             )
         return data
+
+    @app.post("/api/v2/agents/{did}/a2a/{method}")
+    async def v2_agents_a2a(
+        did: str, method: str, request: Request,
+    ) -> JSONResponse:
+        """Phase 3e: A2A JSON-RPC-style POST forwarder.
+
+        Body is forwarded verbatim to the child's ``POST /a2a/<method>``
+        endpoint. The ``Authorization`` header (carrying the
+        caller's ``CapToken``) is passed through so the child can
+        validate it. The child's response — body + status — is
+        returned to the caller as-is.
+
+        Status codes:
+          404 — no live supervised agent for ``did`` with an
+                a2a_port, OR (forwarded) the child rejects the
+                method as unknown.
+          401/403 — (forwarded) the child rejected the caller's
+                    auth header.
+          413 — body exceeds the hub's 1MB forward cap.
+          502 — child returned malformed bytes or didn't answer.
+          503 — supervisor unavailable.
+
+        The hub does NOT validate the cap_token itself — that's the
+        child's job and keeps the trust boundary at one place.
+        Phase 3f may add hub-side scope validation as a fast-path
+        before the proxy forward. """
+        import urllib.error
+        import urllib.request
+
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(
+                status_code=503,
+                detail="agent supervisor unavailable",
+            )
+        matching = [
+            r for r in sup.list_agents()
+            if r.did == did and r.a2a_port is not None and r.alive
+        ]
+        if not matching:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no live supervised agent for did={did!r} with "
+                    "an a2a_port"
+                ),
+            )
+        rec = matching[0]
+
+        # H-2 fix (review round Phase 3e R1): check Content-Length
+        # BEFORE awaiting the body so a 1GB POST is rejected at the
+        # header layer instead of fully buffered into hub memory.
+        # Falls through to await body() to enforce the cap when
+        # Content-Length is absent / malformed (Starlette will have
+        # parsed the body already in that case, but bounds-checking
+        # after is the safety net).
+        cl_header = request.headers.get("Content-Length")
+        if cl_header is not None:
+            try:
+                claimed_length = int(cl_header)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Content-Length is not an integer: {cl_header!r}",
+                )
+            if claimed_length > 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"Content-Length {claimed_length} exceeds "
+                        "1MB A2A cap"
+                    ),
+                )
+        body_bytes = await request.body()
+        if len(body_bytes) > 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"body length {len(body_bytes)} exceeds 1MB "
+                    "A2A cap"
+                ),
+            )
+
+        url = f"http://127.0.0.1:{rec.a2a_port}/a2a/{method}"
+        req_headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body_bytes)),
+        }
+        # Pass the caller's auth through so the child can verify
+        # against its own cap_token's issuer_did.
+        auth = request.headers.get("Authorization")
+        if auth:
+            req_headers["Authorization"] = auth
+
+        # Run the blocking urllib call on the threadpool so we
+        # don't block the event loop while waiting up to 2s for
+        # the child to reply.
+        import asyncio
+
+        def _do_forward() -> Tuple[int, bytes]:
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=req_headers, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=2.0) as resp:  # noqa: S310
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as http_exc:
+                # Child returned non-2xx — forward status + body.
+                return http_exc.code, http_exc.read()
+
+        try:
+            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+        except urllib.error.URLError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"A2A proxy could not reach {url}: {exc}",
+            )
+        except (TimeoutError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"A2A proxy timed out / failed at {url}: {exc}",
+            )
+
+        return JSONResponse(
+            status_code=resp_status,
+            content=_decode_or_passthrough(resp_body),
+        )
 
     @app.get("/api/v2/cap_tokens", response_model=List[CapTokenSummaryM])
     def v2_cap_tokens(request: Request) -> List[Dict[str, Any]]:

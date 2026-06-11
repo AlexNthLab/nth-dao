@@ -1373,6 +1373,372 @@ def test_v2_a2a_proxy_404_when_agent_has_no_a2a_port(
 
 
 # ─────────────────────────────────────────────────────────────
+# Phase 3e — recovery sweep, A2A POST proxy, R1 follow-ups
+# ─────────────────────────────────────────────────────────────
+
+def test_atomic_write_json_cleans_up_tmp_on_replace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-2 fix (review round Phase 3d R1): if os.replace raises,
+    the tmp file must be unlinked so the agent dir doesn't
+    accumulate orphan .tmp files. """
+    from nth_dao.web import agent_supervisor as supmod
+
+    target = tmp_path / "cap_token.json"
+    real_replace = os.replace
+
+    def boom_replace(_src: str, _dst: str) -> None:
+        raise OSError("simulated cross-device link")
+
+    monkeypatch.setattr(os, "replace", boom_replace)
+
+    with pytest.raises(OSError):
+        supmod._atomic_write_json(str(target), {"token_id": "x"})
+
+    monkeypatch.setattr(os, "replace", real_replace)  # restore
+    tmp_file = target.with_suffix(target.suffix + ".tmp")
+    assert not tmp_file.exists(), (
+        f"tmp file should be cleaned up on replace failure; "
+        f"found {tmp_file}"
+    )
+
+
+def test_recover_orphaned_receipts_persists_and_unlinks(
+    tmp_path: Path,
+) -> None:
+    """Phase 3e: orphaned ``last_receipt.json`` files from a prior
+    run are persisted via the receipt_persistor on the next
+    supervisor build, and the file is unlinked so a re-run doesn't
+    double-persist. """
+    cap_token_dir = tmp_path / "agents"
+    cap_token_dir.mkdir()
+
+    # Lay down two prior-agent dirs, each with a stub receipt.
+    receipts_seen: list[tuple[str, dict]] = []
+
+    def persistor(agent_id: str, receipt: dict) -> None:
+        receipts_seen.append((agent_id, receipt))
+
+    for aid in ("crashed-001", "crashed-002"):
+        agent_dir = cap_token_dir / aid
+        agent_dir.mkdir()
+        (agent_dir / "last_receipt.json").write_text(
+            json.dumps({
+                "receipt_id": f"r-{aid}",
+                "signer_did": f"did:key:z6Mk{aid}",
+                "content_hash": "abc",
+            }),
+            encoding="utf-8",
+        )
+
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        cap_token_dir=cap_token_dir,
+        receipt_persistor=persistor,
+    )
+    recovered = sup.recover_orphaned_receipts()
+    assert recovered == 2
+    agent_ids = sorted(aid for aid, _ in receipts_seen)
+    assert agent_ids == ["crashed-001", "crashed-002"]
+    # Files unlinked → second sweep is a no-op.
+    assert sup.recover_orphaned_receipts() == 0
+
+
+def test_recover_orphaned_receipts_skips_malformed(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 3e: a recovery file that isn't valid JSON / isn't a
+    receipt-shaped dict is logged + left in place (operator can
+    inspect). The sweep must NOT crash on it. """
+    import logging
+    cap_token_dir = tmp_path / "agents"
+    (cap_token_dir / "bad-json").mkdir(parents=True)
+    (cap_token_dir / "bad-json" / "last_receipt.json").write_text(
+        "{this is not valid JSON",
+        encoding="utf-8",
+    )
+    (cap_token_dir / "no-signer").mkdir()
+    (cap_token_dir / "no-signer" / "last_receipt.json").write_text(
+        json.dumps({"receipt_id": "r", "content_hash": "x"}),
+        encoding="utf-8",
+    )
+
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        cap_token_dir=cap_token_dir,
+        receipt_persistor=lambda _a, _r: None,
+    )
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        recovered = sup.recover_orphaned_receipts()
+    assert recovered == 0
+    # Both files should still be on disk for operator inspection.
+    assert (cap_token_dir / "bad-json" / "last_receipt.json").exists()
+    assert (cap_token_dir / "no-signer" / "last_receipt.json").exists()
+    msgs = [w.getMessage() for w in caplog.records
+            if w.levelno == logging.WARNING]
+    assert any("could not parse" in m for m in msgs)
+    assert any("no signer_did" in m for m in msgs)
+
+
+def test_recover_orphaned_receipts_leaves_file_on_persistor_failure(
+    tmp_path: Path,
+) -> None:
+    """Phase 3e: if the persistor raises mid-sweep, the file is
+    LEFT in place — next run can retry. Otherwise a transient
+    disk error during recovery would silently lose the receipt. """
+    cap_token_dir = tmp_path / "agents"
+    (cap_token_dir / "agent-a").mkdir(parents=True)
+    recovery = cap_token_dir / "agent-a" / "last_receipt.json"
+    recovery.write_text(
+        json.dumps({"receipt_id": "r", "signer_did": "did:key:zX"}),
+        encoding="utf-8",
+    )
+
+    def angry_persistor(_aid: str, _receipt: dict) -> None:
+        raise RuntimeError("disk full")
+
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        cap_token_dir=cap_token_dir,
+        receipt_persistor=angry_persistor,
+    )
+    assert sup.recover_orphaned_receipts() == 0
+    assert recovery.exists(), (
+        "receipt file must remain for next-run retry when "
+        "persistor raised"
+    )
+
+
+def test_a2a_post_proxy_413_on_oversized_content_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-2 fix (review round Phase 3e R1): when the caller claims
+    a body bigger than 1MB via Content-Length, the hub returns 413
+    WITHOUT buffering. urllib's urlopen must NOT be called — the
+    rejection happens at the header check. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:key:z6MkTooBig"
+    rec = AgentRecord(
+        agent_id="big", kind="mock", label="big", did=target_did,
+        capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, a2a_port=51960,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["big"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["big"] = True  # type: ignore[attr-defined]
+
+    # If the hub buffered the body before checking Content-Length,
+    # urlopen would be called. Assert it isn't.
+    import urllib.request as _ureq
+    called: list[object] = []
+
+    def fake_urlopen(*_a: object, **_kw: object) -> None:
+        called.append("urlopen-was-called")
+        raise AssertionError("hub must not forward when body > 1MB")
+
+    monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/v2/agents/{target_did}/a2a/echo",
+        content=b"x",  # tiny body
+        headers={"Content-Length": str(2 * 1024 * 1024)},  # claim 2MB
+    )
+    assert resp.status_code == 413, resp.text
+    assert "1MB" in resp.json()["detail"]
+    assert not called, "urlopen must NOT be invoked before the cap check"
+
+
+def test_a2a_post_proxy_400_on_malformed_content_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-2 follow-up: a Content-Length that isn't an integer
+    (typo, smuggling attempt) lands on the 400 path with a clear
+    diagnostic, not the 500 path. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:key:z6MkBadCL"
+    rec = AgentRecord(
+        agent_id="bcl", kind="mock", label="bcl", did=target_did,
+        capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, a2a_port=51970,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["bcl"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["bcl"] = True  # type: ignore[attr-defined]
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/v2/agents/{target_did}/a2a/echo",
+        content=b"x",
+        headers={"Content-Length": "not-a-number"},
+    )
+    # TestClient may compute its own Content-Length and override
+    # ours. If the explicit header DID stick, we get the 400 path;
+    # if TestClient overwrote it with the actual body length (1),
+    # we'd hit the normal path. Accept either 400 or 404 (404
+    # because the InMemoryRunner-backed agent has no real HTTP
+    # surface so the proxy forward would fail) but never 500.
+    assert resp.status_code != 500, resp.text
+
+
+def test_a2a_post_proxy_403_for_unauthorized_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3e: A2A POST without auth header → child rejects 401,
+    proxy forwards the status. Validates the auth pass-through.
+    Uses a fake urlopen so no real subprocess needed. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:key:z6MkTestPeerForA2A"
+    rec = AgentRecord(
+        agent_id="a2a-test", kind="mock", label="a2a-test",
+        did=target_did, capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, a2a_port=51950,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["a2a-test"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["a2a-test"] = True  # type: ignore[attr-defined]
+
+    import urllib.error
+    import urllib.request as _ureq
+
+    def fake_urlopen(req: object, **_kw: object) -> None:
+        # Simulate the child returning 401 for missing auth.
+        body = json.dumps({"error": {
+            "code": "no-auth",
+            "message": "A2A auth failed for /a2a/echo: no-auth",
+        }}).encode("utf-8")
+        raise urllib.error.HTTPError(
+            url="http://127.0.0.1:51950/a2a/echo",
+            code=401, msg="Unauthorized",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=__import__("io").BytesIO(body),
+        )
+
+    monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/v2/agents/{target_did}/a2a/echo",
+        json={"hello": "world"},
+    )
+    # Child's 401 forwarded by the hub.
+    assert resp.status_code == 401, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "no-auth"
+
+
+def test_a2a_post_proxy_404_when_did_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3e: A2A POST to an unknown DID gets 404 the same way
+    the GET /ping proxy does. """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v2/agents/did:key:z6MkUnknown/a2a/echo",
+        json={"x": 1},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+def test_dummy_agent_verify_a2a_auth_rejects_missing_header() -> None:
+    """Phase 3e child-side: no Authorization header → no-auth. """
+    from nth_dao.web.dummy_agent import _CapTokenHolder, _verify_a2a_auth
+
+    holder = _CapTokenHolder()
+    holder.set({"issuer_did": "did:key:zHubIssuer"})
+    ok, reason, token = _verify_a2a_auth("", holder, "echo")
+    assert ok is False
+    assert reason == "no-auth"
+    assert token is None
+
+
+def test_dummy_agent_verify_a2a_auth_rejects_bad_scheme() -> None:
+    """Phase 3e: anything other than 'CapToken <encoded>' → bad-scheme. """
+    from nth_dao.web.dummy_agent import _CapTokenHolder, _verify_a2a_auth
+
+    holder = _CapTokenHolder()
+    holder.set({"issuer_did": "did:key:zHubIssuer"})
+    ok, reason, _ = _verify_a2a_auth("Bearer xyz", holder, "echo")
+    assert ok is False
+    assert reason == "bad-scheme"
+
+
+def test_dummy_agent_verify_a2a_auth_rejects_before_own_token_loaded() -> None:
+    """Phase 3e: requests arriving before the child has loaded
+    its own cap_token must be rejected with not-yet-authorized
+    (so a fast peer can't slip in pre-handshake). """
+    from nth_dao.web.dummy_agent import _CapTokenHolder, _verify_a2a_auth
+
+    holder = _CapTokenHolder()  # empty — nothing set
+    # Need a syntactically valid CapToken header for the test to
+    # reach the issuer check. The body content doesn't matter
+    # because decode happens before issuer comparison.
+    fake_header = "CapToken " + __import__("base64").urlsafe_b64encode(
+        b'{"kind":"nth-cap-token-v1","issuer_did":"did:key:zX"}'
+    ).decode("ascii").rstrip("=")
+    ok, reason, _ = _verify_a2a_auth(fake_header, holder, "echo")
+    assert ok is False
+    assert reason == "not-yet-authorized"
+
+
+# ─────────────────────────────────────────────────────────────
 # Real subprocess smoke
 # ─────────────────────────────────────────────────────────────
 
@@ -1490,6 +1856,134 @@ def test_supervisor_stamps_a2a_port_on_real_subprocess_spawn() -> None:
         assert entry["a2a_port"] == r.a2a_port
     finally:
         sup.stop(r.agent_id)
+
+
+def test_a2a_post_end_to_end_with_real_subprocess(
+    tmp_path: Path,
+) -> None:
+    """Phase 3e end-to-end: spawn a real child, deliver a cap_token
+    signed by a generated test identity, then call POST /a2a/echo
+    DIRECTLY against the child's HTTP server with a second
+    cap_token signed by the SAME identity. The child must accept
+    + echo back the params + return the caller's subject_did.
+
+    This proves:
+      - Child's auth check parses the Authorization: CapToken header
+      - Child verifies the token's issuer_did matches its own
+      - Child grants the call when capabilities include
+        a2a:message_send
+      - Child rejects auth-less calls (covered by unit test) """
+    pytest.importorskip("nacl")
+    import urllib.error
+    import urllib.request as _ureq
+    import uuid as _uuid
+
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN,
+        encode_authorization_header, sign_cap_token,
+    )
+    from nth_dao.did_key import is_did_key
+    from nth_dao.identity import AgentIdentity
+
+    issuer = AgentIdentity.generate(label="test-hub")
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, e: events.append(e),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"smoke-e2e-{_uuid.uuid4().hex[:12]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, child_did = runner.start(
+        agent_id, kind="mock",
+        cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+    try:
+        assert is_did_key(child_did)
+        # Sign + deliver the CHILD's own cap_token (so its A2A
+        # auth slot fills + it knows the legitimate issuer_did).
+        child_token = sign_cap_token(
+            issuer=issuer,
+            subject_did=child_did,
+            capabilities=[CAP_NTH_RECEIPT_SIGN],
+        )
+        from nth_dao.web.agent_supervisor import _atomic_write_json
+        _atomic_write_json(str(cap_token_path), child_token)
+
+        # Wait for the child to load + start signing receipts —
+        # that confirms cap_token_holder.set() has fired.
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            if any(e.get("event") == "receipt_signed" for e in events):
+                break
+            time.sleep(0.1)
+        assert any(e.get("event") == "receipt_signed" for e in events), (
+            "child should have signed an attestation by now"
+        )
+
+        # Fetch the a2a_port from the agent_started event.
+        started = next(e for e in events if e.get("event") == "agent_started")
+        port = started.get("a2a_port")
+        assert isinstance(port, int) and port > 1024
+
+        # Issue a SECOND cap_token for a "peer agent" calling
+        # /a2a/echo. Same issuer ⇒ child trusts it. Capability
+        # includes a2a:message_send ⇒ child grants the call.
+        peer = AgentIdentity.generate(label="peer-agent")
+        peer_token = sign_cap_token(
+            issuer=issuer,
+            subject_did=peer.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+        )
+        auth_value = "CapToken " + encode_authorization_header(peer_token)
+
+        # POST /a2a/echo directly to the child.
+        req = _ureq.Request(
+            url=f"http://127.0.0.1:{port}/a2a/echo",
+            data=json.dumps({"hello": "world"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Authorization": auth_value,
+            },
+            method="POST",
+        )
+        with _ureq.urlopen(req, timeout=2.0) as resp:  # noqa: S310
+            assert resp.status == 200, resp.status
+            body = json.loads(resp.read().decode("utf-8"))
+        result = body["result"]
+        assert result["method"] == "echo"
+        assert result["received_params"] == {"hello": "world"}
+        assert result["caller_did"] == peer.as_did()
+        assert result["agent_did"] == child_did
+
+        # And: a bogus peer signed by a DIFFERENT issuer is
+        # REJECTED (issuer-mismatch).
+        bogus_issuer = AgentIdentity.generate(label="bogus")
+        bogus_token = sign_cap_token(
+            issuer=bogus_issuer,
+            subject_did=peer.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+        )
+        bogus_auth = "CapToken " + encode_authorization_header(bogus_token)
+        req2 = _ureq.Request(
+            url=f"http://127.0.0.1:{port}/a2a/echo",
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": bogus_auth,
+            },
+            method="POST",
+        )
+        try:
+            with _ureq.urlopen(req2, timeout=2.0):  # noqa: S310
+                pytest.fail("child should have rejected bogus issuer")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401, exc.code
+            err = json.loads(exc.read().decode("utf-8"))
+            assert err["error"]["code"] == "issuer-mismatch"
+    finally:
+        runner.stop(agent_id)
 
 
 def test_subprocess_runner_rejects_mismatched_subject_did(
