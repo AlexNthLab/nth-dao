@@ -1351,16 +1351,22 @@ class SpawnAgentBody(_Model):
             "the agent can sign receipts even with an empty request."
         ),
     )
-    model_allowlist: Optional[List[str]] = Field(
+    scope_model_allowlist: Optional[List[str]] = Field(
         default=None,
         description=(
             "Phase 6b: optional per-token model scope for "
             "`params['model']` overrides on `/a2a/ask` and "
-            "`/a2a/ask-stream`. Semantics by value:\n"
+            "`/a2a/ask-stream`. Wire-field name matches the signed "
+            "token body (`scope_model_allowlist`) so HTTP request "
+            "and on-disk audit record use the same vocabulary "
+            "(I-8 R2 fix). Semantics by value:\n"
             "  • null   — token carries no per-token model scope; "
             "the A2A handler defers to the backend's MODEL_ALLOWLIST.\n"
-            "  • []     — token forbids ALL model overrides "
-            "(tightest; even tighter than backend default).\n"
+            "  • []     — token forbids all `params['model']` "
+            "OVERRIDES. NOTE (I-2 R2): this does NOT restrict the "
+            "backend's DEFAULT_MODEL — peers asking with no "
+            "`params['model']` still get the operator-chosen default. "
+            "Use `_AskBackend.DEFAULT_MODEL` to set the cost floor.\n"
             "  • [...]  — token allows only these models. Combined "
             "with the backend's MODEL_ALLOWLIST as an intersection "
             "(the token scope can narrow, never widen).\n"
@@ -1885,12 +1891,12 @@ def register_v2_routes(app: FastAPI) -> None:
             sign_cap_token,
         )
 
-        # Phase 6b: capture the request's model_allowlist into the
-        # closure so the supervisor-level signature doesn't need to
-        # know about per-token model scope. None passes through to
+        # Phase 6b: capture the request's scope_model_allowlist into
+        # the closure so the supervisor-level signature doesn't need
+        # to know about per-token model scope. None passes through to
         # sign_cap_token unchanged (field omitted from the token,
         # legacy-compatible).
-        requested_model_allowlist = body.model_allowlist
+        requested_model_allowlist = body.scope_model_allowlist
 
         def _issue_cap_token(
             subject_did: str, requested_caps: List[str],

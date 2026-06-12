@@ -461,7 +461,7 @@ def test_spawn_with_empty_model_allowlist_persists_empty_scope(
     audit store as an empty list, NOT as missing / None."""
     r = hub_client.post("/api/v2/agents/spawn", json={
         "kind": "mock", "label": "no-overrides",
-        "model_allowlist": [],
+        "scope_model_allowlist": [],
     })
     assert r.status_code == 201, r.text
     token_id = r.json()["cap_token_id"]
@@ -477,7 +477,7 @@ def test_spawn_with_nonempty_model_allowlist_persists_sorted(
     (matches the capabilities pattern for canonical_json stability)."""
     r = hub_client.post("/api/v2/agents/spawn", json={
         "kind": "mock", "label": "scoped",
-        "model_allowlist": [
+        "scope_model_allowlist": [
             "claude-sonnet-4-6", "claude-haiku-4-5",
             "claude-haiku-4-5",  # duplicate
         ],
@@ -501,13 +501,38 @@ def test_spawn_with_malformed_model_allowlist_500s(
     silently persisted with a junk entry."""
     r = hub_client.post("/api/v2/agents/spawn", json={
         "kind": "mock", "label": "bad-scope",
-        "model_allowlist": [""],  # empty string entry
+        "scope_model_allowlist": [""],  # empty string entry
     })
     # FastAPI may catch as either 500 (spawn-failed envelope) or
     # 422 (pydantic): empty string is structurally valid JSON, so
     # validation passes and sign_cap_token rejects → 500.
     assert r.status_code == 500, r.text
     assert "scope_model_allowlist" in r.text
+
+
+def test_check_token_model_scope_is_method_agnostic() -> None:
+    """I-5 R2 fix (Phase 6b R2): the scope check no longer
+    distinguishes between methods — ``echo``, ``ask``, ``ask-stream``
+    all get the same answer for the same ``params['model']``. A peer
+    can't use ``echo`` as a probe to learn what the operator's policy
+    is (which is itself a small infoleak — if echo says OK but ask
+    says rejected, peer can reverse-engineer the cap_token scope from
+    differential probing).
+
+    This test verifies the PURE helper doesn't reference any method
+    state. The handler shim calls it once per request without
+    branching on method, but that's a separate concern."""
+    from nth_dao.cap_token import REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+    from nth_dao.web.dummy_agent import _check_token_model_scope
+
+    token = {"scope_model_allowlist": ["claude-haiku-4-5"]}
+    params = {"prompt": "hi", "model": "claude-opus-4-8"}
+    # Same answer regardless of what the handler thinks the method
+    # is — the helper doesn't even take a method param.
+    ok, reason, requested = _check_token_model_scope(token, params)
+    assert ok is False
+    assert reason == REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+    assert requested == "claude-opus-4-8"
 
 
 def test_check_token_model_scope_passes_when_no_model_in_params() -> None:

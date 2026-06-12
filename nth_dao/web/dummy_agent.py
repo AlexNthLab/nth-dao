@@ -1541,14 +1541,18 @@ def _start_a2a_server(
                 )
                 return
             # Phase 6b: per-token model-scope check before backend
-            # dispatch. ``ask``/``ask-stream`` are the methods that
-            # forward ``params['model']`` to a real provider; ``echo``
-            # doesn't touch it. Run once here so streaming + buffered
-            # paths share the same gate (and so an SSE header doesn't
-            # get written before we know we'll authorize).
-            if method in ("ask", "ask-stream"):
-                if not self._enforce_token_model_scope(token, params, method):
-                    return
+            # dispatch. I-5 R2 self-audit fix: the gate runs for ALL
+            # methods, not just ``ask``/``ask-stream``. Reason: a peer
+            # who can't pin opus via ``ask`` shouldn't be able to test
+            # whether opus is allowed by sending it to ``echo`` and
+            # seeing it come back in ``received_params``. Uniform
+            # answer across the surface = no method-by-method probing
+            # of operator policy. Cost: one cheap dict lookup per
+            # request — negligible vs the rest of dispatch. Defense
+            # in depth: future methods that forward ``params['model']``
+            # to a backend are auto-covered.
+            if not self._enforce_token_model_scope(token, params, method):
+                return
             # Method dispatch — Phase 4: "echo" wire test + "ask"
             # real-backend call.
             if method == "echo":

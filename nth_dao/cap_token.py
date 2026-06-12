@@ -174,10 +174,16 @@ def sign_cap_token(
                                   for tokens issued before 6b.
               • ``[]``  (empty) — field is present and empty. Means
                                   "this token forbids all model
-                                  overrides." Tightest possible —
-                                  even tighter than the backend
-                                  default if the backend opened
-                                  some up.
+                                  OVERRIDES via ``params['model']``."
+                                  Important asymmetry (I-2 R2):
+                                  ``[]`` does NOT prevent the backend
+                                  from running on its DEFAULT_MODEL —
+                                  the empty scope only blocks the
+                                  override path. To pin peers to the
+                                  cheapest model, set
+                                  ``_AskBackend.DEFAULT_MODEL`` AND
+                                  use ``[]`` so peers can neither
+                                  pick a model nor escape the default.
               • non-empty list  — field is present. Means "this token
                                   allows ONLY these models." The A2A
                                   handler intersects this with the
@@ -417,7 +423,18 @@ def token_allows_model(
 
     Semantics on missing / empty field:
         • Field absent       → no per-token scope → defer to backend.
-        • Field present, []  → token forbids ALL overrides.
+        • Field present, []  → token forbids ALL ``params['model']``
+                               OVERRIDES. NOTE (I-2 R2 doc fix): this
+                               only restricts the override path. A
+                               peer who omits ``params['model']``
+                               still gets the BACKEND'S
+                               ``DEFAULT_MODEL`` — the empty scope
+                               does NOT prevent operator-pinned
+                               defaults from being used. Operators
+                               wanting a true cost floor must set
+                               ``_AskBackend.DEFAULT_MODEL`` to the
+                               cheapest model, then use ``[]`` to
+                               freeze peers there.
         • Field present list → token allows ONLY these.
 
     This sits BESIDE the backend's ``MODEL_ALLOWLIST`` — both must
