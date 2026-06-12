@@ -558,6 +558,109 @@ def test_v2_agents_listing_joins_scope_model_allowlist(
     ]
 
 
+def test_spawn_rejects_unknown_kind_with_422(
+    hub_client: TestClient,
+) -> None:
+    """Phase 3g/4 debt R1: a typo in ``kind`` (e.g. 'clude-code')
+    used to slip through the HTTP boundary and silently demote to
+    mock at the child's fallback path. With the SpawnAgentBody
+    validator, the typo now 422s here with a clear "unknown backend
+    kind" message naming the valid set. """
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "clude-code",  # typo of 'claude-code'
+        "label": "typo-bait",
+    })
+    # pydantic field_validator failures surface as 422 Unprocessable.
+    assert r.status_code == 422, r.text
+    body = r.text
+    assert "clude-code" in body or "unknown backend kind" in body, body
+    # Operator-visible hint: the message should name the valid set
+    # so the operator doesn't have to grep the source for it.
+    assert "mock" in body and "hermes" in body, (
+        "422 message must name the valid kinds so the operator "
+        "can fix the typo without leaving the error envelope"
+    )
+
+
+def test_spawn_accepts_all_known_kinds(
+    hub_client: TestClient,
+) -> None:
+    """Phase 3g/4 debt R1 regression guard: each kind in
+    ``KNOWN_BACKEND_KINDS`` MUST pass the validator. Without this,
+    a refactor that drops one (or renames) would silently break
+    spawn for that backend until someone tried it live."""
+    from nth_dao.web.dummy_agent import KNOWN_BACKEND_KINDS
+
+    for kind in sorted(KNOWN_BACKEND_KINDS):
+        # mock is the only one guaranteed to actually SPAWN cleanly
+        # (others need claude.exe / codex / hermes-agent on the
+        # host). The point of THIS test is the validator path —
+        # so accept either 201 (mock) or downstream errors that
+        # are NOT 422 from the validator.
+        r = hub_client.post("/api/v2/agents/spawn", json={
+            "kind": kind, "label": f"smoke-{kind}",
+        })
+        assert r.status_code != 422, (
+            f"kind={kind!r} (a known kind!) was rejected by the "
+            f"validator with 422 — the validator and "
+            f"KNOWN_BACKEND_KINDS got out of sync. body={r.text}"
+        )
+
+
+def test_a2a_handler_timeout_constant_is_set_and_propagates() -> None:
+    """Phase 3g/4 debt R1 — socket-idle timeout on the A2A handler.
+    Two assertions:
+      1. ``A2A_HANDLER_TIMEOUT_S`` exists, is a real number, and
+         lies in a sensible range (5..600s). The constant doubles
+         as the contract — operators reading the module know the
+         upper bound on slowloris-style connection retention.
+      2. ``_start_a2a_server`` actually stamps the constant onto
+         the handler class so ``BaseHTTPRequestHandler.setup``
+         picks it up when a request arrives. Verifies the wire-up,
+         not just that the constant exists. """
+    import http.server as _httpserv
+    from nth_dao.web.dummy_agent import (
+        A2A_HANDLER_TIMEOUT_S,
+        _CapTokenHolder,
+        _MockAskBackend,
+        _start_a2a_server,
+    )
+
+    assert isinstance(A2A_HANDLER_TIMEOUT_S, (int, float))
+    assert 5.0 <= A2A_HANDLER_TIMEOUT_S <= 600.0, (
+        f"timeout {A2A_HANDLER_TIMEOUT_S} outside sensible range"
+    )
+
+    holder = _CapTokenHolder()
+    backend = _MockAskBackend()
+    port, server = _start_a2a_server(
+        {
+            "agent_id": "timeout-test",
+            "kind": "mock",
+            "did": "did:key:z6MkTimeoutTest",
+            "pubkey_hex": "00" * 32,
+            "started_at": "2026-06-12T00:00:00Z",
+        },
+        holder, backend,
+    )
+    try:
+        assert server is not None and port is not None, (
+            "server should bind on 127.0.0.1:0"
+        )
+        handler_cls = server.RequestHandlerClass
+        # The handler class inherits from BaseHTTPRequestHandler;
+        # ``timeout`` is a class-level attr setup() reads.
+        assert issubclass(handler_cls, _httpserv.BaseHTTPRequestHandler)
+        assert handler_cls.timeout == A2A_HANDLER_TIMEOUT_S, (
+            f"handler timeout {handler_cls.timeout} should equal "
+            f"the module constant {A2A_HANDLER_TIMEOUT_S} — the "
+            f"wire-up in _start_a2a_server didn't take"
+        )
+    finally:
+        if server is not None:
+            server.shutdown()
+
+
 def test_spawn_keeps_500_for_non_input_errors(
     hub_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -82,7 +82,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -1344,8 +1344,33 @@ class SpawnAgentBody(_Model):
     """POST /api/v2/agents/spawn request body. """
     kind: str = Field(
         ...,
-        description="Backend kind label, e.g. 'mock', 'claude-code'.",
+        description=(
+            "Backend kind label. One of: 'mock', 'claude-code', "
+            "'codex', 'hermes'. Phase 3g/4 debt R1: validated at the "
+            "HTTP boundary against ``dummy_agent.KNOWN_BACKEND_KINDS`` "
+            "so a typo (e.g. 'clude-code') 422s here instead of "
+            "silently being demoted to mock by the child's "
+            "fallback path."
+        ),
     )
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, v: str) -> str:
+        # Lazy import — avoids a top-level dummy_agent import cycle
+        # (dummy_agent is the child runtime; v2_api is the hub). The
+        # constant lives next to ``_resolve_ask_backend`` so the
+        # single source of truth is co-located with the dispatcher.
+        from nth_dao.web.dummy_agent import KNOWN_BACKEND_KINDS
+
+        if v not in KNOWN_BACKEND_KINDS:
+            raise ValueError(
+                f"unknown backend kind {v!r}; must be one of "
+                f"{sorted(KNOWN_BACKEND_KINDS)!r}. The child's "
+                "fallback to ``mock`` for unknown kinds is defensive "
+                "only — operator input should fail clearly here."
+            )
+        return v
     label: str = Field(
         default="",
         description="Human-readable name; defaults to kind if empty.",

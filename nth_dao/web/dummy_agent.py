@@ -1493,6 +1493,26 @@ def _check_token_model_scope(
     return ok, reason, requested
 
 
+# Phase 3g/4 debt — hub-side kind validation (Phase H R1): the
+# canonical whitelist of backend kinds. ``_resolve_ask_backend``
+# (below) still routes ``mock`` for unknown values as a defense in
+# depth (a misconfigured supervisor shouldn't crash mid-spawn), but
+# the v2_api spawn endpoint pre-validates against this set so a
+# typo in operator input fails at the HTTP boundary with a clear
+# 422 instead of getting silently demoted to mock.
+KNOWN_BACKEND_KINDS = frozenset({"mock", "claude-code", "codex", "hermes"})
+
+# Phase 3g/4 debt R1: per-connection socket idle timeout on the
+# A2A handler. Bounds slowloris-style attacks where a peer opens a
+# TCP connection then trickles bytes (or never sends any) to pin a
+# server thread. Applied via ``A2AHandler.timeout = …`` inside
+# ``_start_a2a_server`` so ``socket.settimeout`` runs in the
+# handler's ``setup()``. 120s is wide enough for a slow localhost
+# peer that pauses on a JSON body but tight enough that a silent
+# socket gets reaped before it racks up.
+A2A_HANDLER_TIMEOUT_S = 120.0
+
+
 def _resolve_ask_backend(kind: str) -> _AskBackend:
     """Pick the backend implementation for a given agent kind.
 
@@ -2055,6 +2075,11 @@ def _start_a2a_server(
             ("127.0.0.1", 0), A2AHandler,
         )
         server.daemon_threads = True
+        # Phase 3g/4 debt R1: bind the socket-idle timeout onto the
+        # handler CLASS (not instance) so ``BaseHTTPRequestHandler.
+        # setup`` picks it up at request time. Without this, a slow
+        # peer can hold a worker thread open indefinitely.
+        A2AHandler.timeout = A2A_HANDLER_TIMEOUT_S
     except OSError as exc:
         _print_error(
             event="a2a_bind_failed",
