@@ -491,23 +491,52 @@ def test_spawn_with_nonempty_model_allowlist_persists_sorted(
     ]
 
 
-def test_spawn_with_malformed_model_allowlist_500s(
+def test_spawn_with_malformed_scope_model_allowlist_400s(
     hub_client: TestClient,
 ) -> None:
-    """Phase 6b: an entry that isn't a non-empty string trips
-    ``sign_cap_token``'s validator and surfaces as a 500 — the
-    spawn endpoint wraps issuance errors as ``spawn failed``. This
-    lets the operator see the typo instead of getting a token
-    silently persisted with a junk entry."""
+    """6B-5 fix (deferred backlog R1): an entry that isn't a
+    non-empty string trips ``sign_cap_token``'s validator. That's a
+    CLIENT input error and belongs on the 400 path, not the 500
+    path which implies the SERVER misbehaved. Pre-6B-5 this was
+    500 — caught + retitled to make the regression intent explicit
+    (test name asserts the new 400 contract). """
     r = hub_client.post("/api/v2/agents/spawn", json={
         "kind": "mock", "label": "bad-scope",
         "scope_model_allowlist": [""],  # empty string entry
     })
-    # FastAPI may catch as either 500 (spawn-failed envelope) or
-    # 422 (pydantic): empty string is structurally valid JSON, so
-    # validation passes and sign_cap_token rejects → 500.
-    assert r.status_code == 500, r.text
+    assert r.status_code == 400, r.text
     assert "scope_model_allowlist" in r.text
+
+
+def test_spawn_keeps_500_for_non_input_errors(
+    hub_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """6B-5 regression guard: ValueError-from-input is now 400, but
+    OTHER exceptions (a real server-side issue — supervisor crash,
+    disk full, cap_token store I/O error) MUST still surface as 500.
+    Otherwise the 400 widening accidentally swallows real bugs into
+    "client did something wrong" buckets.
+
+    Patches the supervisor's spawn to raise a non-ValueError so the
+    spawn endpoint exercises the 500 branch."""
+    app = hub_client.app
+    sup = app.state.v2_supervisor
+
+    original_spawn = sup.spawn
+
+    def kaboom_spawn(*_a: object, **_kw: object) -> None:
+        raise RuntimeError("simulated supervisor crash")
+
+    monkeypatch.setattr(sup, "spawn", kaboom_spawn)
+    try:
+        r = hub_client.post("/api/v2/agents/spawn", json={
+            "kind": "mock", "label": "trigger-500",
+        })
+        assert r.status_code == 500, r.text
+        assert "spawn failed" in r.text
+    finally:
+        monkeypatch.setattr(sup, "spawn", original_spawn)
 
 
 def test_check_token_model_scope_is_method_agnostic() -> None:
@@ -2411,71 +2440,72 @@ def test_child_stream_ask_flushes_error_event_when_backend_raises_mid_stream(
     assert "simulated mid-stream" in events[2]["error"]["message"]
 
 
-def test_proxy_ssestream_abandons_upstream_when_consumer_disconnects(
+# Phase 5.2f (deferred backlog R1): the old
+# ``test_proxy_ssestream_abandons_upstream_when_consumer_disconnects``
+# test exercised the 5s consumer-gone queue-full timeout in the
+# daemon-thread + queue.Queue bridge. After the httpx refactor that
+# whole architecture is gone — when the consumer cancels the async
+# generator, FastAPI exits the ``async with client.stream(...)``
+# context manager → httpx closes the upstream connection in finally.
+# No thread to find, no queue to fill. The behavior the old test
+# guarded is now httpx's responsibility (covered in its own suite).
+# Deleted explicitly rather than skipped so the dead lookup doesn't
+# pollute the supervisor's psutil test surface.
+
+
+def test_proxy_ssestream_emits_error_envelope_on_upstream_500(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F-1 + F-2 fix (review round Phase 5.2 R1): when the queue
-    fills because the consumer is gone, the reader thread must
-    bail out within the consumer-gone timeout instead of blocking
-    forever (leaking the upstream urllib connection + thread).
+    """Phase 5.2f R1: preserve the original error-envelope behavior
+    after the httpx refactor — a non-200 upstream emits one terminal
+    SSE event of shape ``data: {"error": {...}}`` and closes.
 
-    Asserted by:
-      - injecting a urlopen that produces an unbounded stream of
-        1KB chunks
-      - NOT draining the SSE queue
-      - asserting the reader thread exits within a bounded wall
-        time after the queue fills (5s consumer-gone timeout
-        + 2s slack) """
+    Uses an in-process httpx MockTransport so we don't bring up a
+    real socket but exercise the actual async generator + httpx
+    plumbing end-to-end. """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
-    import time as _time
-    import urllib.request as _ureq
-
+    import asyncio
+    import httpx
     from nth_dao.web.v2_api import _proxy_ssestream
 
-    # Fake upstream that streams forever.
-    class _InfiniteResp:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *_a): return None
-        def read(self, n: int = -1) -> bytes:
-            # Bounded by FastAPI/queue semantics, not by us.
-            return b"x" * 1024
+    def _transport_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            502, content=b"child crashed on this prompt",
+        )
 
-    monkeypatch.setattr(_ureq, "urlopen", lambda *_a, **_k: _InfiniteResp())
+    # Patch the AsyncClient factory so our generator picks up the
+    # mock transport. ``_proxy_ssestream`` builds ``httpx.AsyncClient``
+    # with only a ``timeout`` kwarg, so the patched constructor needs
+    # to handle that plus inject the transport.
+    real_async_client = httpx.AsyncClient
 
-    response = _proxy_ssestream(
+    def patched(**kw: object) -> httpx.AsyncClient:
+        kw["transport"] = httpx.MockTransport(_transport_handler)
+        return real_async_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+
+    resp = _proxy_ssestream(
         url="http://127.0.0.1:0/fake",
         body_bytes=b"{}",
         req_headers={},
-        forward_timeout=60.0,
+        forward_timeout=10.0,
     )
-    # We deliberately do NOT consume response.body_iterator. The
-    # reader thread will fill its 64-slot queue almost immediately
-    # then block on put(timeout=5). Within ~7s it should give up
-    # and the daemon thread should die.
-    start = _time.time()
-    deadline = start + 12.0
-    # Find the reader thread by name; wait for it to terminate.
-    import threading as _th
-    reader = next(
-        (t for t in _th.enumerate() if t.name == "a2a-sse-reader"),
-        None,
-    )
-    assert reader is not None, "reader thread should have started"
-    while reader.is_alive() and _time.time() < deadline:
-        _time.sleep(0.5)
-    elapsed = _time.time() - start
-    assert not reader.is_alive(), (
-        f"reader thread should have exited within ~7s (queue-full "
-        f"timeout); still alive after {elapsed:.1f}s"
-    )
-    # 7s = 5s consumer-gone timeout + ~2s for queue to fill at
-    # 1KB/iter × 64 slots; we give 12s wall budget to dodge CI
-    # jitter but verify it landed well under.
-    assert elapsed < 12.0
+
+    # Drain the StreamingResponse's body iterator.
+    async def drain() -> bytes:
+        buf = b""
+        async for chunk in resp.body_iterator:
+            buf += chunk if isinstance(chunk, bytes) else chunk.encode()
+        return buf
+
+    body = asyncio.run(drain())
+    assert b"data: " in body
+    assert b'"code": "upstream-502"' in body or b'"code":"upstream-502"' in body
+    assert b"child crashed" in body
 
 
 def test_v2_proxy_forwards_ask_stream_as_sse(
@@ -2517,20 +2547,25 @@ def test_v2_proxy_forwards_ask_stream_as_sse(
         b'data: {"done":true,"input_tokens":5,"output_tokens":2}\n\n'
     )
 
-    import urllib.request as _ureq
+    # Phase 5.2f R1: after the httpx refactor, the proxy uses
+    # httpx.AsyncClient.stream instead of urllib.urlopen. Mock the
+    # httpx transport so the test exercises the actual async
+    # generator path against a deterministic upstream response.
+    import httpx
 
-    class _FakeResp:
-        status = 200
-        _consumed = False
-        def __enter__(self) -> "_FakeResp": return self
-        def __exit__(self, *_a: object) -> None: return None
-        def read(self, n: int = -1) -> bytes:
-            if self._consumed:
-                return b""
-            self._consumed = True
-            return sse_body
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
 
-    monkeypatch.setattr(_ureq, "urlopen", lambda *_a, **_k: _FakeResp())
+    real_async_client = httpx.AsyncClient
+
+    def patched(**kw: object) -> httpx.AsyncClient:
+        kw["transport"] = httpx.MockTransport(_handler)
+        return real_async_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
 
     client = TestClient(app)
     with client.stream(

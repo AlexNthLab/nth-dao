@@ -1389,132 +1389,98 @@ def _proxy_ssestream(
     req_headers: Dict[str, str],
     forward_timeout: float,
 ) -> Any:
-    """Phase 5.2: stream an SSE response from the child to the
-    operator's browser through a queue-bridged async generator.
+    """Phase 5.2f (deferred backlog, refactored to httpx + native
+    async): forward an SSE response from the child to the operator's
+    browser.
 
-    Why a queue+thread instead of httpx async: the project doesn't
-    have an async HTTP client as a hard dep yet, and the stdlib
-    ``urllib`` blocks at ``resp.read(N)``. We run the blocking
-    reader on a daemon thread, push raw chunks onto a thread-safe
-    queue, and let the StreamingResponse's async generator drain
-    it. One thread per request — fine for single-operator localhost.
+    Replaces the old daemon-thread + ``urllib`` + ``queue.Queue``
+    bridge with a single async generator using ``httpx.AsyncClient``.
+    Key wins:
 
-    Phase 5.2f could swap to ``httpx.AsyncClient`` if a multi-user
-    deployment makes the per-request thread cost matter. """
-    import queue as _queue
-    import threading as _threading
-    import urllib.error
-    import urllib.request
+      • Native consumer-cancel handling. When the operator's browser
+        disconnects, FastAPI cancels the async generator → the
+        ``async with client.stream(...)`` block exits → httpx closes
+        the upstream connection in finally → no urllib leak. The old
+        5s consumer-gone timeout + bounded queue + sentinel
+        choreography is gone (it was *our* invention to bridge sync
+        IO into async; httpx does this natively).
+      • One coroutine per request instead of one daemon thread.
+        Sub-100KB memory + no GIL ping-pong.
+      • Backpressure for free: the async generator yields one chunk
+        at a time; if the StreamingResponse can't push it downstream
+        the coroutine blocks, which back-pressures the upstream
+        ``aiter_bytes`` iterator, which back-pressures the
+        provider's TCP window — the right behavior, no extra code.
+
+    Preserved invariants from the original:
+      • Error envelope on non-200 upstream: emits one terminal
+        ``data: {"error": {"code": "upstream-<N>", "message": <text>}}``
+        event then closes.
+      • 4KB cap on upstream error body so a misbehaving child can't
+        blast a multi-MB blob into the operator's browser buffer.
+      • SSE-correct response headers (``no-cache`` / ``Connection:
+        close`` / ``X-Accel-Buffering: no``).
+
+    Deleted invariant (no longer needed):
+      • The old consumer-gone timeout test (5s queue-full bailout)
+        is irrelevant — there is no queue and no thread to leak.
+    """
+    import httpx
     from starlette.responses import StreamingResponse
 
-    chunk_queue: "_queue.Queue[Optional[bytes]]" = _queue.Queue(maxsize=64)
+    # 4KB cap matches the old M-2 / L-2 fix on error-body reads —
+    # a misbehaving child can't blast multi-MB error blobs through.
+    _ERR_BODY_CAP = 4096
 
-    # F-1 + F-2 fix (review round Phase 5.2 R1): when the consumer
-    # (operator's browser) disconnects, FastAPI cancels the
-    # async generator → queue stops draining → unbounded put()
-    # would block the reader thread forever, holding the upstream
-    # connection + leaking API spend on a stream nobody is reading.
-    # Bounded put with timeout makes the reader notice abandonment
-    # within 5s and bail out, releasing the urllib connection.
-    _CONSUMER_GONE_TIMEOUT_S = 5.0
-
-    def _safe_put(payload: Optional[bytes]) -> bool:
-        """Returns True if the put landed, False if the consumer
-        is gone (queue full for too long). Caller treats False as
-        "abandon and exit the reader loop". """
-        try:
-            chunk_queue.put(payload, timeout=_CONSUMER_GONE_TIMEOUT_S)
-            return True
-        except _queue.Full:
-            return False
-
-    def _reader_thread() -> None:
-        try:
-            req = urllib.request.Request(
-                url, data=body_bytes, headers=req_headers, method="POST",
+    def _error_event(code: str, message: str) -> bytes:
+        return (
+            b"data: "
+            + json.dumps({"error": {"code": code, "message": message}}).encode(
+                "utf-8",
             )
-            with urllib.request.urlopen(  # noqa: S310
-                req, timeout=forward_timeout,
-            ) as resp:
-                if resp.status != 200:
-                    err_body = resp.read()
-                    # F-4 fix (review round Phase 5.2 R1): only one
-                    # in-line put — the sentinel in ``finally`` is
-                    # the single source of truth. The previous code
-                    # double-put None which under F-1's backpressure
-                    # scenario doubled the deadlock window.
-                    _safe_put(b"data: " + err_body + b"\n\n")
-                    return
-                # Drain incrementally — read(N) blocks until ANY
-                # data is available, so this drives forward whenever
-                # the child flushes a chunk.
-                while True:
-                    chunk = resp.read(1024)
-                    if not chunk:
-                        break
-                    if not _safe_put(chunk):
-                        # Consumer gone — abandon the upstream call
-                        # so the SDK / child can free their side
-                        # too (urllib closes the response on the
-                        # ``with`` exit).
+            + b"\n\n"
+        )
+
+    async def _gen():
+        try:
+            async with httpx.AsyncClient(timeout=forward_timeout) as client:
+                async with client.stream(
+                    "POST", url, content=body_bytes, headers=req_headers,
+                ) as resp:
+                    if resp.status_code != 200:
+                        # aread reads remaining body fully; cap below.
+                        body = await resp.aread()
+                        yield _error_event(
+                            f"upstream-{resp.status_code}",
+                            body[:_ERR_BODY_CAP].decode(
+                                "utf-8", errors="replace",
+                            ),
+                        )
                         return
-        except urllib.error.HTTPError as exc:
-            # M-2 + L-2 fix (review round Phase 5.2 R2): bound the
-            # error-body read at 4KB so a misbehaving child can't
-            # blast back a multi-MB error blob the operator's
-            # browser would then buffer. ``hasattr(exc, "read")``
-            # is redundant — urllib.error.HTTPError ALWAYS has a
-            # ``read`` method (it's a file-like response wrapper).
-            # R2-5 fix (review round Phase 5.2 R3): narrow the catch
-            # to the realistic failure modes for exc.read on an
-            # already-broken HTTPError stream. OSError covers
-            # socket.timeout / ConnectionResetError; ValueError
-            # covers http.client's framing errors. Anything else
-            # (TypeError from passing wrong arg) is a real bug we
-            # want surfaced, not swallowed.
-            try:
-                body = exc.read(4096)
-            except (OSError, ValueError):
-                body = b""
-            _safe_put(
-                b"data: " + json.dumps({
-                    "error": {
-                        "code": f"upstream-{exc.code}",
-                        "message": body.decode("utf-8", errors="replace"),
-                    },
-                }).encode("utf-8") + b"\n\n"
+                    # aiter_bytes yields each chunk httpx receives. No
+                    # forced 1KB read size — we hand them up the SSE
+                    # pipe at whatever granularity the child emitted,
+                    # preserving event boundaries.
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+        except httpx.TimeoutException as exc:
+            yield _error_event(
+                "proxy-failed", f"TimeoutException: {exc}",
             )
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            _safe_put(
-                b"data: " + json.dumps({
-                    "error": {
-                        "code": "proxy-failed",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    },
-                }).encode("utf-8") + b"\n\n"
+        except httpx.HTTPError as exc:
+            yield _error_event(
+                "proxy-failed", f"{type(exc).__name__}: {exc}",
             )
-        finally:
-            # Sentinel — async generator stops when it sees None.
-            # Best-effort; if the queue is full for >5s the
-            # consumer is definitely gone and our sentinel is moot.
-            _safe_put(None)
-
-    _threading.Thread(
-        target=_reader_thread,
-        name="a2a-sse-reader",
-        daemon=True,
-    ).start()
-
-    async def _async_gen():
-        import asyncio
-        while True:
-            chunk = await asyncio.to_thread(chunk_queue.get)
-            if chunk is None:
-                break
-            yield chunk
+        except OSError as exc:
+            # Realistic socket-layer failures that escape httpx's
+            # wrappers (Windows ConnectionAbortedError, etc.) still
+            # need a clean envelope.
+            yield _error_event(
+                "proxy-failed", f"{type(exc).__name__}: {exc}",
+            )
 
     return StreamingResponse(
-        _async_gen(),
+        _gen(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1933,6 +1899,23 @@ def register_v2_routes(app: FastAPI) -> None:
                 label=body.label,
                 capabilities=body.capabilities,
                 cap_token_issuer=_issue_cap_token,
+            )
+        except ValueError as exc:
+            # 6B-5 fix (Phase 6b deferred backlog): bad input to
+            # sign_cap_token (e.g. non-string scope_model_allowlist
+            # entry, scope_task_id format error) propagates from
+            # the issuer closure as ValueError. That's a CLIENT
+            # error — operator gave us junk — and belongs on the
+            # 400 path, not the 500 path which implies "we broke".
+            # Keeps the spawn-fail semantics aligned with how the
+            # other write endpoints (e.g. /api/cap_tokens/issue)
+            # already classify ValueError as bad-request.
+            logger.info(
+                "v2_api: spawn rejected — bad request: %s", exc,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"spawn rejected: {exc}",
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("v2_api: spawn failed: %s", exc)
