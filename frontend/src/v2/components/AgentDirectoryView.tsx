@@ -499,6 +499,57 @@ export function AgentDirectoryView({
                           {a.kind}
                         </span>
                       )}
+                      {/* Phase G: cap_token scope_model_allowlist
+                          badge. Three rendered states reflect the
+                          three wire semantics:
+                            • field absent  → no badge (unscoped /
+                              legacy; backend allowlist is the only
+                              gate, no per-token signal to show)
+                            • []            → "scope: closed" pill
+                              (token explicitly forbids overrides)
+                            • [m1, m2, …]   → "scope: m1, m2" pill
+                              with full list in the tooltip if it
+                              grows past two entries. */}
+                      {Array.isArray(a.scope_model_allowlist) && (
+                        a.scope_model_allowlist.length === 0 ? (
+                          <span
+                            // ``wait`` (yellow) not ``bad`` (red) —
+                            // self-audit G-3: a closed scope is a
+                            // deliberate operator policy choice (safest
+                            // config from cost-control POV), worth
+                            // drawing the eye to but NOT an error.
+                            // The styles.css palette uses ``.pill.wait``
+                            // for "needs attention" yellow; ``.pill.warn``
+                            // is not a defined variant.
+                            className="pill wait"
+                            title={
+                              "cap_token scope_model_allowlist=[] — " +
+                              "this token forbids all params['model'] " +
+                              "overrides. The agent will only ever run " +
+                              "its backend's DEFAULT_MODEL."
+                            }
+                            style={{ fontSize: 10 }}
+                          >
+                            scope: closed
+                          </span>
+                        ) : (
+                          <span
+                            className="pill ok"
+                            title={
+                              "cap_token scope_model_allowlist " +
+                              "(per-token model policy): " +
+                              a.scope_model_allowlist.join(", ")
+                            }
+                            style={{ fontSize: 10 }}
+                          >
+                            scope: {
+                              a.scope_model_allowlist.length <= 2
+                                ? a.scope_model_allowlist.join(", ")
+                                : `${a.scope_model_allowlist[0]} +${a.scope_model_allowlist.length - 1}`
+                            }
+                          </span>
+                        )
+                      )}
                       {typeof a.a2a_port === "number" && (
                         <code
                           className="mono"

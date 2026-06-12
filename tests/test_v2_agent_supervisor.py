@@ -508,6 +508,56 @@ def test_spawn_with_malformed_scope_model_allowlist_400s(
     assert "scope_model_allowlist" in r.text
 
 
+def test_v2_agents_listing_joins_scope_model_allowlist(
+    hub_client: TestClient,
+) -> None:
+    """Phase G (frontend integration): the ``/api/v2/agents`` listing
+    enriches each supervised agent entry with
+    ``scope_model_allowlist`` joined from the cap_token store. Lets
+    the frontend show a "scope: …" badge without per-agent fetches.
+    Spawns three agents — one unscoped, one with empty scope, one
+    with a list — and asserts the listing surfaces each verbatim."""
+    # Spawn agent A: no scope (omit the field).
+    rA = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "no-scope-A",
+    })
+    assert rA.status_code == 201, rA.text
+    did_a = rA.json()["did"]
+
+    # Spawn agent B: empty scope (explicit []).
+    rB = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "empty-scope-B",
+        "scope_model_allowlist": [],
+    })
+    assert rB.status_code == 201, rB.text
+    did_b = rB.json()["did"]
+
+    # Spawn agent C: explicit list.
+    rC = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "scoped-C",
+        "scope_model_allowlist": [
+            "claude-haiku-4-5", "claude-sonnet-4-6",
+        ],
+    })
+    assert rC.status_code == 201, rC.text
+    did_c = rC.json()["did"]
+
+    listing = hub_client.get("/api/v2/agents").json()
+    by_did = {a["did"]: a for a in listing}
+
+    # A: no scope → field absent (or None) in the enriched entry.
+    assert by_did[did_a].get("scope_model_allowlist") is None
+
+    # B: empty list propagates as-is.
+    assert by_did[did_b]["scope_model_allowlist"] == []
+
+    # C: full list propagates sorted (the sort happens at
+    # sign_cap_token; enrichment is a verbatim mirror).
+    assert by_did[did_c]["scope_model_allowlist"] == [
+        "claude-haiku-4-5", "claude-sonnet-4-6",
+    ]
+
+
 def test_spawn_keeps_500_for_non_input_errors(
     hub_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

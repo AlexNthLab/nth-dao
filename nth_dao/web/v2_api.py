@@ -1032,6 +1032,14 @@ class AgentEntryM(_Model):
     # The v2 console uses this to surface a "/ping → :PORT" badge
     # and to invoke /api/v2/agents/{did}/ping.
     a2a_port: Optional[int] = None
+    # Phase G (frontend integration): mirror the cap_token's
+    # ``scope_model_allowlist`` (joined from cap_tokens store).
+    # Lets the agent card show a "scoped: <models>" badge so the
+    # operator can see at a glance which agents are pinned to a
+    # narrower model set vs which are unrestricted. None when the
+    # agent's cap_token has no scope field (legacy / unscoped) or
+    # when join-side lookup fails.
+    scope_model_allowlist: Optional[List[str]] = None
 
 
 class SpawnResponseM(_Model):
@@ -1778,11 +1786,38 @@ def register_v2_routes(app: FastAPI) -> None:
         # spawned this session"; disk reflects identities written by
         # other parts of the stack; seed is the fallback for demo.
         sup = _state_supervisor(request)
+        # Phase G: join cap_token scope on supervised agents so the
+        # frontend can render a "scoped: <models>" badge inline with
+        # the agent card. Pre-resolve the store once outside the loop
+        # to keep the per-agent overhead at one ``store.get(id)``
+        # dict-lookup-plus-disk-read.
+        cap_tokens_store = _state_cap_tokens_store(request)
         supervised: List[Dict[str, Any]] = []
         if sup is not None:
             try:
                 for rec in sup.list_agents():
-                    supervised.append(rec.to_agent_entry())
+                    entry = rec.to_agent_entry()
+                    # Phase G: try to surface the agent's cap_token
+                    # scope_model_allowlist into the listing. Failures
+                    # are swallowed (store missing, token deleted, etc.)
+                    # — the UI is happier rendering the agent without
+                    # scope info than seeing the whole listing 500.
+                    if (
+                        cap_tokens_store is not None
+                        and rec.cap_token_id
+                    ):
+                        try:
+                            tok = cap_tokens_store.get(rec.cap_token_id)
+                        except Exception:  # noqa: BLE001
+                            tok = None
+                        if (
+                            isinstance(tok, dict)
+                            and "scope_model_allowlist" in tok
+                        ):
+                            entry["scope_model_allowlist"] = (
+                                tok["scope_model_allowlist"]
+                            )
+                    supervised.append(entry)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("v2_api: supervisor list_agents failed: %s", exc)
         disk = _read_agents_from_disk(_state_workspace(request))

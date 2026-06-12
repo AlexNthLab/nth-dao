@@ -223,6 +223,15 @@ export interface AgentEntry {
    *  the child failed to bind (degraded state) or for non-local
    *  agents. */
   a2a_port?: number;
+  /** Phase G (Phase 6b cap_token scope, frontend integration):
+   *  the cap_token's `scope_model_allowlist` joined into the agent
+   *  listing. Wire semantics (matches the cap_token wire field):
+   *    - undefined  — no per-token scope; backend MODEL_ALLOWLIST
+   *                   is the only gate (or token was issued pre-6b).
+   *    - []         — empty list, token forbids ALL `params['model']`
+   *                   overrides.
+   *    - [...]      — explicit allowed model names. */
+  scope_model_allowlist?: string[];
 }
 
 /** A single chat message inside a conversation. Aligns with the
