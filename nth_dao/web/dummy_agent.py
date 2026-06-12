@@ -809,7 +809,18 @@ class _CodexCliAskBackend(_AskBackend):
                 "codex CLI not on PATH — install with "
                 "'npm i -g @openai/codex' or switch agent to kind=mock"
             )
-        if not shim.lower().endswith(".ps1"):
+        # F-1 fix (deep self-audit Phase 5.4 R2): npm-global ships
+        # ``codex.cmd`` + ``codex.ps1`` + (sometimes) ``codex.bat``.
+        # Windows ``PATHEXT`` typically lists ``.CMD`` before
+        # ``.PS1``, so ``shutil.which("codex")`` on most boxes
+        # returns the ``.cmd`` shim — and my CO-2 R1 only branched
+        # on ``.ps1``, silently letting ``.cmd`` through to
+        # subprocess.run. That works but adds a cmd.exe → node →
+        # codex.exe process layer per call AND loses our
+        # arch-aware vendored-binary fallback. Walk to the
+        # vendored .exe for ALL shim extensions.
+        shim_lower = shim.lower()
+        if not any(shim_lower.endswith(ext) for ext in (".ps1", ".cmd", ".bat")):
             return shim
         # CO-2 fix (review round Phase 5.4 R1): arch-aware glob.
         # npm publishes the vendored binary under
@@ -924,24 +935,62 @@ class _CodexCliAskBackend(_AskBackend):
                 creationflags=creation_flags,
             )
         except _sp.TimeoutExpired as exc:
-            # CO-6 fix (review round Phase 5.4 R1): the common
-            # cause of a codex exec timeout when stdin=DEVNULL is
-            # that the LLM tried to use a tool, codex paused for
-            # interactive approval, and our DEVNULL means it
-            # waits forever. Surface that hypothesis in the error
-            # so the operator knows to either narrow the prompt
-            # to a no-tool answer or (Phase 5.5+) wire an approval
-            # pipe. We can't peek partial stdout here because the
-            # TimeoutExpired exception's partial buffers may be
-            # unset on Windows.
+            # F-2 + F-3 fixes (deep self-audit Phase 5.4 R2): the
+            # CO-6 R1 message generic-hinted at tool-use approval.
+            # Two improvements:
+            #   1. Python's TimeoutExpired carries partial stdout +
+            #      stderr captured up to the kill point (docs are
+            #      explicit, including on Windows) — my R1
+            #      docstring claimed otherwise without verifying.
+            #      Peek stderr for tell-tales so we can be
+            #      DEFINITE about the cause when codex spoke,
+            #      not just hypothesize.
+            #   2. If the caller's budget was tight (< 15s), that
+            #      is by far the more likely explanation — codex
+            #      cold-start is typically 15-30s. Order hints by
+            #      likelihood for that case so the operator's
+            #      first instinct isn't "fix the prompt" when the
+            #      real fix is "raise timeout_s".
+            partial = ""
+            try:
+                if exc.stderr:
+                    raw = exc.stderr
+                    partial = (
+                        raw if isinstance(raw, str)
+                        else raw.decode("utf-8", errors="replace")
+                    )[-400:]
+            except Exception:  # noqa: BLE001 — diagnostic best-effort
+                partial = ""
+            saw_approval = any(
+                k in partial.lower()
+                for k in ("approve", "approval", "waiting for", "y/n")
+            )
+            tight_budget = exc.timeout < 15.0
+            hints: List[str] = []
+            if saw_approval:
+                hints.append(
+                    "child stderr mentions approval — codex is "
+                    "blocked waiting for interactive consent that "
+                    "our stdin=/dev/null can't supply. Try a "
+                    "no-tool prompt or use kind=anthropic/hermes."
+                )
+            if tight_budget:
+                hints.append(
+                    f"caller-set timeout_s={exc.timeout:.1f}s is "
+                    "tight — codex cold-start is typically 15-30s. "
+                    "Raise timeout_s in the request body."
+                )
+            if not hints:
+                hints.append(
+                    "if the prompt would trigger tool use, codex "
+                    "may be waiting for interactive approval; "
+                    "stdin is /dev/null here. Try a no-tool "
+                    "prompt or use kind=anthropic/hermes."
+                )
             raise TimeoutError(
                 f"codex CLI did not respond within "
                 f"{exc.timeout:.1f}s for prompt[{len(prompt)}]. "
-                "If the prompt would trigger tool use (file edits, "
-                "shell commands) codex may be blocked waiting for "
-                "interactive approval — stdin is /dev/null here. "
-                "Try a no-tool prompt, raise timeout_s, or use "
-                "kind=anthropic/hermes for tool-heavy work."
+                + " ".join(hints)
             ) from exc
 
         if completed.returncode != 0:

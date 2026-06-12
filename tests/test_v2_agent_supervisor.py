@@ -2794,6 +2794,104 @@ def test_codex_backend_timeout_message_hints_tool_use(
         backend.ask({"prompt": "hi"}, timeout_s=30.0)
 
 
+def test_codex_backend_timeout_uses_partial_stderr_when_approval_seen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-2 fix (deep self-audit Phase 5.4 R2): when codex DID
+    print "waiting for approval" before we killed it, the
+    TimeoutError message must say so DEFINITELY (not just hint).
+    Python's TimeoutExpired carries partial stderr up to the kill
+    point — peek it. """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    def fake_run(*_a: object, **_kw: object) -> object:
+        raise _sp.TimeoutExpired(
+            cmd=["codex"], timeout=30.0,
+            stderr=(
+                "Loaded credentials.\nThinking...\n"
+                "Tool call: shell\nWaiting for user approval (y/n): "
+            ),
+        )
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
+    with pytest.raises(TimeoutError, match="approval") as exc_info:
+        backend.ask({"prompt": "edit a file"}, timeout_s=30.0)
+    msg = str(exc_info.value)
+    # The DEFINITE phrasing ("child stderr mentions") must appear
+    # — not the generic hypothesis fallback.
+    assert "child stderr mentions" in msg, msg
+
+
+def test_codex_backend_timeout_at_tight_budget_blames_budget_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-3 fix (deep self-audit Phase 5.4 R2): a caller-set
+    ``timeout_s=5.0`` on codex is nearly guaranteed to time out —
+    cold start is 15-30s. The error should call this out as the
+    likely cause, not lead with "tool-use approval" which would
+    send the operator on a wild-goose-chase trying to fix the
+    prompt when the actual fix is "raise timeout_s". """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    def fake_run(*_a: object, **_kw: object) -> object:
+        # No stderr captured — pure budget timeout, no approval
+        # signal.
+        raise _sp.TimeoutExpired(cmd=["codex"], timeout=5.0, stderr="")
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
+    with pytest.raises(TimeoutError) as exc_info:
+        backend.ask({"prompt": "hi"}, timeout_s=5.0)
+    msg = str(exc_info.value)
+    assert "tight" in msg or "cold-start" in msg or "Raise timeout_s" in msg, msg
+    assert "5.0s" in msg, msg
+
+
+def test_codex_backend_walks_to_vendored_exe_for_cmd_shim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F-1 fix (deep self-audit Phase 5.4 R2): on Windows
+    ``shutil.which("codex")`` often returns ``codex.cmd`` (PATHEXT
+    typically lists .CMD before .PS1). Previous R1 only handled
+    .ps1 — .cmd was silently passed through to subprocess.run.
+    Verify .cmd also triggers the arch-aware walk to the vendored
+    .exe. """
+    import platform
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    npm = tmp_path / "npm-global"
+    cmd = npm / "codex.cmd"
+    npm.mkdir()
+    cmd.write_text("@node ...", encoding="utf-8")
+    vendored = (
+        npm / "node_modules" / "@openai" / "codex-win32-x64"
+        / "vendor" / "x86_64-pc-windows-msvc" / "bin"
+    )
+    vendored.mkdir(parents=True)
+    exe = vendored / "codex.exe"
+    exe.write_text("# vendored", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda _n: str(cmd))
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+
+    resolved = _CodexCliAskBackend()._resolve_binary()
+    assert resolved == str(exe), (
+        f"expected vendored .exe; got {resolved!r} (still routing "
+        "through the cmd shim?)"
+    )
+
+
 @pytest.mark.parametrize("stderr_msg", [
     "401 Unauthorized",
     "Not logged in. Run: codex login",
