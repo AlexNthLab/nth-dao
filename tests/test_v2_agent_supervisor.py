@@ -612,6 +612,201 @@ def test_check_token_model_scope_ignores_whitespace_only_model() -> None:
     assert requested == ""
 
 
+# ─── Phase D: per-ask audit receipt ──────────────────────────────────
+
+
+def test_build_a2a_ask_receipt_returns_none_without_crypto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase D: signing failure path. If ``execution_receipt`` can't
+    be imported (PyNaCl missing), the helper returns None — caller
+    treats this as "skip receipt this call" rather than crashing
+    the ask. The LLM response is what the operator gets; receipts
+    are the audit trail and must not block the response."""
+    import builtins
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "nth_dao.execution_receipt":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    out = _build_a2a_ask_receipt(
+        identity=None, method="ask", backend_name="mock",
+        token={}, agent_did="did:key:z6M...",
+        params={}, result={},
+        started_at_ms=0, ended_at_ms=1,
+    )
+    assert out is None
+
+
+def test_build_a2a_ask_receipt_carries_resolved_model() -> None:
+    """Phase D: the receipt's timeline pins ``resolved_model`` from
+    the backend's returned dict. This is the audit primitive that
+    closes the cost-accountability loop: the receipt proves WHICH
+    model the operator was actually billed for, signed by the
+    agent's DID. """
+    pytest.importorskip("nacl")
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    signer = AgentIdentity.generate(label="phase-d-receipt-test")
+    # Stub token — full crypto verify is covered by execution_receipt's
+    # own tests. This test is about the timeline payload pinning
+    # ``resolved_model``, NOT the cap_token chain walk.
+    token = {
+        "subject_did": "did:key:z6MkPeerSubject",
+        "token_id": "tok-123",
+    }
+    result = {
+        "response": "PONG",
+        "model": "claude-sonnet-4-6",
+        "input_tokens": 7,
+        "output_tokens": 1,
+        "stop_reason": "end_turn",
+    }
+    receipt = _build_a2a_ask_receipt(
+        identity=signer,
+        method="ask",
+        backend_name="claude-code",
+        token=token,
+        agent_did=signer.as_did(),
+        params={"prompt": "ping", "model": "claude-sonnet-4-6"},
+        result=result,
+        started_at_ms=1_000_000,
+        ended_at_ms=1_005_000,
+    )
+    assert receipt is not None
+    # Envelope sanity (signed body wires up properly).
+    assert receipt["signer_did"] == signer.as_did()
+    assert receipt["goal_id"] == "a2a:ask"
+    assert receipt["kind"] == "nth-execution-receipt-v1"
+    assert receipt["sig"], "receipt must carry a non-empty sig"
+
+    # The audit primitive: the timeline carries the resolved_model.
+    # NOTE: timeline[0] is the chain_link entry on chained receipts;
+    # here we have a single payload entry so it's at index 0 OR 1
+    # depending on whether sign_receipt prepended anything. Find it
+    # by type to be robust.
+    ask_entries = [
+        e for e in receipt["timeline"]
+        if e["type"] == "nth.a2a_ask_executed"
+    ]
+    assert len(ask_entries) == 1
+    payload = ask_entries[0]["payload"]
+    assert payload["resolved_model"] == "claude-sonnet-4-6"
+    assert payload["requested_model"] == "claude-sonnet-4-6"
+    assert payload["method"] == "ask"
+    assert payload["backend"] == "claude-code"
+    assert payload["caller_did"] == "did:key:z6MkPeerSubject"
+    assert payload["input_tokens"] == 7
+    assert payload["output_tokens"] == 1
+    assert payload["stop_reason"] == "end_turn"
+    assert payload["cap_token_id"] == "tok-123"
+    assert payload["elapsed_ms"] == 5_000
+
+
+def test_build_a2a_ask_receipt_handles_backend_without_model_key() -> None:
+    """Phase D: mock backend doesn't include a ``model`` key in its
+    returned dict. Receipt's ``resolved_model`` should be empty
+    string, not None — wire types stay consistent for downstream
+    JSON validators."""
+    pytest.importorskip("nacl")
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    signer = AgentIdentity.generate(label="phase-d-noModel-test")
+    token = {"subject_did": "did:key:z6MkPeer", "token_id": "t"}
+    result = {
+        "response": "(mock) ack",
+        "backend": "mock",
+        # no "model" key — what mock returns
+    }
+    receipt = _build_a2a_ask_receipt(
+        identity=signer, method="ask", backend_name="mock",
+        token=token, agent_did=signer.as_did(),
+        params={"prompt": "hi"}, result=result,
+        started_at_ms=0, ended_at_ms=1,
+    )
+    assert receipt is not None
+    payload = next(
+        e["payload"] for e in receipt["timeline"]
+        if e["type"] == "nth.a2a_ask_executed"
+    )
+    assert payload["resolved_model"] == ""
+    assert payload["input_tokens"] == 0
+    assert payload["output_tokens"] == 0
+
+
+def test_build_a2a_ask_receipt_supports_ask_stream_method() -> None:
+    """D-1 R1 self-audit (Phase D): the stream path also signs
+    receipts after a clean stream completes. The receipt's method
+    field distinguishes it from buffered ask receipts so a verifier
+    walking the audit chain can tell which transport was used. """
+    pytest.importorskip("nacl")
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    signer = AgentIdentity.generate(label="phase-d-stream-test")
+    token = {"subject_did": "did:key:z6MkStreamPeer", "token_id": "t"}
+    # The stream path's ``last_done_meta`` mirrors the buffered
+    # path's ``result`` dict — same keys, same semantics.
+    done_meta = {
+        "model": "claude-sonnet-4-6",
+        "input_tokens": 10,
+        "output_tokens": 200,
+        "stop_reason": "end_turn",
+    }
+    receipt = _build_a2a_ask_receipt(
+        identity=signer, method="ask-stream", backend_name="claude-code",
+        token=token, agent_did=signer.as_did(),
+        params={"prompt": "long-running"}, result=done_meta,
+        started_at_ms=2_000_000, ended_at_ms=2_062_500,
+    )
+    assert receipt is not None
+    assert receipt["goal_id"] == "a2a:ask-stream"
+    payload = next(
+        e["payload"] for e in receipt["timeline"]
+        if e["type"] == "nth.a2a_ask_executed"
+    )
+    assert payload["method"] == "ask-stream"
+    assert payload["resolved_model"] == "claude-sonnet-4-6"
+    assert payload["elapsed_ms"] == 62_500
+
+
+def test_build_a2a_ask_receipt_attaches_authorizing_cap_token() -> None:
+    """Phase D: the token that authorized this ask rides on the
+    receipt envelope. A verifier walking the cap chain back to the
+    issuer's root authority needs this to confirm the signer was
+    delegated authority for this exact call. """
+    pytest.importorskip("nacl")
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    signer = AgentIdentity.generate(label="phase-d-cap-test")
+    token = {
+        "subject_did": "did:key:z6MkPeer",
+        "token_id": "tok-cap-X",
+        "capabilities": ["a2a:message_send", "nth:receipt_sign"],
+    }
+    receipt = _build_a2a_ask_receipt(
+        identity=signer, method="ask", backend_name="mock",
+        token=token, agent_did=signer.as_did(),
+        params={}, result={"response": "ok"},
+        started_at_ms=0, ended_at_ms=1,
+    )
+    assert receipt is not None
+    # The envelope carries a verbatim copy of the cap_token.
+    assert receipt["authorizing_cap_token"]["token_id"] == "tok-cap-X"
+    assert (
+        receipt["authorizing_cap_token"]["capabilities"]
+        == ["a2a:message_send", "nth:receipt_sign"]
+    )
+
+
 def test_v2_receipt_persistor_drops_when_receipts_store_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1318,6 +1318,88 @@ class _HermesAskBackend(_AskBackend):
         }
 
 
+def _build_a2a_ask_receipt(
+    *,
+    identity: Any,
+    method: str,
+    backend_name: str,
+    token: Dict[str, Any],
+    agent_did: str,
+    params: Dict[str, Any],
+    result: Dict[str, Any],
+    started_at_ms: int,
+    ended_at_ms: int,
+) -> Optional[Dict[str, Any]]:
+    """Phase D: sign a per-ask audit receipt for ``/a2a/ask`` and
+    ``/a2a/ask-stream``. Returns the signed receipt dict on success,
+    None on failure (caller logs + continues — the LLM response is
+    what the operator gets; the receipt is the audit trail and a
+    transient signing hiccup must not block the response).
+
+    Timeline shape (single entry):
+        type=``nth.a2a_ask_executed``
+        payload pins:
+          • method (``ask`` / ``ask-stream``)
+          • caller_did + agent_did
+          • backend name + ``requested_model`` (what caller asked
+            for) + ``resolved_model`` (what backend actually used)
+          • input/output tokens (best-effort from backend result;
+            backends that don't report them carry 0)
+          • timing: started_at_ms + ended_at_ms + elapsed_ms
+          • cap_token_id (correlates this ask with the authorizing
+            token in the audit store, for revocation tracing)
+
+    Authorizing cap_token is attached on the envelope so the
+    verifier can walk back to the issuer's root authority — same
+    pattern as the existing ``nth.agent_attestation`` receipt.
+
+    Pure function — extracted from the handler so it's unit-testable
+    without bringing up an HTTP socket.
+    """
+    try:
+        from nth_dao.execution_receipt import TimelineEntry, sign_receipt
+    except ImportError:
+        return None
+
+    requested_model = ""
+    explicit = params.get("model")
+    if isinstance(explicit, str) and explicit.strip():
+        requested_model = explicit.strip()
+
+    payload = {
+        "method": method,
+        "backend": backend_name,
+        "caller_did": str(token.get("subject_did", "")),
+        "agent_did": agent_did,
+        "requested_model": requested_model,
+        # Backend may not return a ``model`` key (mock doesn't);
+        # treat as empty rather than carrying None on the wire.
+        "resolved_model": str(result.get("model") or ""),
+        "input_tokens": int(result.get("input_tokens", 0) or 0),
+        "output_tokens": int(result.get("output_tokens", 0) or 0),
+        "started_at_ms": int(started_at_ms),
+        "ended_at_ms": int(ended_at_ms),
+        "elapsed_ms": int(ended_at_ms - started_at_ms),
+        "stop_reason": str(result.get("stop_reason") or ""),
+        "cap_token_id": str(token.get("token_id") or ""),
+    }
+    timeline = [
+        TimelineEntry(
+            timestamp=int(ended_at_ms),
+            type="nth.a2a_ask_executed",
+            payload=payload,
+        ),
+    ]
+    try:
+        return sign_receipt(
+            timeline, identity,
+            goal_id=f"a2a:{method}",
+            authorizing_cap_token=token,
+        )
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
+
+
 def _check_token_model_scope(
     token: Dict[str, Any], params: Dict[str, Any],
 ) -> Tuple[bool, str, str]:
@@ -1428,6 +1510,9 @@ def _start_a2a_server(
     identity_card: Dict[str, Any],
     cap_token_holder: "_CapTokenHolder",
     ask_backend: "_AskBackend",
+    *,
+    signer: Any = None,
+    agent_id: str = "",
 ) -> Tuple[Optional[int], Optional[socketserver.BaseServer]]:
     """Bind a stdlib HTTP server on 127.0.0.1:<random port> and
     serve ``identity_card`` from GET /ping plus a JSON-RPC-style
@@ -1572,6 +1657,7 @@ def _start_a2a_server(
                 # are turned into structured 502 envelopes here
                 # rather than HTTP exceptions so the caller sees a
                 # clean JSON shape.
+                started_at_ms = int(time.time() * 1000)
                 try:
                     # M-1 fix (review round Phase 4 R1): pull the
                     # backend-suggested timeout via getattr so the
@@ -1607,9 +1693,42 @@ def _start_a2a_server(
                         f"{type(exc).__name__}: {exc}",
                     )
                     return
+                ended_at_ms = int(time.time() * 1000)
+
+                # Phase D: sign + emit a per-ask audit receipt.
+                # Best-effort: a signing failure logs but doesn't
+                # block the LLM response — the response itself is
+                # the user-facing value; the receipt is the audit
+                # trail and the supervisor's recovery sweep handles
+                # the rare case of a missed signing.
+                if signer is not None:
+                    receipt = _build_a2a_ask_receipt(
+                        identity=signer,
+                        method=method,
+                        backend_name=ask_backend.name,
+                        token=token,
+                        agent_did=state_snapshot["did"],
+                        params=params,
+                        result=result,
+                        started_at_ms=started_at_ms,
+                        ended_at_ms=ended_at_ms,
+                    )
+                    if receipt is not None:
+                        _print_event(
+                            event="receipt_signed",
+                            agent_id=agent_id,
+                            receipt=receipt,
+                        )
+
                 response = {"result": {
                     "method": method,
                     "backend": ask_backend.name,
+                    # Phase D: un-strip ``model`` from the response
+                    # shape. Operator (or peer) can correlate the
+                    # billed model with the on-chain receipt's
+                    # ``resolved_model`` field. Empty string when
+                    # the backend doesn't report a model (e.g. mock).
+                    "model": str(result.get("model") or ""),
                     "response": result.get("response", ""),
                     "caller_did": token.get("subject_did", ""),
                     "agent_did": state_snapshot["did"],
@@ -1733,6 +1852,16 @@ def _start_a2a_server(
             else:
                 effective = backend_default
 
+            # Phase D: capture start time for the per-stream audit
+            # receipt. Done at the same moment we'd start billing —
+            # the SDK call kicks off when the generator's first
+            # __next__ executes (lazy), and we don't want to count
+            # network setup. ``started_at_ms`` matches the buffered
+            # ask path's measurement.
+            started_at_ms = int(time.time() * 1000)
+            last_done_meta: Dict[str, Any] = {}
+            stream_ok = True  # set False on error → skip receipt
+
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -1767,6 +1896,11 @@ def _start_a2a_server(
                             return  # client gone — stop iterating
                     elif kind == "done":
                         meta = dict(payload) if isinstance(payload, dict) else {}
+                        # Phase D: snapshot the backend-reported meta
+                        # before we adorn it with wire-only fields.
+                        # The receipt records what the BACKEND said,
+                        # not the wire-level transport sugar.
+                        last_done_meta = dict(meta)
                         meta["done"] = True
                         meta["caller_did"] = token.get("subject_did", "")
                         meta["agent_did"] = state_snapshot["did"]
@@ -1786,6 +1920,7 @@ def _start_a2a_server(
             # returns False (BrokenPipeError shielded inside) and
             # we fall out anyway. Best-effort terminal write.
             except TimeoutError as exc:
+                stream_ok = False
                 write_event({
                     "error": {
                         "code": "backend-timeout",
@@ -1793,6 +1928,7 @@ def _start_a2a_server(
                     },
                 })
             except ValueError as exc:
+                stream_ok = False
                 write_event({
                     "error": {
                         "code": "bad-request",
@@ -1800,12 +1936,39 @@ def _start_a2a_server(
                     },
                 })
             except Exception as exc:  # noqa: BLE001
+                stream_ok = False
                 write_event({
                     "error": {
                         "code": "backend-failed",
                         "message": f"{type(exc).__name__}: {exc}",
                     },
                 })
+
+            # Phase D: sign + emit a per-stream audit receipt. Only
+            # on clean completion — partial / errored streams don't
+            # produce a receipt because there's no canonical "what
+            # was billed" answer mid-failure. Mirrors the buffered
+            # ask path: best-effort, never blocks the user-facing
+            # stream.
+            if stream_ok and signer is not None:
+                ended_at_ms = int(time.time() * 1000)
+                receipt = _build_a2a_ask_receipt(
+                    identity=signer,
+                    method="ask-stream",
+                    backend_name=backend.name,
+                    token=token,
+                    agent_did=state_snapshot["did"],
+                    params=params,
+                    result=last_done_meta,
+                    started_at_ms=started_at_ms,
+                    ended_at_ms=ended_at_ms,
+                )
+                if receipt is not None:
+                    _print_event(
+                        event="receipt_signed",
+                        agent_id=agent_id,
+                        receipt=receipt,
+                    )
 
     try:
         # Port 0 → kernel picks a free ephemeral port; we then read
@@ -2033,6 +2196,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         cap_token_holder,
         ask_backend,
+        # Phase D: thread the signing identity into the handler so
+        # successful ``ask`` calls can emit a per-request audit
+        # receipt. ``agent_id`` rides along for the receipt_signed
+        # event envelope (matches the existing attestation receipt
+        # event shape so the supervisor's persistor closure works
+        # unchanged).
+        signer=identity,
+        agent_id=args.id,
     )
 
     # SIGTERM is the conventional shutdown signal on POSIX; on
