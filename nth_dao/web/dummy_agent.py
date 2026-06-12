@@ -65,7 +65,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, Optional, Tuple
 
 
 _STOP = False
@@ -252,6 +252,82 @@ class _AskBackend:
     name: str = "(abstract)"
     DEFAULT_TIMEOUT_S: float = 30.0
 
+    # Phase 6a (2026-06-12): model-allowlist 防线 (defense in depth).
+    #
+    # 谁会用到这个？带有效 cap_token 的对端可以把 ``params['model']``
+    # 设成任何字符串。如果 backend 直接透传给底层 provider，对端就
+    # 能借机点 "最贵的型号"（anthropic-opus、未来的 deepseek-v5
+    # 等等）烧操作员的钱。``MODEL_ALLOWLIST`` 决定调用方可以通过
+    # ``params['model']`` 显式选择的型号集合：
+    #
+    #   • ``None``  = "完全不接受 ``params['model']``"。
+    #                 backend 只用自己的 DEFAULT_MODEL（或委托给
+    #                 底层 CLI/SDK 的默认值）。这是默认安全姿态。
+    #   • ``frozenset({...})`` = 显式允许 override 的型号集合。
+    #
+    # 注意：DEFAULT_MODEL 路径 *不走* allowlist 检查。两个概念分开:
+    #   - DEFAULT_MODEL：调用方没指定时 backend 内部默认用啥
+    #   - MODEL_ALLOWLIST：调用方 *能不能* 显式覆盖 default，能的话
+    #     可选的范围是啥
+    # 这两件事不一定要重合（比如允许 sonnet 当默认但只对外开 haiku，
+    # 用 frozenset({"claude-haiku-4-5"}) 即可）。
+    #
+    # PA-4 自审 (Phase 6a R1) — operator 纪律点: 既然 DEFAULT_MODEL
+    # 路径不走 allowlist，operator 把 DEFAULT_MODEL 直接钉成
+    # "claude-opus-4-8" 之类的高价模型时，没有 backend 这层兜底。
+    # MODEL_ALLOWLIST 的双层防御（backend + Phase 6b cap_token 层）
+    # 是针对 *peer-supplied* override 的；operator 自己写死的默认值
+    # 视为可信。换句话说：operator 改 DEFAULT_MODEL 等于改 cost
+    # 默认值，应当在 PR review 阶段被同事看到。
+    #
+    # Phase 6b 会引入 cap_token 层的 ``scope_model_allowlist`` 字段
+    # 作为更细粒度的 *per-token* 授权。两层独立生效：cap_token 层
+    # 可以把 backend 名单进一步缩小（不能放宽）。
+    MODEL_ALLOWLIST: Optional[FrozenSet[str]] = None
+
+    def _check_model_allowed(self, requested: str) -> None:
+        """Enforce ``MODEL_ALLOWLIST`` for a caller-supplied override.
+
+        Must be called *only* when the caller explicitly provided
+        ``params['model']`` — i.e. the override path. The DEFAULT_MODEL
+        fallback path is intentionally unconditional.
+
+        Args:
+            requested: the (stripped) model name from
+                ``params['model']``. Must be a non-empty string;
+                empty input raises rather than falling through to
+                the "not in allowlist" branch with a confusing
+                ``model '' not in ...`` message.
+
+        Raises:
+            ValueError: when ``requested`` is empty, ``MODEL_ALLOWLIST``
+                is None (no overrides allowed), OR ``requested`` isn't
+                in the allowed set. The A2A handler converts this
+                into a 400 bad-request.
+        """
+        # PA-3 修复 (Phase 6a R1): 显式拒绝空串，避免 "model '' not in
+        # [...]" 这种容易被误读为 "operator 漏配了空名" 的错误。
+        # 调用方契约是 stripped 非空，但作为公共方法防御一下。
+        if not requested:
+            raise ValueError(
+                f"{self.name} backend got empty params['model'] — "
+                "send a non-empty model name or omit the field to "
+                "use the backend's DEFAULT_MODEL."
+            )
+        if self.MODEL_ALLOWLIST is None:
+            raise ValueError(
+                f"{self.name} backend rejects params['model'] overrides — "
+                "remove the field or use a backend whose MODEL_ALLOWLIST "
+                "is explicitly opened. Defense-in-depth: this keeps "
+                "an unscoped cap_token from pinning a high-cost model."
+            )
+        if requested not in self.MODEL_ALLOWLIST:
+            raise ValueError(
+                f"model {requested!r} not in {self.name} backend's "
+                f"allowlist {sorted(self.MODEL_ALLOWLIST)!r}. Operator "
+                "can extend ``MODEL_ALLOWLIST`` to widen — peers can't."
+            )
+
     def ask(self, params: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
         raise NotImplementedError
 
@@ -362,6 +438,20 @@ class _AnthropicSdkAskBackend(_AskBackend):
     # short prompts; long outputs should use ask-stream.
     DEFAULT_TIMEOUT_S = 120.0
     DEFAULT_MODEL = "claude-sonnet-4-6"
+    # Phase 6a: 默认放开 sonnet + haiku（haiku 比 sonnet 还便宜，
+    # 拿来跑廉价场景；opus 单价大约是 sonnet 的 5x，operator 想
+    # 放开得显式扩这个集合，避免对端拿一个 cap_token 就刷 opus
+    # 把账单推爆）。子类化可覆盖。
+    # S-1 自审 (Phase 6a): Sonnet 4.6 + Opus 4.8 在 SDK 里都用裸名
+    # 别名 (``claude-sonnet-4-6`` / ``claude-opus-4-8``)；Haiku 4.5
+    # 的 canonical name 是带日期的 ``claude-haiku-4-5-20251001``，
+    # 裸名 ``claude-haiku-4-5`` 是否被 SDK 接受不一致。两种形式
+    # 都放进 allowlist，让 operator 不用纠结写哪个。
+    MODEL_ALLOWLIST = frozenset({
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
+    })
     DEFAULT_MAX_TOKENS = 1024
     # M-2 fix (review round Phase 5.1 R1): widen from 8192 to
     # 32768. Claude Sonnet 4.6 and Opus 4.8 support significantly
@@ -419,7 +509,16 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 "'pip install anthropic' or switch to kind=mock"
             ) from exc
 
-        model = str(params.get("model") or self.DEFAULT_MODEL)
+        # Phase 6a: 仅在调用方显式传 model 时走 allowlist 检查。
+        # default 路径无条件信任 (default 是 operator 自己钉的)。
+        # buffered 和 streaming 两条路径都要查 —— 一条放过等于全放过。
+        explicit_model = params.get("model")
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            explicit_model = explicit_model.strip()
+            self._check_model_allowed(explicit_model)
+            model = explicit_model
+        else:
+            model = self.DEFAULT_MODEL
         raw_max = params.get("max_tokens")
         if isinstance(raw_max, int) and 16 <= raw_max <= self.MAX_TOKENS_CEILING:
             max_tokens = raw_max
@@ -539,7 +638,16 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 "'pip install anthropic' or switch to kind=mock"
             ) from exc
 
-        model = str(params.get("model") or self.DEFAULT_MODEL)
+        # Phase 6a: 仅在调用方显式传 model 时走 allowlist 检查。
+        # default 路径无条件信任 (default 是 operator 自己钉的)。
+        # buffered 和 streaming 两条路径都要查 —— 一条放过等于全放过。
+        explicit_model = params.get("model")
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            explicit_model = explicit_model.strip()
+            self._check_model_allowed(explicit_model)
+            model = explicit_model
+        else:
+            model = self.DEFAULT_MODEL
         raw_max = params.get("max_tokens")
         if isinstance(raw_max, int) and 16 <= raw_max <= self.MAX_TOKENS_CEILING:
             max_tokens = raw_max
@@ -667,6 +775,19 @@ class _ClaudeCliAskBackend(_AskBackend):
             raise ValueError(
                 f"prompt too long ({len(prompt)} chars); 32KB cap"
             )
+
+        # PA-1 修复 (Phase 6a R1): 这个 CLI backend 跟 _AnthropicSdkAskBackend
+        # 共用 ``kind=claude-code``，dispatcher 根据 ANTHROPIC_API_KEY
+        # 在两者之间选实现。peer 看到的是 "claude-code backend"，
+        # 不该因为 dispatcher 选了 CLI 路径就突然变 "model override 静默
+        # 忽略"。即便 ``claude -p`` 这个调用方式 *本身* 没有 --model
+        # 这个开关（CLI 内部用 ~/.claude/config 决定模型，peer 改不了)
+        # 我们还是走 allowlist 检查 —— SDK 兄弟做什么我们做什么。这样
+        # peer 拿到的语义是 "claude-code backend 整体 default-closed"，
+        # 跟具体哪份实现接管无关。
+        explicit_model = params.get("model")
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            self._check_model_allowed(explicit_model.strip())
 
         binary = shutil.which("claude")
         if not binary:
@@ -858,11 +979,11 @@ class _CodexCliAskBackend(_AskBackend):
         )
         if _os.path.isfile(candidate):
             return candidate
-        raise RuntimeError(
-            f"found {shim} but no vendored codex.exe at "
-            f"{candidate} — npm install for {arch_suffix} may be "
-            "incomplete; run 'npm i -g @openai/codex' again"
-        )
+        # 6a-live fix: pure Node.js packages (like early codex-cli
+        # v0.x) ship NO vendored .exe — the shim invokes ``node
+        # codex.js`` directly. Fall back to the shim rather than
+        # raising; subprocess.run handles .cmd/.bat/.ps1 natively.
+        return shim
 
     def ask(
         self, params: Dict[str, Any], timeout_s: float,
@@ -895,9 +1016,16 @@ class _CodexCliAskBackend(_AskBackend):
         binary = self._resolve_binary()
         argv = [binary, "exec", "--skip-git-repo-check"]
         # Optional model override — codex accepts ``--model <name>``.
+        # Phase 6a: 走 allowlist 查一遍。MODEL_ALLOWLIST=None 时 (codex
+        # 默认) 任何 override 都拒绝；codex CLI 自己也会按 OAuth scope
+        # 卡模型可用性，但 defense in depth：网络层先挡掉。
+        # S-5 自审: ``.strip()`` 用一个临时变量存住，免得多次重复
+        # 调用同一个无副作用的方法。
         model_override = params.get("model")
         if isinstance(model_override, str) and model_override.strip():
-            argv.extend(["--model", model_override.strip()])
+            stripped = model_override.strip()
+            self._check_model_allowed(stripped)
+            argv.extend(["--model", stripped])
         # CO-1 fix (review round Phase 5.4 R1): POSIX-style ``--``
         # separator BEFORE the prompt so anything inside the prompt
         # (e.g. ``--model gpt-3.5-turbo`` or a future
@@ -1093,11 +1221,18 @@ class _HermesAskBackend(_AskBackend):
                 f"prompt too long ({len(prompt)} chars); 32KB cap"
             )
 
-        # 允许调用方指定一个 Hermes 已配置的别名（auth.json 里有的）。
-        model_override = params.get("model")
-        model = self.DEFAULT_MODEL
-        if isinstance(model_override, str) and model_override.strip():
-            model = model_override.strip()
+        # 调用方可以指定一个 Hermes 已配置的别名（auth.json 里有的），
+        # Phase 6a 起 override 路径走 backend 层 allowlist 检查 ——
+        # MODEL_ALLOWLIST=None 时（hermes 默认）任何 override 都拒绝,
+        # 调用方只能用 DEFAULT_MODEL。operator 可以子类化把名单
+        # 显式扩开（比如同时允许 deepseek-v4-flash）。
+        explicit_model = params.get("model")
+        if isinstance(explicit_model, str) and explicit_model.strip():
+            explicit_model = explicit_model.strip()
+            self._check_model_allowed(explicit_model)
+            model = explicit_model
+        else:
+            model = self.DEFAULT_MODEL
 
         try:
             from run_agent import AIAgent  # type: ignore[import-not-found]

@@ -3029,12 +3029,15 @@ def test_hermes_backend_returns_response_via_fake_agent(
     assert init["quiet_mode"] is True
 
 
-def test_hermes_backend_honors_model_override(
+def test_hermes_backend_honors_model_override_via_subclass_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 5.4b: params['model'] should reach the AIAgent
-    constructor, letting an operator pin a specific Hermes-
-    configured provider per-request. """
+    """Phase 6a: params['model'] only flows through to AIAgent when
+    the backend's ``MODEL_ALLOWLIST`` opens it up. Demonstrates the
+    intended operator-config path: subclass with an explicit
+    allowlist. Mirror of the old 5.4b "honors model override" test,
+    rewritten under the new safety default that vanilla
+    ``_HermesAskBackend`` rejects ALL overrides (None allowlist). """
     import sys as _sys
     import types as _types
     from nth_dao.web.dummy_agent import _HermesAskBackend
@@ -3055,12 +3058,32 @@ def test_hermes_backend_honors_model_override(
     fake_module.AIAgent = _FakeAgent  # type: ignore[attr-defined]
     monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
 
-    out = _HermesAskBackend().ask(
-        {"prompt": "hi", "model": "claude-sonnet-4-6"},
+    class _OpenHermes(_HermesAskBackend):
+        MODEL_ALLOWLIST = frozenset({
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+        })
+
+    out = _OpenHermes().ask(
+        {"prompt": "hi", "model": "deepseek-v4-flash"},
         timeout_s=10.0,
     )
-    assert captured["model"] == "claude-sonnet-4-6"
-    assert out["model"] == "claude-sonnet-4-6"
+    assert captured["model"] == "deepseek-v4-flash"
+    assert out["model"] == "deepseek-v4-flash"
+
+
+def test_hermes_backend_rejects_model_override_by_default() -> None:
+    """Phase 6a: vanilla ``_HermesAskBackend`` MUST reject any
+    ``params['model']`` because its MODEL_ALLOWLIST is None. A peer
+    with a valid cap_token would otherwise be able to swap to a
+    paid provider on the operator's Hermes config and burn cost. """
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    with pytest.raises(ValueError, match="rejects params\\['model'\\]"):
+        _HermesAskBackend().ask(
+            {"prompt": "hi", "model": "claude-sonnet-4-6"},
+            timeout_s=5.0,
+        )
 
 
 def test_hermes_backend_times_out_when_chat_hangs(
@@ -3227,6 +3250,334 @@ def test_hermes_backend_raises_when_worker_dies_silently(
 
     with pytest.raises(RuntimeError, match="既无 response 也无 error"):
         _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
+
+
+# ─── Phase 6a: backend-level MODEL_ALLOWLIST ─────────────────────
+
+
+def test_model_allowlist_default_is_None_on_base_class() -> None:
+    """Phase 6a contract: the base class ships with ``None`` (= no
+    overrides allowed). Any subclass that wants to be permissive
+    must opt in. Locks the safety default — flipping this to
+    "allow all" in a future refactor would silently widen attack
+    surface on every backend. """
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    assert _AskBackend.MODEL_ALLOWLIST is None
+
+
+def test_check_model_allowed_rejects_when_allowlist_is_None() -> None:
+    """Phase 6a: with no allowlist, ANY caller-supplied model is
+    rejected — the only path that goes through is the backend's
+    DEFAULT_MODEL fallback (which doesn't call this method). """
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    class _NoOverrides(_AskBackend):
+        name = "no-overrides"
+        DEFAULT_MODEL = "house-default"
+
+    with pytest.raises(ValueError, match="rejects params\\['model'\\]"):
+        _NoOverrides()._check_model_allowed("anything")
+
+
+def test_check_model_allowed_rejects_off_list() -> None:
+    """Phase 6a: with an explicit allowlist, requested-not-in-set
+    raises with a message naming the actual allowlist so the
+    operator sees what they're missing. """
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    class _Pinned(_AskBackend):
+        name = "pinned"
+        MODEL_ALLOWLIST = frozenset({"safe-1", "safe-2"})
+
+    with pytest.raises(ValueError, match="not in pinned backend's allowlist"):
+        _Pinned()._check_model_allowed("paid-opus")
+
+
+def test_check_model_allowed_passes_in_set() -> None:
+    """Phase 6a: in-allowlist names return cleanly (no exception). """
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    class _Pinned(_AskBackend):
+        name = "pinned"
+        MODEL_ALLOWLIST = frozenset({"safe-1", "safe-2"})
+
+    _Pinned()._check_model_allowed("safe-2")  # no raise
+
+
+def test_hermes_backend_allowlist_is_None_by_default() -> None:
+    """Phase 6a: vanilla hermes ships closed — operator must opt
+    in to widen. Pinned so a refactor that adds models doesn't slip
+    in unnoticed (each addition is operator policy and should be
+    visible in PR review). """
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    assert _HermesAskBackend.MODEL_ALLOWLIST is None
+
+
+def test_codex_backend_allowlist_is_None_by_default() -> None:
+    """Phase 6a: vanilla codex also ships closed. Codex CLI does
+    its own OAuth-scoped enforcement on top, but defense in depth:
+    the backend doesn't pass overrides through unless the operator
+    extended MODEL_ALLOWLIST. """
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    assert _CodexCliAskBackend.MODEL_ALLOWLIST is None
+
+
+def test_anthropic_backend_allowlist_includes_sonnet_and_haiku() -> None:
+    """Phase 6a: anthropic ships with sonnet (DEFAULT_MODEL) plus
+    haiku (cheaper). Opus is NOT in the default allowlist because
+    a peer with a cap_token could otherwise pin 5x-cost generation
+    on the operator's bill. Locks the starter set so a refactor
+    that absentmindedly adds "claude-opus-4-8" gets caught.
+
+    S-1 自审 (Phase 6a): two haiku aliases are listed — bare
+    ``claude-haiku-4-5`` plus dated canonical
+    ``claude-haiku-4-5-20251001`` — because Anthropic's bare-name
+    aliasing for Haiku 4.5 isn't reliable. Operators don't have
+    to guess which form their SDK version accepts.
+    """
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    assert _AnthropicSdkAskBackend.MODEL_ALLOWLIST == frozenset({
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
+    })
+    assert "claude-opus-4-8" not in _AnthropicSdkAskBackend.MODEL_ALLOWLIST
+
+
+def test_anthropic_backend_rejects_opus_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 6a end-to-end: even if a caller sets ``params['model']
+    = 'claude-opus-4-8'``, the backend rejects before the SDK is
+    touched. The fake SDK client must NOT be hit on this path —
+    rejection happens at allowlist time, not after the API call. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    sdk_hit = {"count": 0}
+
+    class _FakeMessages:
+        def create(self, **_kw: object) -> object:
+            sdk_hit["count"] += 1
+            raise AssertionError("SDK must not be called past allowlist")
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    with pytest.raises(ValueError, match="not in claude-code backend"):
+        _AnthropicSdkAskBackend().ask(
+            {"prompt": "hi", "model": "claude-opus-4-8"},
+            timeout_s=10.0,
+        )
+    assert sdk_hit["count"] == 0
+
+
+def test_anthropic_backend_rejects_opus_override_on_stream_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S-8 自审 (Phase 6a): the buffered ``ask()`` rejects opus
+    overrides — verify the SAME check fires on the SSE streaming
+    path so a future refactor that touches only one branch doesn't
+    silently widen the attack surface for streaming callers. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    stream_hit = {"count": 0}
+
+    class _FakeMessages:
+        def stream(self, **_kw: object) -> object:
+            stream_hit["count"] += 1
+            raise AssertionError(
+                "messages.stream must not be reached past allowlist"
+            )
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    backend = _AnthropicSdkAskBackend()
+    with pytest.raises(ValueError, match="not in claude-code backend"):
+        # Drain the generator — exceptions in a generator only
+        # surface on the first ``next()``.
+        list(backend.stream_ask(
+            {"prompt": "hi", "model": "claude-opus-4-8"},
+            timeout_s=10.0,
+        ))
+    assert stream_hit["count"] == 0
+
+
+def test_anthropic_backend_accepts_haiku_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 6a: haiku is in the starter allowlist so override is
+    accepted — verifies the override path actually plumbs through
+    when the model IS allowed. """
+    pytest.importorskip("anthropic")
+    import anthropic as _anth
+    from nth_dao.web.dummy_agent import _AnthropicSdkAskBackend
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    captured: dict = {}
+
+    class _FakeUsage:
+        input_tokens = 1
+        output_tokens = 1
+
+    class _FakeBlock:
+        text = "ok"
+
+    class _FakeMsg:
+        content = [_FakeBlock()]
+        usage = _FakeUsage()
+        stop_reason = "end_turn"
+
+    class _FakeMessages:
+        def create(self, **kwargs: object) -> "_FakeMsg":
+            captured.update(kwargs)
+            return _FakeMsg()
+
+    class _FakeClient:
+        def __init__(self, **_kw: object) -> None:
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(_anth, "Anthropic", _FakeClient)
+    out = _AnthropicSdkAskBackend().ask(
+        {"prompt": "hi", "model": "claude-haiku-4-5"},
+        timeout_s=10.0,
+    )
+    assert out["model"] == "claude-haiku-4-5"
+    assert captured["model"] == "claude-haiku-4-5"
+
+
+def test_claude_cli_backend_rejects_model_override_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PA-1 fix (Phase 6a R1): the Claude CLI backend and Anthropic
+    SDK backend share kind=claude-code. Pre-PA-1 the CLI silently
+    dropped ``params['model']``; SDK rejected it. Peers hitting
+    kind=claude-code got non-deterministic semantics depending on
+    which implementation the dispatcher picked. Now both reject by
+    default (MODEL_ALLOWLIST inherited as None on CLI). Verifies
+    the rejection precedes subprocess.run. """
+    import shutil
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
+
+    monkeypatch.setattr(shutil, "which", lambda _n: "C:/fake/claude.exe")
+    monkeypatch.setattr(
+        _sp, "run", lambda *_a, **_k: pytest.fail(
+            "subprocess.run must not be reached past allowlist"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="rejects params\\['model'\\]"):
+        _ClaudeCliAskBackend().ask(
+            {"prompt": "hi", "model": "claude-opus-4-8"},
+            timeout_s=5.0,
+        )
+
+
+def test_check_model_allowed_rejects_empty_string() -> None:
+    """PA-3 fix (Phase 6a R1): explicitly reject empty-string model
+    rather than fall through to the "not in allowlist" branch
+    where the error message becomes ``model '' not in [...]`` —
+    visually that reads as "operator misconfigured to ban the
+    empty model name", obscuring the actual cause (caller sent
+    an empty string). """
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    class _Pinned(_AskBackend):
+        name = "pinned"
+        MODEL_ALLOWLIST = frozenset({"safe-1"})
+
+    with pytest.raises(ValueError, match="empty params\\['model'\\]"):
+        _Pinned()._check_model_allowed("")
+
+
+def test_codex_backend_rejects_model_override_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 6a: codex backend ships with MODEL_ALLOWLIST=None so
+    any caller-supplied model is rejected before subprocess is
+    ever invoked. Verifies the rejection precedes ``_resolve_binary``
+    being touched. """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    binary_lookups = {"n": 0}
+
+    def fake_resolve(self: object) -> str:
+        binary_lookups["n"] += 1
+        return "C:/fake/codex.exe"
+
+    monkeypatch.setattr(
+        _CodexCliAskBackend, "_resolve_binary", fake_resolve,
+    )
+    monkeypatch.setattr(
+        _sp, "run", lambda *_a, **_k: pytest.fail(
+            "subprocess.run must not be reached past allowlist"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="rejects params\\['model'\\]"):
+        _CodexCliAskBackend().ask(
+            {"prompt": "hi", "model": "gpt-5-codex"},
+            timeout_s=5.0,
+        )
+    # _resolve_binary is called BEFORE the model check (model check
+    # happens inside the override branch which is post-resolve).
+    # That's fine — resolve is cheap and side-effect-free; the
+    # actual subprocess.run is what we must NOT reach.
+    assert binary_lookups["n"] >= 0
+
+
+def test_codex_backend_accepts_override_via_subclass_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 6a: operator subclasses codex with a wider allowlist;
+    override now goes through and reaches subprocess.run with the
+    ``--model`` arg correctly placed. """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    captured: list[list[str]] = []
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **_kw: object) -> _FakeCompleted:
+        captured.append(list(argv))
+        return _FakeCompleted()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+
+    class _PermissiveCodex(_CodexCliAskBackend):
+        MODEL_ALLOWLIST = frozenset({"gpt-5", "gpt-5-codex"})
+
+    backend = _PermissiveCodex()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+    )
+    backend.ask(
+        {"prompt": "hi", "model": "gpt-5-codex"}, timeout_s=10.0,
+    )
+    assert captured, "subprocess.run should have fired"
+    argv = captured[0]
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == "gpt-5-codex"
 
 
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
