@@ -429,6 +429,9 @@ class IssueCapTokenPayload(BaseModel):
     capabilities: List[str]
     scope_task_id: str = ""
     scope_dao: str = ""
+    # Phase 6b: per-token model scope. See ``sign_cap_token``
+    # docstring for the None / [] / [...] semantics.
+    scope_model_allowlist: Optional[List[str]] = None
     ttl_ms: int = _CAP_DEFAULT_TTL_MS
     token_id: str = ""
 
@@ -1060,6 +1063,7 @@ def create_app(
                 capabilities=payload.capabilities,
                 scope_task_id=payload.scope_task_id,
                 scope_dao=payload.scope_dao,
+                scope_model_allowlist=payload.scope_model_allowlist,
                 ttl_ms=payload.ttl_ms,
                 token_id=payload.token_id,
             )

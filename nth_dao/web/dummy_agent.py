@@ -1318,6 +1318,45 @@ class _HermesAskBackend(_AskBackend):
         }
 
 
+def _check_token_model_scope(
+    token: Dict[str, Any], params: Dict[str, Any],
+) -> Tuple[bool, str, str]:
+    """Phase 6b: pure-function helper for the A2A handler's per-token
+    model scope check. Extracted from the handler so it's unit-testable
+    without bringing up an HTTP socket.
+
+    Args:
+        token: a verified cap_token dict.
+        params: the parsed request body for ``/a2a/ask`` or
+            ``/a2a/ask-stream``.
+
+    Returns:
+        ``(ok, reason, requested_model)``:
+          • ``ok=True`` → request is in scope. ``reason=""``,
+            ``requested_model=""`` when caller didn't supply a model,
+            else the stripped model name.
+          • ``ok=False`` → ``reason`` is a machine-readable code
+            (``REJECT_MODEL_NOT_IN_TOKEN_SCOPE``), ``requested_model``
+            is the stripped name the caller asked for. Handler should
+            emit a 403 with both in the diagnostic.
+
+    Semantics:
+      • Missing / empty ``params['model']`` → defer (per-token scope is
+        for OVERRIDES only; the default path uses backend's
+        DEFAULT_MODEL).
+      • Non-string / whitespace-only ``params['model']`` → defer.
+      • Otherwise → delegate to :func:`cap_token.token_allows_model`.
+    """
+    from nth_dao.cap_token import token_allows_model
+
+    explicit = params.get("model")
+    if not (isinstance(explicit, str) and explicit.strip()):
+        return True, "", ""
+    requested = explicit.strip()
+    ok, reason = token_allows_model(token, requested)
+    return ok, reason, requested
+
+
 def _resolve_ask_backend(kind: str) -> _AskBackend:
     """Pick the backend implementation for a given agent kind.
 
@@ -1501,6 +1540,15 @@ def _start_a2a_server(
                     reason, f"A2A auth failed for /a2a/{method}: {reason}",
                 )
                 return
+            # Phase 6b: per-token model-scope check before backend
+            # dispatch. ``ask``/``ask-stream`` are the methods that
+            # forward ``params['model']`` to a real provider; ``echo``
+            # doesn't touch it. Run once here so streaming + buffered
+            # paths share the same gate (and so an SSE header doesn't
+            # get written before we know we'll authorize).
+            if method in ("ask", "ask-stream"):
+                if not self._enforce_token_model_scope(token, params, method):
+                    return
             # Method dispatch — Phase 4: "echo" wire test + "ask"
             # real-backend call.
             if method == "echo":
@@ -1596,6 +1644,47 @@ def _start_a2a_server(
                 ensure_ascii=False,
             ).encode("utf-8")
             self._respond(status, body)
+
+        def _enforce_token_model_scope(
+            self,
+            token: Dict[str, Any],
+            params: Dict[str, Any],
+            method: str,
+        ) -> bool:
+            """Phase 6b: gate ``params['model']`` against the verified
+            cap_token's ``scope_model_allowlist``.
+
+            Thin shim — the policy logic is in
+            :func:`_check_token_model_scope` so it can be unit-tested
+            without bringing up the whole HTTP handler. This method
+            only adapts the (ok, reason, requested) result into the
+            JSON-error wire shape.
+
+            Layering:
+              • This is the *per-token* check — "is the bearer of
+                this specific token allowed to ask for this model?"
+              • The backend's ``MODEL_ALLOWLIST`` check that fires
+                inside ``ask()`` is the *per-backend* check — "does
+                this operator's deployment policy allow this model
+                at all, regardless of who's asking?"
+              • Both must pass. This one is first because it lets
+                us reject before paying SDK init / subprocess spawn.
+            """
+            ok, reason, requested = _check_token_model_scope(
+                token, params,
+            )
+            if ok:
+                return True
+            scope_list = token.get("scope_model_allowlist")
+            self._json_error(
+                403, reason,
+                (
+                    f"requested model {requested!r} is outside the "
+                    f"cap_token's scope_model_allowlist {scope_list!r} "
+                    f"(method=/a2a/{method})"
+                ),
+            )
+            return False
 
         def _stream_ask(
             self,

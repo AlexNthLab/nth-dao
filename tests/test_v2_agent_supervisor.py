@@ -429,6 +429,164 @@ def test_spawn_persists_cap_token_in_store(hub_client: TestClient) -> None:
     assert "nth-dao.chat" not in record["capabilities"]
 
 
+# ─── Phase 6b: per-token model-scope at the spawn endpoint ───────────
+
+
+def test_spawn_without_model_allowlist_omits_scope_field(
+    hub_client: TestClient,
+) -> None:
+    """Phase 6b: spawn requests without ``model_allowlist`` MUST
+    produce tokens with no ``scope_model_allowlist`` field — the
+    legacy / unscoped shape. Verifies the body default truly
+    propagates to ``sign_cap_token(scope_model_allowlist=None)`` and
+    the field is omitted from the body."""
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "no-scope",
+    })
+    assert r.status_code == 201, r.text
+    token_id = r.json()["cap_token_id"]
+    record = hub_client.app.state.nth.cap_tokens.get(token_id)
+    assert record is not None
+    assert "scope_model_allowlist" not in record, (
+        "missing model_allowlist on spawn must NOT add the field; "
+        "found: " + repr(record.get("scope_model_allowlist"))
+    )
+
+
+def test_spawn_with_empty_model_allowlist_persists_empty_scope(
+    hub_client: TestClient,
+) -> None:
+    """Phase 6b: explicit empty list ``[]`` is "this token forbids
+    all model overrides" — tightest possible. Must land in the
+    audit store as an empty list, NOT as missing / None."""
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "no-overrides",
+        "model_allowlist": [],
+    })
+    assert r.status_code == 201, r.text
+    token_id = r.json()["cap_token_id"]
+    record = hub_client.app.state.nth.cap_tokens.get(token_id)
+    assert record is not None
+    assert record["scope_model_allowlist"] == []
+
+
+def test_spawn_with_nonempty_model_allowlist_persists_sorted(
+    hub_client: TestClient,
+) -> None:
+    """Phase 6b: non-empty allowlist persists deduped + sorted
+    (matches the capabilities pattern for canonical_json stability)."""
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "scoped",
+        "model_allowlist": [
+            "claude-sonnet-4-6", "claude-haiku-4-5",
+            "claude-haiku-4-5",  # duplicate
+        ],
+    })
+    assert r.status_code == 201, r.text
+    token_id = r.json()["cap_token_id"]
+    record = hub_client.app.state.nth.cap_tokens.get(token_id)
+    assert record is not None
+    assert record["scope_model_allowlist"] == [
+        "claude-haiku-4-5", "claude-sonnet-4-6",
+    ]
+
+
+def test_spawn_with_malformed_model_allowlist_500s(
+    hub_client: TestClient,
+) -> None:
+    """Phase 6b: an entry that isn't a non-empty string trips
+    ``sign_cap_token``'s validator and surfaces as a 500 — the
+    spawn endpoint wraps issuance errors as ``spawn failed``. This
+    lets the operator see the typo instead of getting a token
+    silently persisted with a junk entry."""
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "bad-scope",
+        "model_allowlist": [""],  # empty string entry
+    })
+    # FastAPI may catch as either 500 (spawn-failed envelope) or
+    # 422 (pydantic): empty string is structurally valid JSON, so
+    # validation passes and sign_cap_token rejects → 500.
+    assert r.status_code == 500, r.text
+    assert "scope_model_allowlist" in r.text
+
+
+def test_check_token_model_scope_passes_when_no_model_in_params() -> None:
+    """Phase 6b: caller didn't supply ``params['model']`` → check
+    short-circuits OK without ever looking at the token's scope.
+    Per-token scope is for OVERRIDES only; default path is trusted."""
+    from nth_dao.web.dummy_agent import _check_token_model_scope
+
+    token = {"scope_model_allowlist": []}  # tightest possible
+    ok, reason, requested = _check_token_model_scope(
+        token, {"prompt": "hi"},  # no 'model' key
+    )
+    assert ok is True
+    assert reason == ""
+    assert requested == ""
+
+
+def test_check_token_model_scope_passes_when_model_in_token_scope() -> None:
+    """Phase 6b: caller asks for a model that's in the token's scope
+    → OK. Stripped model returned so the handler can log it."""
+    from nth_dao.web.dummy_agent import _check_token_model_scope
+
+    token = {"scope_model_allowlist": ["claude-haiku-4-5"]}
+    ok, reason, requested = _check_token_model_scope(
+        token, {"prompt": "hi", "model": "  claude-haiku-4-5  "},
+    )
+    assert ok is True
+    assert reason == ""
+    assert requested == "claude-haiku-4-5"
+
+
+def test_check_token_model_scope_rejects_outside_scope() -> None:
+    """Phase 6b: caller asks for a model that's NOT in the token's
+    scope → (False, REJECT_MODEL_NOT_IN_TOKEN_SCOPE, requested) so
+    the handler can emit a 403 with the requested model named in
+    the diagnostic."""
+    from nth_dao.cap_token import REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+    from nth_dao.web.dummy_agent import _check_token_model_scope
+
+    token = {"scope_model_allowlist": ["claude-haiku-4-5"]}
+    ok, reason, requested = _check_token_model_scope(
+        token, {"prompt": "hi", "model": "claude-opus-4-8"},
+    )
+    assert ok is False
+    assert reason == REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+    assert requested == "claude-opus-4-8"
+
+
+def test_check_token_model_scope_legacy_token_defers() -> None:
+    """Phase 6b: tokens without ``scope_model_allowlist`` (pre-6b
+    issuance) defer the check — backend's MODEL_ALLOWLIST will be
+    the only gate. Backward-compatibility check."""
+    from nth_dao.web.dummy_agent import _check_token_model_scope
+
+    token = {}  # no scope field at all
+    ok, reason, requested = _check_token_model_scope(
+        token, {"prompt": "hi", "model": "claude-opus-4-8"},
+    )
+    assert ok is True
+    assert reason == ""
+    assert requested == "claude-opus-4-8"
+
+
+def test_check_token_model_scope_ignores_whitespace_only_model() -> None:
+    """Phase 6b: ``params['model']="   "`` is the same as no
+    override — caller's intent isn't clear, fall through to default
+    path rather than emit a confusing scope error about an empty
+    model name."""
+    from nth_dao.web.dummy_agent import _check_token_model_scope
+
+    token = {"scope_model_allowlist": []}
+    ok, reason, requested = _check_token_model_scope(
+        token, {"prompt": "hi", "model": "   "},
+    )
+    assert ok is True
+    assert reason == ""
+    assert requested == ""
+
+
 def test_v2_receipt_persistor_drops_when_receipts_store_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

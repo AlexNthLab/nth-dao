@@ -693,3 +693,301 @@ def test_audit_endpoint_returns_persisted_token(client):
     ).json()
     assert audit["token"]["token_id"] == token_id
     assert audit["revoked"] is False
+
+
+# ─── Phase 6b: per-token model-scope allowlist ───────────────────────
+
+
+def test_sign_omits_scope_model_allowlist_when_none(admin, helper):
+    """Phase 6b: ``scope_model_allowlist=None`` (default) must NOT
+    add the field to the token body. Old verifiers + tokens signed
+    pre-6b stay bytes-identical."""
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+    )
+    assert "scope_model_allowlist" not in tok
+
+
+def test_sign_records_empty_scope_model_allowlist(admin, helper):
+    """Phase 6b: an explicit empty list is the "forbid all overrides"
+    case — must be on the wire (not coalesced to None), so a verifier
+    can tell "deliberate ban" from "legacy / unspecified"."""
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=[],
+    )
+    assert tok["scope_model_allowlist"] == []
+
+
+def test_sign_dedupes_and_sorts_scope_model_allowlist(admin, helper):
+    """Phase 6b: matches the existing ``capabilities`` shape — the
+    canonical_json signing path needs the list byte-stable, so dedup
+    + sort at sign time."""
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=[
+            "claude-haiku-4-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",  # duplicate
+        ],
+    )
+    assert tok["scope_model_allowlist"] == [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-6",
+    ]
+
+
+def test_sign_rejects_non_string_scope_model_entry(admin, helper):
+    """Phase 6b: each entry must be a non-empty string. ``[None]``,
+    ``[42]``, ``[""]`` all fail loud at sign time so a typo doesn't
+    silently get into the audit store."""
+    for bad in [None, 42, ""]:
+        with pytest.raises(ValueError, match="scope_model_allowlist"):
+            sign_cap_token(
+                issuer=admin, subject_did=helper.as_did(),
+                capabilities=[CAP_A2A_MESSAGE_SEND],
+                scope_model_allowlist=[bad],  # type: ignore[list-item]
+            )
+
+
+def test_sign_rejects_non_list_scope_model_allowlist(admin, helper):
+    """Phase 6b: scope_model_allowlist MUST be a list (or None).
+    Passing a frozenset / tuple / dict / str gets caught early."""
+    for bad in [frozenset({"x"}), ("a", "b"), {"a": 1}, "single-string"]:
+        with pytest.raises(ValueError, match="scope_model_allowlist"):
+            sign_cap_token(
+                issuer=admin, subject_did=helper.as_did(),
+                capabilities=[CAP_A2A_MESSAGE_SEND],
+                scope_model_allowlist=bad,  # type: ignore[arg-type]
+            )
+
+
+def test_sign_verify_roundtrip_preserves_scope_model_allowlist(admin, helper):
+    """Phase 6b: signing with the field then verifying with the
+    standard ``verify_cap_token`` still passes — the field rides in
+    the canonical_json body so tampering would break the sig."""
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=["claude-sonnet-4-6"],
+    )
+    ok, reason = verify_cap_token(tok)
+    assert ok, reason
+    assert tok["scope_model_allowlist"] == ["claude-sonnet-4-6"]
+
+
+def test_verify_rejects_tampered_scope_model_allowlist(admin, helper):
+    """Phase 6b: tampering the scope after signing breaks the sig —
+    a peer can't widen their own model scope by editing the JSON."""
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=["claude-haiku-4-5"],
+    )
+    tok["scope_model_allowlist"] = ["claude-opus-4-8"]  # tamper
+    ok, reason = verify_cap_token(tok)
+    assert not ok
+    assert reason == REJECT_SIG_INVALID
+
+
+def test_token_allows_model_legacy_token_defers(admin, helper):
+    """Phase 6b helper: token without scope_model_allowlist → always
+    OK from the per-token check (defer to backend's allowlist).
+    Backward-compat for tokens issued before 6b."""
+    from nth_dao.cap_token import token_allows_model
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+    )
+    ok, reason = token_allows_model(tok, "claude-opus-4-8")
+    assert ok, reason
+
+
+def test_token_allows_model_empty_scope_rejects_any_override(admin, helper):
+    """Phase 6b: explicit empty scope means "no overrides allowed",
+    even tighter than backend's policy."""
+    from nth_dao.cap_token import (
+        REJECT_MODEL_NOT_IN_TOKEN_SCOPE, token_allows_model,
+    )
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=[],
+    )
+    ok, reason = token_allows_model(tok, "claude-sonnet-4-6")
+    assert not ok
+    assert reason == REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+
+
+def test_token_allows_model_in_scope(admin, helper):
+    from nth_dao.cap_token import token_allows_model
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=["claude-haiku-4-5"],
+    )
+    ok, reason = token_allows_model(tok, "claude-haiku-4-5")
+    assert ok, reason
+
+
+def test_token_allows_model_outside_scope(admin, helper):
+    from nth_dao.cap_token import (
+        REJECT_MODEL_NOT_IN_TOKEN_SCOPE, token_allows_model,
+    )
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=["claude-haiku-4-5"],
+    )
+    ok, reason = token_allows_model(tok, "claude-opus-4-8")
+    assert not ok
+    assert reason == REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+
+
+def test_token_allows_model_empty_request_defers(admin, helper):
+    """Phase 6b: empty ``requested_model`` (caller didn't override)
+    always returns OK — the per-token scope is for overrides only;
+    the default-path always uses the backend's DEFAULT_MODEL."""
+    from nth_dao.cap_token import token_allows_model
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=[],  # most restrictive
+    )
+    ok, reason = token_allows_model(tok, "")
+    assert ok, reason
+
+
+def test_token_allows_model_malformed_scope_fails_closed(admin, helper):
+    """Phase 6b: if somehow the scope field is the wrong type
+    (e.g. parsed JSON with a non-list there), fail closed rather
+    than open. The verifier's signature check should already catch
+    tampered tokens, but defense-in-depth at the policy layer."""
+    from nth_dao.cap_token import (
+        REJECT_MODEL_NOT_IN_TOKEN_SCOPE, token_allows_model,
+    )
+    # Bypass sign_cap_token's input validation by building manually.
+    tok = {
+        "scope_model_allowlist": "not-a-list",  # malformed
+    }
+    ok, reason = token_allows_model(tok, "anything")
+    assert not ok
+    assert reason == REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+
+
+def test_sign_strips_whitespace_in_scope_model_entries(admin, helper):
+    """6B-9 fix (Phase 6b R1): operator-supplied entries with leading
+    or trailing whitespace get stripped at sign time. Without this,
+    a typo like ``"claude-sonnet-4-6 "`` lands in the token verbatim
+    and peer's ``params['model']="claude-sonnet-4-6"`` (correct, no
+    space) silently fails the equality check. Strip + dedup catches
+    both the whitespace AND the dup that strip might expose."""
+    tok = sign_cap_token(
+        issuer=admin, subject_did=helper.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        scope_model_allowlist=[
+            "  claude-sonnet-4-6  ",  # leading + trailing space
+            "claude-sonnet-4-6",       # bare → dup after strip
+            "claude-haiku-4-5",
+        ],
+    )
+    assert tok["scope_model_allowlist"] == [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-6",
+    ]
+
+
+def test_sign_rejects_whitespace_only_scope_entry(admin, helper):
+    """6B-9 (Phase 6b R1): a string that's only whitespace becomes
+    empty after strip and gets rejected. Catches operators sending
+    ``["   "]`` from a bad UI form."""
+    with pytest.raises(ValueError, match="non-empty after strip"):
+        sign_cap_token(
+            issuer=admin, subject_did=helper.as_did(),
+            capabilities=[CAP_A2A_MESSAGE_SEND],
+            scope_model_allowlist=["   "],
+        )
+
+
+def test_two_layer_intersection_backend_can_narrow_token_scope() -> None:
+    """6B-11 fix (Phase 6b R1): explicit proof that the per-token
+    scope and the per-backend MODEL_ALLOWLIST stack as AND, not OR.
+
+    Scenario:
+      • Cap_token's ``scope_model_allowlist`` = ["claude-opus-4-8"]
+        (token says "this peer can pick opus")
+      • Backend's ``MODEL_ALLOWLIST`` = {"claude-sonnet-4-6",
+        "claude-haiku-4-5"} (operator deployment says "no opus
+        in this hub")
+
+    Peer requests opus. Order of checks:
+      1. ``token_allows_model(token, "opus")`` → True (token OK).
+      2. Backend's ``_check_model_allowed("opus")`` → ValueError
+         (backend forbids).
+
+    The backend's policy MUST narrow the token's grant. Otherwise
+    an operator who issued a permissive token could be surprised
+    by their own deployment cap being bypassed.
+    """
+    from nth_dao.cap_token import token_allows_model
+    from nth_dao.web.dummy_agent import _AskBackend
+
+    token = {"scope_model_allowlist": ["claude-opus-4-8"]}
+    ok, _reason = token_allows_model(token, "claude-opus-4-8")
+    assert ok is True, "token scope should ALLOW opus in this scenario"
+
+    class _BackendForbidsOpus(_AskBackend):
+        name = "test-backend"
+        MODEL_ALLOWLIST = frozenset({
+            "claude-sonnet-4-6", "claude-haiku-4-5",
+        })
+
+    with pytest.raises(ValueError, match="not in test-backend"):
+        _BackendForbidsOpus()._check_model_allowed("claude-opus-4-8")
+
+
+def test_admin_issue_endpoint_persists_model_allowlist(client):
+    """6B-13 fix (Phase 6b R1): the legacy admin endpoint
+    ``POST /api/cap_tokens/issue`` was wired to accept
+    ``scope_model_allowlist`` but had no test. Cover the path."""
+    helper_ident = AgentIdentity.generate(label="scoped-admin-issue")
+    issue = client.post(
+        "/api/cap_tokens/issue",
+        json={
+            "subject_did": helper_ident.as_did(),
+            "capabilities": [CAP_A2A_MESSAGE_SEND],
+            "scope_model_allowlist": [
+                "claude-haiku-4-5",
+                "claude-sonnet-4-6",
+            ],
+        },
+        headers=_console_headers(client),
+    )
+    assert issue.status_code == 200, issue.text
+    tok = issue.json()["token"]
+    assert tok["scope_model_allowlist"] == [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-6",
+    ]
+
+
+def test_admin_issue_endpoint_omits_scope_when_not_provided(client):
+    """6B-13 (Phase 6b R1): legacy admin endpoint with no
+    ``scope_model_allowlist`` in the body produces a token without
+    the field. Backward-compat with pre-6b admin scripts that don't
+    know about this field."""
+    helper_ident = AgentIdentity.generate(label="unscoped-admin-issue")
+    issue = client.post(
+        "/api/cap_tokens/issue",
+        json={
+            "subject_did": helper_ident.as_did(),
+            "capabilities": [CAP_A2A_MESSAGE_SEND],
+        },
+        headers=_console_headers(client),
+    )
+    assert issue.status_code == 200, issue.text
+    tok = issue.json()["token"]
+    assert "scope_model_allowlist" not in tok

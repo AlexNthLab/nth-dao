@@ -58,7 +58,7 @@ import os
 import uuid
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING, Any, Dict, Iterable, Optional, Set, Tuple,
+    TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple,
 )
 
 from nth_dao.b64u import b64u_decode, b64u_encode
@@ -148,6 +148,7 @@ def sign_cap_token(
     capabilities: Iterable[str],
     scope_task_id: str = "",
     scope_dao: str = "",
+    scope_model_allowlist: Optional[List[str]] = None,
     ttl_ms: int = DEFAULT_TTL_MS,
     token_id: str = "",
 ) -> Dict[str, Any]:
@@ -162,13 +163,37 @@ def sign_cap_token(
             task scope (token holder can act on any task in
             capabilities).
         scope_dao: optional DAO slug binding. Empty = no DAO scope.
+        scope_model_allowlist: Phase 6b — optional per-token model
+            scope for the A2A ``ask``/``ask-stream`` ``params['model']``
+            override. Semantics by value:
+
+              • ``None``        — field is omitted from the token body.
+                                  Means "no per-token scope; the A2A
+                                  handler defers to the backend's
+                                  ``MODEL_ALLOWLIST``." Backward-compat
+                                  for tokens issued before 6b.
+              • ``[]``  (empty) — field is present and empty. Means
+                                  "this token forbids all model
+                                  overrides." Tightest possible —
+                                  even tighter than the backend
+                                  default if the backend opened
+                                  some up.
+              • non-empty list  — field is present. Means "this token
+                                  allows ONLY these models." The A2A
+                                  handler intersects this with the
+                                  backend's ``MODEL_ALLOWLIST`` so the
+                                  scope can only narrow, never widen.
+
+            Per-token scope lets one hub issue tokens with different
+            cost allowances to different peers — a "trusted peer" gets
+            sonnet+haiku, a "lower-trust peer" gets only haiku.
         ttl_ms: token lifetime in milliseconds. Capped at MAX_TTL_MS.
             Default 1 hour.
         token_id: optional caller-supplied uuid; minted if absent.
 
     Raises:
         ValueError on bad input (empty caps, bad subject DID, ttl
-        out of range).
+        out of range, bad model_allowlist shape).
         RuntimeError if the issuer cannot sign.
     """
     caps_list = sorted({c for c in capabilities})
@@ -200,6 +225,37 @@ def sign_cap_token(
             f"token_id must be alphanumeric (or dash); got {rid!r}"
         )
 
+    # Phase 6b: 校验 model 名单的形状 —— 必须是 list[str]，每个
+    # 元素都是非空字符串。None 表示 "字段不上 wire"，跟空 list
+    # 是两个不同语义（见 docstring），不要 normalize 成同一个。
+    # 6B-9 自审 (Phase 6b R1): 同时 strip 每个 entry —— operator
+    # 写 ``"claude-sonnet-4-6 "`` (尾巴一个空格) 会跟 peer 后面
+    # 不带空格的 ``params['model']="claude-sonnet-4-6"`` 因为
+    # 严格相等比对而不命中，构成静默 mismatch。strip 之后再判空。
+    if scope_model_allowlist is not None:
+        if not isinstance(scope_model_allowlist, list):
+            raise ValueError(
+                "scope_model_allowlist must be a list[str] or None; "
+                f"got {type(scope_model_allowlist).__name__}"
+            )
+        normalized_scope: List[str] = []
+        for m in scope_model_allowlist:
+            if not isinstance(m, str):
+                raise ValueError(
+                    "scope_model_allowlist entries must be strings; "
+                    f"got {m!r}"
+                )
+            stripped = m.strip()
+            if not stripped:
+                raise ValueError(
+                    "scope_model_allowlist entries must be non-empty "
+                    f"after strip; got {m!r}"
+                )
+            normalized_scope.append(stripped)
+        # 用 normalize 后的 list 替换 caller 传进来的版本，
+        # 后面写 body 时直接用它。
+        scope_model_allowlist = normalized_scope
+
     now = now_ms()
     body = {
         "kind": NTH_CAP_TOKEN_KIND,
@@ -214,6 +270,12 @@ def sign_cap_token(
         "not_after": now + ttl_ms,
         "nonce": uuid.uuid4().hex,
     }
+    # Phase 6b: 只在 caller 显式给了 scope_model_allowlist 才上 wire,
+    # 以保留 6a 前签发的旧 token 的字节级 stable signature。
+    # 排序：跟 capabilities 一样去重 + 排序，让 canonical bytes
+    # 不依赖输入顺序。
+    if scope_model_allowlist is not None:
+        body["scope_model_allowlist"] = sorted(set(scope_model_allowlist))
     sig_bytes = issuer.sign(canonical_json(body))
     body["sig"] = b64u_encode(sig_bytes)
     return body
@@ -322,6 +384,58 @@ def verify_cap_token(
         return False, REJECT_SIG_INVALID
 
     return True, ""
+
+
+# ─── Phase 6b: per-token model-allowlist helper ──────────────────────
+
+
+REJECT_MODEL_NOT_IN_TOKEN_SCOPE = "model-not-in-token-scope"
+
+
+def token_allows_model(
+    token: Dict[str, Any], requested_model: str,
+) -> Tuple[bool, str]:
+    """Phase 6b: check a verified cap_token's per-token model scope.
+
+    Caller contract: ``token`` MUST have already been verified by
+    ``verify_cap_token`` first. This function does not re-verify —
+    it only inspects the ``scope_model_allowlist`` field.
+
+    Args:
+        token: a verified cap_token dict.
+        requested_model: the (stripped) model name from
+            ``params['model']``. Empty string is treated as "no
+            override" and returns OK regardless of scope.
+
+    Returns:
+        (ok, reason):
+            • ``(True, "")`` if the token has no scope_model_allowlist
+              (legacy / "defer to backend"), OR the requested model is
+              in the scope.
+            • ``(False, REJECT_MODEL_NOT_IN_TOKEN_SCOPE)`` if the scope
+              is present and the requested model isn't in it.
+
+    Semantics on missing / empty field:
+        • Field absent       → no per-token scope → defer to backend.
+        • Field present, []  → token forbids ALL overrides.
+        • Field present list → token allows ONLY these.
+
+    This sits BESIDE the backend's ``MODEL_ALLOWLIST`` — both must
+    pass. The A2A handler should call this first (cheap inline
+    check) and let the backend's ``_check_model_allowed`` enforce
+    its own policy second. Final permission = intersection.
+    """
+    if not requested_model:
+        return True, ""
+    if "scope_model_allowlist" not in token:
+        return True, ""
+    scope = token["scope_model_allowlist"]
+    if not isinstance(scope, list):
+        # Malformed scope field — fail closed.
+        return False, REJECT_MODEL_NOT_IN_TOKEN_SCOPE
+    if requested_model in scope:
+        return True, ""
+    return False, REJECT_MODEL_NOT_IN_TOKEN_SCOPE
 
 
 # ─── envelope codec for the Authorization header ─────────────────────

@@ -1351,6 +1351,24 @@ class SpawnAgentBody(_Model):
             "the agent can sign receipts even with an empty request."
         ),
     )
+    model_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Phase 6b: optional per-token model scope for "
+            "`params['model']` overrides on `/a2a/ask` and "
+            "`/a2a/ask-stream`. Semantics by value:\n"
+            "  • null   — token carries no per-token model scope; "
+            "the A2A handler defers to the backend's MODEL_ALLOWLIST.\n"
+            "  • []     — token forbids ALL model overrides "
+            "(tightest; even tighter than backend default).\n"
+            "  • [...]  — token allows only these models. Combined "
+            "with the backend's MODEL_ALLOWLIST as an intersection "
+            "(the token scope can narrow, never widen).\n"
+            "Operators issue different lists to different peers to "
+            "give per-peer cost ceilings instead of one operator-wide "
+            "policy."
+        ),
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1867,6 +1885,13 @@ def register_v2_routes(app: FastAPI) -> None:
             sign_cap_token,
         )
 
+        # Phase 6b: capture the request's model_allowlist into the
+        # closure so the supervisor-level signature doesn't need to
+        # know about per-token model scope. None passes through to
+        # sign_cap_token unchanged (field omitted from the token,
+        # legacy-compatible).
+        requested_model_allowlist = body.model_allowlist
+
         def _issue_cap_token(
             subject_did: str, requested_caps: List[str],
         ) -> Dict[str, Any]:
@@ -1882,6 +1907,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 issuer=identity,
                 subject_did=subject_did,
                 capabilities=caps,
+                scope_model_allowlist=requested_model_allowlist,
             )
             try:
                 cap_tokens_store.record(token)
