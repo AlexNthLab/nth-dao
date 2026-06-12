@@ -1020,6 +1020,169 @@ class _CodexCliAskBackend(_AskBackend):
         }
 
 
+class _HermesAskBackend(_AskBackend):
+    """Phase 5.4b (2026-06-12): Hermes 本机子代理。
+
+    把一次 ``/a2a/ask`` 转成 hermes-agent 包里的
+    ``run_agent.AIAgent.chat(message) -> str``。
+
+    为什么用进程内导入而不是 subprocess（沿用 "先查现成轮子" 法则）：
+      • hermes-agent 已经把单次 prompt 的入口暴露成了
+        ``AIAgent.chat()``，它就是我们要的 "现成轮子"。
+        再撸一遍 HTTP / CLI 包装只会把同一份逻辑写两次。
+      • 走 subprocess 还得跟 Windows 的 stdout 死锁与 codex
+        的 approval 死等之类的坑赛跑——而 in-process 直接
+        绕开这一整类问题。
+      • hermes-agent 是 editable 安装在用户机器上，
+        ``import run_agent`` 几乎是免费的（除了第一次
+        构造 ``AIAgent`` 时约 30 秒的 config + provider 装载）。
+
+    每次 ``ask`` 都新建一个 ``AIAgent``：
+      • 状态隔离：每个 prompt 都是干净的对话历史，
+        不会因为前后两次调用串了上下文。
+      • 简单到不需要锁：单实例并发会引起内部状态污染，
+        每次新建一个就完全没这个问题。
+      • 代价：每次约 +30 秒的构造开销。在演示/单 operator
+        场景下可接受；生产场景应改为复用 agent + 调用
+        ``reset_session_state()``，并用 lock 串行 ``chat()``。
+
+    Auth：Hermes 自己读 ``~/.hermes/config.yaml`` + ``auth.json``，
+    我们不掺和。默认 provider = deepseek (``deepseek-v4-pro``)，
+    用户可通过 ``params['model']`` 改成 ``~/.hermes/auth.json``
+    里其他已配置的模型。
+
+    Timeout: ``AIAgent.chat()`` 自身没有 timeout 入参，
+    Hermes 内部对 HTTP 调用有 retry/timeout 配置。我们额外
+    用一个 daemon 工作线程 + ``Thread.join(timeout)`` 做硬截止：
+    超时时抛 ``TimeoutError`` 给调用方，后台线程会随进程退出
+    被回收（文档化在 docstring 里）。
+    """
+
+    name = "hermes"
+    # 30s 构造 + chat 一般 7~60s + 余量。DeepSeek 较慢，留宽一点。
+    DEFAULT_TIMEOUT_S = 120.0
+
+    # 默认模型：裸名 ``deepseek-v4-pro``。
+    #
+    # L-2 误判记录 (5.4b R1 提案 → R2 自审 revert):
+    #   ~/.hermes/config.yaml 里写的是 ``deepseek/deepseek-v4-pro``，
+    #   外审建议用这个规范化形式以便未来 provider 切换。但实测
+    #   ``AIAgent(model='deepseek/deepseek-v4-pro')`` 直接 HTTP 400:
+    #   Hermes 把整串当模型名透传给 DeepSeek，DeepSeek 回
+    #   "supported model names are deepseek-v4-pro or
+    #   deepseek-v4-flash"。也就是说配置文件里的斜杠只在 Hermes
+    #   解析阶段 split provider/model 时用，AIAgent(model=) 入参
+    #   反而要去掉前缀。外审是基于猜测的（没实测），所以维持
+    #   裸名。教训：依赖现成轮子时，"应该这样调"和"实际怎么调"
+    #   永远以实测为准。
+    DEFAULT_MODEL = "deepseek-v4-pro"
+
+    # prompt 上限和其他 backend 对齐，防止恶意 peer 耗 LLM 上下文。
+    MAX_PROMPT_CHARS = 32 * 1024
+
+    def ask(
+        self, params: Dict[str, Any], timeout_s: float,
+    ) -> Dict[str, Any]:
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError(
+                "hermes backend requires a 'prompt' param"
+            )
+        if len(prompt) > self.MAX_PROMPT_CHARS:
+            raise ValueError(
+                f"prompt too long ({len(prompt)} chars); 32KB cap"
+            )
+
+        # 允许调用方指定一个 Hermes 已配置的别名（auth.json 里有的）。
+        model_override = params.get("model")
+        model = self.DEFAULT_MODEL
+        if isinstance(model_override, str) and model_override.strip():
+            model = model_override.strip()
+
+        try:
+            from run_agent import AIAgent  # type: ignore[import-not-found]
+        except ImportError as exc:
+            # H-1 修复 (5.4b R1): 错误消息别钉死路径，给出
+            # 通用的安装提示，与 codex backend 风格一致。
+            raise RuntimeError(
+                "hermes-agent 未安装；请到 hermes-agent 仓库根"
+                "目录执行 'pip install -e .'（仓库参考 "
+                "https://github.com/NousResearch/hermes-agent）"
+            ) from exc
+
+        # 跑在 daemon 线程里以便我们自己卡 timeout
+        # （AIAgent.chat 没有 timeout 入参）。
+        result_box: Dict[str, Any] = {}
+
+        def _worker() -> None:
+            agent = None
+            try:
+                agent = AIAgent(
+                    model=model,
+                    quiet_mode=True,
+                    verbose_logging=False,
+                    skip_memory=True,
+                    skip_context_files=True,
+                )
+                response = agent.chat(prompt)
+                if not isinstance(response, str):
+                    result_box["error"] = RuntimeError(
+                        "hermes AIAgent.chat() 返回了非字符串: "
+                        f"{type(response).__name__}"
+                    )
+                    return
+                result_box["response"] = response
+            except Exception as exc:  # noqa: BLE001 — 转回主线程抛
+                result_box["error"] = exc
+            finally:
+                if agent is not None:
+                    try:
+                        agent.close()
+                    except Exception:  # noqa: BLE001 — best-effort
+                        pass
+
+        worker = threading.Thread(
+            target=_worker, name="hermes-ask", daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=timeout_s)
+        if worker.is_alive():
+            # 工作线程仍在跑——HTTP 还没回。我们放弃等待，
+            # 让线程随进程退出被回收。下次 ask 会新起一个 agent，
+            # 不复用这个被遗弃的实例。
+            raise TimeoutError(
+                f"hermes AIAgent.chat did not respond within "
+                f"{timeout_s:.1f}s for prompt[{len(prompt)}]. "
+                f"DeepSeek/远端可能在排队；可加大 timeout_s 或换 "
+                f"params['model'] 到 ~/.hermes/auth.json 里更快的 "
+                f"provider。"
+            )
+
+        err = result_box.get("error")
+        if err is not None:
+            # 透传 ValueError / RuntimeError 以保留诊断信息。
+            raise err
+        # M-1 修复 (5.4b R1): 我们的 try/except 只接 Exception；
+        # 万一 worker 里冒出 BaseException 直系子类（SystemExit、
+        # KeyboardInterrupt、GeneratorExit），worker 线程会
+        # 静默死掉、result_box 既无 response 也无 error。
+        # 此时下一行的 .get("response", "") 会返回 ""，调用方就
+        # 看到 "成功返回了空字符串"，比 raise 还难排查。显式守卫。
+        if "response" not in result_box:
+            raise RuntimeError(
+                "hermes 工作线程异常退出：result_box 既无 response "
+                "也无 error。可能原因：AIAgent 内部抛了 BaseException "
+                "子类（SystemExit/KeyboardInterrupt 等）穿透了 worker "
+                "的 try/except。请检查 ~/.hermes/logs/。"
+            )
+
+        return {
+            "response": str(result_box["response"]),
+            "backend": self.name,
+            "model": model,
+        }
+
+
 def _resolve_ask_backend(kind: str) -> _AskBackend:
     """Pick the backend implementation for a given agent kind.
 
@@ -1041,6 +1204,12 @@ def _resolve_ask_backend(kind: str) -> _AskBackend:
         # ``codex login`` the backend's ``ask`` raises a clear
         # RuntimeError pointing at the fix.
         return _CodexCliAskBackend()
+    if kind == "hermes":
+        # Phase 5.4b (2026-06-12): hermes-agent in-process backend.
+        # 走 ``import run_agent`` 直接调 ``AIAgent.chat()``。
+        # 认证 / provider 选择都由 ~/.hermes/ 自己接管，我们不
+        # 替它做决定。详见 ``_HermesAskBackend`` docstring。
+        return _HermesAskBackend()
     if kind == "claude-code":
         # BUG-3 fix (review round Phase 5.1 R2): the dispatcher
         # used to construct ``_AnthropicSdkAskBackend`` whenever

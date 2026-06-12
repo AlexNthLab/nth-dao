@@ -2923,6 +2923,312 @@ def test_codex_backend_translates_unauthorized_error(
         backend.ask({"prompt": "hi"}, timeout_s=30.0)
 
 
+# ─── Phase 5.4b: Hermes in-process backend ──────────────────────
+
+
+def test_resolve_ask_backend_picks_hermes_for_kind_hermes() -> None:
+    """Phase 5.4b: ``_resolve_ask_backend("hermes")`` returns the
+    Hermes backend regardless of ANTHROPIC_API_KEY (Hermes reads
+    its own ~/.hermes/auth.json). """
+    from nth_dao.web.dummy_agent import (
+        _HermesAskBackend, _resolve_ask_backend,
+    )
+    assert isinstance(
+        _resolve_ask_backend("hermes"), _HermesAskBackend,
+    )
+
+
+def test_hermes_backend_rejects_empty_prompt() -> None:
+    """Phase 5.4b: empty prompt → ValueError (mirrors codex). """
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    with pytest.raises(ValueError, match="requires a 'prompt'"):
+        _HermesAskBackend().ask({"prompt": "   "}, timeout_s=5.0)
+
+
+def test_hermes_backend_rejects_oversized_prompt() -> None:
+    """Phase 5.4b: 32KB cap matches the other backends so a
+    misbehaving peer can't burn LLM context. """
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    with pytest.raises(ValueError, match="prompt too long"):
+        _HermesAskBackend().ask(
+            {"prompt": "x" * 40000}, timeout_s=5.0,
+        )
+
+
+def test_hermes_backend_raises_when_package_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b: clean error when ``run_agent`` (hermes-agent
+    package) isn't importable. The error should tell the operator
+    where to pip install -e from, not surface a raw ImportError. """
+    import builtins
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "run_agent":
+            raise ImportError("No module named 'run_agent'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(RuntimeError, match="pip install -e"):
+        _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
+
+
+def test_hermes_backend_returns_response_via_fake_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b: stub out AIAgent so the test doesn't need real
+    Hermes creds or 30s of construct time. Verify the backend
+    threads the prompt through chat() and packages the response
+    into the expected {response, backend, model} shape. """
+    import builtins
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    captured: dict = {}
+
+    class _FakeAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured["init_kwargs"] = kwargs
+
+        def chat(self, message: str) -> str:
+            captured["prompt"] = message
+            return "PONG"
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _FakeAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    out = _HermesAskBackend().ask(
+        {"prompt": "hello hermes"}, timeout_s=10.0,
+    )
+    assert out == {
+        "response": "PONG",
+        "backend": "hermes",
+        # L-2 revert (5.4b R2 自审): 实测 Hermes 接的是裸名,
+        # canonical ``provider/model`` 形式会被透传给 DeepSeek
+        # 而 DeepSeek 直接 HTTP 400。详见 _HermesAskBackend
+        # DEFAULT_MODEL 上方的注释。
+        "model": "deepseek-v4-pro",
+    }
+    assert captured["prompt"] == "hello hermes"
+    assert captured.get("closed") is True
+    # Defaults we explicitly set in the wrapper so a stale
+    # ~/.hermes/memories or context file can't pollute the ask.
+    init = captured["init_kwargs"]
+    assert init["skip_memory"] is True
+    assert init["skip_context_files"] is True
+    assert init["quiet_mode"] is True
+
+
+def test_hermes_backend_honors_model_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b: params['model'] should reach the AIAgent
+    constructor, letting an operator pin a specific Hermes-
+    configured provider per-request. """
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    captured: dict = {}
+
+    class _FakeAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured["model"] = kwargs.get("model")
+
+        def chat(self, message: str) -> str:
+            return "ok"
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _FakeAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    out = _HermesAskBackend().ask(
+        {"prompt": "hi", "model": "claude-sonnet-4-6"},
+        timeout_s=10.0,
+    )
+    assert captured["model"] == "claude-sonnet-4-6"
+    assert out["model"] == "claude-sonnet-4-6"
+
+
+def test_hermes_backend_times_out_when_chat_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b: AIAgent.chat() has no timeout param of its own,
+    so the backend enforces timeout_s via Thread.join. If chat()
+    hangs past the deadline, ask() must raise TimeoutError rather
+    than block the A2A handler indefinitely. """
+    import sys as _sys
+    import time as _time
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    class _HangingAgent:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        def chat(self, _message: str) -> str:
+            _time.sleep(5.0)  # > timeout_s
+            return "should not see this"
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _HangingAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    with pytest.raises(TimeoutError, match="did not respond within"):
+        _HermesAskBackend().ask(
+            {"prompt": "hi"}, timeout_s=0.3,
+        )
+
+
+def test_hermes_backend_propagates_chat_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b: a RuntimeError raised by AIAgent.chat() (e.g.
+    auth failure, provider 4xx) should propagate to the A2A
+    handler so the operator sees the actual Hermes error message,
+    not a generic 'backend failed'. """
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    class _AngryAgent:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        def chat(self, _m: str) -> str:
+            raise RuntimeError("HTTP 401 from deepseek: invalid key")
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _AngryAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    with pytest.raises(RuntimeError, match="HTTP 401 from deepseek"):
+        _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
+
+
+def test_hermes_backend_closes_agent_when_chat_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b R1: covers a gap the external reviewer flagged —
+    R0 fake-agent tests didn't assert that ``agent.close()`` runs
+    when ``chat()`` raises. The wrapper's ``finally`` block must
+    release any open HTTP clients / sessions Hermes opened during
+    ``AIAgent()`` construction even on the error path; otherwise a
+    storm of failed asks leaks descriptors. """
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    state: dict = {"closed": False}
+
+    class _RaisingAgent:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        def chat(self, _m: str) -> str:
+            raise RuntimeError("provider 500")
+
+        def close(self) -> None:
+            state["closed"] = True
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _RaisingAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    with pytest.raises(RuntimeError, match="provider 500"):
+        _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
+    assert state["closed"] is True, (
+        "agent.close() must run in the worker's finally even when "
+        "chat() raised — otherwise a storm of failed asks leaks "
+        "HTTP clients"
+    )
+
+
+def test_hermes_backend_rejects_non_string_chat_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.4b R1: covers the ``isinstance(response, str)``
+    branch the external reviewer flagged as untested. A
+    misbehaving / future hermes-agent returning a dict / None from
+    ``chat()`` should surface a clear RuntimeError naming the
+    actual type, not silently coerce-and-return. """
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    class _WeirdAgent:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        def chat(self, _m: str) -> object:
+            return {"content": "I am a dict, not a string"}
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _WeirdAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    with pytest.raises(RuntimeError, match="返回了非字符串.*dict"):
+        _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
+
+
+def test_hermes_backend_raises_when_worker_dies_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-1 fix (5.4b R1): if the worker dies via a BaseException
+    subclass (SystemExit / KeyboardInterrupt / GeneratorExit) the
+    ``except Exception`` clause doesn't catch it, ``result_box``
+    stays empty, and the pre-fix code would silently return
+    ``response=""``. The fix is a guard that raises a clear error
+    pointing at the worker's anomalous exit. Simulate the case by
+    letting ``chat()`` raise ``SystemExit`` — the worker thread
+    dies, main thread sees an empty result_box, and must raise
+    RuntimeError instead of returning an empty success. """
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    class _SuicidalAgent:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        def chat(self, _m: str) -> str:
+            # BaseException subclass — falls through our ``except
+            # Exception`` net. Worker thread will die silently.
+            raise SystemExit(0)
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _SuicidalAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    with pytest.raises(RuntimeError, match="既无 response 也无 error"):
+        _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
+
+
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
