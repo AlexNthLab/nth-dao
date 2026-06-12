@@ -634,13 +634,16 @@ def test_build_a2a_ask_receipt_returns_none_without_crypto(
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    out = _build_a2a_ask_receipt(
+    receipt, reason = _build_a2a_ask_receipt(
         identity=None, method="ask", backend_name="mock",
         token={}, agent_did="did:key:z6M...",
         params={}, result={},
         started_at_ms=0, ended_at_ms=1,
     )
-    assert out is None
+    assert receipt is None
+    # D-3 R1: reason names crypto-unavailable so the caller can
+    # emit an operator-visible ``receipt_skipped`` event.
+    assert reason == "crypto-unavailable"
 
 
 def test_build_a2a_ask_receipt_carries_resolved_model() -> None:
@@ -668,7 +671,7 @@ def test_build_a2a_ask_receipt_carries_resolved_model() -> None:
         "output_tokens": 1,
         "stop_reason": "end_turn",
     }
-    receipt = _build_a2a_ask_receipt(
+    receipt, _reason = _build_a2a_ask_receipt(
         identity=signer,
         method="ask",
         backend_name="claude-code",
@@ -725,7 +728,7 @@ def test_build_a2a_ask_receipt_handles_backend_without_model_key() -> None:
         "backend": "mock",
         # no "model" key — what mock returns
     }
-    receipt = _build_a2a_ask_receipt(
+    receipt, _reason = _build_a2a_ask_receipt(
         identity=signer, method="ask", backend_name="mock",
         token=token, agent_did=signer.as_did(),
         params={"prompt": "hi"}, result=result,
@@ -760,7 +763,7 @@ def test_build_a2a_ask_receipt_supports_ask_stream_method() -> None:
         "output_tokens": 200,
         "stop_reason": "end_turn",
     }
-    receipt = _build_a2a_ask_receipt(
+    receipt, _reason = _build_a2a_ask_receipt(
         identity=signer, method="ask-stream", backend_name="claude-code",
         token=token, agent_did=signer.as_did(),
         params={"prompt": "long-running"}, result=done_meta,
@@ -775,6 +778,102 @@ def test_build_a2a_ask_receipt_supports_ask_stream_method() -> None:
     assert payload["method"] == "ask-stream"
     assert payload["resolved_model"] == "claude-sonnet-4-6"
     assert payload["elapsed_ms"] == 62_500
+
+
+def test_safe_str_and_safe_int_defend_against_truthy_trap() -> None:
+    """D-1 R1 (Phase D R1): the original ``str(x or "")`` /
+    ``int(x or 0)`` pattern silently coerces falsy values to the
+    default. ``model=0`` (int) would have become ``""`` instead of
+    being rejected as a type error. ``input_tokens=True`` would have
+    read as 1 (Python's ``isinstance(True, int)`` is True). The
+    type-strict helpers reject both."""
+    from nth_dao.web.dummy_agent import _safe_int, _safe_str
+
+    # _safe_str: strings pass through, everything else → ""
+    assert _safe_str("haiku") == "haiku"
+    assert _safe_str("") == ""              # empty string is a string
+    assert _safe_str(0) == ""               # int → ""
+    assert _safe_str(False) == ""           # bool → ""
+    assert _safe_str(None) == ""
+    assert _safe_str(["sonnet"]) == ""
+
+    # _safe_int: real ints pass through, bool and everything else → 0
+    assert _safe_int(0) == 0
+    assert _safe_int(42) == 0 or _safe_int(42) == 42
+    assert _safe_int(42) == 42
+    assert _safe_int(True) == 0             # critical: bool isinstance int
+    assert _safe_int(False) == 0
+    assert _safe_int("42") == 0             # string → 0
+    assert _safe_int(None) == 0
+    assert _safe_int(3.14) == 0             # float → 0 (we want exact ints)
+
+
+def test_build_a2a_ask_receipt_uses_safe_coercion_on_int_fields() -> None:
+    """D-1 R1: a backend that returns ``input_tokens=True`` (extreme
+    case but a real type-confusion class of bug) must read as 0 in
+    the receipt — NOT 1. Receipts are evidence for billing
+    reconciliation; coercing a bool to a token count would corrupt
+    cost analytics silently."""
+    pytest.importorskip("nacl")
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    signer = AgentIdentity.generate(label="phase-d-r1-int-test")
+    receipt, _reason = _build_a2a_ask_receipt(
+        identity=signer, method="ask", backend_name="weird",
+        token={"subject_did": "did:key:z6M", "token_id": "t"},
+        agent_did=signer.as_did(),
+        params={},
+        # Pathological backend return — wires up True/False as
+        # integers via Python's bool-is-int inheritance.
+        result={
+            "model": "valid-model",
+            "input_tokens": True,    # would read as 1 under naive int()
+            "output_tokens": False,  # would read as 0 under naive int()
+        },
+        started_at_ms=0, ended_at_ms=1,
+    )
+    assert receipt is not None
+    payload = next(
+        e["payload"] for e in receipt["timeline"]
+        if e["type"] == "nth.a2a_ask_executed"
+    )
+    # Both should now be 0 — the bool defense fires.
+    assert payload["input_tokens"] == 0
+    assert payload["output_tokens"] == 0
+
+
+def test_build_a2a_ask_receipt_returns_sign_failed_reason() -> None:
+    """D-3 R1: when sign_receipt raises (e.g. an identity that
+    doesn't hold a private key), the helper returns
+    ``(None, "sign-failed:<ExcName>")`` so the caller can emit a
+    structured ``receipt_skipped`` event naming the failure mode."""
+    pytest.importorskip("nacl")
+    from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
+
+    class _UnsignedIdentity:
+        def as_did(self) -> str:
+            return "did:key:z6MkFakeNoPrivateKey"
+
+        def sign(self, _digest: bytes) -> bytes:
+            raise RuntimeError("no private key")
+
+        @property
+        def pubkey_hex(self) -> str:
+            return "00" * 32
+
+    receipt, reason = _build_a2a_ask_receipt(
+        identity=_UnsignedIdentity(),
+        method="ask", backend_name="mock",
+        token={"subject_did": "did:key:z6M", "token_id": "t"},
+        agent_did="did:key:z6MkFakeNoPrivateKey",
+        params={}, result={"response": "ok"},
+        started_at_ms=0, ended_at_ms=1,
+    )
+    assert receipt is None
+    assert reason.startswith("sign-failed:"), (
+        f"reason should name the failure mode; got {reason!r}"
+    )
 
 
 def test_build_a2a_ask_receipt_attaches_authorizing_cap_token() -> None:
@@ -792,7 +891,7 @@ def test_build_a2a_ask_receipt_attaches_authorizing_cap_token() -> None:
         "token_id": "tok-cap-X",
         "capabilities": ["a2a:message_send", "nth:receipt_sign"],
     }
-    receipt = _build_a2a_ask_receipt(
+    receipt, _reason = _build_a2a_ask_receipt(
         identity=signer, method="ask", backend_name="mock",
         token=token, agent_did=signer.as_did(),
         params={}, result={"response": "ok"},

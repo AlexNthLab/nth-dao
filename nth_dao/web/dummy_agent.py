@@ -1318,6 +1318,30 @@ class _HermesAskBackend(_AskBackend):
         }
 
 
+def _safe_str(v: Any) -> str:
+    """D-1 (Phase D R1): coerce ``v`` to a string field for the
+    receipt timeline, defending against the ``str(x or "")`` pattern's
+    truthy-trap (e.g. a backend that ever returned ``model=0`` or
+    ``model=False`` would be silently coerced to ``""``, losing the
+    actual value). Strings pass through verbatim; everything else
+    becomes ``""`` so the receipt's payload stays type-stable.
+    """
+    return v if isinstance(v, str) else ""
+
+
+def _safe_int(v: Any) -> int:
+    """D-1 (Phase D R1): same defensive coercion for int counter
+    fields. ``isinstance(True, int)`` is True in Python so we
+    explicitly exclude bool — a backend returning ``output_tokens=True``
+    would otherwise read as 1 token.
+    """
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, int):
+        return v
+    return 0
+
+
 def _build_a2a_ask_receipt(
     *,
     identity: Any,
@@ -1329,12 +1353,22 @@ def _build_a2a_ask_receipt(
     result: Dict[str, Any],
     started_at_ms: int,
     ended_at_ms: int,
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """Phase D: sign a per-ask audit receipt for ``/a2a/ask`` and
-    ``/a2a/ask-stream``. Returns the signed receipt dict on success,
-    None on failure (caller logs + continues — the LLM response is
-    what the operator gets; the receipt is the audit trail and a
-    transient signing hiccup must not block the response).
+    ``/a2a/ask-stream``. Returns ``(receipt, reason)``:
+      • ``(receipt, "")`` — signed successfully.
+      • ``(None, reason)`` — best-effort failed; caller logs the
+        reason (D-3 R1 fix: callers used to silently drop None
+        without an operator-visible signal — operators would see
+        their hub run for hours without receipts and not know
+        receipt signing was the missing piece).
+
+    ``reason`` values:
+      • ``"crypto-unavailable"`` — ``nth_dao.execution_receipt`` /
+        PyNaCl can't be imported. Operator should ``pip install
+        pynacl``.
+      • ``"sign-failed:<ExcName>"`` — sign_receipt raised. Usually
+        an identity-without-private-key configuration error.
 
     Timeline shape (single entry):
         type=``nth.a2a_ask_executed``
@@ -1346,8 +1380,25 @@ def _build_a2a_ask_receipt(
           • input/output tokens (best-effort from backend result;
             backends that don't report them carry 0)
           • timing: started_at_ms + ended_at_ms + elapsed_ms
+
+            D-4 R1 caveat: elapsed_ms is wall-clock from BEFORE
+            ``backend.ask()`` to AFTER it returns, so it includes
+            the handler's Python overhead (param parsing, the
+            isinstance / .strip / ValueError catches), not just the
+            LLM call. Typically <1ms vs 1000s+ms LLM latency, but
+            operators reconciling against provider invoices should
+            expect a small offset.
           • cap_token_id (correlates this ask with the authorizing
             token in the audit store, for revocation tracing)
+
+    D-2 R1 note on streaming polyfill: backends that don't override
+    ``stream_ask`` get the default polyfill which yields
+    ``(done, meta)`` where ``meta = result - response``. If the
+    backend's ``ask()`` doesn't return a ``model`` key (mock is the
+    canonical example), the streaming receipt's ``resolved_model``
+    will be ``""``. This is faithful — mock doesn't HAVE a model
+    concept — not a bug, just worth flagging so operators reading
+    mock-backed audit logs know why ``resolved_model`` is empty.
 
     Authorizing cap_token is attached on the envelope so the
     verifier can walk back to the issuer's root authority — same
@@ -1359,29 +1410,31 @@ def _build_a2a_ask_receipt(
     try:
         from nth_dao.execution_receipt import TimelineEntry, sign_receipt
     except ImportError:
-        return None
+        return None, "crypto-unavailable"
 
     requested_model = ""
     explicit = params.get("model")
     if isinstance(explicit, str) and explicit.strip():
         requested_model = explicit.strip()
 
+    # D-1 (R1): _safe_str / _safe_int defend against the truthy-trap
+    # ``str(x or "")`` / ``int(x or 0)`` pattern that silently coerces
+    # a 0 / False / type-mismatched backend return into a "" / 0
+    # receipt field.
     payload = {
         "method": method,
         "backend": backend_name,
-        "caller_did": str(token.get("subject_did", "")),
+        "caller_did": _safe_str(token.get("subject_did")),
         "agent_did": agent_did,
         "requested_model": requested_model,
-        # Backend may not return a ``model`` key (mock doesn't);
-        # treat as empty rather than carrying None on the wire.
-        "resolved_model": str(result.get("model") or ""),
-        "input_tokens": int(result.get("input_tokens", 0) or 0),
-        "output_tokens": int(result.get("output_tokens", 0) or 0),
+        "resolved_model": _safe_str(result.get("model")),
+        "input_tokens": _safe_int(result.get("input_tokens")),
+        "output_tokens": _safe_int(result.get("output_tokens")),
         "started_at_ms": int(started_at_ms),
         "ended_at_ms": int(ended_at_ms),
         "elapsed_ms": int(ended_at_ms - started_at_ms),
-        "stop_reason": str(result.get("stop_reason") or ""),
-        "cap_token_id": str(token.get("token_id") or ""),
+        "stop_reason": _safe_str(result.get("stop_reason")),
+        "cap_token_id": _safe_str(token.get("token_id")),
     }
     timeline = [
         TimelineEntry(
@@ -1391,13 +1444,14 @@ def _build_a2a_ask_receipt(
         ),
     ]
     try:
-        return sign_receipt(
+        receipt = sign_receipt(
             timeline, identity,
             goal_id=f"a2a:{method}",
             authorizing_cap_token=token,
         )
-    except Exception:  # noqa: BLE001 — best-effort
-        return None
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        return None, f"sign-failed:{type(exc).__name__}"
+    return receipt, ""
 
 
 def _check_token_model_scope(
@@ -1702,7 +1756,7 @@ def _start_a2a_server(
                 # trail and the supervisor's recovery sweep handles
                 # the rare case of a missed signing.
                 if signer is not None:
-                    receipt = _build_a2a_ask_receipt(
+                    receipt, sign_reason = _build_a2a_ask_receipt(
                         identity=signer,
                         method=method,
                         backend_name=ask_backend.name,
@@ -1718,6 +1772,17 @@ def _start_a2a_server(
                             event="receipt_signed",
                             agent_id=agent_id,
                             receipt=receipt,
+                        )
+                    else:
+                        # D-3 R1: surface signing skip as a structured
+                        # stderr event so operator sees WHY receipts
+                        # aren't materializing instead of staring at
+                        # an empty audit log for hours.
+                        _print_error(
+                            event="receipt_skipped",
+                            agent_id=agent_id,
+                            method=method,
+                            reason=sign_reason,
                         )
 
                 response = {"result": {
@@ -1952,7 +2017,7 @@ def _start_a2a_server(
             # stream.
             if stream_ok and signer is not None:
                 ended_at_ms = int(time.time() * 1000)
-                receipt = _build_a2a_ask_receipt(
+                receipt, sign_reason = _build_a2a_ask_receipt(
                     identity=signer,
                     method="ask-stream",
                     backend_name=backend.name,
@@ -1968,6 +2033,14 @@ def _start_a2a_server(
                         event="receipt_signed",
                         agent_id=agent_id,
                         receipt=receipt,
+                    )
+                else:
+                    # D-3 R1: same skip-signal as the buffered path.
+                    _print_error(
+                        event="receipt_skipped",
+                        agent_id=agent_id,
+                        method="ask-stream",
+                        reason=sign_reason,
                     )
 
     try:
