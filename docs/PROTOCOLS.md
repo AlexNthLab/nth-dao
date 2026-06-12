@@ -677,4 +677,307 @@ populate them without breaking on-disk format.
 
 ---
 
-*Last updated for nth-dao v0.9.3.*
+## 10. Capability Tokens (cap_token)
+
+`nth-cap-token-v1` is the wire format for delegated authority. The hub
+issues a signed token to a child agent at spawn; the child presents the
+token to peer agents over A2A; peers verify the token before honoring
+the request.
+
+### 10.1 Body
+
+`kind`, `spec` are version pins. `issuer_did` signed; `subject_did` is
+the bearer. Phase 6 added `scope_model_allowlist` for per-token model
+governance.
+
+```json
+{
+  "kind": "nth-cap-token-v1",
+  "spec": "nth-dao/cap-token@1.0",
+  "token_id": "<32-hex>",
+  "issuer_did": "did:key:z6Mk...",
+  "subject_did": "did:key:z6Mk...",
+  "capabilities": ["a2a:message_send", "nth:receipt_sign"],
+  "scope_task_id": "",
+  "scope_dao": "",
+  "scope_model_allowlist": ["claude-sonnet-4-6"],
+  "not_before": 1717000000000,
+  "not_after": 1717003600000,
+  "nonce": "<32-hex>",
+  "sig": "<base64url-of-Ed25519-sig>"
+}
+```
+
+- `token_id` — alphanumeric + dash. Doubles as a filename in
+  `<workspace>/team_cap_tokens/<token_id>.json` for audit. Reject any
+  other characters at issuance.
+- `capabilities` — sorted, deduplicated, non-empty. Each entry follows
+  `verb:noun` naming (e.g. `a2a:message_send`, `nth:receipt_sign`).
+  Unknown entries (not in `KNOWN_CAPABILITIES`) are accepted on the
+  wire but the v2 spawn endpoint filters them at issuance.
+- `scope_task_id` / `scope_dao` — empty string = "no scope", an
+  explicit value pins the token to that one task / DAO.
+- **`scope_model_allowlist`** *(Phase 6b)* — `null` field absent on
+  the wire = "no per-token model scope, defer to backend". When
+  present:
+    - `[]` empty list = "token forbids all `params['model']`
+      OVERRIDES" (does NOT restrict the backend's `DEFAULT_MODEL`
+      — see §12.3).
+    - Non-empty list = "token allows only these models", strings
+      stripped + deduped + sorted at sign time.
+- `not_before` / `not_after` — milliseconds since epoch. `not_after`
+  capped at 1 week (`MAX_TTL_MS = 604_800_000`) to bound delegation
+  reach.
+- `nonce` — 32-hex, freshly minted per token. Prevents collision
+  attacks against the audit store.
+
+### 10.2 Signature
+
+Compute over `canonical_json(body_without_sig)`:
+
+    sig = Ed25519_sign(issuer_privkey, canonical_json(body_minus_sig))
+    body["sig"] = b64url_encode(sig)
+
+Verify the inverse. The verifier's check order is shape → time bounds
+→ revocation → required capabilities → scope → signature. Time bounds
+and revocation are cheap so they fail fast; the signature check (most
+expensive) runs last.
+
+### 10.3 Authorization Header Envelope
+
+Peers present the token in the `Authorization` header of their
+`/a2a/<method>` request:
+
+    Authorization: CapToken <b64url(canonical_json(body))>
+
+The scheme is `CapToken` (not `Bearer`) so middleware can distinguish
+cap_tokens from the operator's console Bearer token at the HTTP layer.
+
+---
+
+## 11. Execution Receipts (`nth-execution-receipt-v1`)
+
+A receipt is a signed timeline of typed entries. The hub recovers them
+on startup and persists them via the receipt store. Verifiers replay
+the timeline + cross-check against the `authorizing_cap_token` chain.
+
+### 11.1 Envelope
+
+```json
+{
+  "kind": "nth-execution-receipt-v1",
+  "spec": "nth-dao/execution-receipt@1.0",
+  "compatible_with": "motebit/execution-ledger@1.0",
+  "receipt_id": "<32-hex>",
+  "goal_id": "a2a:ask",
+  "signer_did": "did:key:z6Mk...",
+  "signer_pubkey_hex": "<64-hex>",
+  "issued_at": "2026-06-12T03:14:15.926+00:00",
+  "timeline": [ … ],
+  "content_hash": "<64-hex>",
+  "sig": "<base64url-of-Ed25519-sig>",
+  "authorizing_cap_token": { … }       // optional
+}
+```
+
+- `signer_did` — the agent that signed. Pubkey is reconstructible from
+  the DID; `signer_pubkey_hex` is supplied redundantly so a verifier
+  can cross-check without parsing the DID.
+- `issued_at` — UTC-aware ISO 8601. Used for chain head sorting only;
+  signature does NOT cover this field (so a verifier with skew gets
+  the same content_hash).
+- `content_hash` — SHA-256 hex of the serialized timeline (NOT the
+  envelope). Used as the signature input AS-RAW-BYTES (`bytes.fromhex`)
+  per motebit §6 — implementations that sign the hex string produce
+  sigs no motebit verifier accepts.
+- `authorizing_cap_token` — when present, verifier walks back to the
+  issuer's root authority. Lives OUTSIDE the signed body because the
+  cap_token has its own signature; nesting them would create a
+  chicken-and-egg sig dependency.
+
+### 11.2 Timeline Entries
+
+Each entry has three fields:
+
+```json
+{
+  "timestamp": 1717000123456,
+  "type": "<entry-kind>",
+  "payload": { … }
+}
+```
+
+Three entry kinds are defined:
+
+- **`nth.agent_attestation`** *(Phase 3c)* — emitted once at agent
+  start when the cap_token first lands. Payload pins `agent_id`,
+  `kind`, `did`, `cap_token_id`, `cap_token_caps`, `a2a_port`, plus a
+  `claim` string. Proves "I, this agent, hold the cap_token above
+  and am alive at this timestamp."
+
+- **`nth.a2a_ask_executed`** *(Phase D)* — emitted by the child on
+  successful `/a2a/ask` or `/a2a/ask-stream`. Payload:
+
+    ```json
+    {
+      "method": "ask" | "ask-stream",
+      "backend": "claude-code" | "codex" | "hermes" | "mock",
+      "caller_did":      "did:key:z6Mk…",
+      "agent_did":       "did:key:z6Mk…",
+      "requested_model": "claude-sonnet-4-6" | "",
+      "resolved_model":  "claude-sonnet-4-6" | "",
+      "input_tokens":    7,
+      "output_tokens":   1,
+      "started_at_ms":   1717000123456,
+      "ended_at_ms":     1717000128456,
+      "elapsed_ms":      5000,
+      "stop_reason":     "end_turn" | "",
+      "cap_token_id":    "<32-hex>"
+    }
+    ```
+
+  `resolved_model` is the receipt's cost-accountability anchor — it
+  records exactly which model was billed regardless of what the caller
+  asked for. Backends that don't surface a model field (mock) carry
+  `""` here.
+
+- **`nth.chain_link`** *(Phase B)* — prepended automatically by
+  `sign_receipt` when `prev_content_hash` is non-empty. Payload is
+  just `{"prev_content_hash": "<64-hex>"}`. The chain link participates
+  in the content_hash so the linkage is signature-protected.
+
+### 11.3 content_hash Algorithm
+
+```
+for each entry in timeline:
+    canonical_entry = canonical_json(entry.to_dict())
+sha256.update(canonical_entry)
+content_hash = sha256.hexdigest()
+sig = Ed25519_sign(signer_privkey, sha256.digest())  // RAW 32 BYTES
+```
+
+The signature input is **the 32-byte raw digest**, not the hex string.
+Multiple round-trip tests across Rust + TS verifiers have caught
+implementations that signed the hex.
+
+---
+
+## 12. A2A Method Surface (`POST /a2a/<method>`)
+
+Each running agent serves an HTTP loop on `127.0.0.1:<random-port>`.
+The `/ping` GET is unauthenticated and returns the agent's identity
+card. Everything else is `POST /a2a/<method>` with `Authorization:
+CapToken <…>`.
+
+### 12.1 Methods
+
+| Method        | Required cap            | Returns                          |
+|---------------|-------------------------|----------------------------------|
+| `echo`        | `a2a:message_send`      | `{result: {received_params, …}}` |
+| `ask`         | `a2a:message_send`      | `{result: {response, model, …}}` |
+| `ask-stream`  | `a2a:message_send`      | SSE: `data: {delta}` lines + `done` |
+
+Methods not in the table return `401 method-unknown` — auth runs
+before dispatch and rejects any method whose required cap isn't
+defined. (The dispatcher carries a defensive `404 method-not-found`
+fallback that is unreachable in current code but kept as a belt-and-
+suspenders guard.)
+
+### 12.2 Auth + Scope Order (every method)
+
+1. **Parse `Authorization`.** Must be `CapToken <b64url-canonical>`.
+   Bad scheme → 401 `bad-scheme`.
+2. **Verify cap_token** (`verify_cap_token`). Time bounds → revocation
+   → required capability → signature. Failures map to 401 / 403 with
+   the `REJECT_*` reason string.
+3. **`_enforce_token_model_scope(token, params)`** *(Phase 6b)*. Runs
+   for ALL methods (`ask`, `ask-stream`, `echo`, and any future
+   methods). If `params['model']` is present and the token's
+   `scope_model_allowlist` is `[]` or doesn't contain the requested
+   model → 403 `model-not-in-token-scope`. Cheap inline check; fails
+   before paying SDK init / subprocess spawn.
+4. **Method dispatch.**
+
+### 12.3 Two-Layer Model Policy (Phase 6)
+
+```
+peer request
+  └─ A2A handler
+     ├─ Phase 6b: cap_token.scope_model_allowlist gate  ← per-token scope
+     └─ backend.ask()
+        ├─ Phase 6a: backend.MODEL_ALLOWLIST gate        ← per-backend policy
+        └─ provider call
+```
+
+- The cap_token scope is the *per-token* answer: "is this peer
+  allowed to ask for this model?"
+- The backend allowlist is the *per-deployment* answer: "is this
+  model in our operator's hub-wide policy?"
+- Both must pass. The cap_token scope can only **narrow**, never
+  widen. An operator who issues a permissive token can't bypass
+  their own deployment cap.
+- **Important asymmetry**: both gates check `params['model']`
+  OVERRIDES only. The backend's `DEFAULT_MODEL` (used when caller
+  omits the field) is unconditionally trusted — operators wanting a
+  true cost floor must set `DEFAULT_MODEL` to the cheapest model
+  AND set `scope_model_allowlist=[]` on the issued tokens so peers
+  can neither pick a model nor escape the default.
+
+### 12.4 Response Shape — `ask`
+
+```json
+{
+  "result": {
+    "method": "ask",
+    "backend": "claude-code",
+    "model": "claude-sonnet-4-6",   // Phase D: resolved model
+    "response": "PONG",
+    "caller_did": "did:key:z6Mk…",
+    "agent_did": "did:key:z6Mk…"
+  }
+}
+```
+
+The `model` field surfaces the same value as the receipt's
+`resolved_model`. Operators can correlate the response with the
+signed audit record by matching `(agent_did, model, received_at)`.
+
+### 12.5 Response Shape — `ask-stream` (SSE)
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+Connection: close
+
+data: {"delta":"hello"}
+
+data: {"delta":" world"}
+
+data: {"done":true,"input_tokens":7,"output_tokens":2,"model":"…","caller_did":"…","agent_did":"…"}
+```
+
+Errors mid-stream emit a final `data: {"error": {...}}` event then
+close the connection. A receipt for the stream is signed on clean
+completion only; partial / errored streams produce no receipt because
+there's no canonical "what was billed" answer for a failed run.
+
+### 12.6 Receipt Emission
+
+After a successful `ask` or `ask-stream`, the child signs a
+`nth.a2a_ask_executed` receipt (§11.2), emits it via the NDJSON
+stderr-event stream as:
+
+```json
+{"event": "receipt_signed", "agent_id": "…", "receipt": { … }}
+```
+
+The supervisor's persistor closure picks it up off the child's stdout
+and writes to the workspace receipt store. Receipt signing is
+best-effort: a failure to sign logs an error but does NOT block the
+response to the caller — the LLM response is the user-facing value,
+and the supervisor's recovery sweep covers rare missed signings.
+
+---
+
+*Last updated for nth-dao v0.10.0 (Phase D, 2026-06-12).*
