@@ -90,12 +90,11 @@ export default function App() {
 }
 
 function AppInner() {
-  /* Default landing = Blackboard per the autopilot-mode philosophy
-   * (DESIGN_TRADE_OFFS extension): the operational dashboard is
-   * the steady-state home screen; Decisions is consulted only when
-   * the badge calls. In manual mode (early V1) users will quickly
-   * switch to Decisions; the badge + Cmd+K make that one keypress. */
-  const [active, setActive] = useState<NavId>("blackboard");
+  /* Default landing = Chat (2026-06-14 简化:聊天优先). 教育市场阶段,
+   * 用户"带着自己的 agent 进来聊天"是第一动作,传统聊天软件式布局学习
+   * 成本最低。Blackboard 等 7 个专业视图降级进 IconNav 的"更多",待办
+   * 仍有角标提示,Cmd+K 一键直达,不丢功能。 */
+  const [active, setActive] = useState<NavId>("chat");
   const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
   /* S5 fix (2026-06-10): track in-flight resolves by id and pass
    * the Set down to DecisionQueue so the main-head renders a

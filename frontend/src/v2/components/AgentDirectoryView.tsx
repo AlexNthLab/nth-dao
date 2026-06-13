@@ -683,7 +683,8 @@ export function AgentDirectoryView({
                   >
                     <IconZap size={12} /> Issue cap_token
                   </button>
-                  {onSendMessage && (
+                  {onSendMessage && a.supervised && a.alive
+                   && typeof a.a2a_port === "number" && (
                     <button
                       type="button"
                       className="btn btn-ghost"
