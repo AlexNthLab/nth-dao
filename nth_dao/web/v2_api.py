@@ -1883,7 +1883,10 @@ def register_v2_routes(app: FastAPI) -> None:
           500 — runner spawn or cap_token issuance failed AFTER the
                 child started. Supervisor has already torn the child
                 down before this point.
+          429 — live-agent ceiling reached (NTH_MAX_LIVE_AGENTS).
         """
+        from .agent_supervisor import AgentCapacityExceeded
+
         sup = _state_supervisor(request)
         if sup is None:
             raise HTTPException(
@@ -1965,6 +1968,15 @@ def register_v2_routes(app: FastAPI) -> None:
                 label=body.label,
                 capabilities=body.capabilities,
                 cap_token_issuer=_issue_cap_token,
+            )
+        except AgentCapacityExceeded as exc:
+            # 2026-06-14 审查补:达到运行态 agent 上限。这是"暂时容量不足"
+            # 而非客户端错误或服务端故障 → 429 Too Many Requests,带可读
+            # 提示(可调 NTH_MAX_LIVE_AGENTS)。fail-closed:此前未起子进程。
+            logger.warning("v2_api: spawn rejected — at capacity: %s", exc)
+            raise HTTPException(
+                status_code=429,
+                detail=f"spawn rejected: {exc}",
             )
         except ValueError as exc:
             # 6B-5 fix (Phase 6b deferred backlog): bad input to

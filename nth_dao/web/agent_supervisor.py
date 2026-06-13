@@ -75,6 +75,22 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 logger = logging.getLogger(__name__)
 
 
+# 运行态 agent 数量天花板(2026-06-14 审查补:项目反复强调 auto/scale 路径
+# 必须有显式上限,而 spawn 之前没有任何上限——跑飞的循环/误用/带 token 的
+# CSRF 可无限拉起子进程耗尽机器)。默认 32,可由 NTH_MAX_LIVE_AGENTS 覆盖;
+# <=0 视为"不限"(回到旧行为,但需显式选择)。
+def _default_max_live_agents() -> int:
+    try:
+        return int(os.environ.get("NTH_MAX_LIVE_AGENTS", "32"))
+    except (TypeError, ValueError):
+        return 32
+
+
+class AgentCapacityExceeded(RuntimeError):
+    """spawn 时存活 agent 数已达上限。端点应映射为 HTTP 429。"""
+
+
+
 # ─────────────────────────────────────────────────────────────
 # Data
 # ─────────────────────────────────────────────────────────────
@@ -679,10 +695,16 @@ class AgentSupervisor:
         cap_token_dir: Optional[Path] = None,
         receipt_persistor: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         decision_raiser: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        max_live_agents: Optional[int] = None,
     ) -> None:
         self._runner = runner
         self._agents: Dict[str, AgentRecord] = {}
         self._lock = threading.Lock()
+        # 运行态上限:None → 取 NTH_MAX_LIVE_AGENTS / 默认 32;<=0 表示不限。
+        self._max_live_agents = (
+            _default_max_live_agents() if max_live_agents is None
+            else max_live_agents
+        )
         self._cap_token_dir = cap_token_dir
         self._receipt_persistor = receipt_persistor
         # Phase 3d: invoked when a child emits ``decision_raised``.
@@ -716,7 +738,23 @@ class AgentSupervisor:
                 timeout.
             Any exception from ``cap_token_issuer`` (after killing
                 the child).
+            AgentCapacityExceeded if the live-agent ceiling is reached
+                (checked BEFORE starting any subprocess, fail-closed).
         """
+        # 容量闸:达上限即拒,绝不再起子进程。stop() 会从 _agents.pop,
+        # 故 len(_agents) 即当前在册(已起未停)数。并发下可能轻微超额
+        # (检查与最终插入之间锁已释放),但这是防"跑飞",非精确配额,
+        # 操作员触发频率低,可接受。
+        if self._max_live_agents > 0:
+            with self._lock:
+                live = len(self._agents)
+            if live >= self._max_live_agents:
+                raise AgentCapacityExceeded(
+                    f"live agent ceiling reached: "
+                    f"{live}/{self._max_live_agents} "
+                    f"(raise NTH_MAX_LIVE_AGENTS to allow more)"
+                )
+
         agent_id = uuid.uuid4().hex
         # Phase 3b note (race): the reader thread starts inside
         # runner.start() and emits on_event(agent_started) before

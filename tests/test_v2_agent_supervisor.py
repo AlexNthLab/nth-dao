@@ -5286,3 +5286,27 @@ def test_subprocess_runner_cap_token_file_round_trip(
         assert payload.get("did") == did
     finally:
         runner.stop(agent_id)
+
+
+# 运行态 agent 数量天花板(2026-06-14 审查补:auto/scale 显式上限)。
+def test_spawn_enforces_live_agent_ceiling():
+    from nth_dao.web.agent_supervisor import AgentCapacityExceeded
+
+    sup = AgentSupervisor(InMemoryRunner(), max_live_agents=2)
+    sup.spawn(kind="mock", label="a")
+    sup.spawn(kind="mock", label="b")
+    # 第三个超限 → 拒绝(且未起任何子进程)。
+    with pytest.raises(AgentCapacityExceeded):
+        sup.spawn(kind="mock", label="c")
+    # 停掉一个腾出名额 → 又能起。
+    victim = sup.list_agents()[0].agent_id
+    assert sup.stop(victim) is True
+    sup.spawn(kind="mock", label="d")  # 不再抛
+    assert len(sup.list_agents()) == 2
+
+
+def test_spawn_ceiling_zero_means_unlimited():
+    sup = AgentSupervisor(InMemoryRunner(), max_live_agents=0)
+    for i in range(6):
+        sup.spawn(kind="mock", label=f"x{i}")
+    assert len(sup.list_agents()) == 6
