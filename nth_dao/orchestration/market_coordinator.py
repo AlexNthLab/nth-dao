@@ -33,11 +33,26 @@ from nth_dao.orchestration.a2a_coordinator import (
 )
 
 
+def announcement_id_for(mission_id: str, step_id: str) -> str:
+    """(mission_id, step_id) → 确定性 announcement_id。
+
+    同一份活永远映射到同一个 id。这是去中心幂等的关键:claim 的 CAS 锁
+    是按 announcement_id 建的,所以哪怕同一 step 被**重复 announce**(协调者
+    重试/重启/多副本并发),所有副本共享同一 id → 认领仍只成一份 → 一个
+    worker、一笔交易。否则随机 id 会让一份活裂成多条公告、被多人各干一遍、
+    付多次(CAS 只在单条公告内防双认领,挡不住"多条公告")。
+    """
+    import hashlib
+    h = hashlib.sha256(f"{mission_id}\x00{step_id}".encode("utf-8")).hexdigest()
+    return f"mstep-{h[:40]}"
+
+
 def announce_step(
     feed: MarketFeed,
     step: Any,
     *,
     publisher: Any,           # AgentIdentity(can_sign)
+    mission_id: str = "",
     reward_minor: int = 0,
     reward_asset: str = "credit",
     title_prefix: str = "mission-step",
@@ -46,16 +61,20 @@ def announce_step(
     """把一个 mission step 发成市场公告(publisher 签名),发布到 feed。
 
     capability_set = step.required_capabilities(空则 [default_capability])。
-    返回签名后的 TaskAnnouncement。
+    announcement_id 由 (mission_id, step.id) **确定性**派生 —— 重复 announce
+    幂等(认领仍只成一份,见 ``announcement_id_for``)。**应传 mission_id**
+    以避免跨 mission 的 step_id 撞车。返回签名后的 TaskAnnouncement。
     """
     caps = list(getattr(step, "required_capabilities", []) or []) or [default_capability]
+    step_id = str(getattr(step, "id", ""))
     ann = sign_announcement(
         publisher=publisher,
-        title=f"{title_prefix}: {getattr(step, 'id', '')}",
+        title=f"{title_prefix}: {step_id}",
         capability_set=caps,
         reward_minor=reward_minor,
         reward_asset=reward_asset,
         description=str(getattr(step, "description", "")),
+        announcement_id=announcement_id_for(mission_id, step_id),
     )
     feed.publish(ann)
     return ann
@@ -94,7 +113,15 @@ class MarketWorker:
         self.did = identity.as_did()
 
     def try_claim(self, announcement_id: str) -> Optional[Any]:
-        """原子认领。胜者得 ClaimOutcome;竞态败者/无权限 → None。"""
+        """原子认领。胜者得 ClaimOutcome;竞态败者/无权限 → None。
+
+        已知限制(审查记录,非本轮修):
+          - 把 ClaimConflict(竞态败者)与 ClaimRejected(无权限/过期/信誉
+            不达)都吞成 None —— 对调度足够,但丢了"为何没拿到"的可观测性。
+          - **不支持** claimant_policy 公告:本方法不传 claimant_reputation,
+            故带信誉门槛的公告一律 ClaimRejected→None(fail-closed,安全但
+            功能缺)。网络部署要支持时,须由认领权威服务端算信誉后传入。
+        """
         try:
             return claim_announcement(
                 self.feed, self.claim_store, announcement_id,

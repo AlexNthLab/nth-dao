@@ -23,7 +23,7 @@ from nth_dao.execution_receipt import verify_receipt, now_ms
 from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
 from nth_dao.orchestration.a2a_coordinator import PeerResponse
 from nth_dao.orchestration.market_coordinator import (
-    announce_step, MarketWorker,
+    announce_step, announcement_id_for, MarketWorker,
 )
 
 
@@ -108,6 +108,30 @@ def test_loser_gets_nothing_no_double_work(tmp_path: Path) -> None:
     second = wb.claim_and_execute(ann.announcement_id, prompt="p")
     assert first is not None and first.verified
     assert second is None  # 败者不重复干活
+
+
+def test_reannounce_is_idempotent_no_double_claim(tmp_path: Path) -> None:
+    """审查修复:同一 step 被**重复 announce**(协调者重试/重启/多副本)产生
+    **同一** announcement_id → 认领仍只成一份(CAS 按 id 建锁),不会被两个
+    worker 各干一遍。这堵上"随机 id 让一份活裂成多条公告双付"的洞。"""
+    feed = MarketFeed(tmp_path)
+    publisher = AgentIdentity.generate(label="pub")
+    step = _Step("s1", ["solo"])
+
+    a1 = announce_step(feed, step, publisher=publisher, mission_id="m1", reward_minor=10)
+    a2 = announce_step(feed, step, publisher=publisher, mission_id="m1", reward_minor=10)
+    assert a1.announcement_id == a2.announcement_id == announcement_id_for("m1", "s1")
+
+    shared = ClaimStore(tmp_path)
+    wa = _worker(tmp_path, feed, "A", "solo"); wa.claim_store = shared
+    wb = _worker(tmp_path, feed, "B", "solo"); wb.claim_store = shared
+    # 两个 worker 各对"自己看到的那条公告"认领 —— 但 id 相同 → CAS 只成一个。
+    ra = wa.try_claim(a1.announcement_id)
+    rb = wb.try_claim(a2.announcement_id)
+    assert len([r for r in (ra, rb) if r is not None]) == 1
+
+    # 不同 mission 的同名 step → 不同 id(不会跨 mission 撞车)。
+    assert announcement_id_for("m1", "s1") != announcement_id_for("m2", "s1")
 
 
 def test_worker_without_skill_token_cannot_claim(tmp_path: Path) -> None:
