@@ -114,39 +114,12 @@ class A2ACoordinator:
     def _verify_peer_work(
         self, peer: A2APeer, resp: "PeerResponse", prompt: str,
     ) -> str:
-        """返回 "" 表示通过;非空为拒绝原因。
-
-        三道:
-          1. 验签 + signer_did == 该 peer DID(同 reputation/binding 模式);
-          2. receipt **绑定本次请求**:payload.request_sha256 == sha256(我发
-             的 prompt) —— 否则是重放别处签的 receipt;
-          3. receipt **绑定本次回应**:payload.response_sha256 == sha256(peer
-             回的 text) —— 否则文本被伪造(签名真但内容对不上)。
-        """
-        import hashlib
-
-        receipt = resp.receipt
-        if not isinstance(receipt, dict) or not receipt:
-            return "no-receipt"
-        try:
-            from nth_dao.execution_receipt import verify_receipt
-        except ImportError:
-            return "crypto-unavailable"
-        if not verify_receipt(receipt):
-            return "receipt-sig-invalid"
-        if str(receipt.get("signer_did", "")) != peer.did:
-            return "receipt-signer-mismatch"
-        # 取出 a2a_ask 那条 timeline payload。
-        payload = _a2a_ask_payload(receipt)
-        if payload is None:
-            return "receipt-no-ask-entry"
-        want_req = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        if str(payload.get("request_sha256", "")) != want_req:
-            return "request-not-bound"  # 重放 / 张冠李戴
-        want_resp = hashlib.sha256((resp.text or "").encode("utf-8")).hexdigest()
-        if str(payload.get("response_sha256", "")) != want_resp:
-            return "response-not-bound"  # 文本被伪造
-        return ""
+        """返回 "" 表示通过;非空为拒绝原因。委托给模块级
+        ``verify_work_receipt``(协调者与市场 worker 共用同一套校验)。"""
+        ok, why = verify_work_receipt(
+            resp.receipt, expected_signer=peer.did,
+            prompt=prompt, response=resp.text or "")
+        return "" if ok else why
 
     def run_mission(
         self,
@@ -253,3 +226,44 @@ def _a2a_ask_payload(receipt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if isinstance(p, dict):
                 return p
     return None
+
+
+def verify_work_receipt(
+    receipt: Optional[Dict[str, Any]],
+    *,
+    expected_signer: str,
+    prompt: str,
+    response: str,
+) -> "tuple[bool, str]":
+    """校验一张 A2A 工作 receipt 是否"这个 DID 为这个请求/回应亲签"。
+
+    协调者(_verify_peer_work)与市场 worker 共用。三道:
+      1. 验签 + signer_did == expected_signer(同 reputation/binding 模式);
+      2. request_sha256 == sha256(prompt) —— 否则重放别处签的 receipt;
+      3. response_sha256 == sha256(response) —— 否则文本被伪造。
+    返回 (ok, reason)。
+    """
+    import hashlib
+
+    if not isinstance(receipt, dict) or not receipt:
+        return False, "no-receipt"
+    try:
+        from nth_dao.execution_receipt import verify_receipt
+    except ImportError:
+        return False, "crypto-unavailable"
+    if not verify_receipt(receipt):
+        return False, "receipt-sig-invalid"
+    if str(receipt.get("signer_did", "")) != expected_signer:
+        return False, "receipt-signer-mismatch"
+    payload = _a2a_ask_payload(receipt)
+    if payload is None:
+        return False, "receipt-no-ask-entry"
+    if str(payload.get("request_sha256", "")) != hashlib.sha256(
+        prompt.encode("utf-8")
+    ).hexdigest():
+        return False, "request-not-bound"
+    if str(payload.get("response_sha256", "")) != hashlib.sha256(
+        (response or "").encode("utf-8")
+    ).hexdigest():
+        return False, "response-not-bound"
+    return True, ""
