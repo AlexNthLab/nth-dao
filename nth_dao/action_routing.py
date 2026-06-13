@@ -391,7 +391,7 @@ class ActionRouter:
         if self._pubkey_lookup is None:
             raise RuntimeError(
                 "ActionRouter._pubkey_lookup is None but _verify_enabled "
-                "is True — caller must wire a lookup callable.",
+                "is True -- caller must wire a lookup callable.",
             )
         # C-9 fix: pubkey_lookup is an arbitrary integrator-provided callable.
         # If it raises (network error, malformed registry record, ...) we
@@ -415,7 +415,7 @@ class ActionRouter:
         if self._identity is None:
             raise RuntimeError(
                 "ActionRouter._identity is None but _verify_enabled "
-                "is True — caller must wire an Identity instance.",
+                "is True -- caller must wire an Identity instance.",
             )
         try:
             return self._identity.verify_json(

@@ -8,7 +8,9 @@ def test_web_console_serves_typescript_frontend(tmp_path):
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "NTH DAO Console" in response.text
+    # `/` 现在服务 v2 SPA(2026-06-14 默认入口=v2);断言 SPA 外壳标志,
+    # 不再耦合具体品牌字串(标题已改正字 "Nᵗʰ DAO Console")。
+    assert 'id="root"' in response.text
     assert "/assets/" in response.text
 
 

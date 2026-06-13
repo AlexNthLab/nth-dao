@@ -143,12 +143,20 @@ class TestIsAlive:
         assert r.is_alive(max_stale_seconds=1) is False
 
     def test_clock_skew_tolerance_applied(self):
-        """A record just barely stale should still be alive due to skew buffer."""
+        """CRIT-2(2026-06-10)后:skew 缓冲只用于宽恕"未来"的小幅时钟漂移
+        (远端时钟略快),不再用来加宽"过期"窗口。窗口为 [-SKEW, max_stale)。
+        因此一个 20s 未来(在 30s skew 内)的心跳仍算存活。"""
+        future = (datetime.now() + timedelta(seconds=20)).isoformat()
+        r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=future)
+        # delta=-20:>= -SKEW(30) 且 < max_stale(90) -> 存活。
+        assert r.is_alive(max_stale_seconds=90) is True
+
+    def test_barely_stale_past_is_dead(self):
+        """CRIT-2 后:95s 前的心跳 >= max_stale(90) -> 死。skew 不再加宽过期
+        窗口(旧实现 max_stale+SKEW 会误判 95s 仍活,已修)。"""
         past = (datetime.now() - timedelta(seconds=95)).isoformat()
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=past)
-        # Without skew: 95s > 90s -> dead.
-        # With CLOCK_SKEW_TOLERANCE_SECONDS=30: 95s < 120s -> alive.
-        assert r.is_alive(max_stale_seconds=90) is True
+        assert r.is_alive(max_stale_seconds=90) is False
 
     def test_far_future_rejected_even_with_skew(self):
         """Timestamp 10 minutes in the future exceeds FUTURE_STALE_SECONDS,
@@ -157,12 +165,13 @@ class TestIsAlive:
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=future)
         assert r.is_alive(max_stale_seconds=90) is False
 
-    def test_near_future_is_alive_within_skew(self):
-        """A timestamp 2 minutes in the future is within FUTURE_STALE_SECONDS
-        and within max_stale + CLOCK_SKEW_TOLERANCE, so it's still alive."""
+    def test_future_beyond_skew_is_dead(self):
+        """CRIT-2 后:未来漂移的容忍只有 CLOCK_SKEW_TOLERANCE_SECONDS(30s),
+        一个 120s 未来的时间戳已超出 -> 视为死(时钟被篡改/严重漂移),与更
+        宽松的 FUTURE_STALE_SECONDS 无关(后者对未来路径已是死代码)。"""
         future = (datetime.now() + timedelta(seconds=120)).isoformat()
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=future)
-        assert r.is_alive(max_stale_seconds=90) is True
+        assert r.is_alive(max_stale_seconds=90) is False
 
 
 # -------------------------- find_complements --------------------------
