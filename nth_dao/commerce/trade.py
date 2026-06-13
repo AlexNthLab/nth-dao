@@ -281,6 +281,16 @@ def _parties(events: List[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
+def _trade_terms(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """从开局事件取约定结算条款（CS4）；未签 terms 返回 None。"""
+    if not events:
+        return None
+    opened = events[0]
+    p = opened.get("payload", {}) if isinstance(opened, dict) else {}
+    t = p.get("terms")
+    return t if isinstance(t, dict) else None
+
+
 def _append_event(
     store: TradeStore,
     trade_id: str,
@@ -362,6 +372,7 @@ def open_trade(
     verifier_did: str = "",
     settler_did: str = "",
     resolver_did: str = "",
+    terms: Optional[Dict[str, Any]] = None,
     now_ms_override: int = 0,
 ) -> TradeEvent:
     """从一条市场 claim 开一个 trade（状态 → EXECUTING）。
@@ -369,6 +380,12 @@ def open_trade(
     claimant/publisher 从 claim_record 取并绑定。verifier/settler/resolver
     由开局方指定（默认 verifier/settler = publisher_did；resolver（争议
     裁决方，CS3）默认 = verifier_did —— 生产中应换成中立仲裁方）。
+
+    terms（CS4）：约定结算条款 ``{"amount_minor":int,"currency":str,
+    "payee_did":str}``（金额来自公告 reward；payee 默认 claimant）。由
+    authority 在开局事件里签下后，``verify_trade`` 会用它**自动**核对
+    settlement 金额/币种/收款方 —— 闭合"settler 改小金额白嫖"缺口，无需
+    审计方另带条款。不传 terms → 老行为（verify_trade 不校验金额）。
 
     一笔认领一个 trade（trade_id = announcement_id）。重复 open → 拒。
     """
@@ -392,6 +409,15 @@ def open_trade(
         "resolver_did": rd,
         "claim_receipt_id": str(claim_record.get("receipt_id", "")),
     }
+    if terms is not None:
+        # payee 默认 claimant（干活的人收钱）。金额/币种留给 verify_settlement
+        # 全量校验；这里只规整结构。
+        amt = terms.get("amount_minor")
+        payload["terms"] = {
+            "amount_minor": amt if isinstance(amt, int) and not isinstance(amt, bool) else -1,
+            "currency": str(terms.get("currency", "")),
+            "payee_did": str(terms.get("payee_did", "")) or claimant_did,
+        }
     return _append_event(
         store, announcement_id, actor=authority,
         event_type=EVENT_TRADE_OPENED, new_state=STATE_EXECUTING,
@@ -623,6 +649,26 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
                 role_set = {d for d in role_set if d}
                 if ev.actor_did not in role_set:
                     return False, REJECT_WRONG_ACTOR
+            # CS4：直接结算（VERIFIED→SETTLED）若开局签了 terms，自动核对
+            # settlement 金额/币种/收款方 —— 闭合"settler 改小金额白嫖"。
+            # 争议裁决（dispute_resolved）的金额由 resolver 判，不受 terms 约束，
+            # 故只在 SETTLEMENT_RECORDED 这一支强制。
+            if ev.type == EVENT_SETTLEMENT_RECORDED:
+                terms = _trade_terms(events)
+                if terms:
+                    from nth_dao.commerce.settlement import verify_settlement
+                    settlement = (ev.payload or {}).get("settlement", {})
+                    exp_amt = terms.get("amount_minor")
+                    if isinstance(exp_amt, bool) or not isinstance(exp_amt, int):
+                        exp_amt = -1
+                    ok, reason = verify_settlement(
+                        settlement if isinstance(settlement, dict) else {},
+                        expected_amount_minor=exp_amt,
+                        expected_currency=str(terms.get("currency", "")),
+                        expected_payee_did=str(terms.get("payee_did", "")),
+                    )
+                    if not ok:
+                        return False, reason
         state = ev.new_state
 
     return True, ""

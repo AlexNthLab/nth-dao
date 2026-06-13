@@ -63,6 +63,10 @@ REJECT_PAYER_MISMATCH = "settlement-payer-mismatch"
 REJECT_TX_REF_MISSING = "settlement-tx-ref-missing"
 REJECT_NETWORK_MISSING = "settlement-network-missing"
 REJECT_PROOF_MISSING = "settlement-proof-missing"
+REJECT_TRADE_MISMATCH = "settlement-trade-mismatch"
+REJECT_TRADE_NOT_FOUND = "settlement-trade-not-found"
+REJECT_BAD_STATE = "settlement-bad-state"
+REJECT_WRONG_SETTLER = "settlement-wrong-settler"
 
 
 class SettlementFailed(Exception):
@@ -334,17 +338,46 @@ def settle_trade(
     （VERIFIED → SETTLED）。
 
     把 CS4 的 adapter 接到 CS1 的 ``record_settlement`` 上，不改后者签名。
-    intent.trade_id 必须与 trade_id 一致（防把 A 单的付款记到 B 单上）。
-    rail 失败 → SettlementFailed 上抛，不留半条结算。
+
+    付款前预检（防双付）：x402 的 ``adapter.settle`` 会真的广播交易，所以
+    必须在付款**之前**确认 trade 能接受这笔结算 —— 否则若 record_settlement
+    因状态/角色被拒，钱已付出去却没记事件，重试就双付了。预检：
+      - intent.trade_id 与目标一致（防把 A 单付款记到 B 单）；
+      - trade 存在且处于 VERIFIED（唯一能直接结算的前置态）；
+      - settler 是 open 时绑定的结算方。
+    预检通过后才付款。残留 TOCTOU（预检与落账之间另有写入）由
+    record_settlement 的原子状态守卫兜底：那种情况下第二个写入会被拒，
+    但钱可能已付 —— 真钱生产应上两阶段提交（CS4 testnet 范围内以预检
+    覆盖常见 foot-gun 为度）。
     """
     # 延迟 import 避免与 __init__ 的导入次序耦合（trade 不依赖本模块）。
-    from nth_dao.commerce.trade import record_settlement
+    from nth_dao.commerce.trade import (
+        record_settlement, trade_state, _parties, STATE_VERIFIED,
+    )
 
     if intent.trade_id != trade_id:
         raise SettlementFailed(
-            "settlement-trade-mismatch",
+            REJECT_TRADE_MISMATCH,
             f"intent.trade_id={intent.trade_id!r} != trade_id={trade_id!r}",
         )
+    events = store.get_events(trade_id)
+    if not events:
+        raise SettlementFailed(REJECT_TRADE_NOT_FOUND, trade_id)
+    state = trade_state(store, trade_id)
+    if state != STATE_VERIFIED:
+        raise SettlementFailed(
+            REJECT_BAD_STATE,
+            f"trade 须在 {STATE_VERIFIED!r} 才能结算，实际 {state!r}（付款前置守卫）",
+        )
+    parties = _parties(events)
+    if settler.as_did() != parties.get("settler_did"):
+        raise SettlementFailed(
+            REJECT_WRONG_SETTLER,
+            f"settler {settler.as_did()!r} 非绑定结算方 "
+            f"{parties.get('settler_did')!r}",
+        )
+
+    # 预检通过 → 付款（adapter 可能广播）→ 落账。
     payload = adapter.settle(intent).to_payload()
     return record_settlement(
         store, trade_id, settler=settler, settlement=payload,

@@ -263,6 +263,116 @@ def test_verify_settlement_x402_requires_onchain_proof(tmp_path) -> None:
     assert not ok and reason == REJECT_PROOF_MISSING
 
 
+def test_verify_settlement_payer_mismatch(tmp_path) -> None:
+    """给了期望 payer 时，payer 不符也挡（payer-mismatch）。"""
+    from nth_dao.commerce import REJECT_PAYER_MISMATCH
+    s = _good_x402_settlement()
+    ok, reason = verify_settlement(
+        s, expected_amount_minor=1000, expected_currency="USDC",
+        expected_payee_did="did:key:zPayee",
+        expected_payer_did="did:key:zSomeoneElse")
+    assert not ok and reason == REJECT_PAYER_MISMATCH
+
+
+# ─── 审查修复 A：terms 让 verify_trade 自动核对结算金额 ──────────
+
+
+def test_terms_make_verify_trade_catch_freeride(tmp_path) -> None:
+    """开局签 terms(1000) 后，settler 记一条 amount=1 的结算想白嫖 ——
+    record_settlement 仍会写入（它不验金额），但 verify_trade 自动用
+    terms 核对，挡下（amount-mismatch）。这才真正闭合缺口。"""
+    from nth_dao.commerce import record_settlement
+    store = TradeStore(tmp_path)
+    pub = AgentIdentity.generate(label="pub")
+    claimant = AgentIdentity.generate(label="worker")
+    verifier = AgentIdentity.generate(label="ver")
+    settler = AgentIdentity.generate(label="settler")
+    open_trade(store, authority=pub,
+               claim_record=_claim("ann-t", claimant, pub),
+               verifier_did=verifier.as_did(), settler_did=settler.as_did(),
+               terms={"amount_minor": 1000, "currency": "USDC"})
+    submit_delivery(store, "ann-t", claimant=claimant,
+                    delivery={"artifact_sha256": "a", "execution_receipt_id": "x"})
+    record_verification(store, "ann-t", verifier=verifier, verdict=VERDICT_PASS,
+                        result={"ok": 1})
+    # settler 手搓一条改小金额的结算（绕过 settle_trade 的 adapter）
+    record_settlement(store, "ann-t", settler=settler, settlement={
+        "adapter_id": ADAPTER_X402_TESTNET, "amount_minor": 1,
+        "currency": "USDC", "payee_did": claimant.as_did(),
+        "tx_ref": "fake:deadbeef", "network": "base-sepolia",
+        "proof": {"settled": True},
+    })
+    assert trade_state(store, "ann-t") == STATE_SETTLED
+    ok, reason = verify_trade(store, "ann-t")
+    assert not ok and reason == REJECT_AMOUNT_MISMATCH
+
+
+def test_terms_honest_settlement_passes_verify_trade(tmp_path) -> None:
+    """开局签 terms 后，诚实按约定金额经 settle_trade 结算，verify_trade 过。"""
+    store = TradeStore(tmp_path)
+    pub = AgentIdentity.generate(label="pub")
+    claimant = AgentIdentity.generate(label="worker")
+    verifier = AgentIdentity.generate(label="ver")
+    settler = AgentIdentity.generate(label="settler")
+    open_trade(store, authority=pub,
+               claim_record=_claim("ann-h", claimant, pub),
+               verifier_did=verifier.as_did(), settler_did=settler.as_did(),
+               terms={"amount_minor": 1000, "currency": "USDC"})
+    submit_delivery(store, "ann-h", claimant=claimant,
+                    delivery={"artifact_sha256": "a", "execution_receipt_id": "x"})
+    record_verification(store, "ann-h", verifier=verifier, verdict=VERDICT_PASS,
+                        result={"ok": 1})
+    intent = SettlementIntent(trade_id="ann-h", amount_minor=1000,
+                              currency="USDC", payee_did=claimant.as_did())
+    settle_trade(store, "ann-h", settler=settler,
+                 adapter=X402SettlementAdapter(FakePaymentRail()), intent=intent)
+    ok, reason = verify_trade(store, "ann-h")
+    assert ok, reason
+
+
+# ─── 审查修复 B：settle_trade 付款前预检（防双付）──────────────
+
+
+def test_settle_trade_rejects_before_paying_when_not_verified(tmp_path) -> None:
+    """trade 不在 VERIFIED 时，settle_trade 在**付款前**就拒 —— rail 没被
+    调用（无双付风险）。"""
+    store = TradeStore(tmp_path)
+    pub = AgentIdentity.generate(label="pub")
+    claimant = AgentIdentity.generate(label="worker")
+    verifier = AgentIdentity.generate(label="ver")
+    settler = AgentIdentity.generate(label="settler")
+    # 只开到 EXECUTING（未交付未验收）
+    open_trade(store, authority=pub,
+               claim_record=_claim("ann-b", claimant, pub),
+               verifier_did=verifier.as_did(), settler_did=settler.as_did())
+    rail = FakePaymentRail()
+    intent = SettlementIntent(trade_id="ann-b", amount_minor=5,
+                              currency="USDC", payee_did=claimant.as_did())
+    with pytest.raises(SettlementFailed):
+        settle_trade(store, "ann-b", settler=settler,
+                     adapter=X402SettlementAdapter(rail), intent=intent)
+    assert rail.calls == []  # 关键：付款前就拦下，rail 未被调
+
+
+def test_settle_trade_rejects_wrong_settler_before_paying(tmp_path) -> None:
+    """非绑定 settler 调 settle_trade → 付款前拒，rail 未被调。"""
+    store = TradeStore(tmp_path)
+    pub = AgentIdentity.generate(label="pub")
+    claimant = AgentIdentity.generate(label="worker")
+    verifier = AgentIdentity.generate(label="ver")
+    settler = AgentIdentity.generate(label="settler")
+    intruder = AgentIdentity.generate(label="intruder")
+    _to_verified(store, "ann-w", claimant=claimant, publisher=pub,
+                 verifier=verifier, settler=settler)
+    rail = FakePaymentRail()
+    intent = SettlementIntent(trade_id="ann-w", amount_minor=5,
+                              currency="USDC", payee_did=claimant.as_did())
+    with pytest.raises(SettlementFailed):
+        settle_trade(store, "ann-w", settler=intruder,
+                     adapter=X402SettlementAdapter(rail), intent=intent)
+    assert rail.calls == []
+
+
 def test_verify_settlement_manual_needs_no_txref(tmp_path) -> None:
     """manual（无真钱）不要求 tx_ref/network/proof。"""
     intent = SettlementIntent(trade_id="t", amount_minor=10,
