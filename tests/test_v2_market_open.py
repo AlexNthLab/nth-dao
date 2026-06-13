@@ -64,3 +64,11 @@ def test_market_open_empty_when_no_feed(tmp_path: Path) -> None:
     r = client.get("/api/v2/market/open")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_market_open_read_has_no_filesystem_side_effects(tmp_path: Path) -> None:
+    # 自审回归:只读 GET 不该在从不用市场的节点工作区里造出市场目录。
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    assert client.get("/api/v2/market/open").status_code == 200
+    assert not (tmp_path / "market_feed").exists()
+    assert not (tmp_path / "market_claims").exists()

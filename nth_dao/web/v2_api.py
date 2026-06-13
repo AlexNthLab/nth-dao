@@ -1818,6 +1818,12 @@ def register_v2_routes(app: FastAPI) -> None:
         ws = _state_workspace(request)
         if ws is None:
             return []
+        # 自审修复:MarketFeed/ClaimStore 的构造会 mkdir。读端点(且匿名)
+        # 不该有文件系统副作用——否则任何一次只读 GET 都会在从不用市场的
+        # 节点工作区里凭空造出 market_feed/ 与 market_claims/。feed 日志不
+        # 存在 ⇒ 还没有任何公告 ⇒ 直接返回 [],不触碰磁盘。
+        if not (ws / "market_feed" / "announcements.jsonl").exists():
+            return []
         try:
             feed = MarketFeed(ws)
             claims = ClaimStore(ws)
@@ -1825,6 +1831,8 @@ def register_v2_routes(app: FastAPI) -> None:
             logger.debug("v2_market_open: market store unavailable: %s", e)
             return []
         # poll(since_seq=-1) 默认已跳过过期;再排掉已认领的 → 只剩"可认领"。
+        # 上限 500 防一次性读爆;FIFO(老→新),展示前翻成"新→老"更贴发现
+        # 板直觉。注:开放公告超 500 时最新的会被截断,留待分页(切片后续)。
         pr = feed.poll(since_seq=-1, limit=500)
         out: List[Dict[str, Any]] = []
         for ann in pr.announcements:
@@ -1833,6 +1841,7 @@ def register_v2_routes(app: FastAPI) -> None:
             d = ann.to_dict()
             d["claimed"] = False
             out.append(d)
+        out.reverse()  # 新→老
         return out
 
     @app.get("/api/v2/agents", response_model=List[AgentEntryM])
