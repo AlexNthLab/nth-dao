@@ -152,6 +152,14 @@ def claim_announcement(
 ) -> ClaimOutcome:
     """原子认领一条公告。
 
+    ⚠️ claimant_reputation 安全契约（独立审查 M5 R2）：当公告设了
+    claimant_policy，此参数**必须由认领权威（主 DAO）自己用
+    ``compute_reputation`` 计算**（该函数会验签每条 claim receipt），
+    **绝不能直接采信认领方请求里自带的信誉**。网络部署时，claim 端点
+    要在服务端算 reputation，而不是从请求体读 —— 否则认领方塞一个
+    伪造的高信誉 profile 即可绕过门槛。本函数信任传入的 profile，因为
+    它假定调用方就是权威。
+
     步骤：
       1. 取公告（不存在/过期 → ClaimRejected）。
       2. 验 cap_token（sig/时效/撤销 + 公告所需能力 ⊆ token.capabilities

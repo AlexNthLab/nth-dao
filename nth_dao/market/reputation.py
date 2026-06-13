@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from nth_dao.execution_receipt import verify_receipt
+
 
 @dataclass
 class ReputationProfile:
@@ -95,16 +97,24 @@ def compute_reputation(
     Args:
         subject_did: 要算谁的信誉。
         claim_records: claim 记录列表（ClaimStore.all_records() 或跨 DAO
-            汇集）。每条形如 claim.py 写的 claim_record：含 claimant_did /
-            publisher_did / claimed_at_ms + 嵌入的 receipt（payload 里有
-            capability_set / reward_minor）。只统计 claimant_did == subject
-            的记录。
+            汇集）。每条含嵌入的签名 receipt。
 
     Returns:
         ReputationProfile（多维，无全局分）。
 
-    说明：reward / capability 优先从 claim 记录里嵌入的签名 receipt 的
-    payload 取（不可被篡改），取不到再退到 claim 记录顶层字段。
+    安全（独立审查 M5 R2 加固）：**每条记录的嵌入 receipt 都要验签**,
+    且 receipt.signer_did 必须 == subject —— 只有 subject 亲手签名认领
+    的、密码学可验证的记录才计入。所有维度（publisher / capability /
+    reward / 时间）都从**已验签的 payload** 取，绝不碰 claim 记录的顶层
+    字段（顶层可被伪造）。
+
+    为什么必须验：compute_reputation 是通用函数，输入可能来自跨 DAO 网络
+    汇集（约束 D"用对方 receipt 历史算"）。若信任未验证输入，攻击者伪造
+    一批 claim 记录即可刷出高信誉。reputation 建立在签名证据上，就必须
+    验签名，不能只读不验（与 M5 R1"授权门槛 fail-closed"同一原则）。
+
+    代价：每条记录一次 verify_receipt（Ed25519 验签）。reputation 非
+    热路径，正确性优先于速度。
     """
     publishers = set()
     capabilities = set()
@@ -114,27 +124,20 @@ def compute_reputation(
     last_seen = 0
 
     for rec in claim_records:
-        if not isinstance(rec, dict):
-            continue
-        if rec.get("claimant_did") != subject_did:
-            continue
+        payload = _verified_claim_payload(rec, subject_did)
+        if payload is None:
+            continue  # 无 receipt / 验签失败 / signer 不是 subject → 不计入
         claims += 1
-        pub = rec.get("publisher_did")
+
+        pub = payload.get("publisher_did")
         if pub:
             publishers.add(pub)
-
-        # 优先从签名 receipt 的 payload 取（防篡改顶层字段）
-        payload = _claimed_payload(rec)
-        caps = payload.get("capability_set") or rec.get("capability_set") or []
-        for c in caps:
+        for c in (payload.get("capability_set") or []):
             capabilities.add(c)
-        reward = payload.get("reward_minor")
-        if reward is None:
-            reward = rec.get("reward_minor", 0)
+        reward = payload.get("reward_minor", 0)
         if isinstance(reward, int) and not isinstance(reward, bool):
             total_reward += reward
-
-        ts = payload.get("claimed_at_ms") or rec.get("claimed_at_ms") or 0
+        ts = payload.get("claimed_at_ms") or 0
         if isinstance(ts, int) and ts > 0:
             first_seen = ts if first_seen == 0 else min(first_seen, ts)
             last_seen = max(last_seen, ts)
@@ -150,20 +153,36 @@ def compute_reputation(
     )
 
 
-def _claimed_payload(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """从 claim 记录里嵌入的 receipt 取 nth.task_claimed 的 payload。
+def _verified_claim_payload(
+    rec: Dict[str, Any], subject_did: str,
+) -> Optional[Dict[str, Any]]:
+    """返回该记录中**已验签**的 nth.task_claimed payload；任一环节不过
+    → None（不计入信誉）。
 
-    取不到（旧记录 / 结构异常）返回空 dict，调用方退回顶层字段。
+    校验链：
+      1. rec 是 dict 且有 dict 形式的 receipt。
+      2. verify_receipt(receipt) —— 签名 + content_hash 有效。
+      3. receipt.signer_did == subject —— 确认是 subject 亲签
+         （受签名保护，不是顶层可伪造的 claimant_did）。
+      4. timeline 里有 nth.task_claimed 条目，其 payload.claimant_did
+         也 == subject（双保险）。
     """
+    if not isinstance(rec, dict):
+        return None
     receipt = rec.get("receipt")
     if not isinstance(receipt, dict):
-        return {}
+        return None
+    if not verify_receipt(receipt):
+        return None
+    if str(receipt.get("signer_did", "")) != subject_did:
+        return None
     timeline = receipt.get("timeline")
     if not isinstance(timeline, list):
-        return {}
+        return None
     for entry in timeline:
         if isinstance(entry, dict) and entry.get("type") == "nth.task_claimed":
             payload = entry.get("payload")
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and \
+                    str(payload.get("claimant_did", "")) == subject_did:
                 return payload
-    return {}
+    return None

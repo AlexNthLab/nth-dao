@@ -87,6 +87,70 @@ def test_compute_reputation_aggregates_dimensions(tmp_path) -> None:
     assert prof.last_seen_ms >= prof.first_seen_ms
 
 
+def test_compute_reputation_rejects_forged_records() -> None:
+    """独立审查回归 (M5 R2)：compute_reputation 必须验签嵌入的 receipt，
+    不能信任未验证输入。否则跨 DAO 汇集时，攻击者伪造一批无签名 claim
+    记录即可刷出高信誉。
+
+    构造 10 条纯伪造记录（无有效 receipt）→ 信誉必须为 0。
+    """
+    victim = "did:key:zVictimForgeTarget"
+    forged = [
+        {"claimant_did": victim, "publisher_did": f"did:key:zPub{i}",
+         "claimed_at_ms": 1000 + i, "capability_set": ["code_review"],
+         "reward_minor": 9999}
+        for i in range(10)
+    ]
+    prof = compute_reputation(victim, forged)
+    assert prof.claims_count == 0, "无签名伪造记录不得计入信誉"
+    assert prof.distinct_publishers == 0
+    assert prof.total_reward_minor == 0
+
+
+def test_compute_reputation_rejects_tampered_receipt(tmp_path) -> None:
+    """已签名 receipt 落地后被改 reward → 验签失败 → 不计入。"""
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="i")
+    pub = AgentIdentity.generate(label="p")
+    worker = AgentIdentity.generate(label="w")
+    a = sign_announcement(publisher=pub, title="t", capability_set=["code_review"],
+                          reward_minor=10)
+    feed.publish(a)
+    out = claim_announcement(feed, store, a.announcement_id, claimant=worker,
+                             cap_token=_token(issuer, worker))
+    # 真实记录先确认计入
+    good = compute_reputation(worker.as_did(), store.all_records())
+    assert good.claims_count == 1
+    # 篡改记录里 receipt 的 payload reward —— 验签应失败
+    rec = store.get(a.announcement_id)
+    rec["receipt"]["timeline"][0]["payload"]["reward_minor"] = 999999
+    tampered = compute_reputation(worker.as_did(), [rec])
+    assert tampered.claims_count == 0, "篡改 receipt 后验签失败，不得计入"
+
+
+def test_compute_reputation_rejects_wrong_signer(tmp_path) -> None:
+    """receipt 由别人签、却挂在 victim 名下 → signer != subject → 不计入。"""
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="i")
+    pub = AgentIdentity.generate(label="p")
+    real = AgentIdentity.generate(label="real")
+    victim = AgentIdentity.generate(label="victim")
+    a = sign_announcement(publisher=pub, title="t", capability_set=["code_review"],
+                          reward_minor=10)
+    feed.publish(a)
+    out = claim_announcement(feed, store, a.announcement_id, claimant=real,
+                             cap_token=_token(issuer, real))
+    rec = store.get(a.announcement_id)
+    # 把顶层 claimant_did 改成 victim，但 receipt 仍是 real 签的
+    rec["claimant_did"] = victim.as_did()
+    prof = compute_reputation(victim.as_did(), [rec])
+    assert prof.claims_count == 0, "顶层 claimant 伪造、signer 不符 → 不得计入"
+    # real 用同一条（signer 匹配）仍算
+    assert compute_reputation(real.as_did(), [rec]).claims_count == 1
+
+
 def test_compute_reputation_ignores_other_agents(tmp_path) -> None:
     feed = MarketFeed(tmp_path)
     store = ClaimStore(tmp_path)
