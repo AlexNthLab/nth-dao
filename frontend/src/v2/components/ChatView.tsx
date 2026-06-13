@@ -102,7 +102,10 @@ export function ChatView({
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+    // border-box 下 scrollHeight 不含 border,直接设会矮 2px → 单行也冒
+    // 一条发丝级滚动条。补上 border 高度差(offsetHeight-clientHeight)。
+    const border = el.offsetHeight - el.clientHeight;
+    el.style.height = `${el.scrollHeight + border}px`;
   }, [draft, selectedId]);
   const toast = useToast();
 
@@ -228,7 +231,7 @@ export function ChatView({
                 {headInitial}
               </div>
               <div className="chat-head-meta">
-                <span className="chat-head-name">{headName}</span>
+                <h1 className="chat-head-name">{headName}</h1>
                 <span className="chat-head-sub">
                   {selected.kind === "dm" ? (
                     <>

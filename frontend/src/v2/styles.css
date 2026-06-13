@@ -931,7 +931,8 @@ select option {
   align-items: center;
   line-height: 1.2;
 }
-.chat-head-name { font-size: 14px; font-weight: 500; color: var(--fg-primary); }
+/* h1(无障碍:会话标题作页面主标题),视觉收成纤细一行。 */
+.chat-head-name { margin: 0; font-size: 14px; font-weight: 500; color: var(--fg-primary); }
 .chat-head-sub {
   display: inline-flex;
   align-items: center;
