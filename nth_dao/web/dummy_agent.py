@@ -1050,6 +1050,13 @@ class _CodexCliAskBackend(_AskBackend):
                 stdin=_sp.DEVNULL,
                 capture_output=True,
                 text=True,
+                # 2026-06-13 真实测试修复:显式 UTF-8 解码。``text=True``
+                # 默认用平台 locale(Windows 中文机是 GBK),codex 的非 ASCII
+                # 输出(中文/特殊符号)会让 capture_output 的 reader 线程
+                # UnicodeDecodeError 崩掉 → 回应丢成空。codex CLI 一律 UTF-8,
+                # 这里钉死 utf-8 + replace,跨平台稳。
+                encoding="utf-8",
+                errors="replace",
                 # CO-3 fix (review round Phase 5.4 R1): drop the
                 # ``max(10.0, ...)`` floor — caller's effective
                 # budget passes through verbatim, matching the
