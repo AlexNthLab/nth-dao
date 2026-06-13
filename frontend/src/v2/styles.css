@@ -914,8 +914,10 @@ select option {
   align-items: flex-end;
   gap: 8px;
   margin-top: 2px;                 /* 连发紧凑 */
-  animation: bubble-in 220ms var(--ease) both;
 }
+/* pop-in 只作用于最新一条(JSX 给最后一条加 .is-last),避免打开会话
+ * 时整段历史一起做入场动画。 */
+.chat-row.is-last { animation: bubble-in 220ms var(--ease) both; }
 .chat-row.group-start { margin-top: 12px; }   /* 换人/隔久,留呼吸 */
 .chat-row.out { justify-content: flex-end; }
 .chat-row.in  { justify-content: flex-start; }
@@ -1064,6 +1066,6 @@ select option {
   30%           { transform: translateY(-4px); opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .chat-row { animation: none; }
+  .chat-row.is-last { animation: none; }
   .typing-dots span { animation: none; }
 }

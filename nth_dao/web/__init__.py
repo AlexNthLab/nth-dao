@@ -2479,36 +2479,44 @@ def create_app(
             },
         )
 
-    @app.get("/", response_class=HTMLResponse, response_model=None)
-    def index():
-        index_file = STATIC_DIR / "index.html"
-        if index_file.exists():
-            return _html_shell(_render_console_html(index_file, app.state.nth_console_token))
+    def _serve_console(file_name: str):
+        f = STATIC_DIR / file_name
+        if f.exists():
+            return _html_shell(
+                _render_console_html(f, app.state.nth_console_token))
         return _html_shell(_frontend_missing_html(), 503)
 
+    # 默认入口 = v2 聊天优先控制台（2026-06-14）。此前 `/` 服务的是 v1
+    # 旧版控制台，导致"本地启动 NTH DAO 打开的是旧版页面"——根因不只是
+    # 缓存,而是默认 URL 本身指向 v1。现在 `/` 直接给 v2,v1 降级到 `/v1`
+    # 保留(不删功能),与"降级不删除"一致。
+    @app.get("/", response_class=HTMLResponse, response_model=None)
     @app.get("/v2", response_class=HTMLResponse, response_model=None)
     @app.get("/v2.html", response_class=HTMLResponse, response_model=None)
-    def console_v2():
-        # v2 控制台（agents 目录 / spawn / 任务流式输出）入口。
-        v2_file = STATIC_DIR / "v2.html"
-        if v2_file.exists():
-            return _html_shell(
-                _render_console_html(v2_file, app.state.nth_console_token))
-        return _html_shell(_frontend_missing_html(), 503)
+    def index():
+        return _serve_console("v2.html")
+
+    @app.get("/v1", response_class=HTMLResponse, response_model=None)
+    @app.get("/v1.html", response_class=HTMLResponse, response_model=None)
+    def console_v1():
+        # 旧版（决策队列）控制台,保留备用。
+        return _serve_console("index.html")
 
     @app.get("/{path:path}", include_in_schema=False, response_model=None)
     def frontend_fallback(path: str):
         if path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
-        # v2 控制台的深链接（/v2/...）也路由到 v2.html，让前端路由接管。
-        if path == "v2" or path == "v2.html" or path.startswith("v2/"):
-            v2_file = STATIC_DIR / "v2.html"
-            if v2_file.exists():
+        # v1 深链接走旧版;其余(含 v2 深链接与未知路径)统一回 v2.html,
+        # 让前端路由接管——默认就是新版。
+        if path == "v1" or path == "v1.html" or path.startswith("v1/"):
+            f = STATIC_DIR / "index.html"
+            if f.exists():
                 return _html_shell(
-                    _render_console_html(v2_file, app.state.nth_console_token))
-        index_file = STATIC_DIR / "index.html"
-        if index_file.exists():
-            return _html_shell(_render_console_html(index_file, app.state.nth_console_token))
+                    _render_console_html(f, app.state.nth_console_token))
+        v2_file = STATIC_DIR / "v2.html"
+        if v2_file.exists():
+            return _html_shell(
+                _render_console_html(v2_file, app.state.nth_console_token))
         return JSONResponse(
             {"detail": "frontend assets are not built; run npm --prefix frontend run build"},
             status_code=503,

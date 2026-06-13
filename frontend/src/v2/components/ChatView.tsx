@@ -103,11 +103,13 @@ export function ChatView({
   }, [selectedId, onConversationSelect]);
 
   // Auto-scroll to the bottom when messages change or conversation
-  // switches. Behaviour matches every chat app users know.
+  // switches. 依赖里带上最后一条的 body:流式回复时长度不变、只是
+  // 内容在增长,若只依赖 length 会在长回复中途"卡住"不跟随。
+  const lastBody = messages.length ? messages[messages.length - 1].body : "";
   useEffect(() => {
     const el = transcriptRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [selectedId, messages.length]);
+  }, [selectedId, messages.length, lastBody]);
 
   /* Send handler (audit fix 2026-06-10, finding C4 + review#1):
    *   Original bug: setDraft("") fired BEFORE await onSend(); if
@@ -275,11 +277,14 @@ export function ChatView({
                     next.sender_id === m.sender_id &&
                     new Date(next.created_at).getTime() - t <= GAP_MS;
                   const isTyping = m.body === "Agent is thinking...";
+                  // pop-in 只给最新一条:打开会话时不让整段历史一起抖。
+                  const isLast = i === messages.length - 1;
                   const rowClass = [
                     "chat-row",
                     isYou ? "out" : "in",
                     contFromPrev ? "grp-top" : "group-start",
                     contToNext ? "grp-bottom" : "",
+                    isLast ? "is-last" : "",
                   ]
                     .filter(Boolean)
                     .join(" ");
