@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -111,12 +112,18 @@ class CodexBackend(AgentBackend):
 
         start = self._track_turn_start()
 
-        #
-        args = [self.cli_name, "--json"]
+        # Windows 修复：npm 装的 codex 是 .cmd shim，subprocess 不走 PATHEXT
+        # 解析裸名 "codex" → WinError 2。先 shutil.which 解析成全路径。
+        cli = shutil.which(self.cli_name) or self.cli_name
+        # codex v0.137 非交互形态是 `codex exec [OPTS] <PROMPT>`（旧的
+        # `--json --task` 已不存在）。用 -o 把最终消息写到临时文件拿干净
+        # 输出；system_prompt 折进 prompt（exec 无 --system）。
+        out_fd, out_path = tempfile.mkstemp(prefix="codex-out-", suffix=".txt")
+        os.close(out_fd)
+        args = [cli, "exec", "-o", out_path]
         if self.model:
-            args += ["--model", self.model]
-        if system_prompt:
-            args += ["--system", system_prompt]
+            args += ["-m", self.model]
+        full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
 
         env = {**os.environ, **self._session_config.env}
         env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -126,7 +133,7 @@ class CodexBackend(AgentBackend):
             #  Popen + binary read hermes.py  Python 3.14 Windows
             #  UTF-8 locale  subprocess.run reader thread  UnicodeDecodeError
             popen = subprocess.Popen(
-                args + ["--task", prompt],
+                args + [full_prompt],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -163,21 +170,27 @@ class CodexBackend(AgentBackend):
                 error=f"{type(e).__name__}: {e}",
             )
 
-        #  JSON
+        # -o 文件里是干净的最终消息；取不到回落 stdout。
+        content = ""
         try:
-            payload = json.loads(stdout or "{}")
-        except json.JSONDecodeError:
-            payload = {"output": stdout, "usage": {}}
+            with open(out_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read().strip()
+        except OSError:
+            content = ""
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+        if not content:
+            content = (stdout or "").strip()
 
-        usage = TokenUsage(
-            input_tokens=payload.get("usage", {}).get("prompt_tokens", 0),
-            output_tokens=payload.get("usage", {}).get("completion_tokens", 0),
-        )
+        usage = TokenUsage()  # codex exec 文本模式不回 token 计数
         latency = self._track_turn_end(start, usage)
 
         if returncode != 0:
             return TurnResponse(
-                content=payload.get("output", ""),
+                content=content,
                 finish_reason="error",
                 usage=usage,
                 latency_seconds=latency,
@@ -185,11 +198,11 @@ class CodexBackend(AgentBackend):
             )
 
         return TurnResponse(
-            content=payload.get("output", "") or payload.get("code", ""),
+            content=content,
             finish_reason="stop",
             usage=usage,
             latency_seconds=latency,
-            metadata={"backend": self.backend_id, **payload.get("metadata", {})},
+            metadata={"backend": self.backend_id},
         )
 
     def end_session(self) -> SessionSummary:
