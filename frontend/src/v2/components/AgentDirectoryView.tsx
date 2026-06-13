@@ -59,6 +59,17 @@ export interface AgentDirectoryViewProps {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ) => Promise<{ status: number; body: unknown }>;
+  /** UI 集成（2026-06-13）：给一个 supervised agent 派一个任务，**流式**
+   *  接收输出。hub 替操作员注入 cap_token（浏览器无签名私钥）。omitted
+   *  或 agent 非 supervised 时工作面板隐藏。onDelta 逐块回调，onStatus
+   *  报告阶段。返回拼好的全文 + backend/model。 */
+  onAskAgent?: (
+    did: string,
+    prompt: string,
+    onDelta: (delta: string) => void,
+    signal?: AbortSignal,
+    onStatus?: (status: string) => void,
+  ) => Promise<{ text: string; backend?: string; model?: string }>;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -81,7 +92,7 @@ type Filter = "all" | AgentSource;
 
 export function AgentDirectoryView({
   agents, onAddByDid, onScanLan, onIssueCap, onSendMessage,
-  onPingAgent, onA2AEcho,
+  onPingAgent, onA2AEcho, onAskAgent,
 }: AgentDirectoryViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -117,13 +128,54 @@ export function AgentDirectoryView({
    *  lifetime equals the component's; effect-time cleanup aborts
    *  everything outstanding. */
   const inflight = useRef<Map<string, AbortController>>(new Map());
+  /** UI 集成：工作面板状态（给选中 agent 派任务，流式收输出）。 */
+  const [workPrompt, setWorkPrompt] = useState("");
+  const [workOutput, setWorkOutput] = useState("");
+  const [workStatus, setWorkStatus] = useState<
+    "idle" | "running" | "done" | "error"
+  >("idle");
+  const [workMeta, setWorkMeta] = useState("");
+  const [workError, setWorkError] = useState("");
+  const workAbort = useRef<AbortController | null>(null);
   useEffect(() => {
     const map = inflight.current;
     return () => {
       for (const ctrl of map.values()) ctrl.abort();
       map.clear();
+      workAbort.current?.abort();
     };
   }, []);
+
+  async function runAgentWork(did: string) {
+    if (!onAskAgent || !workPrompt.trim()) return;
+    workAbort.current?.abort();
+    const ctrl = new AbortController();
+    workAbort.current = ctrl;
+    setWorkOutput("");
+    setWorkError("");
+    setWorkMeta("");
+    setWorkStatus("running");
+    try {
+      const res = await onAskAgent(
+        did,
+        workPrompt.trim(),
+        (delta) => setWorkOutput((cur) => cur + delta),
+        ctrl.signal,
+        (status) => setWorkMeta(status),
+      );
+      if (res.text && res.text.length > 0) setWorkOutput(res.text);
+      setWorkMeta(
+        [res.backend && `backend: ${res.backend}`, res.model && `model: ${res.model}`]
+          .filter(Boolean)
+          .join(" · "),
+      );
+      setWorkStatus("done");
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") return; // 取消不算错
+      setWorkError((e as Error)?.message ?? String(e));
+      setWorkStatus("error");
+    }
+  }
 
   function markBusy(did: string, busy: boolean) {
     setBusyDids((s) => {
@@ -772,6 +824,72 @@ export function AgentDirectoryView({
                   </span>
                 </div>
               </div>
+              {/* UI 集成（2026-06-13）：派任务 + 流式输出。只对有 a2a_port
+                  的 supervised 在线 agent 显示（hub 可路由 + 注入 cap_token）。 */}
+              {onAskAgent && selected.supervised && selected.alive
+               && typeof selected.a2a_port === "number" && (
+                <div className="detail-section">
+                  <div className="detail-section-label">
+                    Run task {selected.kind ? `· ${selected.kind}` : ""}
+                  </div>
+                  <textarea
+                    value={workPrompt}
+                    onChange={(e) => setWorkPrompt(e.target.value)}
+                    placeholder="给这个 agent 派一个任务（prompt）…"
+                    rows={3}
+                    style={{
+                      width: "100%", resize: "vertical", fontSize: 12,
+                      fontFamily: "var(--t-mono)", padding: 8,
+                      borderRadius: 6, border: "1px solid var(--border)",
+                      background: "var(--bg-elevated)", color: "var(--fg)",
+                    }}
+                  />
+                  <div style={{ display: "flex", gap: 8, marginTop: 6, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={workStatus === "running" || !workPrompt.trim()}
+                      onClick={() => void runAgentWork(selected.did)}
+                    >
+                      {workStatus === "running" ? "Running…" : "Run"}
+                    </button>
+                    {workStatus === "running" && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => workAbort.current?.abort()}
+                      >
+                        Stop
+                      </button>
+                    )}
+                    {workMeta && (
+                      <span className="muted" style={{ fontSize: 11 }}>{workMeta}</span>
+                    )}
+                  </div>
+                  {(workOutput || workStatus !== "idle") && (
+                    <pre
+                      style={{
+                        marginTop: 8, marginBottom: 0, maxHeight: 280,
+                        overflow: "auto", whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        background: "var(--bg-elevated)", padding: 8,
+                        borderRadius: 6, fontSize: 12,
+                        fontFamily: "var(--t-mono)",
+                      }}
+                    >
+                      {workOutput || (workStatus === "running" ? "…" : "")}
+                    </pre>
+                  )}
+                  {workStatus === "error" && (
+                    <div
+                      className="mono"
+                      style={{ marginTop: 6, fontSize: 11, color: "var(--danger, #cf222e)" }}
+                    >
+                      {workError}
+                    </div>
+                  )}
+                </div>
+              )}
               <SignaturePanel
                 value={{
                   did: selected.did,

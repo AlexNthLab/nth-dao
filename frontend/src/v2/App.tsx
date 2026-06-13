@@ -24,9 +24,10 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
-  a2aEchoApi, fetchAgents, fetchCapTokens, fetchConversations,
-  fetchDecisions, fetchMessages, fetchMissions, fetchProcesses,
-  fetchReceipts, pingAgentApi, probeHub, resolveDecisionApi,
+  a2aEchoApi, askAgentStream, fetchAgents, fetchCapTokens,
+  fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
+  fetchProcesses, fetchReceipts, pingAgentApi, probeHub,
+  resolveDecisionApi,
 } from "./api";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
@@ -683,6 +684,11 @@ function AppInner() {
         onPingAgent={(did, signal) => pingAgentApi(did, signal)}
         onA2AEcho={(did, params, signal) =>
           a2aEchoApi(did, params, { signal })
+        }
+        /* UI 集成（2026-06-13）：派任务 + 流式输出。hub 替操作员注入
+           cap_token（浏览器无签名私钥）。 */
+        onAskAgent={(did, prompt, onDelta, signal, onStatus) =>
+          askAgentStream(did, prompt, onDelta, signal, onStatus)
         }
       />
     );

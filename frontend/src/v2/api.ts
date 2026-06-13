@@ -251,6 +251,104 @@ export async function pingAgentApi(
   return { status: res.status, body };
 }
 
+/** Result of a completed agent task run. */
+export interface AskAgentResult {
+  text: string;
+  backend?: string;
+  model?: string;
+}
+
+/** UI 集成（2026-06-13）：驱动一个 spawn 出来的 agent 跑一个任务，**流式**
+ *  接收输出。打的是 hub 端点 ``POST /api/v2/agents/{did}/ask-stream`` ——
+ *  hub 替操作员注入该 agent 的 cap_token（浏览器没有签名私钥，详见
+ *  v2_api ``_agent_ask`` docstring）。
+ *
+ *  读 SSE 流：每个 ``data: {...}`` 事件 —— ``{delta}`` 调 onDelta 追加；
+ *  ``{done,...}`` 收尾带 backend/model；``{error}`` 抛错。返回拼好的全文 +
+ *  backend/model。
+ */
+export async function askAgentStream(
+  did: string,
+  prompt: string,
+  onDelta: (delta: string) => void,
+  signal?: AbortSignal,
+  onStatus?: (status: string) => void,
+): Promise<AskAgentResult> {
+  onStatus?.("dispatching");
+  const res = await fetch(
+    `${BASE}/agents/${encodeURIComponent(did)}/ask-stream`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ prompt }),
+      signal,
+    },
+  );
+  if (!res.ok || !res.body) {
+    // 非流式错误（404/409/502…）—— 读 JSON 错误体给出可读消息。
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as Record<string, unknown>;
+      detail = JSON.stringify(j).slice(0, 300);
+    } catch { /* keep HTTP status */ }
+    throw new Error(`ask-stream failed: ${detail}`);
+  }
+
+  onStatus?.("streaming");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let text = "";
+  let backend: string | undefined;
+  let model: string | undefined;
+
+  const handleEvent = (raw: string) => {
+    // 一个 SSE 事件可能有多行；只取 ``data:`` 行。
+    const dataLines = raw
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trim());
+    if (dataLines.length === 0) return;
+    const payloadStr = dataLines.join("\n");
+    let ev: Record<string, unknown>;
+    try {
+      ev = JSON.parse(payloadStr) as Record<string, unknown>;
+    } catch {
+      return; // 半截/非 JSON 事件，忽略
+    }
+    if (typeof ev.delta === "string") {
+      text += ev.delta;
+      onDelta(ev.delta);
+    } else if (ev.error) {
+      const e = ev.error as Record<string, unknown>;
+      throw new Error(
+        `agent error: ${String(e.code ?? "?")} — ${String(e.message ?? "")}`,
+      );
+    } else if (ev.done) {
+      if (typeof ev.backend === "string") backend = ev.backend;
+      if (typeof ev.model === "string") model = ev.model;
+    }
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // SSE 事件以空行（\n\n）分隔。
+    let idx: number;
+    while ((idx = buf.indexOf("\n\n")) !== -1) {
+      const evt = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      handleEvent(evt);
+    }
+  }
+  if (buf.trim()) handleEvent(buf); // 收尾残留
+
+  onStatus?.("done");
+  return { text, backend, model };
+}
+
 export async function a2aEchoApi(
   did: string,
   params: Record<string, unknown>,
