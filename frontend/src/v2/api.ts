@@ -36,6 +36,21 @@ import type {
 
 const BASE = "/api/v2";
 
+/** Console Bearer token, injected into the served HTML by the hub
+ *  (``window.__NTH_CONSOLE_TOKEN__``). v2 READ endpoints are open
+ *  (anonymous), but v2 ACTION endpoints (spawn / stop / ask) are
+ *  gated on console auth when it's enabled (2026-06-13 hardening).
+ *  Attaching the token on writes makes the v2 console work in a
+ *  hardened (auth-on) deployment; in the local default (auth off)
+ *  the server ignores it. Returns ``{}`` when no token is present
+ *  so callers can spread it unconditionally. */
+function authHeader(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const tok = (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })
+    .__NTH_CONSOLE_TOKEN__;
+  return tok ? { Authorization: `Bearer ${tok}` } : {};
+}
+
 /** Generic helper. Throws on network error, on non-2xx, and on
  *  JSON parse error — caller decides what to do (typically: fall
  *  back to mock seed). */
@@ -144,8 +159,8 @@ async function postJson<T>(path: string, body?: unknown): Promise<T> {
     method: "POST",
     credentials: "same-origin",
     headers: body === undefined
-      ? { Accept: "application/json" }
-      : { Accept: "application/json", "Content-Type": "application/json" },
+      ? { Accept: "application/json", ...authHeader() }
+      : { Accept: "application/json", "Content-Type": "application/json", ...authHeader() },
   };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
@@ -280,7 +295,7 @@ export async function askAgentStream(
     {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeader() },
       body: JSON.stringify({ prompt }),
       signal,
     },

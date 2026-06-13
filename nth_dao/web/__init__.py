@@ -667,7 +667,21 @@ def create_app(
         # operator into a login dance for a localhost preview.
         # Phase 2 will introduce per-action cap_token checks at
         # each POST/PATCH endpoint; the read surface stays open.
-        if request.url.path.startswith("/api/v2/"):
+        # 2026-06-13 hardening: ONLY safe (read) methods ride the
+        # anonymous bypass. Action endpoints under /api/v2/ —
+        # spawn / stop / agents/{did}/ask[-stream] — are
+        # state-changing and, in ask's case, drive a spawned agent
+        # under its hub-held cap_token authority (and, by default,
+        # a2a:message_send onto the network). Letting an
+        # unauthenticated caller (incl. a CSRF POST from a visited
+        # webpage) wield that is a confused-deputy hole. So writes
+        # fall through to the normal auth path: open when console
+        # auth is disabled (local default), Bearer/CapToken-gated
+        # when it's on. This is the "Phase 2 per-action cap_token
+        # checks" the read-surface comment promised.
+        if request.url.path.startswith("/api/v2/") and request.method in (
+            "GET", "HEAD", "OPTIONS",
+        ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
 

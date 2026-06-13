@@ -69,6 +69,25 @@ describe("askAgentStream", () => {
     ).rejects.toThrow(/cap_token/);
   });
 
+  it("带 console token 时附 Authorization: Bearer（auth-on 部署）", async () => {
+    // v2 action 端点在 console auth 开启时受 Bearer 门禁；前端必须把
+    // 注入到页面的 __NTH_CONSOLE_TOKEN__ 附在写请求上，否则 401。
+    const g = globalThis as unknown as { window?: { __NTH_CONSOLE_TOKEN__?: string } };
+    g.window = { __NTH_CONSOLE_TOKEN__: "operator-secret" };
+    const fetchMock = vi.fn().mockResolvedValue(streamFrom([
+      'data: {"done":true}\n\n',
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await askAgentStream("did:key:zX", "hi", () => {});
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      expect((init.headers as Record<string, string>).Authorization)
+        .toBe("Bearer operator-secret");
+    } finally {
+      delete g.window;
+    }
+  });
+
   it("onStatus 报告阶段", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamFrom([
       'data: {"delta":"x"}\n\n',
