@@ -501,6 +501,30 @@ function AppInner() {
    * the bootstrapped identity rather than the literal "admin", so
    * a 50-user deployment shows each user's own messages on the
    * right of the transcript. */
+  /* 2026-06-13:把被监管 agent 自动补成 Chat 侧栏里的 DM 会话,这样在
+   * Chat 里能直接选中它发消息(handleChatSend 会真去 ask 它)。之前 Chat
+   * 是空壳(onSend 只塞本地 state),用户"发消息无回复"的根因。 */
+  useEffect(() => {
+    const dms: Conversation[] = agents
+      .filter((a) => a.supervised && a.alive && typeof a.a2a_port === "number")
+      .map((a) => ({
+        id: `dm-${a.did}`,
+        title: `DM: ${a.label || a.did.slice(0, 12)}`,
+        subtitle: a.kind ? `${a.kind} agent` : "agent",
+        last_preview: "",
+        last_at: "",
+        unread: 0,
+        kind: "dm" as const,
+        participant_dids: [MOCK_IDENTITY.did, a.did],
+      }));
+    if (!dms.length) return;
+    setConversations((prev) => {
+      const have = new Set(prev.map((c) => c.id));
+      const add = dms.filter((d) => !have.has(d.id));
+      return add.length ? [...prev, ...add] : prev;
+    });
+  }, [agents]);
+
   async function handleChatSend(convId: string, body: string) {
     const msg: ChatMessage = {
       message_id: `m-local-${Date.now()}`,
@@ -513,7 +537,55 @@ function AppInner() {
       ...prev,
       [convId]: [...(prev[convId] ?? []), msg],
     }));
-    // TODO: POST /api/messages with {channel_id, body}
+
+    // 2026-06-13:若该会话是对某个**可驱动 agent**(supervised+alive+
+    // a2a_port)的 DM,就真去 ask 它,把流式回复写进会话;否则(频道/无
+    // 可驱动 agent)保持旧的本地行为。这才让"发消息→有回复"成立。
+    const conv = conversations.find((c) => c.id === convId);
+    const agent =
+      conv && conv.kind === "dm" && conv.participant_dids
+        ? agents.find(
+            (a) =>
+              conv.participant_dids!.includes(a.did) &&
+              a.did !== MOCK_IDENTITY.did &&
+              a.supervised &&
+              a.alive &&
+              typeof a.a2a_port === "number",
+          )
+        : undefined;
+    if (!agent) return;
+
+    const replyId = `m-agent-${Date.now()}`;
+    let acc = "";
+    setChatMessages((prev) => ({
+      ...prev,
+      [convId]: [
+        ...(prev[convId] ?? []),
+        {
+          message_id: replyId,
+          sender_id: agent.did,
+          sender_label: agent.label || "agent",
+          body: "…",
+          created_at: new Date().toISOString(),
+        },
+      ],
+    }));
+    const patch = (text: string) =>
+      setChatMessages((prev) => ({
+        ...prev,
+        [convId]: (prev[convId] ?? []).map((m) =>
+          m.message_id === replyId ? { ...m, body: text } : m,
+        ),
+      }));
+    try {
+      const res = await askAgentStream(agent.did, body, (delta) => {
+        acc += delta;
+        patch(acc);
+      });
+      patch(acc || res.text || "(空回复)");
+    } catch (e) {
+      patch(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /* ── agent directory handlers (audit fix M14/M15 2026-06-10):
