@@ -90,11 +90,11 @@ export default function App() {
 }
 
 function AppInner() {
-  /* Default landing = Chat (2026-06-14 简化:聊天优先). 教育市场阶段,
-   * 用户"带着自己的 agent 进来聊天"是第一动作,传统聊天软件式布局学习
-   * 成本最低。Blackboard 等 7 个专业视图降级进 IconNav 的"更多",待办
-   * 仍有角标提示,Cmd+K 一键直达,不丢功能。 */
-  const [active, setActive] = useState<NavId>("chat");
+  /* Default landing = Blackboard (2026-06-14 重定:A2A 任务优先).
+   * 项目第一性原则是 A2A 任务协调,落地页给"运行态总览"——每个 agent
+   * 正在推进什么任务,而非聊天。Chat 是低频沟通入口,在 IconNav 里按
+   * 频次下沉,不再是首屏。 */
+  const [active, setActive] = useState<NavId>("blackboard");
   const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
   /* S5 fix (2026-06-10): track in-flight resolves by id and pass
    * the Set down to DecisionQueue so the main-head renders a
