@@ -1913,7 +1913,7 @@ def register_v2_routes(app: FastAPI) -> None:
         # AFTER the child has reported its DID, so subject_did is the
         # child's real W3C did:key.
         from nth_dao.cap_token import (
-            CAP_NTH_RECEIPT_SIGN, KNOWN_CAPABILITIES,
+            CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN, KNOWN_CAPABILITIES,
             sign_cap_token,
         )
 
@@ -1931,7 +1931,13 @@ def register_v2_routes(app: FastAPI) -> None:
             # doesn't end up as an issued cap that no verifier recognises.
             # CAP_NTH_RECEIPT_SIGN is always included — without it the
             # child can't sign anything, defeating Phase 3b's purpose.
-            caps: List[str] = [CAP_NTH_RECEIPT_SIGN]
+            # CAP_A2A_MESSAGE_SEND is also always included (2026-06-13):
+            # the hub's /api/v2/agents/{did}/ask[-stream] proxy injects
+            # this agent's cap_token to drive the child; without the
+            # a2a:message_send scope the child fails-closed (403) and the
+            # v2 console "Run task" panel can't talk to it. Granting it by
+            # default makes every spawned agent immediately drivable.
+            caps: List[str] = [CAP_NTH_RECEIPT_SIGN, CAP_A2A_MESSAGE_SEND]
             for c in requested_caps:
                 if c in KNOWN_CAPABILITIES and c not in caps:
                     caps.append(c)

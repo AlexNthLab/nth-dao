@@ -473,6 +473,30 @@ def test_spawn_persists_cap_token_in_store(hub_client: TestClient) -> None:
     assert "nth-dao.chat" not in record["capabilities"]
 
 
+def test_spawn_always_grants_a2a_message_send(hub_client: TestClient) -> None:
+    """Regression (2026-06-13): every spawned agent must get
+    a2a:message_send by default, even when the client requests no
+    a2a caps. The hub's /api/v2/agents/{did}/ask[-stream] proxy injects
+    this token to drive the child; without the scope the child fails
+    closed (403) and the v2 console "Run task" panel can't reach it.
+    """
+    from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND
+
+    # Request ZERO capabilities — the default must still include it.
+    r = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "drivable-by-default",
+        "capabilities": [],
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    store = hub_client.app.state.nth.cap_tokens
+    record = store.get(body["cap_token_id"])
+    assert record is not None
+    assert CAP_A2A_MESSAGE_SEND in record["capabilities"], (
+        "spawned agent must be hub-drivable by default"
+    )
+
+
 # ─── Phase 6b: per-token model-scope at the spawn endpoint ───────────
 
 
