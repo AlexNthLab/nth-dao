@@ -53,4 +53,29 @@ describe("chatStore 热层持久", () => {
     localStorage.setItem("nth.chat.v1", "{ not json");
     expect(loadChat()).toEqual({ messages: {}, selectedId: null });
   });
+
+  it("审查A:消息时间戳损坏的会话**不会**被误判过期消失", () => {
+    const bad: ChatMessage = {
+      message_id: "b", sender_id: "u", sender_label: "you",
+      body: "x", created_at: "not-a-date",
+    };
+    saveChat({ "dm-bad": [bad] }, "dm-bad");
+    // 坏时间戳兜底为"现在" → 不过期 → 仍能读回(否则就是又一次"消失")。
+    expect(loadChat().messages["dm-bad"]).toBeDefined();
+    expect(loadChat().messages["dm-bad"].length).toBe(1);
+  });
+
+  it("审查B:会话数封顶 MAX_CONVS,只留最近活动的", () => {
+    const now = Date.now();
+    const all: Record<string, ChatMessage[]> = {};
+    // 70 个会话,活动时间 now-0 .. now-69 分钟(越小越新)。
+    for (let i = 0; i < 70; i++) {
+      all[`c${i}`] = [msg(`m${i}`, now - i * 60_000)];
+    }
+    saveChat(all, null);
+    const kept = Object.keys(loadChat().messages);
+    expect(kept.length).toBe(60); // MAX_CONVS
+    expect(kept).toContain("c0"); // 最新的留
+    expect(kept).not.toContain("c69"); // 最旧的砍
+  });
 });
