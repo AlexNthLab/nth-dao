@@ -9,7 +9,7 @@ commerce 负责"干得怎样、钱怎么付"（execute→deliver→verify→sett
 里程碑：
   CS1 ✅  签名 trade 状态机（无真钱，manual 结算）
   CS2 ✅  commerce↔market 绑定校验 + DeterministicTestVerifier（首个 SKU）
-  CS3 ⏳  争议处理（DISPUTED → REFUNDED / 部分结算）
+  CS3 ✅  争议处理（DISPUTED → SETTLED / REFUNDED / SPLIT_SETTLED）
   CS4 ⏳  x402 testnet 真钱结算 adapter
 """
 
@@ -20,14 +20,22 @@ from nth_dao.commerce.trade import (
     STATE_VERIFIED,
     STATE_FAILED,
     STATE_SETTLED,
+    STATE_DISPUTED,
+    STATE_REFUNDED,
+    STATE_SPLIT_SETTLED,
     TERMINAL_STATES,
-    # 事件类型 / verdict
+    # 事件类型 / verdict / resolution
     EVENT_TRADE_OPENED,
     EVENT_DELIVERY_SUBMITTED,
     EVENT_VERIFICATION_RECORDED,
     EVENT_SETTLEMENT_RECORDED,
+    EVENT_DISPUTE_OPENED,
+    EVENT_DISPUTE_RESOLVED,
     VERDICT_PASS,
     VERDICT_FAIL,
+    RESOLUTION_SETTLE,
+    RESOLUTION_REFUND,
+    RESOLUTION_SPLIT,
     # 对象 + 存储
     TradeEvent,
     TradeStore,
@@ -38,6 +46,8 @@ from nth_dao.commerce.trade import (
     submit_delivery,
     record_verification,
     record_settlement,
+    open_dispute,
+    resolve_dispute,
     # 查询 + 验证
     trade_state,
     verify_trade,
@@ -50,6 +60,7 @@ from nth_dao.commerce.trade import (
     REJECT_ILLEGAL_TRANSITION,
     REJECT_WRONG_ACTOR,
     REJECT_BAD_VERDICT,
+    REJECT_BAD_RESOLUTION,
     REJECT_EVENT_SIG_INVALID,
     REJECT_CHAIN_BROKEN,
 )
@@ -60,13 +71,21 @@ __all__ = [
     "STATE_VERIFIED",
     "STATE_FAILED",
     "STATE_SETTLED",
+    "STATE_DISPUTED",
+    "STATE_REFUNDED",
+    "STATE_SPLIT_SETTLED",
     "TERMINAL_STATES",
     "EVENT_TRADE_OPENED",
     "EVENT_DELIVERY_SUBMITTED",
     "EVENT_VERIFICATION_RECORDED",
     "EVENT_SETTLEMENT_RECORDED",
+    "EVENT_DISPUTE_OPENED",
+    "EVENT_DISPUTE_RESOLVED",
     "VERDICT_PASS",
     "VERDICT_FAIL",
+    "RESOLUTION_SETTLE",
+    "RESOLUTION_REFUND",
+    "RESOLUTION_SPLIT",
     "TradeEvent",
     "TradeStore",
     "sign_trade_event",
@@ -75,6 +94,8 @@ __all__ = [
     "submit_delivery",
     "record_verification",
     "record_settlement",
+    "open_dispute",
+    "resolve_dispute",
     "trade_state",
     "verify_trade",
     "TradeRejected",
@@ -84,6 +105,7 @@ __all__ = [
     "REJECT_ILLEGAL_TRANSITION",
     "REJECT_WRONG_ACTOR",
     "REJECT_BAD_VERDICT",
+    "REJECT_BAD_RESOLUTION",
     "REJECT_EVENT_SIG_INVALID",
     "REJECT_CHAIN_BROKEN",
     # CS2a binding
