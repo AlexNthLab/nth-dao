@@ -212,6 +212,73 @@ def test_claim_rejected_not_found(tmp_path) -> None:
     assert exc.value.reason == REJECT_ANN_NOT_FOUND
 
 
+# ─── cap_token 无效路径（外审 MEDIUM：此前无回归保护）────────────
+
+
+def test_claim_rejected_expired_cap_token(tmp_path) -> None:
+    """过期 cap_token → verify_cap_token 失败 → REJECT_CAP_TOKEN_INVALID。
+
+    外审 MEDIUM：此前 10 个 M3 测试无一条让密码学无效的 token 走到
+    这条 except 分支，重构改了 verify_cap_token 返回格式会静默崩。
+    """
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="i")
+    pub = AgentIdentity.generate(label="p")
+    claimant = AgentIdentity.generate(label="c")
+    ann = _publish(feed, pub, caps=["code_review"])
+    # 短 TTL 的 token
+    token = sign_cap_token(
+        issuer=issuer, subject_did=claimant.as_did(),
+        capabilities=["code_review", CAP_NTH_RECEIPT_SIGN],
+        ttl_ms=1000,
+    )
+    # 在 token 过期之后认领
+    far_future = token["not_after"] + 60_000
+    with pytest.raises(ClaimRejected) as exc:
+        claim_announcement(feed, store, ann.announcement_id,
+                           claimant=claimant, cap_token=token,
+                           now_ms_override=far_future)
+    assert exc.value.reason == REJECT_CAP_TOKEN_INVALID
+    assert "expired" in exc.value.detail   # 底层 reason 被带上
+    assert store.get(ann.announcement_id) is None
+
+
+def test_claim_rejected_revoked_cap_token(tmp_path) -> None:
+    """撤销的 cap_token → REJECT_CAP_TOKEN_INVALID。"""
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="i")
+    pub = AgentIdentity.generate(label="p")
+    claimant = AgentIdentity.generate(label="c")
+    ann = _publish(feed, pub, caps=["code_review"])
+    token = _token_for(issuer, claimant)
+    with pytest.raises(ClaimRejected) as exc:
+        claim_announcement(feed, store, ann.announcement_id,
+                           claimant=claimant, cap_token=token,
+                           revoked_ids={token["token_id"]})
+    assert exc.value.reason == REJECT_CAP_TOKEN_INVALID
+    assert "revoked" in exc.value.detail
+
+
+def test_claim_rejected_tampered_cap_token_sig(tmp_path) -> None:
+    """签名被篡改的 cap_token → REJECT_CAP_TOKEN_INVALID（在 skill 检查之前）。"""
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="i")
+    pub = AgentIdentity.generate(label="p")
+    claimant = AgentIdentity.generate(label="c")
+    ann = _publish(feed, pub, caps=["code_review"])
+    token = _token_for(issuer, claimant)
+    # 篡改 capabilities —— 签名随之失效；verify_cap_token 先于 skill 检查
+    token["capabilities"] = list(token["capabilities"]) + ["nth:add_member"]
+    with pytest.raises(ClaimRejected) as exc:
+        claim_announcement(feed, store, ann.announcement_id,
+                           claimant=claimant, cap_token=token)
+    assert exc.value.reason == REJECT_CAP_TOKEN_INVALID
+    assert store.get(ann.announcement_id) is None
+
+
 # ─── 冲突 + 幂等 ─────────────────────────────────────────────────
 
 

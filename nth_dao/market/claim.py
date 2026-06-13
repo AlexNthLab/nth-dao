@@ -22,6 +22,17 @@ C4 问题：旧 marketplace.claim 非原子，prior 审计标了 double-claim �
 
   另外校验 ``token.subject_did == claimant`` —— 防 Agent B 拿 Agent A 的
   token 认领。
+
+授权边界（M4 独立审查确认，permissionless-by-design）：
+  认领是**无许可**的 —— 任何持有效 cap_token（哪怕自己给自己签的，
+  issuer == subject）且具备所需技能的 Agent，都能认领公开发布的公告。
+  这是开放去中心化市场的正确模型（类比 x402；"绝对去中心化" = 没有
+  中心 gatekeeper 决定谁能接活；"一人公司" 的 Agent 本就是自己的
+  issuer）。问责靠**签名认领收据**（claimant DID 在案）+ 未来 M5 的
+  可解释信誉，而非认领时的准入。
+  发布方若想"只让可信 Agent 接我的活"，那是 **M5 的 publisher 侧
+  claimant 信誉门槛**（对称于订阅的 ``publisher_trust_floor``），不在
+  M4 范围。本层故意不做准入，保持市场开放。
 """
 
 from __future__ import annotations

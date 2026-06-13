@@ -34,6 +34,7 @@ from nth_dao.market.announcement import (
     TaskAnnouncement,
     verify_announcement,
 )
+from nth_dao.util.io import InterProcessLock
 from nth_dao.util.jsonl_safe import safe_append_jsonl
 
 logger = logging.getLogger("nth_dao.market.feed")
@@ -181,8 +182,14 @@ class MarketFeed:
         """
         if not self.log_path.exists():
             return []
+        # M4 加固（此前 M1/M3 标的 deferred 读锁项）：读取时持与
+        # safe_append_jsonl 同一把 InterProcessLock，关掉"并发 append
+        # 写到一半时被读到半行"的窗口。append 写整行+fsync 在锁内完成,
+        # 读也在锁内 → 读到的永远是完整行。锁路径 = log_path+".lock",
+        # 与 append 一致，二者串行。读很快，锁占用极短。
         try:
-            text = self.log_path.read_text(encoding="utf-8")
+            with InterProcessLock(self.log_path):
+                text = self.log_path.read_text(encoding="utf-8")
         except OSError as e:
             logger.warning("market feed read failed at %s: %s", self.log_path, e)
             return []
