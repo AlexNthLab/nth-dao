@@ -139,6 +139,15 @@ class TaskOrder:
 
     @classmethod
     def from_dict(cls, data: dict) -> "TaskOrder":
+        # 2026-06-14 审查补:没有 order_id 的记录不是订单。orders_dir 里还
+        # 混着同名 *.json 的非订单文件(如 {agent}_credits.json),此前会被
+        # from_dict 容忍成"空 OPEN 订单",污染 list_open/stats/check_expired
+        # 计数。这里直接拒,各 glob 循环已 catch ValueError 会干净跳过。
+        order_id = data.get("order_id", "")
+        if not order_id:
+            raise ValueError(
+                "TaskOrder.from_dict: missing order_id (not an order record)"
+            )
         status_raw = data.get("status", "open")
         try:
             status = OrderStatus(status_raw)
@@ -146,7 +155,7 @@ class TaskOrder:
             status = OrderStatus.OPEN
 
         return cls(
-            order_id=data.get("order_id", ""),
+            order_id=order_id,
             creator=data.get("creator", ""),
             title=data.get("title", ""),
             description=data.get("description", ""),
@@ -213,6 +222,7 @@ class TaskMarketplace:
         channel: Optional[TeamChannel] = None,
         reputation: Optional[ReputationManager] = None,
         marketplace_dir: str = DEFAULT_MARKETPLACE_DIR,
+        max_open_orders: Optional[int] = None,
     ):
         """
         Args:
@@ -222,12 +232,23 @@ class TaskMarketplace:
             channel:
             reputation:
             marketplace_dir:
+            max_open_orders: 单个 creator 的开放订单上限(防无界堆单)。
+                None → NTH_MARKETPLACE_MAX_OPEN_ORDERS / 默认 100;<=0 不限。
         """
         self.workspace = workspace
         self.agent_id = agent_id
         self.identity = identity
         self.channel = channel
         self.reputation = reputation
+        # 开单上限(2026-06-14 审查补:auto/scale 显式上限)。
+        if max_open_orders is None:
+            try:
+                _cap = int(os.environ.get("NTH_MARKETPLACE_MAX_OPEN_ORDERS", "100"))
+            except (TypeError, ValueError):
+                _cap = 100
+            self._max_open_orders = _cap if _cap >= 0 else 100
+        else:
+            self._max_open_orders = max_open_orders
         self.orders_dir = workspace / marketplace_dir
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
@@ -364,6 +385,21 @@ class TaskMarketplace:
                 f"Insufficient credits: balance={self._read_credits()}, "
                 f"reward={reward}"
             )
+        # 开单上限:防单个 agent 无界堆开放订单撑爆 marketplace 目录。
+        # 统计自己名下 OPEN 单(list_my_orders 已按 creator/claimant 过滤,
+        # 这里再确认 creator==self);达上限即拒。<=0 表示不限。
+        if self._max_open_orders > 0:
+            my_open = sum(
+                1 for o in self.list_my_orders(status=OrderStatus.OPEN)
+                if o.creator == self.agent_id
+            )
+            if my_open >= self._max_open_orders:
+                raise ValueError(
+                    f"open-order ceiling reached: "
+                    f"{my_open}/{self._max_open_orders} "
+                    f"(complete/cancel some, or raise "
+                    f"NTH_MARKETPLACE_MAX_OPEN_ORDERS)"
+                )
 
         order = TaskOrder(
             order_id=uuid.uuid4().hex,

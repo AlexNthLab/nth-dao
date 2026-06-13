@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import time
 import uuid
@@ -118,6 +119,10 @@ class GossipNode:
     PING_INTERVAL = 30
     #
     RECONNECT_DELAY = 5
+    # 入站 peer 连接数上限(2026-06-14 审查补:网络面 auto/scale 上限)。
+    # 防止攻击者(或 TOFU 开启时大量自称不同 agent_id 的连接)无界堆积
+    # peer 连接耗资源。可由 NTH_GOSSIP_MAX_PEERS 覆盖;<=0 表示不限。
+    MAX_PEERS = 256
 
     def __init__(
         self,
@@ -131,6 +136,7 @@ class GossipNode:
         allow_tofu: bool = True,
         trust_graph=None,  # 可选 TrustGraph：启用 web-of-trust 传递信任
         wot_max_depth: int = 2,
+        max_peers: Optional[int] = None,  # 入站 peer 上限;None→env/MAX_PEERS
     ):
         """
         Args:
@@ -160,6 +166,15 @@ class GossipNode:
         self.peers: Dict[str, websockets.WebSocketServerProtocol] = {}
         self.peer_infos: Dict[str, PeerInfo] = {}
         self.bootstrap_urls = bootstrap_peers or []
+        # 入站 peer 上限:None → NTH_GOSSIP_MAX_PEERS / 类常量;<=0 不限。
+        if max_peers is None:
+            try:
+                _mp = int(os.environ.get("NTH_GOSSIP_MAX_PEERS", str(self.MAX_PEERS)))
+            except (TypeError, ValueError):
+                _mp = self.MAX_PEERS
+            self._max_peers = _mp if _mp >= 0 else self.MAX_PEERS
+        else:
+            self._max_peers = max_peers
 
         # ───── 信任锚 ─────
         # agent_id → pubkey_hex 的映射，直接 pinned 信任。
@@ -197,6 +212,15 @@ class GossipNode:
         self._tasks: List[asyncio.Task] = []
 
     #
+
+    def _can_accept_peer(self, remote_agent_id: str) -> bool:
+        """容量闸:已在册的 agent_id 允许重连(替换旧连接);新 peer 仅在
+        未达上限时接纳。<=0 表示不限。抽成独立方法便于单测。"""
+        if self._max_peers <= 0:
+            return True
+        if remote_agent_id in self.peers:
+            return True
+        return len(self.peers) < self._max_peers
 
     # ───── 信任锚管理 ─────
 
@@ -549,6 +573,16 @@ class GossipNode:
                     "challenge_response signature invalid for %s", remote_agent_id
                 )
                 await ws.close(1008, "invalid challenge signature")
+                return
+
+            # 容量闸:验签通过后、注册/TOFU 前先查上限。新 peer 超限则拒
+            # (1013 = Try Again Later,RFC6455 服务端过载),避免无界堆连接。
+            if not self._can_accept_peer(remote_agent_id):
+                logger.warning(
+                    "rejecting peer %s: at capacity %d/%d",
+                    remote_agent_id, len(self.peers), self._max_peers,
+                )
+                await ws.close(1013, "server at peer capacity")
                 return
 
             # client 通过了 → 把 pubkey 锚定到 agent_id
