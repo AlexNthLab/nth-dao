@@ -137,6 +137,30 @@ class MarketFeed:
         records = self._read_all()
         return records[-1][0] if records else -1
 
+    def get(
+        self,
+        announcement_id: str,
+        *,
+        include_expired: bool = True,
+        now_ms_override: int = 0,
+    ) -> Optional[TaskAnnouncement]:
+        """按 id 取一条已验签的公告（M3 认领前的查找）。
+
+        feed 是 append-only，理论上同一 id 不会重复；若真重复（异常），
+        返回最早的那条（FIFO，第一个写入的为准）。验签不过的跳过。
+        include_expired 默认 True —— 认领路径会单独检查过期并给出明确
+        reason，所以这里先把公告取出来。
+        """
+        for seq, raw in self._read_all():
+            ann = self._safe_parse(seq, raw)
+            if ann is None:
+                continue
+            if ann.announcement_id == announcement_id:
+                if not include_expired and ann.is_expired(now_ms_override):
+                    return None
+                return ann
+        return None
+
     # ── 内部 ─────────────────────────────────────────────────────
 
     def _read_all(self) -> List[tuple]:

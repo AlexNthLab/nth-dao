@@ -109,7 +109,7 @@ def sign_announcement(
     publisher: "Any",  # AgentIdentity —— 必须 can_sign
     title: str,
     capability_set: Optional[List[str]] = None,
-    context: str = "general",
+    context: str = "",
     input_schema: Optional[Dict[str, Any]] = None,
     acceptance: Optional[Dict[str, Any]] = None,
     reward_minor: int = 0,
@@ -148,12 +148,22 @@ def sign_announcement(
     # 去重 + 排序，让 canonical body 不依赖输入顺序。
     caps = sorted(set(caps))
 
+    # 独立审查修复 (M2 R1)：context 默认从主能力派生，而不是恒为
+    # "general"。footgun 根因 —— 一条 capability_set=["code_review"]
+    # 但忘了设 context 的公告会拿到 context="general"，于是把
+    # contexts=["code_review"] 的订阅者挡在外面（能干却看不见）。
+    # 现在：未显式给 context 时，取首个（排序后）能力作为类别；
+    # 无能力则回落 "general"。显式传入的 context 永远优先。
+    resolved_context = context.strip() if isinstance(context, str) else ""
+    if not resolved_context:
+        resolved_context = caps[0] if caps else "general"
+
     ann = TaskAnnouncement(
         announcement_id=announcement_id or uuid.uuid4().hex,
         publisher_did=publisher.as_did(),
         title=title,
         capability_set=caps,
-        context=context,
+        context=resolved_context,
         input_schema=dict(input_schema or {}),
         acceptance=dict(acceptance or {}),
         reward_minor=reward_minor,

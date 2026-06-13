@@ -28,16 +28,70 @@ from nth_dao.market.announcement import (
     REJECT_ANN_SIG_DECODE_FAILED,
     REJECT_ANN_CRYPTO_UNAVAILABLE,
 )
-from nth_dao.market.feed import MarketFeed
+from nth_dao.market.feed import MarketFeed, PollResult
+from nth_dao.market.subscription import MarketSubscription
+from nth_dao.market.match import (
+    match,
+    poll_matching,
+    MatchResult,
+    ScoredAnnouncement,
+    MatchingPollResult,
+    REJECT_EXPIRED,
+    REJECT_CAP_INSUFFICIENT,
+    REJECT_CONTEXT_NOT_SUBSCRIBED,
+    REJECT_REWARD_BELOW_FLOOR,
+    REJECT_PUBLISHER_BELOW_TRUST,
+)
+from nth_dao.market import vocabulary
+from nth_dao.market.claim import (
+    claim_announcement,
+    ClaimStore,
+    ClaimOutcome,
+    ClaimConflict,
+    ClaimRejected,
+    REJECT_ANN_NOT_FOUND,
+    REJECT_ANN_EXPIRED,
+    REJECT_CAP_TOKEN_INVALID,
+    REJECT_SUBJECT_MISMATCH,
+    REJECT_SKILL_INSUFFICIENT,
+    CLAIM_STATUS_CLAIMED,
+)
 
 __all__ = [
+    # M1
     "TaskAnnouncement",
     "sign_announcement",
     "verify_announcement",
     "MarketFeed",
+    "PollResult",
     "REJECT_ANN_MISSING_FIELD",
     "REJECT_ANN_BAD_PUBLISHER_DID",
     "REJECT_ANN_SIG_INVALID",
     "REJECT_ANN_SIG_DECODE_FAILED",
     "REJECT_ANN_CRYPTO_UNAVAILABLE",
+    # M2
+    "MarketSubscription",
+    "match",
+    "poll_matching",
+    "MatchResult",
+    "ScoredAnnouncement",
+    "MatchingPollResult",
+    "vocabulary",
+    "REJECT_EXPIRED",
+    "REJECT_CAP_INSUFFICIENT",
+    "REJECT_CONTEXT_NOT_SUBSCRIBED",
+    "REJECT_REWARD_BELOW_FLOOR",
+    "REJECT_PUBLISHER_BELOW_TRUST",
+    # M3
+    "claim_announcement",
+    "ClaimStore",
+    "ClaimOutcome",
+    "ClaimConflict",
+    "ClaimRejected",
+    "REJECT_ANN_NOT_FOUND",
+    "REJECT_ANN_EXPIRED",
+    "REJECT_CAP_TOKEN_INVALID",
+    "REJECT_SUBJECT_MISMATCH",
+    "REJECT_SKILL_INSUFFICIENT",
+    "CLAIM_STATUS_CLAIMED",
 ]
