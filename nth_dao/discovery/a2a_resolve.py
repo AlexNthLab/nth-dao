@@ -12,13 +12,15 @@ dispatch}。本模块把 LAN/联邦发现到的对端(LANPeer 等,带 did + 网�
     带什么凭据"作为 ``dispatch_for`` 注入,信任模型可插拔、不写死。
   - 无 DID 的 legacy peer 不可寻址、其工作也无法验签(协调者已强制
     signed-receipt)→ 直接滤掉,不让它进组。
-  - ⚠️ 发现是**未认证**的(UDP/mDNS 广播)。恶意节点可广播
-    ``did=受害者DID`` 配自己的 endpoint(冒名)。但协调者要求"完成的
-    step 必须附该 DID 亲签的 receipt"——冒名者没有受害者私钥,**伪造的
-    工作会被拒**(这正是上一步先做 signed-receipt 的回报)。**未**绑定的
-    是 endpoint↔DID:一条冒名记录仍可能把任务**误路由/DoS**到错的
-    endpoint(任务发出去但完不成、step 失败)。彻底绑定靠联邦信任握手
-    (对端用其 DID 签一张 token 证明"这个 endpoint 确是我")—— 下一层。
+  - 发现是**未认证**的(UDP/mDNS 广播),恶意节点可广播 ``did=受害者DID``
+    配自己的 endpoint(冒名)。两道闸已合上:
+      1. 工作伪造:协调者要求 step 附该 DID 亲签且**绑定请求/回应**的
+         receipt —— 冒名者无受害者私钥,伪造工作被拒(2ad19b1 + 198f4cb)。
+      2. endpoint↔DID 误路由:``resolve_a2a_peers(verify_identity=True)`` 用
+         ``verify_peer_identity`` 挑战-应答,**证明 endpoint 确实掌握所称
+         DID 的私钥**才入组 —— 冒名记录连组都进不去,任务不会被误路由
+         (本次收口)。
+    至此发现→传输链的"身份+内容+落点"三绑全闭环。
 """
 
 from __future__ import annotations
@@ -28,7 +30,9 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Iterable, List, Optional, Protocol
 
-from nth_dao.orchestration.a2a_coordinator import A2APeer, DispatchFn, PeerResponse
+from nth_dao.orchestration.a2a_coordinator import (
+    A2APeer, DispatchFn, PeerResponse, _a2a_ask_payload,
+)
 
 
 class DiscoveredPeer(Protocol):
@@ -44,11 +48,61 @@ class DiscoveredPeer(Protocol):
 DispatchForFn = Callable[[Any], DispatchFn]
 
 
+def verify_peer_identity(
+    did: str, dispatch: DispatchFn, *, nonce: Optional[str] = None,
+) -> "tuple[bool, str]":
+    """挑战-应答:证明应答 ``dispatch`` 的 endpoint 确实掌握 ``did`` 的私钥。
+
+    返回 (ok, reason)。发一个**随机 nonce** 当 prompt,要求回的签名 receipt
+    满足:signer_did==did 且 request_sha256==sha256(nonce)。冒名者(在错的
+    endpoint 上谎称是 did)既签不出该 did 的 receipt,也绑不上这个**当场新
+    生成**的 nonce(防 replay 旧 receipt)→ 失败。复用 receipt 内容绑定
+    (198f4cb)即得身份证明,无需新端点。
+
+    代价:一次 ask 往返(对真 LLM backend 是一次廉价调用)。发现不频繁,
+    可接受;未来可加一个只签 nonce、不跑 backend 的轻量 challenge 端点。
+
+    残留(诚实):这证明的是"该 endpoint 能拿到 did 私钥签的应答"——一个
+    **透明 MITM 代理**(转发给真 agent)也能过握手,从而窃听 prompt / 拖延
+    (DoS)。但它**改不了**回应(response_sha256 绑定),也偷不到工作信誉。
+    彻底防 MITM 需信道绑定(TLS / 证书钉);LAN/testnet 范围内可接受。
+    """
+    import hashlib
+    import secrets
+
+    try:
+        from nth_dao.execution_receipt import verify_receipt
+    except ImportError:
+        return False, "crypto-unavailable"
+    challenge = nonce or ("nth-id-challenge:" + secrets.token_hex(16))
+    try:
+        resp = dispatch(challenge)
+    except Exception as exc:
+        return False, f"dispatch-failed: {exc}"
+    receipt = resp.receipt
+    if not isinstance(receipt, dict) or not receipt:
+        return False, "no-receipt"
+    if not verify_receipt(receipt):
+        return False, "sig-invalid"
+    if str(receipt.get("signer_did", "")) != did:
+        return False, "signer-mismatch"
+    payload = _a2a_ask_payload(receipt)
+    if payload is None:
+        return False, "no-ask-entry"
+    if str(payload.get("request_sha256", "")) != hashlib.sha256(
+        challenge.encode("utf-8")
+    ).hexdigest():
+        return False, "challenge-not-bound"
+    return True, ""
+
+
 def resolve_a2a_peers(
     discovered: Iterable[Any],
     *,
     dispatch_for: DispatchForFn,
     want_capabilities: Optional[Iterable[str]] = None,
+    verify_identity: bool = False,
+    on_reject: Optional[Callable[[str, str], None]] = None,
 ) -> List[A2APeer]:
     """把发现记录映射成 A2APeer 列表。
 
@@ -56,8 +110,13 @@ def resolve_a2a_peers(
         discovered: 发现到的 peer 记录(需有 .did/.capabilities/.label)。
         dispatch_for: peer -> DispatchFn(注入传输+信任)。
         want_capabilities: 若给定,只保留能力有交集的 peer。
+        verify_identity: True 时对每个候选跑 ``verify_peer_identity`` 挑战-
+            应答,**证明 endpoint 确实掌握所声称 DID 的私钥**才入组 —— 关掉
+            "冒名记录把任务误路由到错 endpoint"的最后缺口。默认 False(纯
+            映射,适用于来源本就可信/本地的场景)。
+        on_reject: (did, reason) 回调,记录被剔除的候选(可观测性)。
 
-    过滤:无 did 的记录直接跳过(不可寻址 + 工作无法验签)。
+    过滤:无 did / 重复 / 能力不符 / (开了校验时)身份证明不过 → 不入组。
     """
     want = set(want_capabilities) if want_capabilities else None
     out: List[A2APeer] = []
@@ -65,13 +124,24 @@ def resolve_a2a_peers(
     for p in discovered:
         did = str(getattr(p, "did", "") or "")
         if not did or did in seen:
+            if did and on_reject:
+                on_reject(did, "duplicate")
             continue  # 无 DID 或重复 → 不入组
         caps = list(getattr(p, "capabilities", []) or [])
         if want is not None and not (want & set(caps)):
+            if on_reject:
+                on_reject(did, "capability-mismatch")
             continue
         label = str(getattr(p, "label", "") or getattr(p, "agent_id", "") or did)
+        dispatch = dispatch_for(p)
+        if verify_identity:
+            ok, reason = verify_peer_identity(did, dispatch)
+            if not ok:
+                if on_reject:
+                    on_reject(did, f"identity:{reason}")
+                continue  # endpoint 证明不了它掌握该 DID → 拒(防冒名误路由)
         out.append(A2APeer(did=did, capabilities=caps,
-                           dispatch=dispatch_for(p), label=label))
+                           dispatch=dispatch, label=label))
         seen.add(did)
     return out
 

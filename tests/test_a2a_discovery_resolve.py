@@ -27,7 +27,7 @@ from nth_dao.orchestration.mission import Mission, MissionStep, MissionStatus
 from nth_dao.orchestration.mission_store import MissionStore
 from nth_dao.orchestration.a2a_coordinator import A2ACoordinator, PeerResponse
 from nth_dao.discovery.a2a_resolve import (
-    resolve_a2a_peers, make_http_dispatch,
+    resolve_a2a_peers, make_http_dispatch, verify_peer_identity,
 )
 
 
@@ -132,6 +132,68 @@ def test_discovered_record_drives_real_agent(tmp_path: Path) -> None:
         rcpt = store.get("disc-1").steps[0].output.get("receipt")
         assert isinstance(rcpt, dict) and verify_receipt(rcpt)
         assert rcpt.get("signer_did") == did
+    finally:
+        if agent_id:
+            try:
+                client.post(f"/api/v2/agents/{agent_id}/stop")
+            except Exception:
+                pass
+
+
+def test_identity_handshake_admits_honest_rejects_spoof(tmp_path: Path) -> None:
+    """信任握手收口:resolve_a2a_peers(verify_identity=True) 只放掌握所称
+    DID 私钥的 endpoint 入组。
+
+    - 诚实记录(did=真 agent)→ 挑战-应答过 → 入组。
+    - 冒名记录(did=别人,但 endpoint 指向真 agent)→ 真 agent 只会签自己
+      DID 的 receipt,signer 对不上声称的 did → 握手失败 → **不入组**,
+      任务不会被误路由。
+    """
+    app = create_app(workspace=tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    agent_id = None
+    try:
+        r = client.post("/api/v2/agents/spawn", json={
+            "kind": "mock", "label": "real", "capabilities": ["a2a:message_send"]})
+        assert r.status_code == 201, r.text
+        real_did = r.json()["did"]
+        agent_id = r.json()["agent_id"]
+
+        # 一个"够到真 agent"的 dispatch 工厂(按记录里的 did 去打 /ask)。
+        def dispatch_for(peer):
+            def dispatch(prompt: str) -> PeerResponse:
+                for _ in range(20):
+                    rr = client.post(f"/api/v2/agents/{real_did}/ask",
+                                     json={"prompt": prompt})
+                    if rr.status_code == 200 and "not-yet-authorized" not in rr.text:
+                        res = rr.json()["result"]
+                        return PeerResponse(text=str(res["response"]),
+                                            receipt=res.get("receipt"),
+                                            agent_did=str(res.get("agent_did", "")))
+                    time.sleep(0.5)
+                raise RuntimeError("未就绪")
+            return dispatch
+
+        discovered = [
+            _FakePeer(did=real_did, capabilities=["x"], label="honest"),
+            _FakePeer(did="did:key:zSpoofVictim", capabilities=["x"], label="spoof"),
+        ]
+        rejects = []
+        peers = resolve_a2a_peers(
+            discovered, dispatch_for=dispatch_for, verify_identity=True,
+            on_reject=lambda d, why: rejects.append((d, why)))
+
+        dids = [p.did for p in peers]
+        assert dids == [real_did]                     # 只有诚实的入组
+        assert any(d == "did:key:zSpoofVictim" and "identity:signer-mismatch" in why
+                   for d, why in rejects)              # 冒名被身份证明挡下
+
+        # 直接单测 verify_peer_identity:真 DID 过、假 DID 不过。
+        ok, _ = verify_peer_identity(real_did, dispatch_for(discovered[0]))
+        assert ok
+        bad, why = verify_peer_identity("did:key:zSpoofVictim",
+                                        dispatch_for(discovered[1]))
+        assert not bad and why == "signer-mismatch"
     finally:
         if agent_id:
             try:
