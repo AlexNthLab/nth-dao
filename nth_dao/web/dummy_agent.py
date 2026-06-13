@@ -1817,6 +1817,15 @@ def _start_a2a_server(
                     "response": result.get("response", ""),
                     "caller_did": token.get("subject_did", ""),
                     "agent_did": state_snapshot["did"],
+                    # 2026-06-13: surface the signed per-ask receipt in
+                    # the RESPONSE BODY (not just the stderr
+                    # ``receipt_signed`` event). Without it the caller
+                    # (e.g. A2ACoordinator) only sees unsigned text and
+                    # can't prove THIS peer did the work — fatal once
+                    # peers are remote/untrusted. ``None`` when signing
+                    # was skipped (crypto-unavailable); caller decides
+                    # whether to accept unverified work.
+                    "receipt": receipt,
                 }}
             elif method == "ask-stream":
                 # Phase 5.2: SSE streaming. Write headers + each

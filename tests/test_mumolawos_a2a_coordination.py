@@ -27,7 +27,9 @@ from fastapi.testclient import TestClient
 from nth_dao.web import create_app
 from nth_dao.orchestration.mission import Mission, MissionStep, MissionStatus
 from nth_dao.orchestration.mission_store import MissionStore
-from nth_dao.orchestration.a2a_coordinator import A2ACoordinator, A2APeer
+from nth_dao.orchestration.a2a_coordinator import (
+    A2ACoordinator, A2APeer, PeerResponse,
+)
 
 
 # MUMOLAWOS 成员角色 → (label, 任务能力)。能力是 mission 路由用的 skill,
@@ -64,16 +66,18 @@ def _build_mission() -> Mission:
 
 def _make_dispatch(client: TestClient, did: str):
     """构造一个**纯 A2A** dispatch:打 hub /ask(hub 注入 cap_token →
-    子端 /a2a/ask)。轮询等子端 authorized(加载 cap_token 需一瞬)。"""
-    def dispatch(prompt: str) -> str:
+    子端 /a2a/ask)。轮询等子端 authorized(加载 cap_token 需一瞬)。
+    返回 PeerResponse,带子端签名的 receipt(协调者据此验签)。"""
+    def dispatch(prompt: str) -> PeerResponse:
         last = ""
         for _ in range(20):
             r = client.post(f"/api/v2/agents/{did}/ask", json={"prompt": prompt})
             if r.status_code == 200 and "not-yet-authorized" not in r.text:
-                body = r.json()
-                # 证明确实过了 A2A 到子端 mock backend
-                assert body["result"]["backend"] == "mock"
-                return str(body["result"]["response"])
+                res = r.json()["result"]
+                assert res["backend"] == "mock"  # 确过 A2A 到子端 mock
+                return PeerResponse(text=str(res["response"]),
+                                    receipt=res.get("receipt"),
+                                    agent_did=str(res.get("agent_did", "")))
             last = f"{r.status_code}: {r.text[:120]}"
             time.sleep(0.5)
         raise RuntimeError(f"peer {did} 始终未就绪: {last}")
@@ -120,9 +124,40 @@ def test_mumolawos_runs_mission_purely_over_a2a(tmp_path: Path) -> None:
         assert by_step["S1-repro"] == dids["mumo-hermes"]
         assert by_step["S3-patch"] == dids["mumo-codex"]
         assert by_step["S4-review"] == dids["mumo-claude"]
+
+        # 每步的完成都有签名 receipt 作凭据,且 signer == 干活的 peer DID
+        from nth_dao.execution_receipt import verify_receipt
+        store2 = store
+        for s in store2.get("mumolawos-a2a-001").steps:
+            rcpt = (s.output or {}).get("receipt")
+            assert isinstance(rcpt, dict), f"{s.id} 完成缺签名 receipt"
+            assert verify_receipt(rcpt), f"{s.id} receipt 验签不过"
+            assert rcpt.get("signer_did") == by_step[s.id], \
+                f"{s.id} receipt signer 与干活 peer 不符"
     finally:
         for aid in agent_ids:
             try:
                 client.post(f"/api/v2/agents/{aid}/stop")
             except Exception:
                 pass
+
+
+def test_unsigned_work_is_rejected(tmp_path: Path) -> None:
+    """安全回归:peer 回了文本但**无签名 receipt** —— verify_receipts=True
+    的协调者拒绝把该 step 记完成(unverified work)。这正是去中心/远程
+    peer 场景下,防一个 peer 谎称干完活骗信誉/报酬的那道闸。"""
+    store = MissionStore(root=str(tmp_path / "m"))
+    store.create(Mission(
+        id="m-unsigned", title="t", goal="g", status=MissionStatus.ACTIVE.value,
+        steps=[MissionStep(id="s1", description="d", required_capabilities=["x"],
+                           acceptance_criteria={"min_length": 1})]))
+
+    # 一个"撒谎"的 peer:回文本但不带 receipt。
+    liar = A2APeer(did="did:key:zLiar", capabilities=["x"],
+                   dispatch=lambda _p: PeerResponse(text="我干完了(其实没有)", receipt=None))
+    coord = A2ACoordinator(store, [liar])  # verify_receipts 默认 True
+    result = coord.run_mission("m-unsigned", output_key_for=lambda _s: None)
+
+    assert not result.complete and result.done == 0
+    assert result.steps and not result.steps[0].ok
+    assert "unverified" in result.steps[0].detail

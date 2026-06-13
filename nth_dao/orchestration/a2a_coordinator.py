@@ -29,10 +29,21 @@ from nth_dao.orchestration.mission_store import MissionStore
 from nth_dao.orchestration.mission_runner import MissionRunner
 
 
-# dispatch 回调:把一段 prompt 交给某个 A2A peer 执行,返回它的文本回应。
+@dataclass
+class PeerResponse:
+    """A2A peer 的一次回应。除了文本,还带**签名执行 receipt** —— 协调者
+    据此密码学验证"确是这个 peer DID 干的活",而非轻信传输层文本。"""
+
+    text: str
+    receipt: Optional[Dict[str, Any]] = None  # 签名的 nth.a2a_ask_executed
+    agent_did: str = ""                        # 回应里 peer 自称的 DID
+
+
+# dispatch 回调:把一段 prompt 交给某个 A2A peer 执行,返回 PeerResponse。
 # 底层实现(本地 hub /ask 还是远程 /a2a/ask)对协调者透明 —— 这就是
-# "本地=远程=同一种 peer"的落点。
-DispatchFn = Callable[[str], str]
+# "本地=远程=同一种 peer"的落点。**契约**:实现必须自带超时上界(协调者
+# 不为注入的 dispatch 兜底超时;一个挂死的 dispatch 会卡住整盘)。
+DispatchFn = Callable[[str], "PeerResponse"]
 
 
 @dataclass
@@ -46,7 +57,7 @@ class A2APeer:
 
     def __post_init__(self) -> None:
         if not callable(self.dispatch):
-            raise TypeError("A2APeer.dispatch 必须可调用(prompt -> response)")
+            raise TypeError("A2APeer.dispatch 必须可调用(prompt -> PeerResponse)")
 
 
 @dataclass
@@ -77,16 +88,45 @@ class A2ACoordinator:
     ``peer.dispatch``。认领/完成走 MissionRunner(真实 CAS + evaluate)。
     """
 
-    def __init__(self, store: MissionStore, peers: List[A2APeer]) -> None:
+    def __init__(
+        self,
+        store: MissionStore,
+        peers: List[A2APeer],
+        *,
+        verify_receipts: bool = True,
+    ) -> None:
         if not peers:
             raise ValueError("至少要一个 A2APeer")
         self.store = store
         self.peers = peers
+        # verify_receipts=True(默认):一个 step 只有在 peer 回了**签名且
+        # signer==该 peer DID** 的 receipt 时才算完成 —— 不轻信传输层文本。
+        # 这是把全系统"只认签名证据"的原则贯彻到协调平面;去中心/远程
+        # peer 场景下,关掉它等于让任意 peer 谎称干完活骗信誉/报酬。
+        # 仅在全内网可信 / crypto 不可用的封闭环境才显式置 False。
+        self.verify_receipts = verify_receipts
         # 每个 peer 一个 MissionRunner(agent_id=did,带其能力)做认领/完成。
         self._runners: Dict[str, MissionRunner] = {
             p.did: MissionRunner(store, agent_id=p.did, capabilities=p.capabilities)
             for p in peers
         }
+
+    def _verify_peer_work(self, peer: A2APeer, resp: "PeerResponse") -> str:
+        """返回 "" 表示通过;非空为拒绝原因。验证 peer 回应的签名 receipt
+        确由该 peer DID 亲签 —— 同 reputation/binding 的"验签 + signer 匹配"
+        模式。"""
+        receipt = resp.receipt
+        if not isinstance(receipt, dict) or not receipt:
+            return "no-receipt"
+        try:
+            from nth_dao.execution_receipt import verify_receipt
+        except ImportError:
+            return "crypto-unavailable"
+        if not verify_receipt(receipt):
+            return "receipt-sig-invalid"
+        if str(receipt.get("signer_did", "")) != peer.did:
+            return "receipt-signer-mismatch"
+        return ""
 
     def run_mission(
         self,
@@ -132,23 +172,35 @@ class A2ACoordinator:
                     continue
                 # —— 传输:经 A2A 把活交给 peer(协调者唯一对外动作)——
                 try:
-                    response = peer.dispatch(bp(step))
+                    resp = peer.dispatch(bp(step))
                 except Exception as exc:  # peer 故障 → 标 fail,不卡整盘
                     runner.fail(mission_id, step.id, f"dispatch 失败: {exc}")
                     results.append(StepResult(step.id, peer.did, False,
                                               f"dispatch error: {exc}"))
                     progressed = True
                     break
-                # 包装成满足 acceptance_criteria 的输出
-                output: Dict[str, Any] = {"content": response}
+                # —— 验签:确是该 peer 亲签的工作证据,才认这步完成 ——
+                if self.verify_receipts:
+                    why = self._verify_peer_work(peer, resp)
+                    if why:
+                        runner.fail(mission_id, step.id, f"unverified work: {why}")
+                        results.append(StepResult(step.id, peer.did, False,
+                                                  f"unverified: {why}",
+                                                  response=resp.text[:200]))
+                        progressed = True
+                        break
+                # 包装成满足 acceptance_criteria 的输出(附签名 receipt 作凭据)
+                output: Dict[str, Any] = {"content": resp.text}
                 key = output_key_for(step.id)
                 if key:
-                    output[key] = f"{peer.did}:{step.id}: {response[:60]}"
+                    output[key] = f"{peer.did}:{step.id}: {resp.text[:60]}"
+                if resp.receipt is not None:
+                    output["receipt"] = resp.receipt
                 outcome = runner.complete(mission_id, step.id, output)
                 results.append(StepResult(
                     step.id, peer.did, outcome.success,
                     "" if outcome.success else outcome.reason,
-                    response=response[:200]))
+                    response=resp.text[:200]))
                 progressed = True
                 break
             if not progressed:
