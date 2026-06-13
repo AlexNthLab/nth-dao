@@ -265,7 +265,11 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Local-first DAO group layer</p>
-          <h1>NTH DAO Console</h1>
+          {/* 品牌正字 Nᵗʰ DAO(#8 2026-06-14):native <sup> 即上标,内联
+              微调尺寸,不依赖 v2 的 .brand-th。aria-label 念回 "Nth DAO"。 */}
+          <h1 aria-label="Nth DAO">
+            N<sup style={{ fontSize: "0.58em", verticalAlign: "super", lineHeight: 0 }}>th</sup> DAO
+          </h1>
           {/*
             Week-1 Task 5 (2026-06-07): build identifier strip. Helps
             the operator spot "I rebuilt the JS but didn't restart the

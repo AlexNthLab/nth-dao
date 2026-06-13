@@ -3345,11 +3345,11 @@ def _frontend_missing_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NTH DAO Console</title>
+  <title>Nᵗʰ DAO</title>
 </head>
 <body>
   <main>
-    <h1>NTH DAO Console</h1>
+    <h1>N<sup style="font-size:0.58em;vertical-align:super;line-height:0">th</sup> DAO</h1>
     <p>Frontend assets are not built. Run <code>npm --prefix frontend run build</code>.</p>
   </main>
 </body>
