@@ -2354,6 +2354,104 @@ def register_v2_routes(app: FastAPI) -> None:
     async def v2_agents_ask_stream(did: str, request: Request) -> Any:
         return await _agent_ask(did, "ask-stream", request)
 
+    @app.post("/api/v2/agents/{did}/summarize")
+    async def v2_agents_summarize(did: str, request: Request) -> Any:
+        """温层(2026-06-14):把一段对话原文压成一条**签名摘要**,服务端
+        make + verify。body ``{messages:[{message_id,sender_id/sender_label,
+        body}...], conversation_id?, instruction?}``。
+
+        驱动方式同 ``_agent_ask``(hub 注入该 agent 自己的 cap_token),但
+        prompt = 对话规范转录;拿回 response+receipt 后用 ``verify_summary``
+        判"确由该 agent、为这段确切原文而签"。返回 SummaryRecord 形状。
+        签名/验签都在服务端(JS 做不了加密)。
+        """
+        import asyncio
+        import hashlib
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        from nth_dao.cap_token import encode_authorization_header
+        from nth_dao.conversation.summary import (
+            DEFAULT_INSTRUCTION, canonical_transcript, summary_prompt,
+            verify_summary,
+        )
+
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(status_code=503, detail="agent supervisor unavailable")
+        matching = [
+            r for r in sup.list_agents()
+            if r.did == did and r.a2a_port is not None and r.alive
+        ]
+        if not matching:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no live supervised agent for did={did!r}")
+        rec = matching[0]
+        token_id = getattr(rec, "cap_token_id", None)
+        store = _state_cap_tokens_store(request)
+        token = store.get(token_id) if (token_id and store is not None) else None
+        if not isinstance(token, dict):
+            raise HTTPException(
+                status_code=409, detail=f"agent {did!r} has no usable cap_token")
+
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="body must be JSON")
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise HTTPException(status_code=400, detail="messages (non-empty list) required")
+        conversation_id = str(payload.get("conversation_id") or "")
+        instruction = str(payload.get("instruction") or DEFAULT_INSTRUCTION)
+        transcript = canonical_transcript(messages)
+        prompt = summary_prompt(transcript, instruction)
+
+        body_bytes = _json.dumps({"prompt": prompt}).encode("utf-8")
+        url = f"http://127.0.0.1:{rec.a2a_port}/a2a/ask"
+        req_headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"CapToken {encode_authorization_header(token)}",
+        }
+        timeout = _A2A_METHOD_TIMEOUTS.get("ask", _A2A_DEFAULT_TIMEOUT_S)
+
+        def _forward() -> Tuple[int, bytes]:
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=req_headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as e:
+                return e.code, (e.read() if e.fp else b"")
+
+        status, raw = await asyncio.get_event_loop().run_in_executor(None, _forward)
+        try:
+            data = _json.loads(raw.decode("utf-8", "replace") or "{}")
+        except Exception:
+            data = {}
+        if status != 200 or "not-yet-authorized" in _json.dumps(data):
+            raise HTTPException(
+                status_code=(status if status != 200 else 502),
+                detail=f"summarize drive failed: {str(data)[:160]}")
+        result = data.get("result", data) if isinstance(data, dict) else {}
+        summary_text = str(result.get("response", ""))
+        receipt = result.get("receipt")
+        ok, reason = verify_summary(
+            receipt, summary_text=summary_text, messages=messages,
+            expected_signer=did, instruction=instruction)
+        return {
+            "conversation_id": conversation_id,
+            "covered_message_ids": [str(m.get("message_id", "")) for m in messages],
+            "transcript_sha256": hashlib.sha256(transcript.encode("utf-8")).hexdigest(),
+            "summary_text": summary_text,
+            "agent_did": did,
+            "instruction": instruction,
+            "verified": ok,
+            "reason": reason,
+            "receipt": receipt,
+        }
+
     @app.get("/api/v2/cap_tokens", response_model=List[CapTokenSummaryM])
     def v2_cap_tokens(request: Request) -> List[Dict[str, Any]]:
         live = _read_cap_tokens_from_disk(_state_workspace(request))
