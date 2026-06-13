@@ -28,14 +28,21 @@ import { IconChat, IconSend } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { useToast } from "./Toast";
 import { relativeTimeShort } from "../utils/time";
-import type { ChatMessage, Conversation } from "../types-v2";
+import type {
+  ChatMessage, Conversation, ConversationSummary,
+} from "../types-v2";
 
 export interface ChatViewProps {
   conversations: Conversation[];
   messagesByConv: Record<string, ChatMessage[]>;
-  /** Wired to /api/messages once backend integration lands. The
-   *  v2 implementation drops the message into local state for now. */
+  /** 温层(切片2b):每会话的签名摘要,展示在消息区顶部。 */
+  summariesByConv?: Record<string, ConversationSummary[]>;
   onSend: (convId: string, body: string) => Promise<void> | void;
+  /** Lets the parent hydrate message history when a conversation
+   *  becomes active. */
+  onConversationSelect?: (convId: string) => Promise<void> | void;
+  /** Used by the Agents directory to open a specific agent DM. */
+  focusConversationId?: string | null;
   /** Whose perspective is this view rendered from? Used to right-
    *  align messages where sender_id === currentUserId. Defaulted
    *  to "admin" for backwards compat with v1 single-user mock,
@@ -48,8 +55,15 @@ export interface ChatViewProps {
 // (was a local relTime() — moved to ../utils/time, audit M3)
 
 export function ChatView({
-  conversations, messagesByConv, onSend, currentUserId = "admin",
+  conversations,
+  messagesByConv,
+  summariesByConv,
+  onSend,
+  onConversationSelect,
+  focusConversationId,
+  currentUserId = "admin",
 }: ChatViewProps) {
+  const [summariesOpen, setSummariesOpen] = useState(true);
   const sorted = useMemo(
     () => conversations.slice().sort(
       (a, b) => b.last_at.localeCompare(a.last_at),
@@ -62,11 +76,31 @@ export function ChatView({
   );
   const selected = sorted.find((c) => c.id === selectedId) ?? null;
   const messages = selectedId ? messagesByConv[selectedId] ?? [] : [];
+  const summaries = selectedId ? summariesByConv?.[selectedId] ?? [] : [];
 
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const toast = useToast();
+
+  useEffect(() => {
+    if (
+      focusConversationId &&
+      conversations.some((c) => c.id === focusConversationId)
+    ) {
+      setSelectedId(focusConversationId);
+    }
+  }, [focusConversationId, conversations]);
+
+  useEffect(() => {
+    if (!selectedId || !conversations.some((c) => c.id === selectedId)) {
+      setSelectedId(sorted[0]?.id ?? null);
+    }
+  }, [selectedId, conversations, sorted]);
+
+  useEffect(() => {
+    if (selectedId) void onConversationSelect?.(selectedId);
+  }, [selectedId, onConversationSelect]);
 
   // Auto-scroll to the bottom when messages change or conversation
   // switches. Behaviour matches every chat app users know.
@@ -185,6 +219,52 @@ export function ChatView({
                 padding: "16px 32px",
               }}
             >
+              {summaries.length > 0 && (
+                <div
+                  style={{
+                    marginBottom: 16,
+                    border: "1px solid var(--color-border-tertiary)",
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                  }}
+                >
+                  <button
+                    onClick={() => setSummariesOpen((o) => !o)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      font: "inherit",
+                      fontWeight: 600,
+                      fontSize: 13,
+                      color: "var(--color-text-primary)",
+                      padding: 0,
+                    }}
+                  >
+                    📜 对话摘要 ({summaries.length}) {summariesOpen ? "▾" : "▸"}
+                  </button>
+                  {summariesOpen &&
+                    summaries.map((s, i) => (
+                      <div
+                        key={`${s.transcript_sha256}-${i}`}
+                        style={{ marginTop: 8, fontSize: 13, lineHeight: 1.5 }}
+                      >
+                        <div style={{ whiteSpace: "pre-wrap" }}>{s.summary_text}</div>
+                        <div
+                          style={{
+                            fontSize: 11,
+                            marginTop: 4,
+                            color: "var(--color-text-secondary)",
+                          }}
+                        >
+                          {s.verified ? "✓ 已验签" : `⚠️ 未验签(${s.reason})`} · 概括{" "}
+                          {s.covered_message_ids.length} 条 · signer{" "}
+                          {s.agent_did.slice(0, 14)}…
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
               {messages.length === 0 ? (
                 <div className="main-empty" style={{ minHeight: 200 }}>
                   <div className="main-empty-icon">
@@ -238,6 +318,7 @@ export function ChatView({
                           <span>{relativeTimeShort(m.created_at)}</span>
                         </div>
                         <p
+                          aria-live={m.body === "Agent is thinking..." ? "polite" : undefined}
                           style={{
                             margin: 0,
                             fontSize: 13,

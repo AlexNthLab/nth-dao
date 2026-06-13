@@ -26,6 +26,7 @@ import type {
   CapTokenSummary,
   ChatMessage,
   Conversation,
+  ConversationSummary,
   Decision,
   IdentityHeader,
   MissionSummary,
@@ -44,6 +45,48 @@ const BASE = "/api/v2";
  *  hardened (auth-on) deployment; in the local default (auth off)
  *  the server ignores it. Returns ``{}`` when no token is present
  *  so callers can spread it unconditionally. */
+/** 温层(切片2b):请求服务端把一段对话压成**签名摘要**(后端 make+verify)。
+ *  not-yet-authorized 窗口内自动重试。前端不验签 —— verified 由后端给。 */
+export async function summarizeAgent(
+  did: string,
+  messages: ChatMessage[],
+  conversationId: string,
+  instruction?: string,
+  tries = 20,
+): Promise<ConversationSummary> {
+  let last = "";
+  for (let i = 0; i < tries; i++) {
+    const res = await fetch(
+      `${BASE}/agents/${encodeURIComponent(did)}/summarize`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...authHeader(),
+        },
+        body: JSON.stringify({
+          messages,
+          conversation_id: conversationId,
+          ...(instruction ? { instruction } : {}),
+        }),
+      },
+    );
+    if (res.ok) {
+      const rec = (await res.json()) as ConversationSummary;
+      return { ...rec, created_at: new Date().toISOString() };
+    }
+    last = await res.text();
+    if (last.includes("not-yet-authorized")) {
+      await new Promise((r) => setTimeout(r, 600));
+      continue;
+    }
+    throw new Error(`summarize → HTTP ${res.status}: ${last.slice(0, 160)}`);
+  }
+  throw new Error(`summarize: agent 未就绪 (${last.slice(0, 80)})`);
+}
+
 function authHeader(): Record<string, string> {
   if (typeof window === "undefined") return {};
   const tok = (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })

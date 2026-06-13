@@ -27,9 +27,10 @@ import {
   a2aEchoApi, askAgentStream, fetchAgents, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, pingAgentApi, probeHub,
-  resolveDecisionApi,
+  resolveDecisionApi, summarizeAgent,
 } from "./api";
 import { loadChat, saveChat } from "./chatStore";
+import { loadSummaries, appendSummary } from "./summaryStore";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
 import { ChatView } from "./components/ChatView";
@@ -52,6 +53,7 @@ import type {
   ChatMessage,
   CommandItem,
   Conversation,
+  ConversationSummary,
   Decision,
   IdentityHeader,
   MissionSummary,
@@ -602,6 +604,42 @@ function AppInner() {
     saveChat(chatMessages, chatSelectedId);
   }, [chatMessages, chatSelectedId]);
 
+  /* 切片2b:温层签名摘要。热窗口累积超阈值时,自动让该会话的 agent 把**尚未
+   * 被概括**的较老消息(除最近 KEEP_RECENT 外)压成一条**签名摘要**(后端
+   * /summarize:make+verify),存进温层。原文留在热层供展开,过 TTL 自然蒸发。 */
+  const [summaries, setSummaries] = useState<Record<string, ConversationSummary[]>>(
+    () => loadSummaries(),
+  );
+  const summarizingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const convId = chatSelectedId;
+    if (!convId) return;
+    const THRESHOLD = 12, KEEP_RECENT = 6, MIN_CHUNK = 4;
+    const msgs = chatMessages[convId] ?? [];
+    if (msgs.length < THRESHOLD || summarizingRef.current.has(convId)) return;
+    const agent = pickAgentForConv(chatConversations.find((c) => c.id === convId));
+    if (!agent) return;
+    const covered = new Set(
+      (summaries[convId] ?? []).flatMap((s) => s.covered_message_ids),
+    );
+    const candidate = msgs
+      .slice(0, msgs.length - KEEP_RECENT)
+      .filter((m) => !covered.has(m.message_id) && m.sender_id !== "system");
+    if (candidate.length < MIN_CHUNK) return;
+    summarizingRef.current.add(convId);
+    void (async () => {
+      try {
+        const rec = await summarizeAgent(agent.did, candidate, convId);
+        setSummaries((prev) => appendSummary(prev, convId, rec));
+      } catch {
+        /* 摘要失败不打扰用户;下次阈值再试 */
+      } finally {
+        summarizingRef.current.delete(convId);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatMessages, chatSelectedId, summaries, chatConversations, agents]);
+
   async function handleChatSend(convId: string, body: string) {
     const msg: ChatMessage = {
       message_id: `m-local-${Date.now()}`,
@@ -849,6 +887,7 @@ function AppInner() {
   } else if (active === "chat") {
     view = (
       <ChatView
+        summariesByConv={summaries}
         conversations={chatConversations}
         messagesByConv={chatMessages}
         onSend={handleChatSend}

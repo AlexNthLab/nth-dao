@@ -247,6 +247,22 @@ export interface ChatMessage {
   nth_receipt_id?: string;
 }
 
+/** 温层:一条签名对话摘要(后端 /summarize 产出 + 验签)。前端只展示,
+ *  不自己验签(JS 做不了加密);verified 由后端给。 */
+export interface ConversationSummary {
+  conversation_id: string;
+  covered_message_ids: string[];
+  transcript_sha256: string;
+  summary_text: string;
+  agent_did: string;
+  instruction: string;
+  verified: boolean;
+  reason: string;
+  receipt?: Record<string, unknown> | null;
+  /** 前端产出时间(后端不返,前端补)。 */
+  created_at: string;
+}
+
 /** Conversation summary — what the sidebar of the Chat view
  *  shows. A conversation is either a channel inside a DAO, or a
  *  direct line with a helper agent. */
