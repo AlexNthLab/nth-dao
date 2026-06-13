@@ -49,7 +49,37 @@ def _node(agent, cap, response):
 def test_canonical_transcript_deterministic() -> None:
     t1 = canonical_transcript(MSGS)
     t2 = canonical_transcript(MSGS)
-    assert t1 == t2 and "you: 天空为什么是蓝的?" in t1
+    assert t1 == t2 and "[1] you: 天空为什么是蓝的?" in t1
+
+
+def test_transcript_injective_no_newline_collision() -> None:
+    """审查A 回归:一条含换行的消息**不能**冒充成两条 → 转录必须不同,
+    否则签给 A 的摘要会验过伪造的 B。"""
+    a = [{"message_id": "1", "sender_label": "you", "body": "hello\nyou: world"}]
+    b = [
+        {"message_id": "1", "sender_label": "you", "body": "hello"},
+        {"message_id": "2", "sender_label": "you", "body": "world"},
+    ]
+    assert canonical_transcript(a) != canonical_transcript(b)
+    # 顺带:改 message_id 也改变转录(id 进了签名锚)
+    c = [dict(MSGS[0], message_id="99"), *MSGS[1:]]
+    assert canonical_transcript(c) != canonical_transcript(MSGS)
+
+
+def test_summary_does_not_verify_for_collision_set() -> None:
+    """端到端:对带换行的单条消息签摘要,拿"看似等价"的两条来验 → 拒。"""
+    agent = AgentIdentity.generate()
+    cap = sign_cap_token(issuer=AgentIdentity.generate(), subject_did=agent.as_did(),
+                         capabilities=[CAP_NTH_RECEIPT_SIGN])
+    single = [{"message_id": "1", "sender_label": "you", "body": "a\nyou: b"}]
+    rec = make_summary(_node(agent, cap, SUMMARY), agent.as_did(), single)
+    forged = [
+        {"message_id": "1", "sender_label": "you", "body": "a"},
+        {"message_id": "x", "sender_label": "you", "body": "b"},
+    ]
+    ok, why = verify_summary(rec.receipt, summary_text=rec.summary_text,
+                             messages=forged, expected_signer=agent.as_did())
+    assert not ok and why == "request-not-bound"
 
 
 def test_make_summary_signed_and_verifiable() -> None:

@@ -33,17 +33,28 @@ def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def canonical_transcript(messages: List[Dict[str, Any]]) -> str:
-    """把消息列表规范化成**确定性**转录(摘要 prompt 的主体)。
+def _esc(s: str) -> str:
+    # 转义反斜杠与换行 —— 这样 body/who 里的换行不能伪造"换行=分条",
+    # 保证「行数 == 消息数」。
+    return s.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
 
-    确定性是可验性的前提:make 和 verify 必须从同一批消息得到同一字符串,
-    才能让 receipt 的 request_sha256 对得上。形如每行 ``<who>: <body>``。
+
+def canonical_transcript(messages: List[Dict[str, Any]]) -> str:
+    """把消息列表规范化成**确定性且单射**的转录(= 摘要 prompt 主体 = 哈希锚)。
+
+    单射是可验性的命根:不同的消息集必须得到不同的转录,否则签给对话 A 的
+    摘要会"验过"伪造的对话 B(审查 A)。两道:
+      1. 每条带 ``[message_id]`` 前缀 —— 把 id 也钉进签名锚,顺带让
+         covered_message_ids 受约束;
+      2. body/who 的换行/反斜杠转义 —— 一条含换行的消息不能冒充成多条
+         (旧版 ``who: body\n`` 拼接正是在这里碰撞)。
     """
     lines = []
     for m in messages:
-        who = str(m.get("sender_label") or m.get("sender_id") or "?")
-        body = str(m.get("body") or "")
-        lines.append(f"{who}: {body}")
+        mid = _esc(str(m.get("message_id", "")))
+        who = _esc(str(m.get("sender_id") or m.get("sender_label") or "?"))
+        body = _esc(str(m.get("body") or ""))
+        lines.append(f"[{mid}] {who}: {body}")
     return "\n".join(lines)
 
 
