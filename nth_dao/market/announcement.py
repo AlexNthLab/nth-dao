@@ -72,6 +72,13 @@ class TaskAnnouncement:
     reward_asset: str = "credit"
     # —— 关联维度（约束 B）——
     mission_id: str = ""
+    # —— 发布方侧准入策略（M5，约束 D 的对称面）——
+    # 对称于订阅的 ``publisher_trust_floor``：订阅方按信誉过滤发布方,
+    # 发布方按信誉门槛过滤认领方。空 dict = 不设门槛 = 无许可认领
+    # （保持 M4 permissionless 默认）。门槛字段对 ReputationProfile 的
+    # 可解释维度，如 ``{"min_claims_count": 3, "min_distinct_publishers": 2}``。
+    # 由认领权威（主 DAO）在 claim 时按自己计算的 claimant 信誉判定。
+    claimant_policy: Dict[str, Any] = field(default_factory=dict)
     # —— 描述（自由文本，不参与匹配，仅供人/Agent 阅读）——
     description: str = ""
     # —— 时效 ——
@@ -115,6 +122,7 @@ def sign_announcement(
     reward_minor: int = 0,
     reward_asset: str = "credit",
     mission_id: str = "",
+    claimant_policy: Optional[Dict[str, Any]] = None,
     description: str = "",
     not_after: int = 0,
     announcement_id: str = "",
@@ -169,6 +177,7 @@ def sign_announcement(
         reward_minor=reward_minor,
         reward_asset=reward_asset,
         mission_id=mission_id,
+        claimant_policy=dict(claimant_policy or {}),
         description=description,
         published_at_ms=published_at_ms or now_ms(),
         not_after=not_after,

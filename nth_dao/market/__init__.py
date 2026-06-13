@@ -11,7 +11,8 @@ credits），而是在其旁边补齐"主动市场"缺的部分：
   M2 ✅  能力∩兴趣订阅过滤 —— 修 C2/C3
   M3 ✅  原子认领 + cap_token + receipt —— 修 C4 + 签名
   M4 ✅  跨 DAO 联邦（FeedDigest + 按需拉全文，无中心索引）
-  M5 ⏳  Mission 关联 + 可解释信誉
+  M5 ✅  Mission 关联（mission_progress）+ 可解释信誉（ReputationProfile,
+         无全局单分）+ 发布方侧 claimant 准入门槛
 
 暴露（按里程碑）：
   M1  TaskAnnouncement / sign_announcement / verify_announcement /
@@ -71,7 +72,18 @@ from nth_dao.market.claim import (
     REJECT_CAP_TOKEN_INVALID,
     REJECT_SUBJECT_MISMATCH,
     REJECT_SKILL_INSUFFICIENT,
+    REJECT_CLAIMANT_BELOW_POLICY,
+    REJECT_CLAIMANT_REP_MISSING,
     CLAIM_STATUS_CLAIMED,
+)
+from nth_dao.market.reputation import (
+    ReputationProfile,
+    compute_reputation,
+)
+from nth_dao.market.mission_link import (
+    MissionProgress,
+    MissionClaim,
+    mission_progress,
 )
 
 __all__ = [
@@ -123,4 +135,12 @@ __all__ = [
     "REJECT_DIGEST_SIG_INVALID",
     "REJECT_DIGEST_SIG_DECODE_FAILED",
     "REJECT_DIGEST_CRYPTO_UNAVAILABLE",
+    # M5 reputation + mission link + claimant gating
+    "ReputationProfile",
+    "compute_reputation",
+    "MissionProgress",
+    "MissionClaim",
+    "mission_progress",
+    "REJECT_CLAIMANT_BELOW_POLICY",
+    "REJECT_CLAIMANT_REP_MISSING",
 ]

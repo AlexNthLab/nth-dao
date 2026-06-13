@@ -60,6 +60,8 @@ REJECT_ANN_EXPIRED = "announcement-expired"
 REJECT_CAP_TOKEN_INVALID = "cap-token-invalid"        # 携带底层 reason（crypto/时效/撤销）
 REJECT_SUBJECT_MISMATCH = "cap-token-subject-mismatch"
 REJECT_SKILL_INSUFFICIENT = "skill-insufficient"      # token 未授予公告所需技能
+REJECT_CLAIMANT_BELOW_POLICY = "claimant-below-policy"  # 信誉不满足发布方门槛
+REJECT_CLAIMANT_REP_MISSING = "claimant-reputation-missing"  # 有门槛但没给信誉
 
 CLAIM_STATUS_CLAIMED = "claimed"
 
@@ -124,6 +126,18 @@ class ClaimStore:
         rec = self.get(announcement_id)
         return bool(rec) and rec.get("status") == CLAIM_STATUS_CLAIMED
 
+    def all_records(self) -> List[Dict[str, Any]]:
+        """枚举本 store 的全部 claim 记录（M5：信誉聚合 + mission 进度用）。
+
+        损坏/无法解析的文件静默略过。顺序不保证。
+        """
+        out: List[Dict[str, Any]] = []
+        for p in self.root.glob("*.json"):
+            rec = safe_load_json(p, fallback=None)
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+
 
 def claim_announcement(
     feed: "Any",  # MarketFeed
@@ -133,6 +147,7 @@ def claim_announcement(
     claimant: "Any",  # AgentIdentity，必须 can_sign
     cap_token: Dict[str, Any],
     revoked_ids: Optional[set] = None,
+    claimant_reputation: "Any" = None,  # M5: ReputationProfile（仅当公告设了 claimant_policy 才需要）
     now_ms_override: int = 0,
 ) -> ClaimOutcome:
     """原子认领一条公告。
@@ -195,6 +210,22 @@ def claim_announcement(
             f"announcement needs {sorted(need_skills)}, "
             f"token grants {sorted(have_skills)}",
         )
+
+    # ── M5: 发布方侧 claimant 准入门槛（约束 D 的对称面）──
+    # 公告的 claimant_policy 非空时，认领权威按自己计算的 claimant 信誉
+    # 判定是否达标。空 policy = 无许可（保持 M4 permissionless 默认）。
+    # 有门槛但调用方没给信誉 → fail-closed（无法核验即拒）。
+    policy = ann.claimant_policy or {}
+    if policy:
+        if claimant_reputation is None:
+            raise ClaimRejected(
+                REJECT_CLAIMANT_REP_MISSING,
+                f"announcement sets claimant_policy {policy} but no "
+                "claimant_reputation was supplied to verify against",
+            )
+        ok_rep, rep_reason = claimant_reputation.meets(policy)
+        if not ok_rep:
+            raise ClaimRejected(REJECT_CLAIMANT_BELOW_POLICY, rep_reason)
 
     # ── 3+4. CAS + 签收据 + 落盘（锁内一次完成）──
     path = claim_store._path(announcement_id)
