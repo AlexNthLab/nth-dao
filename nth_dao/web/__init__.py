@@ -2463,26 +2463,38 @@ def create_app(
         # to register — the v1 dashboard still works.
         logger.warning("v2 api routes could not register: %s", exc)
 
+    def _html_shell(content: str, status: int = 200) -> HTMLResponse:
+        # 修复(2026-06-14)：HTML 外壳必须 **no-cache**。它引用 content-hash
+        # 的 bundle(v2-<hash>.js);浏览器若缓存了 HTML,即使重新 build 出新
+        # bundle,也会一直加载旧 HTML→旧 bundle引用→**旧版页面**(用户报告
+        # "本地节点启动的 UI 往往是旧版")。hashed 的 /assets 仍可长缓存
+        # (文件名随内容变,旧名不会被复用)。
+        return HTMLResponse(
+            content,
+            status_code=status,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
     @app.get("/", response_class=HTMLResponse, response_model=None)
     def index():
         index_file = STATIC_DIR / "index.html"
         if index_file.exists():
-            return HTMLResponse(_render_console_html(index_file, app.state.nth_console_token))
-        return HTMLResponse(_frontend_missing_html(), status_code=503)
+            return _html_shell(_render_console_html(index_file, app.state.nth_console_token))
+        return _html_shell(_frontend_missing_html(), 503)
 
     @app.get("/v2", response_class=HTMLResponse, response_model=None)
     @app.get("/v2.html", response_class=HTMLResponse, response_model=None)
     def console_v2():
         # v2 控制台（agents 目录 / spawn / 任务流式输出）入口。
-        # 修复（2026-06-13）：之前 catch-all 把所有非 /api 路径都返回
-        # index.html(v1)，导致 v2 控制台**完全无法访问** —— 这正是
-        # "UI 里看不到 AGENT / 任务流" 的根因（用户一直在看 v1 控制台）。
         v2_file = STATIC_DIR / "v2.html"
         if v2_file.exists():
-            return HTMLResponse(
-                _render_console_html(v2_file, app.state.nth_console_token)
-            )
-        return HTMLResponse(_frontend_missing_html(), status_code=503)
+            return _html_shell(
+                _render_console_html(v2_file, app.state.nth_console_token))
+        return _html_shell(_frontend_missing_html(), 503)
 
     @app.get("/{path:path}", include_in_schema=False, response_model=None)
     def frontend_fallback(path: str):
@@ -2492,12 +2504,11 @@ def create_app(
         if path == "v2" or path == "v2.html" or path.startswith("v2/"):
             v2_file = STATIC_DIR / "v2.html"
             if v2_file.exists():
-                return HTMLResponse(
-                    _render_console_html(v2_file, app.state.nth_console_token)
-                )
+                return _html_shell(
+                    _render_console_html(v2_file, app.state.nth_console_token))
         index_file = STATIC_DIR / "index.html"
         if index_file.exists():
-            return HTMLResponse(_render_console_html(index_file, app.state.nth_console_token))
+            return _html_shell(_render_console_html(index_file, app.state.nth_console_token))
         return JSONResponse(
             {"detail": "frontend assets are not built; run npm --prefix frontend run build"},
             status_code=503,

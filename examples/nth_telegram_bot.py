@@ -744,6 +744,25 @@ async def post_init(application):
 
 
 def main():
+    # ─────────────────────────────────────────────────────────────────────
+    # 已禁用(2026-06-14,产品方向决策)。
+    #
+    # 这个老 bot 把 NTH DAO runtime 当作"一个大模型的传话筒"直接对外应答 ——
+    # 它**自己就是个 agent**。但 NTH DAO 的定位是 **agent 沟通协调的底座**,
+    # 我们**不**自建 agent。一个会自己回话的"NTH DAO bot"与这个定位冲突,
+    # 还会让用户误以为平台在提供 agent。所以禁止运行。
+    #
+    # Telegram 的正确接入是 **A2A 桥**:把用户消息**路由到用户自己的 agent**
+    # (经 /a2a/ask + 签名校验),平台只做传输,不替 agent 说话。用:
+    #     python -m nth_dao.integrations.telegram_bridge
+    # 见 nth_dao/integrations/telegram_bridge.py。
+    #
+    # (import 仍无副作用 —— 守卫只在 run 路径,test_v097_telegram_bot_import
+    #  不受影响。)
+    raise SystemExit(
+        "nth_telegram_bot 已停用:NTH DAO 是 agent 协调底座,不自建会回话的 bot。\n"
+        "请改用 A2A 桥(路由到你自己的 agent,带签名校验):\n"
+        "    python -m nth_dao.integrations.telegram_bridge")
     _validate_env()
     try:
         from telegram.ext import Application, CommandHandler, MessageHandler, filters
