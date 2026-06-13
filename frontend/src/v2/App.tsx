@@ -542,20 +542,41 @@ function AppInner() {
     // a2a_port)的 DM,就真去 ask 它,把流式回复写进会话;否则(频道/无
     // 可驱动 agent)保持旧的本地行为。这才让"发消息→有回复"成立。
     const conv = conversations.find((c) => c.id === convId);
-    const agent =
-      conv && conv.kind === "dm" && conv.participant_dids
-        ? agents.find(
-            (a) =>
-              conv.participant_dids!.includes(a.did) &&
-              a.did !== MOCK_IDENTITY.did &&
-              a.supervised &&
-              a.alive &&
-              typeof a.a2a_port === "number",
-          )
-        : undefined;
-    if (!agent) return;
+    const isDm = !!(conv && conv.kind === "dm" && conv.participant_dids);
+    const agent = isDm
+      ? agents.find(
+          (a) =>
+            conv!.participant_dids!.includes(a.did) &&
+            a.did !== MOCK_IDENTITY.did &&
+            a.supervised &&
+            a.alive &&
+            typeof a.a2a_port === "number",
+        )
+      : undefined;
+    if (!agent) {
+      // 审查修复(2026-06-13):DM 但 agent 不可驱动(离线/无 a2a_port)时
+      // **别静默** —— 给一条系统消息,否则又退回"发消息无回复"的困惑。
+      // 频道(channel)无 agent 可回是预期,保持本地行为。
+      if (isDm) {
+        setChatMessages((prev) => ({
+          ...prev,
+          [convId]: [
+            ...(prev[convId] ?? []),
+            {
+              message_id: `m-sys-${Date.now()}`,
+              sender_id: "system",
+              sender_label: "system",
+              body: "⚠️ 该 agent 当前不在线或不可驱动(需 supervised + alive + a2a_port),无法回复。",
+              created_at: new Date().toISOString(),
+            },
+          ],
+        }));
+      }
+      return;
+    }
 
-    const replyId = `m-agent-${Date.now()}`;
+    // 随机后缀防同毫秒双发撞 id(审查修复 C)。
+    const replyId = `m-agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     let acc = "";
     setChatMessages((prev) => ({
       ...prev,
