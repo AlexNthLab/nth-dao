@@ -54,6 +54,27 @@ def test_unknown_deep_link_falls_back_to_v2(tmp_path: Path) -> None:
     assert _is_v2(r.text)
 
 
+def test_favicon_svg_served_not_swallowed_by_spa(tmp_path: Path) -> None:
+    # 根级静态资源(logo / favicon)必须以 svg 返回,而不能被 SPA 回退成
+    # HTML——否则浏览器页签图标拿到的是网页。
+    r = _client(tmp_path).get("/nth-mark.svg")
+    assert r.status_code == 200
+    assert "image/svg+xml" in r.headers.get("content-type", "")
+    assert "<svg" in r.text and "</svg>" in r.text
+
+
+def test_console_html_links_favicon(tmp_path: Path) -> None:
+    r = _client(tmp_path).get("/")
+    assert 'rel="icon"' in r.text and "/nth-mark.svg" in r.text
+
+
+def test_static_root_path_traversal_guarded(tmp_path: Path) -> None:
+    # 白名单后缀 + 禁子路径:不该把任意文件当根级资源吐出去。
+    r = _client(tmp_path).get("/secret.json")
+    # .json 不在白名单 → 落 SPA 回退(HTML 200),而非文件。
+    assert "<svg" not in r.text
+
+
 def test_v1_still_reachable_but_demoted(tmp_path: Path) -> None:
     # 旧版功能不删除,显式 `/v1` 仍可访问。
     c = _client(tmp_path)

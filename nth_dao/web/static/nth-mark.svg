@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="192 188 640 640" width="640" height="640" role="img" aria-label="Nth DAO">
+  <!-- Nᵗʰ DAO 标记:手绘 A 形,三段笔刷描边。背景透明,仅线条着色。
+       favicon 用:随系统浅/深色自适应(浅→黑线,深→白线)。 -->
+  <style>
+    .nth-stroke { stroke: #0a0a0b; }
+    @media (prefers-color-scheme: dark) { .nth-stroke { stroke: #f5f5f7; } }
+  </style>
+  <g class="nth-stroke" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M252 479 Q514 531 772 621" stroke-width="36"/>
+    <path d="M449 319 Q439 491 402 759" stroke-width="28"/>
+    <path d="M552 266 Q604 421 654 581" stroke-width="44"/>
+  </g>
+</svg>

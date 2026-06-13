@@ -7,6 +7,7 @@
  * passively.
  */
 
+import { BrandLogo } from "./BrandLogo";
 import { BrandMark } from "./BrandMark";
 import type { IdentityHeader } from "../types-v2";
 
@@ -19,7 +20,7 @@ export function Topbar({ identity, onCmdK }: TopbarProps) {
   return (
     <header className="topbar">
       <div className="topbar-brand">
-        <div className="topbar-logo">N</div>
+        <BrandLogo size={24} className="topbar-logo-mark" />
         <BrandMark />
       </div>
 
