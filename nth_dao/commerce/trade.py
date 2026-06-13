@@ -410,12 +410,21 @@ def open_trade(
         "claim_receipt_id": str(claim_record.get("receipt_id", "")),
     }
     if terms is not None:
-        # payee 默认 claimant（干活的人收钱）。金额/币种留给 verify_settlement
-        # 全量校验；这里只规整结构。
+        # 快失败：terms 一旦给出就必须是良构的（正整数金额 + 非空币种），
+        # 否则别签进链。早先用 -1 哨兵兜底坏 terms，会让一笔诚实结算永远
+        # 过不了 verify_trade（amount != -1）—— 等于静默 brick 这笔 trade。
+        # 宁可在开局当场拒。payee 默认 claimant（干活的人收钱）。
         amt = terms.get("amount_minor")
+        if isinstance(amt, bool) or not isinstance(amt, int) or amt <= 0:
+            raise TradeRejected(
+                "bad-terms", f"terms.amount_minor 必须正整数，实际 {amt!r}"
+            )
+        cur = str(terms.get("currency", ""))
+        if not cur:
+            raise TradeRejected("bad-terms", "terms.currency 不能为空")
         payload["terms"] = {
-            "amount_minor": amt if isinstance(amt, int) and not isinstance(amt, bool) else -1,
-            "currency": str(terms.get("currency", "")),
+            "amount_minor": amt,
+            "currency": cur,
             "payee_did": str(terms.get("payee_did", "")) or claimant_did,
         }
     return _append_event(

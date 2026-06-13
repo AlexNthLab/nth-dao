@@ -39,6 +39,8 @@ REJECT_CLAIM_SIGNER_MISMATCH = "binding-claim-signer-mismatch"
 REJECT_CLAIMANT_MISMATCH = "binding-claimant-mismatch"
 REJECT_CLAIM_ANN_MISMATCH = "binding-claim-announcement-mismatch"
 REJECT_CLAIM_RECEIPT_ID_MISMATCH = "binding-claim-receipt-id-mismatch"
+REJECT_TERMS_REWARD_MISMATCH = "binding-terms-reward-mismatch"
+REJECT_TERMS_ASSET_MISMATCH = "binding-terms-asset-mismatch"
 
 
 def _claimed_payload(receipt: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,5 +124,20 @@ def verify_trade_binding(
     # 8. opened 指向的 claim_receipt_id 对得上
     if str(op.get("claim_receipt_id", "")) != str(claim_record.get("receipt_id", "")):
         return False, REJECT_CLAIM_RECEIPT_ID_MISMATCH
+
+    # 9. CS4：若 trade 签了 terms（约定结算条款），必须等于公告承诺的
+    #    reward。verify_trade 只能用 terms 核对 settlement，但 terms 是
+    #    **开局方**（authority/publisher）签的 —— 若不回锚到 claimant 真正
+    #    认领的那条公告 reward，恶意 publisher 可把 terms 压成 1（公告
+    #    reward=1000），verify_trade 照样判合格、claimant 被白嫖。这一刀
+    #    把 terms 钉死在签名公告的 reward 上，真正端到端闭合白嫖。
+    terms = op.get("terms")
+    if isinstance(terms, dict):
+        t_amt = terms.get("amount_minor")
+        if (isinstance(t_amt, bool) or not isinstance(t_amt, int)
+                or t_amt != announcement.reward_minor):
+            return False, REJECT_TERMS_REWARD_MISMATCH
+        if str(terms.get("currency", "")) != str(announcement.reward_asset):
+            return False, REJECT_TERMS_ASSET_MISMATCH
 
     return True, ""

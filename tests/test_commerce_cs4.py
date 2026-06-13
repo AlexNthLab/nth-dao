@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import pytest
 
+from nth_dao.cap_token import sign_cap_token, CAP_NTH_RECEIPT_SIGN
 from nth_dao.identity import AgentIdentity
+from nth_dao.market import (
+    MarketFeed, ClaimStore, claim_announcement, sign_announcement,
+)
 from nth_dao.commerce import (
     TradeStore,
     open_trade,
@@ -23,6 +27,8 @@ from nth_dao.commerce import (
     record_verification,
     trade_state,
     verify_trade,
+    verify_trade_binding,
+    TradeRejected,
     STATE_VERIFIED,
     STATE_SETTLED,
     VERDICT_PASS,
@@ -328,6 +334,85 @@ def test_terms_honest_settlement_passes_verify_trade(tmp_path) -> None:
                  adapter=X402SettlementAdapter(FakePaymentRail()), intent=intent)
     ok, reason = verify_trade(store, "ann-h")
     assert ok, reason
+
+
+# ─── 二轮审查修复：terms 必须钉死在签名公告 reward 上 ──────────
+
+
+def _real_claim(tmp_path, *, reward_minor=1000, reward_asset="USDC"):
+    """造一条真实市场链（公告 publisher 签 + 认领 claimant 签）。"""
+    feed = MarketFeed(tmp_path)
+    cstore = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="issuer")
+    publisher = AgentIdentity.generate(label="publisher")
+    worker = AgentIdentity.generate(label="worker")
+    ann = sign_announcement(
+        publisher=publisher, title="do work",
+        capability_set=["test_execution"], reward_minor=reward_minor,
+        reward_asset=reward_asset,
+    )
+    feed.publish(ann)
+    out = claim_announcement(
+        feed, cstore, ann.announcement_id, claimant=worker,
+        cap_token=sign_cap_token(issuer=issuer, subject_did=worker.as_did(),
+                                 capabilities=["test_execution", CAP_NTH_RECEIPT_SIGN]))
+    return {"publisher": publisher, "worker": worker, "ann": ann,
+            "claim_record": out.claim_record}
+
+
+def test_binding_passes_when_terms_match_announcement_reward(tmp_path) -> None:
+    s = _real_claim(tmp_path, reward_minor=1000, reward_asset="USDC")
+    tstore = TradeStore(tmp_path)
+    open_trade(tstore, authority=s["publisher"], claim_record=s["claim_record"],
+               terms={"amount_minor": 1000, "currency": "USDC"})
+    events = tstore.get_events(s["ann"].announcement_id)
+    ok, reason = verify_trade_binding(events, announcement=s["ann"],
+                                      claim_record=s["claim_record"])
+    assert ok, reason
+
+
+def test_binding_catches_opener_underpay_terms(tmp_path) -> None:
+    """恶意开局方把 terms 压成 1（公告 reward=1000）—— verify_trade 会被
+    骗过（terms 自洽），但 verify_trade_binding 把 terms 钉死在签名公告
+    reward 上，识破（terms-reward-mismatch）。这才端到端闭合白嫖。"""
+    from nth_dao.commerce.binding import REJECT_TERMS_REWARD_MISMATCH
+    s = _real_claim(tmp_path, reward_minor=1000, reward_asset="USDC")
+    tstore = TradeStore(tmp_path)
+    open_trade(tstore, authority=s["publisher"], claim_record=s["claim_record"],
+               terms={"amount_minor": 1, "currency": "USDC"})  # 压价
+    events = tstore.get_events(s["ann"].announcement_id)
+    ok, reason = verify_trade_binding(events, announcement=s["ann"],
+                                      claim_record=s["claim_record"])
+    assert not ok and reason == REJECT_TERMS_REWARD_MISMATCH
+
+
+def test_binding_catches_terms_asset_swap(tmp_path) -> None:
+    """terms 币种与公告 reward_asset 不符（公告 USDC、terms NTH-TEST）→ 拒。"""
+    from nth_dao.commerce.binding import REJECT_TERMS_ASSET_MISMATCH
+    s = _real_claim(tmp_path, reward_minor=1000, reward_asset="USDC")
+    tstore = TradeStore(tmp_path)
+    open_trade(tstore, authority=s["publisher"], claim_record=s["claim_record"],
+               terms={"amount_minor": 1000, "currency": "NTH-TEST"})
+    events = tstore.get_events(s["ann"].announcement_id)
+    ok, reason = verify_trade_binding(events, announcement=s["ann"],
+                                      claim_record=s["claim_record"])
+    assert not ok and reason == REJECT_TERMS_ASSET_MISMATCH
+
+
+def test_open_trade_rejects_malformed_terms(tmp_path) -> None:
+    """terms 给了但畸形（空/零/负/bool 金额、空币种）→ 开局当场拒，
+    不签进链（防 -1 哨兵静默 brick 这笔 trade）。"""
+    store = TradeStore(tmp_path)
+    pub = AgentIdentity.generate(label="pub")
+    claimant = AgentIdentity.generate(label="worker")
+    for bad in ({}, {"amount_minor": 0, "currency": "USDC"},
+                {"amount_minor": -5, "currency": "USDC"},
+                {"amount_minor": True, "currency": "USDC"},
+                {"amount_minor": 10, "currency": ""}):
+        with pytest.raises(TradeRejected):
+            open_trade(store, authority=pub,
+                       claim_record=_claim("ann-bad-" + str(id(bad)), claimant, pub),
+                       terms=bad)
 
 
 # ─── 审查修复 B：settle_trade 付款前预检（防双付）──────────────
