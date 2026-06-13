@@ -21,7 +21,7 @@
  * module is the only file that needs to flip.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   a2aEchoApi, askAgentStream, fetchAgents, fetchCapTokens,
@@ -29,6 +29,7 @@ import {
   fetchProcesses, fetchReceipts, pingAgentApi, probeHub,
   resolveDecisionApi,
 } from "./api";
+import { loadChat, saveChat } from "./chatStore";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
 import { ChatView } from "./components/ChatView";
@@ -107,8 +108,15 @@ function AppInner() {
   // Chat state — local-only for v1; flips to /api/messages on
   // backend integration. The shape (Record<convId, Message[]>)
   // matches the mock seed so the swap is a one-liner.
+  /* 切片1(2026-06-14):chatMessages 从热层(localStorage)水合 —— 持久的
+   * 本地消息覆盖 mock 种子,使刷新/导航后对话**不消失**。热层带 TTL,过期
+   * 蒸发,不签名/不联邦/无长期负担(见 chatStore + 对话方案)。 */
   const [chatMessages, setChatMessages] = useState<Record<string, ChatMessage[]>>(
-    mockChatMessages,
+    () => ({ ...mockChatMessages, ...loadChat().messages }),
+  );
+  /** 当前选中的会话(持久 + 刷新后恢复)。 */
+  const [chatSelectedId, setChatSelectedId] = useState<string | null>(
+    () => loadChat().selectedId,
   );
   /* Review fix C1 (2026-06-10): conversations was previously not
    * given a setter — the bootstrap fetched the list but had no way
@@ -140,6 +148,11 @@ function AppInner() {
    *  selected in the sidebar + detail rail. MissionList resets it
    *  back to null after consuming. */
   const [focusMissionId, setFocusMissionId] = useState<string | null>(null);
+  /* 切片1:初始 focus = 热层持久的选中会话,刷新后 ChatView 恢复到上次的
+   * 对话(而非每次回到第一个)。 */
+  const [focusChatConversationId, setFocusChatConversationId] =
+    useState<string | null>(() => loadChat().selectedId);
+  const loadedChatConversations = useRef(new Set<string>());
 
   // Toast hook (audit M14/M15) — used by the agent-directory
   // handlers, the LAN scan, rule transitions, and the keyboard
@@ -239,7 +252,19 @@ function AppInner() {
           if (first) {
             const msgs = await fetchMessages(first.id, ctrl.signal);
             if (!cancelled) {
-              setChatMessages((prev) => ({ ...prev, [first.id]: msgs }));
+              loadedChatConversations.current.add(first.id);
+              // 切片1:合并而非覆盖 —— 别把热层水合的本地消息冲掉。
+              setChatMessages((prev) => {
+                const local = prev[first.id] ?? [];
+                const ids = new Set(msgs.map((m) => m.message_id));
+                return {
+                  ...prev,
+                  [first.id]: [
+                    ...msgs,
+                    ...local.filter((m) => !ids.has(m.message_id)),
+                  ],
+                };
+              });
             }
           }
         } catch { /* swallow — mock messages stay */ }
@@ -523,6 +548,34 @@ function AppInner() {
     return dms.length ? [...conversations, ...dms] : conversations;
   }, [conversations, agents]);
 
+  const handleChatConversationSelect = useCallback(async (convId: string) => {
+    setChatSelectedId(convId); // 切片1:记住选中会话(持久),在 fetch 守卫之前
+    if (!hubReady || loadedChatConversations.current.has(convId)) return;
+    loadedChatConversations.current.add(convId);
+    try {
+      const messages = await fetchMessages(convId);
+      setChatMessages((prev) => {
+        const local = prev[convId] ?? [];
+        const serverIds = new Set(messages.map((message) => message.message_id));
+        return {
+          ...prev,
+          [convId]: [
+            ...messages,
+            ...local.filter((message) => !serverIds.has(message.message_id)),
+          ],
+        };
+      });
+    } catch (error) {
+      loadedChatConversations.current.delete(convId);
+      toast.push(
+        `Could not load this conversation: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "error",
+      );
+    }
+  }, [hubReady, toast]);
+
   /** 给一个会话挑一个可驱动 agent(supervised+alive+a2a_port):
    *  1) 优先会话 participants 里的;
    *  2) 兜底:全节点**恰好一个**可驱动 agent 时用它 —— 这样在**任何**会话
@@ -542,6 +595,12 @@ function AppInner() {
     }
     return drivable.length === 1 ? drivable[0] : null;
   }
+
+  /* 切片1:消息 / 选中会话一变就落盘到热层(localStorage)。带 TTL+截断,
+   * 详见 chatStore。这是消除"对话消失"的关键 —— 状态不再只活在内存。 */
+  useEffect(() => {
+    saveChat(chatMessages, chatSelectedId);
+  }, [chatMessages, chatSelectedId]);
 
   async function handleChatSend(convId: string, body: string) {
     const msg: ChatMessage = {
@@ -594,7 +653,7 @@ function AppInner() {
           message_id: replyId,
           sender_id: agent.did,
           sender_label: agent.label || "agent",
-          body: "…",
+          body: "Agent is thinking...",
           created_at: new Date().toISOString(),
         },
       ],
@@ -649,14 +708,8 @@ function AppInner() {
     );
   }
   function handleSendToAgent(did: string) {
-    // The Chat surface owns conversation selection; v1 just navigates
-    // and emits a toast hinting at next action. v1.x will pass the
-    // DID through so ChatView pre-creates / focuses the DM.
+    setFocusChatConversationId(`dm-${did}`);
     setActive("chat");
-    toast.push(
-      `Open Chat → DM ${did.slice(0, 16)}… to start the conversation.`,
-      "info",
-    );
   }
 
   /* ── rules handlers (audit fix C1 2026-06-10) ─────────────── */
@@ -799,6 +852,8 @@ function AppInner() {
         conversations={chatConversations}
         messagesByConv={chatMessages}
         onSend={handleChatSend}
+        onConversationSelect={handleChatConversationSelect}
+        focusConversationId={focusChatConversationId}
         currentUserId={MOCK_IDENTITY.agent_id}
       />
     );
