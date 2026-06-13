@@ -399,6 +399,68 @@ def test_binding_catches_terms_asset_swap(tmp_path) -> None:
     assert not ok and reason == REJECT_TERMS_ASSET_MISMATCH
 
 
+# ─── 三轮审查修复：payee 绑 claimant / terms 不可选规避 / credit ──
+
+
+def test_binding_catches_payee_redirect(tmp_path) -> None:
+    """开局方把 terms.payee 指到第三方（非 claimant）—— 钱不进 worker
+    口袋。verify_trade 只核对 settlement.payee==terms.payee（自洽）会被骗，
+    binding 把 payee 钉到真 claimant 上识破（terms-payee-mismatch）。"""
+    from nth_dao.commerce.binding import REJECT_TERMS_PAYEE_MISMATCH
+    s = _real_claim(tmp_path, reward_minor=1000, reward_asset="USDC")
+    attacker = AgentIdentity.generate(label="attacker")
+    tstore = TradeStore(tmp_path)
+    open_trade(tstore, authority=s["publisher"], claim_record=s["claim_record"],
+               terms={"amount_minor": 1000, "currency": "USDC",
+                      "payee_did": attacker.as_did()})  # 改收款方
+    events = tstore.get_events(s["ann"].announcement_id)
+    ok, reason = verify_trade_binding(events, announcement=s["ann"],
+                                      claim_record=s["claim_record"])
+    assert not ok and reason == REJECT_TERMS_PAYEE_MISMATCH
+
+
+def test_require_terms_blocks_paid_task_without_terms(tmp_path) -> None:
+    """有偿任务不签 terms 想规避金额约束 —— require_terms=True 时硬失败。
+    默认（require_terms=False）保留旧 provenance-only 语义不破坏 CS2。"""
+    from nth_dao.commerce.binding import REJECT_TERMS_REQUIRED
+    s = _real_claim(tmp_path, reward_minor=1000, reward_asset="USDC")
+    tstore = TradeStore(tmp_path)
+    open_trade(tstore, authority=s["publisher"], claim_record=s["claim_record"])  # 无 terms
+    events = tstore.get_events(s["ann"].announcement_id)
+    # 默认：仍通过（provenance-only，向后兼容）
+    ok, _ = verify_trade_binding(events, announcement=s["ann"],
+                                 claim_record=s["claim_record"])
+    assert ok
+    # 严格：有偿无 terms → 拒
+    ok, reason = verify_trade_binding(events, announcement=s["ann"],
+                                      claim_record=s["claim_record"],
+                                      require_terms=True)
+    assert not ok and reason == REJECT_TERMS_REQUIRED
+
+
+def test_require_terms_allows_free_task_without_terms(tmp_path) -> None:
+    """免费任务（reward_minor=0）即便 require_terms=True 也无需 terms。"""
+    s = _real_claim(tmp_path, reward_minor=0, reward_asset="credit")
+    tstore = TradeStore(tmp_path)
+    open_trade(tstore, authority=s["publisher"], claim_record=s["claim_record"])
+    events = tstore.get_events(s["ann"].announcement_id)
+    ok, reason = verify_trade_binding(events, announcement=s["ann"],
+                                      claim_record=s["claim_record"],
+                                      require_terms=True)
+    assert ok, reason
+
+
+def test_credit_task_settles_via_manual(tmp_path) -> None:
+    """credit 计价任务可经 manual adapter 结算（credit ∈ SUPPORTED）。"""
+    intent = SettlementIntent(trade_id="t", amount_minor=10,
+                              currency="credit", payee_did="did:key:zPayee")
+    s = settlement_payload(ManualSettlementAdapter(), intent)
+    ok, reason = verify_settlement(
+        s, expected_amount_minor=10, expected_currency="credit",
+        expected_payee_did="did:key:zPayee")
+    assert ok, reason
+
+
 def test_open_trade_rejects_malformed_terms(tmp_path) -> None:
     """terms 给了但畸形（空/零/负/bool 金额、空币种）→ 开局当场拒，
     不签进链（防 -1 哨兵静默 brick 这笔 trade）。"""

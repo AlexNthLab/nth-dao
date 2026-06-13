@@ -41,6 +41,8 @@ REJECT_CLAIM_ANN_MISMATCH = "binding-claim-announcement-mismatch"
 REJECT_CLAIM_RECEIPT_ID_MISMATCH = "binding-claim-receipt-id-mismatch"
 REJECT_TERMS_REWARD_MISMATCH = "binding-terms-reward-mismatch"
 REJECT_TERMS_ASSET_MISMATCH = "binding-terms-asset-mismatch"
+REJECT_TERMS_PAYEE_MISMATCH = "binding-terms-payee-mismatch"
+REJECT_TERMS_REQUIRED = "binding-terms-required"
 
 
 def _claimed_payload(receipt: Dict[str, Any]) -> Dict[str, Any]:
@@ -61,6 +63,7 @@ def verify_trade_binding(
     *,
     announcement: TaskAnnouncement,
     claim_record: Dict[str, Any],
+    require_terms: bool = False,
 ) -> Tuple[bool, str]:
     """证明一个 trade 锚定在真实、双方签名的市场证据上。
 
@@ -139,5 +142,16 @@ def verify_trade_binding(
             return False, REJECT_TERMS_REWARD_MISMATCH
         if str(terms.get("currency", "")) != str(announcement.reward_asset):
             return False, REJECT_TERMS_ASSET_MISMATCH
+        # 10. 收款方必须是真正干活认领的 claimant。否则开局方把
+        #     terms.payee 指到自己/同伙，钱不进 worker 口袋，而 verify_trade
+        #     只核对 settlement.payee == terms.payee（自洽）照样合格。
+        if str(terms.get("payee_did", "")) != str(op.get("claimant_did", "")):
+            return False, REJECT_TERMS_PAYEE_MISMATCH
+    elif require_terms and announcement.reward_minor > 0:
+        # terms 是可选的 —— 但"可选"本身就是后门：有偿任务只要**不签
+        # terms**，binding 与 verify_trade 都不约束结算金额，settler 可付
+        # 任意数。消费方要金额保证时传 require_terms=True：有偿任务（reward
+        # >0）必须把 reward 钉进 terms，否则视为未绑定、硬失败。
+        return False, REJECT_TERMS_REQUIRED
 
     return True, ""

@@ -48,9 +48,12 @@ ADAPTER_X402_TESTNET = "x402-testnet"
 KNOWN_ADAPTERS = frozenset({ADAPTER_MANUAL, ADAPTER_X402_TESTNET})
 
 # ── 支持的币种（minor units，整数）──
-#   USDC: 6 位小数，amount_minor 以 1e-6 USDC 计。
+#   USDC: 6 位小数，amount_minor 以 1e-6 USDC 计（x402 真钱）。
 #   NTH-TEST: 内部测试记账单位（manual 用）。
-SUPPORTED_CURRENCIES = frozenset({"USDC", "NTH-TEST"})
+#   credit: 市场层默认计价单位（announcement.reward_asset 默认值）——
+#     收录进来，让有偿"credit"任务可经 manual adapter 内部结算；否则
+#     binding 要求 terms.currency==reward_asset 后，credit 任务无币可结。
+SUPPORTED_CURRENCIES = frozenset({"USDC", "NTH-TEST", "credit"})
 
 # ── reject reasons ──
 REJECT_UNKNOWN_ADAPTER = "settlement-unknown-adapter"
