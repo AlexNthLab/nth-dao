@@ -37,6 +37,9 @@ export interface ChatViewProps {
   messagesByConv: Record<string, ChatMessage[]>;
   /** 温层(切片2b):每会话的签名摘要,展示在消息区顶部。 */
   summariesByConv?: Record<string, ConversationSummary[]>;
+  /** 4C:会话级"思考中"态。为 true 时在该会话底部显示三点指示器,
+   *  与历史消息解耦——不靠 body 文本判断。 */
+  typingByConv?: Record<string, boolean>;
   onSend: (convId: string, body: string) => Promise<void> | void;
   /** Lets the parent hydrate message history when a conversation
    *  becomes active. */
@@ -58,6 +61,7 @@ export function ChatView({
   conversations,
   messagesByConv,
   summariesByConv,
+  typingByConv,
   onSend,
   onConversationSelect,
   focusConversationId,
@@ -77,6 +81,7 @@ export function ChatView({
   const selected = sorted.find((c) => c.id === selectedId) ?? null;
   const messages = selectedId ? messagesByConv[selectedId] ?? [] : [];
   const summaries = selectedId ? summariesByConv?.[selectedId] ?? [] : [];
+  const isTyping = selectedId ? !!typingByConv?.[selectedId] : false;
 
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -109,7 +114,8 @@ export function ChatView({
   useEffect(() => {
     const el = transcriptRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [selectedId, messages.length, lastBody]);
+    // isTyping 也触发滚动,让底部的三点指示器进入视野。
+  }, [selectedId, messages.length, lastBody, isTyping]);
 
   /* Send handler (audit fix 2026-06-10, finding C4 + review#1):
    *   Original bug: setDraft("") fired BEFORE await onSend(); if
@@ -276,9 +282,9 @@ export function ChatView({
                     !!next &&
                     next.sender_id === m.sender_id &&
                     new Date(next.created_at).getTime() - t <= GAP_MS;
-                  const isTyping = m.body === "Agent is thinking...";
                   // pop-in 只给最新一条:打开会话时不让整段历史一起抖。
-                  const isLast = i === messages.length - 1;
+                  // 若正在 typing,把 is-last 让给底部的三点行。
+                  const isLast = i === messages.length - 1 && !isTyping;
                   const rowClass = [
                     "chat-row",
                     isYou ? "out" : "in",
@@ -295,20 +301,7 @@ export function ChatView({
                     <div key={m.message_id} className={rowClass}>
                       <div className="chat-col">
                         {showName && <div className="chat-name">{m.sender_label}</div>}
-                        <div
-                          className="chat-bubble"
-                          aria-live={isTyping ? "polite" : undefined}
-                        >
-                          {isTyping ? (
-                            <span className="typing-dots" aria-label="对方正在输入">
-                              <span />
-                              <span />
-                              <span />
-                            </span>
-                          ) : (
-                            m.body
-                          )}
-                        </div>
+                        <div className="chat-bubble">{m.body}</div>
                         {m.nth_receipt_id && (
                           <div
                             className="chat-receipt"
@@ -324,6 +317,19 @@ export function ChatView({
                     </div>
                   );
                 })
+              )}
+              {isTyping && (
+                <div className="chat-row in is-last" aria-live="polite">
+                  <div className="chat-col">
+                    <div className="chat-bubble">
+                      <span className="typing-dots" aria-label="对方正在输入">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
 

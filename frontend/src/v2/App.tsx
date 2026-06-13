@@ -119,6 +119,10 @@ function AppInner() {
   const [chatSelectedId, setChatSelectedId] = useState<string | null>(
     () => loadChat().selectedId,
   );
+  /* 4C(2026-06-14):typing 是会话级临时态,不再当成一条占位消息塞进
+   * 历史。等待首个 token 期间在该会话底部显示三点;首 token 到达即清除,
+   * 真实流式气泡接管。不持久化——刷新后不会残留"思考中"。 */
+  const [typingConvs, setTypingConvs] = useState<Record<string, boolean>>({});
   /* Review fix C1 (2026-06-10): conversations was previously not
    * given a setter — the bootstrap fetched the list but had no way
    * to apply it, so the Chat sidebar was permanently stuck on the
@@ -688,34 +692,53 @@ function AppInner() {
     // 随机后缀防同毫秒双发撞 id(审查修复 C)。
     const replyId = `m-agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     let acc = "";
-    setChatMessages((prev) => ({
-      ...prev,
-      [convId]: [
-        ...(prev[convId] ?? []),
-        {
-          message_id: replyId,
-          sender_id: agent.did,
-          sender_label: agent.label || "agent",
-          body: "Agent is thinking...",
-          created_at: new Date().toISOString(),
-        },
-      ],
-    }));
-    const patch = (text: string) =>
-      setChatMessages((prev) => ({
-        ...prev,
-        [convId]: (prev[convId] ?? []).map((m) =>
-          m.message_id === replyId ? { ...m, body: text } : m,
-        ),
-      }));
+    // 先点亮"思考中",不插占位消息。
+    setTypingConvs((prev) => ({ ...prev, [convId]: true }));
+    const clearTyping = () =>
+      setTypingConvs((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+    // 幂等 upsert:首次创建回复消息,之后按 id 改写 body。不依赖外部
+    // 标志位,StrictMode 双调用也安全。
+    const upsert = (text: string) =>
+      setChatMessages((prev) => {
+        const list = prev[convId] ?? [];
+        if (list.some((m) => m.message_id === replyId)) {
+          return {
+            ...prev,
+            [convId]: list.map((m) =>
+              m.message_id === replyId ? { ...m, body: text } : m,
+            ),
+          };
+        }
+        return {
+          ...prev,
+          [convId]: [
+            ...list,
+            {
+              message_id: replyId,
+              sender_id: agent.did,
+              sender_label: agent.label || "agent",
+              body: text,
+              created_at: new Date().toISOString(),
+            },
+          ],
+        };
+      });
     try {
       const res = await askAgentStream(agent.did, body, (delta) => {
         acc += delta;
-        patch(acc);
+        clearTyping(); // 首 token 到达即收起三点,真实气泡接管
+        upsert(acc);
       });
-      patch(acc || res.text || "(空回复)");
+      clearTyping();
+      upsert(acc || res.text || "(空回复)");
     } catch (e) {
-      patch(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
+      clearTyping();
+      upsert(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -895,6 +918,7 @@ function AppInner() {
         summariesByConv={summaries}
         conversations={chatConversations}
         messagesByConv={chatMessages}
+        typingByConv={typingConvs}
         onSend={handleChatSend}
         onConversationSelect={handleChatConversationSelect}
         focusConversationId={focusChatConversationId}

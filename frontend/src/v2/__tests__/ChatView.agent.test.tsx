@@ -102,14 +102,14 @@ describe("ChatView iMessage 风格渲染", () => {
         message_id: "m3",
         sender_id: "did:key:zAgent",
         sender_label: "agent",
-        body: "Agent is thinking...",
+        body: "在的,我看看",
         created_at: "2026-06-13T10:01:00Z",
       },
     ],
   };
 
-  it("思考中渲染三点指示器而非字面文本", async () => {
-    const { container } = render(
+  it("4C:typing 由会话级 prop 驱动,不靠消息文本", async () => {
+    const { container, rerender } = render(
       <ToastProvider>
         <ChatView
           conversations={conversations}
@@ -122,9 +122,24 @@ describe("ChatView iMessage 风格渲染", () => {
       </ToastProvider>,
     );
     await screen.findByText("再补一句");
+    // 无 typing 态 → 没有三点。
+    expect(container.querySelector(".typing-dots")).toBeNull();
+
+    rerender(
+      <ToastProvider>
+        <ChatView
+          conversations={conversations}
+          messagesByConv={msgs}
+          typingByConv={{ "dm-did:key:zAgent": true }}
+          onSend={vi.fn()}
+          onConversationSelect={vi.fn()}
+          focusConversationId="dm-did:key:zAgent"
+          currentUserId="admin"
+        />
+      </ToastProvider>,
+    );
+    // 置位后底部出现三点指示器。
     expect(container.querySelector(".typing-dots")).toBeTruthy();
-    // 字面占位串不得直接显示给用户。
-    expect(screen.queryByText("Agent is thinking...")).toBeNull();
   });
 
   it("连发成组 + 仅最新一条带入场动画类", async () => {
@@ -149,5 +164,26 @@ describe("ChatView iMessage 风格渲染", () => {
     expect(rows[2].className).toContain("is-last");
     // is-last 只有一条。
     expect(container.querySelectorAll(".chat-row.is-last").length).toBe(1);
+  });
+
+  it("typing 时 is-last 让给三点行,不重复", async () => {
+    const { container } = render(
+      <ToastProvider>
+        <ChatView
+          conversations={conversations}
+          messagesByConv={msgs}
+          typingByConv={{ "dm-did:key:zAgent": true }}
+          onSend={vi.fn()}
+          onConversationSelect={vi.fn()}
+          focusConversationId="dm-did:key:zAgent"
+          currentUserId="admin"
+        />
+      </ToastProvider>,
+    );
+    await screen.findByText("在的,我看看");
+    // 3 条消息 + 1 条 typing 行 = 4 行;is-last 仍唯一,且在 typing 行上。
+    const lasts = container.querySelectorAll(".chat-row.is-last");
+    expect(lasts.length).toBe(1);
+    expect(lasts[0].querySelector(".typing-dots")).toBeTruthy();
   });
 });
