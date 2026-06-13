@@ -501,11 +501,13 @@ function AppInner() {
    * the bootstrapped identity rather than the literal "admin", so
    * a 50-user deployment shows each user's own messages on the
    * right of the transcript. */
-  /* 2026-06-13:把被监管 agent 自动补成 Chat 侧栏里的 DM 会话,这样在
-   * Chat 里能直接选中它发消息(handleChatSend 会真去 ask 它)。之前 Chat
-   * 是空壳(onSend 只塞本地 state),用户"发消息无回复"的根因。 */
-  useEffect(() => {
-    const dms: Conversation[] = agents
+  /* 2026-06-13(修订):把被监管 agent 派生成 Chat 侧栏的 DM 会话。用
+   * **useMemo 派生**而非往 conversations state 注入 —— 否则 boot 的会话
+   * fetch 可能在 agent 之后覆盖掉注入的 DM(竞态)。chatConversations =
+   * 种子会话 + 每个可驱动 agent 一条 DM(去重)。 */
+  const chatConversations = useMemo<Conversation[]>(() => {
+    const have = new Set(conversations.map((c) => c.id));
+    const dms = agents
       .filter((a) => a.supervised && a.alive && typeof a.a2a_port === "number")
       .map((a) => ({
         id: `dm-${a.did}`,
@@ -516,14 +518,30 @@ function AppInner() {
         unread: 0,
         kind: "dm" as const,
         participant_dids: [MOCK_IDENTITY.did, a.did],
-      }));
-    if (!dms.length) return;
-    setConversations((prev) => {
-      const have = new Set(prev.map((c) => c.id));
-      const add = dms.filter((d) => !have.has(d.id));
-      return add.length ? [...prev, ...add] : prev;
-    });
-  }, [agents]);
+      }))
+      .filter((d) => !have.has(d.id));
+    return dms.length ? [...conversations, ...dms] : conversations;
+  }, [conversations, agents]);
+
+  /** 给一个会话挑一个可驱动 agent(supervised+alive+a2a_port):
+   *  1) 优先会话 participants 里的;
+   *  2) 兜底:全节点**恰好一个**可驱动 agent 时用它 —— 这样在**任何**会话
+   *     /频道直接发消息都能聊到那个明显的 agent(用户在 channel 发也有回复);
+   *  3) 多 agent 且无匹配 → null(提示用户去选某 agent 的 DM)。 */
+  function pickAgentForConv(conv: Conversation | undefined): AgentEntry | null {
+    const drivable = agents.filter(
+      (a) =>
+        a.did !== MOCK_IDENTITY.did &&
+        a.supervised &&
+        a.alive &&
+        typeof a.a2a_port === "number",
+    );
+    if (conv?.participant_dids) {
+      const m = drivable.find((a) => conv.participant_dids!.includes(a.did));
+      if (m) return m;
+    }
+    return drivable.length === 1 ? drivable[0] : null;
+  }
 
   async function handleChatSend(convId: string, body: string) {
     const msg: ChatMessage = {
@@ -538,40 +556,30 @@ function AppInner() {
       [convId]: [...(prev[convId] ?? []), msg],
     }));
 
-    // 2026-06-13:若该会话是对某个**可驱动 agent**(supervised+alive+
-    // a2a_port)的 DM,就真去 ask 它,把流式回复写进会话;否则(频道/无
-    // 可驱动 agent)保持旧的本地行为。这才让"发消息→有回复"成立。
-    const conv = conversations.find((c) => c.id === convId);
-    const isDm = !!(conv && conv.kind === "dm" && conv.participant_dids);
-    const agent = isDm
-      ? agents.find(
-          (a) =>
-            conv!.participant_dids!.includes(a.did) &&
-            a.did !== MOCK_IDENTITY.did &&
-            a.supervised &&
-            a.alive &&
-            typeof a.a2a_port === "number",
-        )
-      : undefined;
+    // 2026-06-13(修订):任何会话(channel 或 DM)只要能挑出一个可驱动
+    // agent,就真去 ask 它,把流式回复写进会话。挑不到 → 给可见系统消息
+    // (而非静默),用户永远有反馈。这才让"在 channel 发消息也有回复"成立。
+    const conv = chatConversations.find((c) => c.id === convId);
+    const agent = pickAgentForConv(conv);
     if (!agent) {
-      // 审查修复(2026-06-13):DM 但 agent 不可驱动(离线/无 a2a_port)时
-      // **别静默** —— 给一条系统消息,否则又退回"发消息无回复"的困惑。
-      // 频道(channel)无 agent 可回是预期,保持本地行为。
-      if (isDm) {
-        setChatMessages((prev) => ({
-          ...prev,
-          [convId]: [
-            ...(prev[convId] ?? []),
-            {
-              message_id: `m-sys-${Date.now()}`,
-              sender_id: "system",
-              sender_label: "system",
-              body: "⚠️ 该 agent 当前不在线或不可驱动(需 supervised + alive + a2a_port),无法回复。",
-              created_at: new Date().toISOString(),
-            },
-          ],
-        }));
-      }
+      const hasAny = agents.some(
+        (a) => a.supervised && a.alive && typeof a.a2a_port === "number",
+      );
+      setChatMessages((prev) => ({
+        ...prev,
+        [convId]: [
+          ...(prev[convId] ?? []),
+          {
+            message_id: `m-sys-${Date.now()}`,
+            sender_id: "system",
+            sender_label: "system",
+            body: hasAny
+              ? "⚠️ 本会话没绑定具体 agent,且节点上有多个可驱动 agent。请在 Agents 里选某个 agent 的 DM 再发。"
+              : "⚠️ 节点上没有可驱动的 agent(需 supervised + alive + a2a_port)。先在 Agents 里 spawn 一个。",
+            created_at: new Date().toISOString(),
+          },
+        ],
+      }));
       return;
     }
 
@@ -788,7 +796,7 @@ function AppInner() {
   } else if (active === "chat") {
     view = (
       <ChatView
-        conversations={conversations}
+        conversations={chatConversations}
         messagesByConv={chatMessages}
         onSend={handleChatSend}
         currentUserId={MOCK_IDENTITY.agent_id}
