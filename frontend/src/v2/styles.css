@@ -72,6 +72,17 @@
   --accent-hover:  #75e1ff;
   --accent-muted:  rgba(77, 214, 255, 0.12);
 
+  /* Chat — Signal / iMessage 风格气泡(暗色模式取色)。
+   * 我方:Apple 暗色系统蓝;对方:中性深灰。气泡 18px 大圆角,连发
+   * 时贴合侧收 6px 小圆角(iMessage 的"成组"观感)。 */
+  --chat-out:        #0a84ff;
+  --chat-out-grad:   linear-gradient(180deg, #2b95ff 0%, #0a7cff 100%);
+  --chat-out-fg:     #ffffff;
+  --chat-in:         #262629;
+  --chat-in-fg:      var(--fg-primary);
+  --chat-radius:       18px;
+  --chat-radius-tight:  6px;
+
   /* Status (3-color discipline — no more) */
   --status-ok:    #4ade80;
   --status-wait:  #f59e0b;
@@ -219,6 +230,15 @@ select option {
   gap: 10px;
   font-weight: 600;
   font-size: 14px;
+}
+
+/* 品牌正字 Nᵗʰ DAO —— th 真上标,克制不抢戏。 */
+.brand-th {
+  font-size: 0.6em;
+  font-weight: 600;
+  vertical-align: super;
+  line-height: 0;
+  margin: 0 0.02em 0 0.01em;
 }
 
 .topbar-logo {
@@ -875,3 +895,175 @@ select option {
 .row { display: flex; align-items: center; gap: 8px; }
 .col { display: flex; flex-direction: column; gap: 8px; }
 .stack > * + * { margin-top: 8px; }
+
+/* ── chat surface (Signal / iMessage 风格) ──────────────────────────
+ *
+ * 设计目标:精致动效 + 系统融合 + 无缝体验。气泡圆角 18px,我方 Apple
+ * 蓝、对方深灰;连发"成组"(同一人、≤5min 内的相邻消息收紧间距+贴合
+ * 圆角);新消息 pop-in;agent 思考时显示三点跳动;输入区做成胶囊 +
+ * 圆形发送钮。配色全部取自暗色模式,与现有深色外壳无缝衔接。 */
+.chat-thread {
+  background: var(--bg-root);
+  padding: 14px 18px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 2px;                 /* 连发紧凑 */
+  animation: bubble-in 220ms var(--ease) both;
+}
+.chat-row.group-start { margin-top: 12px; }   /* 换人/隔久,留呼吸 */
+.chat-row.out { justify-content: flex-end; }
+.chat-row.in  { justify-content: flex-start; }
+
+/* 组内顶部那条显示发送者名字(对方);我方不显示。 */
+.chat-name {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  margin: 0 0 3px 13px;
+  font-weight: 500;
+}
+
+/* 每条消息的纵向栈:名字 / 气泡 / 验签 / 时间,整体限宽 76%。 */
+.chat-col {
+  display: flex;
+  flex-direction: column;
+  max-width: 76%;
+  min-width: 0;
+}
+.chat-row.out .chat-col { align-items: flex-end; }
+.chat-row.in  .chat-col { align-items: flex-start; }
+
+.chat-bubble {
+  position: relative;
+  max-width: 100%;
+  padding: 7px 13px 8px;
+  font-size: 14px;
+  line-height: 1.4;
+  border-radius: var(--chat-radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 微弱投影,贴近 iMessage 的轻浮起感,不喧宾夺主。 */
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
+}
+.chat-row.in  .chat-bubble {
+  background: var(--chat-in);
+  color: var(--chat-in-fg);
+  border-bottom-left-radius: var(--chat-radius);
+}
+.chat-row.out .chat-bubble {
+  background: var(--chat-out);
+  background-image: var(--chat-out-grad);
+  color: var(--chat-out-fg);
+}
+/* 成组贴合:同侧相邻的边收成小圆角,一串气泡像"连"在一起。 */
+.chat-row.in.grp-top    .chat-bubble { border-top-left-radius: var(--chat-radius-tight); }
+.chat-row.in.grp-bottom .chat-bubble { border-bottom-left-radius: var(--chat-radius-tight); }
+.chat-row.out.grp-top    .chat-bubble { border-top-right-radius: var(--chat-radius-tight); }
+.chat-row.out.grp-bottom .chat-bubble { border-bottom-right-radius: var(--chat-radius-tight); }
+
+/* 时间戳:悬停整行才显示,平时隐藏(iMessage 行为),不挤占视线。 */
+.chat-time {
+  align-self: flex-end;
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  opacity: 0;
+  transition: opacity var(--m-fast) var(--ease);
+  white-space: nowrap;
+  margin-bottom: 2px;
+}
+.chat-row:hover .chat-time { opacity: 1; }
+
+/* 验签徽标:挂在气泡下方,小号 mono,呼应"每条都签名"的承诺。 */
+.chat-receipt {
+  font-size: 10px;
+  font-family: var(--t-mono);
+  color: var(--fg-tertiary);
+  margin: 2px 13px 0;
+}
+.chat-row.out .chat-receipt { text-align: right; }
+
+/* 系统/摘要:居中胶囊,像 iMessage 的日期分隔与状态行。 */
+.chat-system {
+  align-self: center;
+  max-width: 88%;
+  margin: 6px 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-secondary);
+  background: var(--bg-elevated);
+  border-radius: 14px;
+}
+.chat-system-toggle {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--fg-secondary);
+}
+
+/* 思考中:三点跳动,占位一个对方气泡。 */
+.typing-dots { display: inline-flex; gap: 4px; padding: 2px 2px; }
+.typing-dots span {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--fg-tertiary);
+  animation: typing-bounce 1.2s var(--ease) infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.18s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.36s; }
+
+/* iMessage 式输入区:胶囊输入框 + 圆形蓝色发送钮。 */
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  background: var(--bg-root);
+  border-top: 1px solid var(--border);
+}
+.chat-input {
+  flex: 1;
+  min-height: 38px;
+  max-height: 140px;
+  padding: 8px 14px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--fg-primary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 19px;
+  resize: none;
+  outline: none;
+  transition: border-color var(--m-fast) var(--ease);
+}
+.chat-input:focus { border-color: var(--accent); }
+.chat-send {
+  flex: 0 0 auto;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--chat-out);
+  background-image: var(--chat-out-grad);
+  transition: transform var(--m-fast) var(--ease), opacity var(--m-fast) var(--ease);
+}
+.chat-send:hover:not(:disabled) { transform: scale(1.06); }
+.chat-send:active:not(:disabled) { transform: scale(0.94); }
+.chat-send:disabled { opacity: 0.35; cursor: default; }
+
+@keyframes bubble-in {
+  from { transform: translateY(6px) scale(0.96); opacity: 0; }
+  to   { transform: translateY(0)   scale(1);    opacity: 1; }
+}
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0);    opacity: 0.5; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-row { animation: none; }
+  .typing-dots span { animation: none; }
+}

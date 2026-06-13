@@ -213,31 +213,19 @@ export function ChatView({
           <>
             <div
               ref={transcriptRef}
-              style={{
-                flex: 1,
-                overflowY: "auto",
-                padding: "16px 32px",
-              }}
+              className="chat-thread"
+              style={{ flex: 1, overflowY: "auto" }}
             >
               {summaries.length > 0 && (
-                <div
-                  style={{
-                    marginBottom: 16,
-                    border: "1px solid var(--color-border-tertiary)",
-                    borderRadius: 8,
-                    padding: "8px 12px",
-                  }}
-                >
+                <div className="chat-system">
                   <button
                     onClick={() => setSummariesOpen((o) => !o)}
+                    className="chat-system-toggle"
                     style={{
                       background: "none",
                       border: "none",
                       cursor: "pointer",
                       font: "inherit",
-                      fontWeight: 600,
-                      fontSize: 13,
-                      color: "var(--color-text-primary)",
                       padding: 0,
                     }}
                   >
@@ -247,16 +235,10 @@ export function ChatView({
                     summaries.map((s, i) => (
                       <div
                         key={`${s.transcript_sha256}-${i}`}
-                        style={{ marginTop: 8, fontSize: 13, lineHeight: 1.5 }}
+                        style={{ marginTop: 8, textAlign: "left" }}
                       >
                         <div style={{ whiteSpace: "pre-wrap" }}>{s.summary_text}</div>
-                        <div
-                          style={{
-                            fontSize: 11,
-                            marginTop: 4,
-                            color: "var(--color-text-secondary)",
-                          }}
-                        >
+                        <div style={{ fontSize: 11, marginTop: 4, color: "var(--fg-tertiary)" }}>
                           {s.verified ? "✓ 已验签" : `⚠️ 未验签(${s.reason})`} · 概括{" "}
                           {s.covered_message_ids.length} 条 · signer{" "}
                           {s.agent_did.slice(0, 14)}…
@@ -276,89 +258,74 @@ export function ChatView({
                   </p>
                 </div>
               ) : (
-                <div className="stack" style={{ gap: 16 }}>
-                  {messages.map((m) => {
-                    const isYou = m.sender_id === currentUserId;
-                    return (
-                      <article
-                        key={m.message_id}
-                        style={{
-                          maxWidth: "70%",
-                          marginLeft: isYou ? "auto" : 0,
-                          background: isYou
-                            ? "var(--accent-muted)"
-                            : "var(--bg-panel)",
-                          border: "1px solid var(--border)",
-                          borderRadius: "var(--r-md)",
-                          padding: "10px 14px",
-                        }}
-                      >
+                messages.map((m, i) => {
+                  const isYou = m.sender_id === currentUserId;
+                  const prev = messages[i - 1];
+                  const next = messages[i + 1];
+                  // iMessage 式"成组":同一人、≤5min 内的相邻消息收紧间距
+                  // 并贴合圆角,视觉上"连"成一串。
+                  const GAP_MS = 5 * 60 * 1000;
+                  const t = new Date(m.created_at).getTime();
+                  const contFromPrev =
+                    !!prev &&
+                    prev.sender_id === m.sender_id &&
+                    t - new Date(prev.created_at).getTime() <= GAP_MS;
+                  const contToNext =
+                    !!next &&
+                    next.sender_id === m.sender_id &&
+                    new Date(next.created_at).getTime() - t <= GAP_MS;
+                  const isTyping = m.body === "Agent is thinking...";
+                  const rowClass = [
+                    "chat-row",
+                    isYou ? "out" : "in",
+                    contFromPrev ? "grp-top" : "group-start",
+                    contToNext ? "grp-bottom" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  // 1:1 DM 不显示发送者名(对象明确);频道里才在组首显示。
+                  const showName =
+                    !isYou && !contFromPrev && selected.kind !== "dm";
+                  return (
+                    <div key={m.message_id} className={rowClass}>
+                      <div className="chat-col">
+                        {showName && <div className="chat-name">{m.sender_label}</div>}
                         <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: 12,
-                            marginBottom: 4,
-                            fontSize: 11,
-                            color: "var(--fg-tertiary)",
-                          }}
+                          className="chat-bubble"
+                          aria-live={isTyping ? "polite" : undefined}
                         >
-                          <strong
-                            style={{
-                              color: isYou
-                                ? "var(--accent)"
-                                : "var(--fg-primary)",
-                              fontWeight: 500,
-                              fontSize: 12,
-                            }}
-                          >
-                            {m.sender_label}
-                          </strong>
-                          <span>{relativeTimeShort(m.created_at)}</span>
+                          {isTyping ? (
+                            <span className="typing-dots" aria-label="对方正在输入">
+                              <span />
+                              <span />
+                              <span />
+                            </span>
+                          ) : (
+                            m.body
+                          )}
                         </div>
-                        <p
-                          aria-live={m.body === "Agent is thinking..." ? "polite" : undefined}
-                          style={{
-                            margin: 0,
-                            fontSize: 13,
-                            lineHeight: 1.55,
-                            color: "var(--fg-primary)",
-                          }}
-                        >
-                          {m.body}
-                        </p>
                         {m.nth_receipt_id && (
                           <div
-                            style={{
-                              marginTop: 6,
-                              fontSize: 10,
-                              color: "var(--fg-tertiary)",
-                              fontFamily: "var(--t-mono)",
-                            }}
+                            className="chat-receipt"
                             title="Signed via authorizing cap_token"
                           >
                             ✓ receipt {m.nth_receipt_id.slice(0, 12)}…
                           </div>
                         )}
-                      </article>
-                    );
-                  })}
-                </div>
+                        <span className="chat-time">
+                          {relativeTimeShort(m.created_at)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
 
-            <form
-              onSubmit={handleSend}
-              style={{
-                padding: "12px 32px 20px",
-                borderTop: "1px solid var(--border)",
-                display: "flex",
-                gap: 8,
-                alignItems: "flex-end",
-              }}
-            >
+            <form onSubmit={handleSend} className="chat-composer">
               <textarea
+                className="chat-input"
+                rows={1}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -367,21 +334,15 @@ export function ChatView({
                     void doSend();
                   }
                 }}
-                placeholder={`Message ${selected.title}…`}
-                style={{
-                  flex: 1,
-                  minHeight: 42,
-                  maxHeight: 160,
-                  resize: "vertical",
-                }}
+                placeholder={`发消息给 ${selected.title}…`}
               />
               <button
                 type="submit"
-                className="btn btn-primary"
+                className="chat-send"
                 disabled={!draft.trim() || sending}
                 aria-label={sending ? "Sending message" : "Send message"}
               >
-                <IconSend size={14} /> {sending ? "Sending…" : "Send"}
+                <IconSend size={16} />
               </button>
             </form>
           </>

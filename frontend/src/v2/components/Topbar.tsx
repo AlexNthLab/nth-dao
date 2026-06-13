@@ -7,6 +7,7 @@
  * passively.
  */
 
+import { BrandMark } from "./BrandMark";
 import type { IdentityHeader } from "../types-v2";
 
 export interface TopbarProps {
@@ -19,7 +20,7 @@ export function Topbar({ identity, onCmdK }: TopbarProps) {
     <header className="topbar">
       <div className="topbar-brand">
         <div className="topbar-logo">N</div>
-        <span>Nth DAO</span>
+        <BrandMark />
       </div>
 
       {identity && (

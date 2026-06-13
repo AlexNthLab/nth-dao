@@ -67,7 +67,7 @@ describe("ChatView agent integration", () => {
     });
 
     const composer = await screen.findByPlaceholderText(
-      "Message DM: test-agent…",
+      "发消息给 DM: test-agent…",
     );
     fireEvent.change(composer, { target: { value: "run the task" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
