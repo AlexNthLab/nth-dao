@@ -1803,6 +1803,38 @@ def register_v2_routes(app: FastAPI) -> None:
         # No disk source yet — rules editor is Phase 2.
         return _seed_rules()
 
+    @app.get("/api/v2/market/open")
+    def v2_market_open(request: Request) -> List[Dict[str, Any]]:
+        """任务广场(发现态):列出 feed 里未认领、未过期的开放任务公告。
+
+        数据源是 nth_dao.market 的 A2A 任务市场(MarketFeed + ClaimStore),
+        此前完全没接进 UI——而"发现可认领的活"正是 A2A 协调底座的核心面。
+        这是读路径(安全方法,匿名可读,与其他 v2 读端点一致);认领是状态
+        变更动作,另设受控端点。
+        """
+        from nth_dao.market.claim import ClaimStore
+        from nth_dao.market.feed import MarketFeed
+
+        ws = _state_workspace(request)
+        if ws is None:
+            return []
+        try:
+            feed = MarketFeed(ws)
+            claims = ClaimStore(ws)
+        except OSError as e:  # noqa: BLE001
+            logger.debug("v2_market_open: market store unavailable: %s", e)
+            return []
+        # poll(since_seq=-1) 默认已跳过过期;再排掉已认领的 → 只剩"可认领"。
+        pr = feed.poll(since_seq=-1, limit=500)
+        out: List[Dict[str, Any]] = []
+        for ann in pr.announcements:
+            if claims.is_claimed(ann.announcement_id):
+                continue
+            d = ann.to_dict()
+            d["claimed"] = False
+            out.append(d)
+        return out
+
     @app.get("/api/v2/agents", response_model=List[AgentEntryM])
     def v2_agents(request: Request) -> List[Dict[str, Any]]:
         # Phase 3a: prepend supervised agents (kind=local, live) ahead
