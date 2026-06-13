@@ -611,12 +611,16 @@ function AppInner() {
     () => loadSummaries(),
   );
   const summarizingRef = useRef<Set<string>>(new Set());
+  // 审查修复:摘要失败后的冷却时间(convId -> 不早于此 ms 再试)。否则
+  // agent 持续失败时,每来一条新消息就重试一次 → 刷屏式失败调用。
+  const summaryCooldownRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     const convId = chatSelectedId;
     if (!convId) return;
     const THRESHOLD = 12, KEEP_RECENT = 6, MIN_CHUNK = 4;
     const msgs = chatMessages[convId] ?? [];
     if (msgs.length < THRESHOLD || summarizingRef.current.has(convId)) return;
+    if (Date.now() < (summaryCooldownRef.current.get(convId) ?? 0)) return; // 冷却中
     const agent = pickAgentForConv(chatConversations.find((c) => c.id === convId));
     if (!agent) return;
     const covered = new Set(
@@ -631,8 +635,10 @@ function AppInner() {
       try {
         const rec = await summarizeAgent(agent.did, candidate, convId);
         setSummaries((prev) => appendSummary(prev, convId, rec));
+        summaryCooldownRef.current.delete(convId); // 成功 → 清冷却
       } catch {
-        /* 摘要失败不打扰用户;下次阈值再试 */
+        // 失败 → 冷却 90s,别每条新消息都重试(审查修复 B)。
+        summaryCooldownRef.current.set(convId, Date.now() + 90_000);
       } finally {
         summarizingRef.current.delete(convId);
       }

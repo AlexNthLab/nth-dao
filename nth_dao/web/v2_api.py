@@ -2403,12 +2403,22 @@ def register_v2_routes(app: FastAPI) -> None:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise HTTPException(status_code=400, detail="messages (non-empty list) required")
+        if len(messages) > 500:
+            raise HTTPException(
+                status_code=413,
+                detail="too many messages for one summary (max 500); chunk client-side")
         conversation_id = str(payload.get("conversation_id") or "")
         instruction = str(payload.get("instruction") or DEFAULT_INSTRUCTION)
         transcript = canonical_transcript(messages)
         prompt = summary_prompt(transcript, instruction)
 
         body_bytes = _json.dumps({"prompt": prompt}).encode("utf-8")
+        # 审查修复:转录可能很大(N 条长消息),封顶 prompt 大小,既防 DoS
+        # 也避开子端 /a2a/ask 的 1MB 上限。超了让前端分块再摘要。
+        if len(body_bytes) > 256 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail="transcript too large for one summary (max 256KB); chunk client-side")
         url = f"http://127.0.0.1:{rec.a2a_port}/a2a/ask"
         req_headers = {
             "Content-Type": "application/json; charset=utf-8",
