@@ -10,7 +10,7 @@ commerce 负责"干得怎样、钱怎么付"（execute→deliver→verify→sett
   CS1 ✅  签名 trade 状态机（无真钱，manual 结算）
   CS2 ✅  commerce↔market 绑定校验 + DeterministicTestVerifier（首个 SKU）
   CS3 ✅  争议处理（DISPUTED → SETTLED / REFUNDED / SPLIT_SETTLED）
-  CS4 ⏳  x402 testnet 真钱结算 adapter
+  CS4 ✅  结算 adapter（manual + x402 testnet，PaymentRail 注入）+ 校验
 """
 
 from nth_dao.commerce.trade import (
@@ -115,6 +115,33 @@ __all__ = [
     "VerificationOutcome",
     "sign_test_execution_receipt",
     "SKU_TEST_EXECUTION",
+    # CS4 settlement adapters
+    "SettlementIntent",
+    "SettlementResult",
+    "SettlementAdapter",
+    "ManualSettlementAdapter",
+    "X402SettlementAdapter",
+    "PaymentRail",
+    "RailReceipt",
+    "FakePaymentRail",
+    "SettlementFailed",
+    "settlement_payload",
+    "settle_trade",
+    "verify_settlement",
+    "ADAPTER_MANUAL",
+    "ADAPTER_X402_TESTNET",
+    "KNOWN_ADAPTERS",
+    "SUPPORTED_CURRENCIES",
+    "REJECT_UNKNOWN_ADAPTER",
+    "REJECT_AMOUNT_INVALID",
+    "REJECT_AMOUNT_MISMATCH",
+    "REJECT_CURRENCY_UNSUPPORTED",
+    "REJECT_CURRENCY_MISMATCH",
+    "REJECT_PAYEE_MISMATCH",
+    "REJECT_PAYER_MISMATCH",
+    "REJECT_TX_REF_MISSING",
+    "REJECT_NETWORK_MISSING",
+    "REJECT_PROOF_MISSING",
 ]
 
 from nth_dao.commerce.binding import (
@@ -133,4 +160,32 @@ from nth_dao.commerce.verifier import (
     VerificationOutcome,
     sign_test_execution_receipt,
     SKU_TEST_EXECUTION,
+)
+from nth_dao.commerce.settlement import (
+    SettlementIntent,
+    SettlementResult,
+    SettlementAdapter,
+    ManualSettlementAdapter,
+    X402SettlementAdapter,
+    PaymentRail,
+    RailReceipt,
+    FakePaymentRail,
+    SettlementFailed,
+    settlement_payload,
+    settle_trade,
+    verify_settlement,
+    ADAPTER_MANUAL,
+    ADAPTER_X402_TESTNET,
+    KNOWN_ADAPTERS,
+    SUPPORTED_CURRENCIES,
+    REJECT_UNKNOWN_ADAPTER,
+    REJECT_AMOUNT_INVALID,
+    REJECT_AMOUNT_MISMATCH,
+    REJECT_CURRENCY_UNSUPPORTED,
+    REJECT_CURRENCY_MISMATCH,
+    REJECT_PAYEE_MISMATCH,
+    REJECT_PAYER_MISMATCH,
+    REJECT_TX_REF_MISSING,
+    REJECT_NETWORK_MISSING,
+    REJECT_PROOF_MISSING,
 )
