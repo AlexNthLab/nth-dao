@@ -71,6 +71,9 @@ logger = logging.getLogger("nth_dao.marketplace")
 DEFAULT_MARKETPLACE_DIR = "team_marketplace"
 DEFAULT_CLAIM_TIMEOUT_HOURS = 48  #
 DEFAULT_ORDER_EXPIRY_DAYS = 7     #
+# 终态订单(完成/失败/取消/过期)本地热缓存保留天数,超期由 prune_finished
+# 清理(2026-06-14:存储膨胀的正解是老化终态订单,而非给开放订单设上限)。
+DEFAULT_FINISHED_RETENTION_DAYS = 30
 
 
 #
@@ -222,7 +225,7 @@ class TaskMarketplace:
         channel: Optional[TeamChannel] = None,
         reputation: Optional[ReputationManager] = None,
         marketplace_dir: str = DEFAULT_MARKETPLACE_DIR,
-        max_open_orders: Optional[int] = None,
+        finished_retention_days: Optional[int] = None,
     ):
         """
         Args:
@@ -232,23 +235,28 @@ class TaskMarketplace:
             channel:
             reputation:
             marketplace_dir:
-            max_open_orders: 单个 creator 的开放订单上限(防无界堆单)。
-                None → NTH_MARKETPLACE_MAX_OPEN_ORDERS / 默认 100;<=0 不限。
+            finished_retention_days: 终态订单(完成/失败/取消/过期)在本地热
+                缓存的保留天数,超期由 prune_finished() 清理。None →
+                NTH_MARKETPLACE_FINISHED_RETENTION_DAYS / 默认 30;<=0 不清理。
         """
         self.workspace = workspace
         self.agent_id = agent_id
         self.identity = identity
         self.channel = channel
         self.reputation = reputation
-        # 开单上限(2026-06-14 审查补:auto/scale 显式上限)。
-        if max_open_orders is None:
+        # 终态订单本地保留期(2026-06-14:不给开放订单设上限——那是待办的真
+        # 实工作;存储膨胀的真因是终态订单永不清理。按"完成的本地缓存一段
+        # 时间→温冷处理"的设计,过保留期由 prune_finished 清理。签名证据
+        # (receipt/reputation)在各自的 store 里持久,清的只是操作态订单文件。
+        if finished_retention_days is None:
             try:
-                _cap = int(os.environ.get("NTH_MARKETPLACE_MAX_OPEN_ORDERS", "100"))
+                _ret = int(os.environ.get(
+                    "NTH_MARKETPLACE_FINISHED_RETENTION_DAYS", "30"))
             except (TypeError, ValueError):
-                _cap = 100
-            self._max_open_orders = _cap if _cap >= 0 else 100
+                _ret = 30
+            self._finished_retention_days = _ret if _ret >= 0 else 30
         else:
-            self._max_open_orders = max_open_orders
+            self._finished_retention_days = finished_retention_days
         self.orders_dir = workspace / marketplace_dir
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
@@ -385,21 +393,6 @@ class TaskMarketplace:
                 f"Insufficient credits: balance={self._read_credits()}, "
                 f"reward={reward}"
             )
-        # 开单上限:防单个 agent 无界堆开放订单撑爆 marketplace 目录。
-        # 统计自己名下 OPEN 单(list_my_orders 已按 creator/claimant 过滤,
-        # 这里再确认 creator==self);达上限即拒。<=0 表示不限。
-        if self._max_open_orders > 0:
-            my_open = sum(
-                1 for o in self.list_my_orders(status=OrderStatus.OPEN)
-                if o.creator == self.agent_id
-            )
-            if my_open >= self._max_open_orders:
-                raise ValueError(
-                    f"open-order ceiling reached: "
-                    f"{my_open}/{self._max_open_orders} "
-                    f"(complete/cancel some, or raise "
-                    f"NTH_MARKETPLACE_MAX_OPEN_ORDERS)"
-                )
 
         order = TaskOrder(
             order_id=uuid.uuid4().hex,
@@ -899,6 +892,55 @@ class TaskMarketplace:
                 continue
 
         return expired_count
+
+    def prune_finished(self, older_than_days: Optional[int] = None) -> int:
+        """老化清理:删除超过保留期的终态订单文件(完成/失败/取消/过期)。
+
+        这是"存储膨胀"的正解(替代之前误加的开放订单上限):开放订单是
+        待办的真实工作不该被拒,真正会无界增长的是终态订单永不清理。按
+        "完成的本地缓存一段时间→温冷处理":过保留期就从本地热存清掉。
+        签名证据(execution receipt、reputation 评分)在各自 store 持久,
+        这里清的只是操作态订单文件,不损审计性。
+
+        Args:
+            older_than_days: 覆盖默认保留期;None 用实例配置。<=0 不清理。
+        Returns:
+            清理的订单数。
+        """
+        retention = (
+            self._finished_retention_days if older_than_days is None
+            else older_than_days
+        )
+        if retention <= 0:
+            return 0
+        cutoff = datetime.now() - timedelta(days=retention)
+        pruned = 0
+        for f in self.orders_dir.glob("*.json"):
+            try:
+                o = TaskOrder.from_dict(json.loads(f.read_text(encoding="utf-8")))
+            except (AttributeError, KeyError, OSError, json.JSONDecodeError,
+                    TypeError, ValueError) as e:
+                # 非订单文件(如 {agent}_credits.json)/损坏 → 跳过。
+                logger.debug("prune_finished skip %s: %s", f, e)
+                continue
+            if not o.is_finished:
+                continue
+            # 终态时间:取 timeline 末条时间戳,回退 completed_at / created_at。
+            ts_str = ""
+            if o.timeline:
+                ts_str = o.timeline[-1].get("timestamp", "") or ""
+            ts_str = ts_str or o.completed_at or o.created_at
+            try:
+                finished_at = datetime.fromisoformat(ts_str)
+            except (TypeError, ValueError):
+                continue  # 无法判龄 → 保守保留
+            if finished_at < cutoff:
+                try:
+                    f.unlink()
+                    pruned += 1
+                except OSError as e:
+                    logger.debug("prune_finished unlink %s failed: %s", f, e)
+        return pruned
 
     #
 
