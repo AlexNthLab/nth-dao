@@ -142,6 +142,75 @@ def test_mumolawos_runs_mission_purely_over_a2a(tmp_path: Path) -> None:
                 pass
 
 
+def test_replayed_and_forged_receipts_rejected(tmp_path: Path) -> None:
+    """绑定回归:一张**有效签名**的 receipt 若不是为本请求/回应而签,也要
+    被拒。覆盖两种攻击:
+      - replay:把别处签的 receipt 套到本 step(request 哈希对不上);
+      - 文本伪造:receipt 真,但 peer 篡改了回传文本(response 哈希对不上)。
+    """
+    app = create_app(workspace=tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    agent_id = None
+    try:
+        r = client.post("/api/v2/agents/spawn", json={
+            "kind": "mock", "label": "p", "capabilities": ["a2a:message_send"]})
+        assert r.status_code == 201, r.text
+        did = r.json()["did"]
+        agent_id = r.json()["agent_id"]
+
+        # 先做一次**别的** prompt 的真 ask,拿一张合法 receipt(signer==did)。
+        other = None
+        for _ in range(20):
+            rr = client.post(f"/api/v2/agents/{did}/ask",
+                             json={"prompt": "UNRELATED-PROMPT"})
+            if rr.status_code == 200 and "not-yet-authorized" not in rr.text:
+                other = rr.json()["result"]
+                break
+            time.sleep(0.5)
+        assert other is not None and other.get("receipt")
+
+        def mk_mission(mid):
+            store = MissionStore(root=str(tmp_path / mid))
+            store.create(Mission(
+                id=mid, title="t", goal="g", status=MissionStatus.ACTIVE.value,
+                steps=[MissionStep(id="s1", description="本 step 的活",
+                                   required_capabilities=["x"],
+                                   acceptance_criteria={"min_length": 1})]))
+            return store
+
+        # 攻击1 replay:任何 prompt 都回这张"别处"的 receipt → request 不绑定。
+        replay_peer = A2APeer(
+            did=did, capabilities=["x"],
+            dispatch=lambda _p: PeerResponse(text=str(other["response"]),
+                                             receipt=other["receipt"]))
+        res1 = A2ACoordinator(mk_mission("m-replay"), [replay_peer]).run_mission(
+            "m-replay", output_key_for=lambda _s: None)
+        assert not res1.complete
+        assert "request-not-bound" in res1.steps[0].detail
+
+        # 攻击2 文本伪造:为本 step 真签,但篡改回传文本 → response 不绑定。
+        def forge_dispatch(prompt: str) -> PeerResponse:
+            for _ in range(20):
+                rr = client.post(f"/api/v2/agents/{did}/ask", json={"prompt": prompt})
+                if rr.status_code == 200 and "not-yet-authorized" not in rr.text:
+                    res = rr.json()["result"]
+                    return PeerResponse(text=str(res["response"]) + "TAMPERED",
+                                        receipt=res.get("receipt"))
+                time.sleep(0.5)
+            raise RuntimeError("未就绪")
+        forge_peer = A2APeer(did=did, capabilities=["x"], dispatch=forge_dispatch)
+        res2 = A2ACoordinator(mk_mission("m-forge"), [forge_peer]).run_mission(
+            "m-forge", output_key_for=lambda _s: None)
+        assert not res2.complete
+        assert "response-not-bound" in res2.steps[0].detail
+    finally:
+        if agent_id:
+            try:
+                client.post(f"/api/v2/agents/{agent_id}/stop")
+            except Exception:
+                pass
+
+
 def test_unsigned_work_is_rejected(tmp_path: Path) -> None:
     """安全回归:peer 回了文本但**无签名 receipt** —— verify_receipts=True
     的协调者拒绝把该 step 记完成(unverified work)。这正是去中心/远程

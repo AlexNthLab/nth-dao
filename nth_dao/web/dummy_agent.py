@@ -1421,6 +1421,14 @@ def _build_a2a_ask_receipt(
     # ``str(x or "")`` / ``int(x or 0)`` pattern that silently coerces
     # a 0 / False / type-mismatched backend return into a "" / 0
     # receipt field.
+    # 2026-06-13: 把 receipt 绑死到**本次请求与回应**(request/response
+    # 哈希)。之前 payload 只记 method/caller/timing —— 不绑内容,于是一张
+    # 有效签名的 receipt 可被**重放**到任意请求,或配一段伪造文本(签名
+    # 仍真)。消费方(A2ACoordinator)据这两个哈希核对"这张 receipt 确为
+    # 我发的 prompt + 我收到的 response 而签",replay / 文本伪造即失效。
+    import hashlib as _hashlib
+    _prompt_s = _safe_str(params.get("prompt"))
+    _response_s = _safe_str(result.get("response"))
     payload = {
         "method": method,
         "backend": backend_name,
@@ -1435,6 +1443,8 @@ def _build_a2a_ask_receipt(
         "elapsed_ms": int(ended_at_ms - started_at_ms),
         "stop_reason": _safe_str(result.get("stop_reason")),
         "cap_token_id": _safe_str(token.get("token_id")),
+        "request_sha256": _hashlib.sha256(_prompt_s.encode("utf-8")).hexdigest(),
+        "response_sha256": _hashlib.sha256(_response_s.encode("utf-8")).hexdigest(),
     }
     timeline = [
         TimelineEntry(

@@ -111,10 +111,20 @@ class A2ACoordinator:
             for p in peers
         }
 
-    def _verify_peer_work(self, peer: A2APeer, resp: "PeerResponse") -> str:
-        """返回 "" 表示通过;非空为拒绝原因。验证 peer 回应的签名 receipt
-        确由该 peer DID 亲签 —— 同 reputation/binding 的"验签 + signer 匹配"
-        模式。"""
+    def _verify_peer_work(
+        self, peer: A2APeer, resp: "PeerResponse", prompt: str,
+    ) -> str:
+        """返回 "" 表示通过;非空为拒绝原因。
+
+        三道:
+          1. 验签 + signer_did == 该 peer DID(同 reputation/binding 模式);
+          2. receipt **绑定本次请求**:payload.request_sha256 == sha256(我发
+             的 prompt) —— 否则是重放别处签的 receipt;
+          3. receipt **绑定本次回应**:payload.response_sha256 == sha256(peer
+             回的 text) —— 否则文本被伪造(签名真但内容对不上)。
+        """
+        import hashlib
+
         receipt = resp.receipt
         if not isinstance(receipt, dict) or not receipt:
             return "no-receipt"
@@ -126,6 +136,16 @@ class A2ACoordinator:
             return "receipt-sig-invalid"
         if str(receipt.get("signer_did", "")) != peer.did:
             return "receipt-signer-mismatch"
+        # 取出 a2a_ask 那条 timeline payload。
+        payload = _a2a_ask_payload(receipt)
+        if payload is None:
+            return "receipt-no-ask-entry"
+        want_req = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if str(payload.get("request_sha256", "")) != want_req:
+            return "request-not-bound"  # 重放 / 张冠李戴
+        want_resp = hashlib.sha256((resp.text or "").encode("utf-8")).hexdigest()
+        if str(payload.get("response_sha256", "")) != want_resp:
+            return "response-not-bound"  # 文本被伪造
         return ""
 
     def run_mission(
@@ -171,17 +191,18 @@ class A2ACoordinator:
                 if runner.claim(mission_id, step.id) is None:  # try_claim CAS
                     continue
                 # —— 传输:经 A2A 把活交给 peer(协调者唯一对外动作)——
+                prompt = bp(step)
                 try:
-                    resp = peer.dispatch(bp(step))
+                    resp = peer.dispatch(prompt)
                 except Exception as exc:  # peer 故障 → 标 fail,不卡整盘
                     runner.fail(mission_id, step.id, f"dispatch 失败: {exc}")
                     results.append(StepResult(step.id, peer.did, False,
                                               f"dispatch error: {exc}"))
                     progressed = True
                     break
-                # —— 验签:确是该 peer 亲签的工作证据,才认这步完成 ——
+                # —— 验签:确是该 peer 为本请求/回应亲签的证据,才认完成 ——
                 if self.verify_receipts:
-                    why = self._verify_peer_work(peer, resp)
+                    why = self._verify_peer_work(peer, resp, prompt)
                     if why:
                         runner.fail(mission_id, step.id, f"unverified work: {why}")
                         results.append(StepResult(step.id, peer.did, False,
@@ -219,3 +240,16 @@ def _default_prompt(step: Any) -> str:
     desc = getattr(step, "description", "")
     inputs = getattr(step, "inputs", {}) or {}
     return f"{desc}\n输入: {inputs}" if inputs else desc
+
+
+def _a2a_ask_payload(receipt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """从签名 receipt 的 timeline 取 nth.a2a_ask_executed 那条 payload。"""
+    timeline = receipt.get("timeline")
+    if not isinstance(timeline, list):
+        return None
+    for entry in timeline:
+        if isinstance(entry, dict) and entry.get("type") == "nth.a2a_ask_executed":
+            p = entry.get("payload")
+            if isinstance(p, dict):
+                return p
+    return None
