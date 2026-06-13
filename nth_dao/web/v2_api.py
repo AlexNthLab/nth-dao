@@ -2247,6 +2247,107 @@ def register_v2_routes(app: FastAPI) -> None:
             content=_decode_or_passthrough(resp_body),
         )
 
+    async def _agent_ask(did: str, method: str, request: Request) -> Any:
+        """UI 集成（2026-06-13）：hub 侧"代操作员驱动任务"端点。
+
+        根因修复：原 ``/api/v2/agents/{did}/a2a/{method}`` 代理把调用方的
+        Authorization **原样透传**。浏览器没有签名私钥、产不出 ``CapToken``
+        头，子端校验 → 401，于是 UI 里"任务流程/流式输出"永远跑不通。
+
+        本端点反过来：浏览器只需 console 认证（操作员），**由 hub 加载该
+        spawn 出来的 agent 自己的 cap_token（落盘在 team_cap_tokens/）、
+        注入 ``Authorization: CapToken <...>``**，再代理到子端
+        ``/a2a/ask`` 或 ``/a2a/ask-stream``。签名材料留在 hub，浏览器不碰。
+
+        method ∈ {"ask", "ask-stream"}。ask-stream 走 SSE 流式代理，UI 实时
+        看到 delta。
+        """
+        import urllib.error
+        import urllib.request
+
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(status_code=503, detail="agent supervisor unavailable")
+        matching = [
+            r for r in sup.list_agents()
+            if r.did == did and r.a2a_port is not None and r.alive
+        ]
+        if not matching:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no live supervised agent for did={did!r} with an a2a_port",
+            )
+        rec = matching[0]
+
+        # 加载该 agent 自己的 cap_token 并注入（keystone）。
+        token_id = getattr(rec, "cap_token_id", None)
+        if not token_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"agent {did!r} has no cap_token — re-spawn it with "
+                    "capabilities=['a2a:message_send'] so the hub can drive it."
+                ),
+            )
+        store = _state_cap_tokens_store(request)
+        token = store.get(token_id) if store is not None else None
+        if not isinstance(token, dict):
+            raise HTTPException(
+                status_code=409,
+                detail=f"cap_token {token_id!r} not found in store for agent {did!r}",
+            )
+        from nth_dao.cap_token import encode_authorization_header
+
+        body_bytes = await request.body()
+        if len(body_bytes) > 1024 * 1024:
+            raise HTTPException(status_code=413, detail="body exceeds 1MB A2A cap")
+
+        url = f"http://127.0.0.1:{rec.a2a_port}/a2a/{method}"
+        req_headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body_bytes)),
+            "Authorization": f"CapToken {encode_authorization_header(token)}",
+        }
+        forward_timeout = _A2A_METHOD_TIMEOUTS.get(method, _A2A_DEFAULT_TIMEOUT_S)
+
+        if method == "ask-stream":
+            return _proxy_ssestream(
+                url=url, body_bytes=body_bytes,
+                req_headers=req_headers, forward_timeout=forward_timeout,
+            )
+
+        import asyncio
+
+        def _do_forward() -> Tuple[int, bytes]:
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=req_headers, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as http_exc:
+                return http_exc.code, http_exc.read()
+
+        try:
+            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"agent-ask proxy failed at {url}: {exc}",
+            )
+        return JSONResponse(
+            status_code=resp_status,
+            content=_decode_or_passthrough(resp_body),
+        )
+
+    @app.post("/api/v2/agents/{did}/ask")
+    async def v2_agents_ask(did: str, request: Request) -> Any:
+        return await _agent_ask(did, "ask", request)
+
+    @app.post("/api/v2/agents/{did}/ask-stream")
+    async def v2_agents_ask_stream(did: str, request: Request) -> Any:
+        return await _agent_ask(did, "ask-stream", request)
+
     @app.get("/api/v2/cap_tokens", response_model=List[CapTokenSummaryM])
     def v2_cap_tokens(request: Request) -> List[Dict[str, Any]]:
         live = _read_cap_tokens_from_disk(_state_workspace(request))

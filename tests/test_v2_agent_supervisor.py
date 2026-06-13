@@ -351,6 +351,50 @@ def test_spawn_endpoint_returns_201(hub_client: TestClient) -> None:
     assert entry["has_active_cap"] is True
 
 
+def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
+    tmp_path: Path,
+) -> None:
+    """UI 集成 keystone（2026-06-13）：浏览器没有签名私钥，直接打
+    ``/a2a/ask`` 代理（原样透传 auth）→ 子端 401。新的 hub 端点
+    ``POST /api/v2/agents/{did}/ask`` 由 hub 注入该 agent 自己的
+    cap_token → 200。这就是"任务流程无法在 UI 跑通"的根因修复。
+
+    用真 subprocess supervisor（不是 InMemoryRunner）—— keystone 本质是
+    端到端：要有真子进程绑 a2a_port + 加载 cap_token 才能验证注入。"""
+    import time
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    app = create_app(workspace=tmp_path, require_console_auth=False)
+    c = TestClient(app)
+    r = c.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "ui-ask",
+        "capabilities": ["a2a:message_send"],
+    })
+    assert r.status_code == 201, r.text
+    did = r.json()["did"]
+    agent_id = r.json()["agent_id"]
+    try:
+        # 原代理无 auth → 401（浏览器会遇到的破路径）
+        raw = c.post(f"/api/v2/agents/{did}/a2a/ask", json={"prompt": "hi"})
+        assert raw.status_code == 401, raw.text
+
+        # 新 hub /ask：hub 注入 cap_token → 200（轮询等子端 authorized）
+        ok = None
+        for _ in range(12):
+            ask = c.post(f"/api/v2/agents/{did}/ask", json={"prompt": "hello UI"})
+            if ask.status_code == 200 and "not-yet-authorized" not in ask.text:
+                ok = ask
+                break
+            time.sleep(0.5)
+        assert ok is not None, "hub /ask 应在 agent authorized 后返回 200"
+        body = ok.json()
+        assert body["result"]["backend"] == "mock"
+        assert "hello UI" in body["result"]["response"]
+    finally:
+        c.post(f"/api/v2/agents/{agent_id}/stop")
+
+
 def test_supervised_agents_appear_in_get(hub_client: TestClient) -> None:
     # Spawn 2 agents.
     spawned = []
