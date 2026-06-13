@@ -36,12 +36,27 @@ logger = logging.getLogger("nth_dao.discovery")
 # repo_root/team_agents/
 DEFAULT_AGENTS_DIR = "team_agents"
 
-# C2: clock-skew tolerance - two machines sharing a filesystem may have
-# clocks that differ by up to 30 s.  Without this buffer, agent B may
-# incorrectly mark agent A as dead simply because B's clock is ahead.
-CLOCK_SKEW_TOLERANCE_SECONDS = 30
+# C2: clock-skew tolerance - two machines that don't share an NTP source
+# can easily differ by a minute or two. Without a generous buffer, agent
+# B marks agent A dead just because A's clock runs ahead of B's. is_alive
+# treats this as the ONLY future-drift gate (see agent_registry.is_alive
+# and the CRIT-2 note); 2026-06-14 raised the default 30s -> 120s after a
+# real two-PC LAN deployment hit it. Tunable via NTH_CLOCK_SKEW_TOLERANCE_S
+# for sites with worse drift (liveness is a reachability hint, not a
+# security gate — actual driving still needs A2A handshake + cap_token,
+# so a looser value is safe).
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, str(default)))
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+CLOCK_SKEW_TOLERANCE_SECONDS = _env_int("NTH_CLOCK_SKEW_TOLERANCE_S", 120)
 # Upper bound on future timestamps - anything more than 5 minutes in the
 # future is treated as invalid (tampered / misconfigured clock).
+# NOTE: subsumed by the SKEW gate in is_alive (kept for external importers).
 FUTURE_STALE_SECONDS = 300
 
 

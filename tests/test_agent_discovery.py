@@ -143,33 +143,34 @@ class TestIsAlive:
         assert r.is_alive(max_stale_seconds=1) is False
 
     def test_clock_skew_tolerance_applied(self):
-        """CRIT-2(2026-06-10)后:skew 缓冲只用于宽恕"未来"的小幅时钟漂移
-        (远端时钟略快),不再用来加宽"过期"窗口。窗口为 [-SKEW, max_stale)。
-        因此一个 20s 未来(在 30s skew 内)的心跳仍算存活。"""
-        future = (datetime.now() + timedelta(seconds=20)).isoformat()
+        """skew 缓冲只宽恕"未来"的时钟漂移(远端时钟略快),不加宽"过期"
+        窗口。窗口为 [-SKEW, max_stale)。一个在 skew 内的未来心跳仍算存活。
+        用常量相对取值,放宽默认值(2026-06-14 30s->120s)后仍成立。"""
+        within = CLOCK_SKEW_TOLERANCE_SECONDS // 2
+        future = (datetime.now() + timedelta(seconds=within)).isoformat()
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=future)
-        # delta=-20:>= -SKEW(30) 且 < max_stale(90) -> 存活。
+        # delta=-within:>= -SKEW 且 < max_stale -> 存活。
         assert r.is_alive(max_stale_seconds=90) is True
 
     def test_barely_stale_past_is_dead(self):
         """CRIT-2 后:95s 前的心跳 >= max_stale(90) -> 死。skew 不再加宽过期
-        窗口(旧实现 max_stale+SKEW 会误判 95s 仍活,已修)。"""
+        窗口(旧实现 max_stale+SKEW 会误判 95s 仍活,已修)。与 skew 取值无关。"""
         past = (datetime.now() - timedelta(seconds=95)).isoformat()
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=past)
         assert r.is_alive(max_stale_seconds=90) is False
 
     def test_far_future_rejected_even_with_skew(self):
-        """Timestamp 10 minutes in the future exceeds FUTURE_STALE_SECONDS,
-        so is_alive returns False regardless of skew buffer."""
-        future = (datetime.now() + timedelta(seconds=600)).isoformat()
+        """远超 skew 容忍的未来时间戳(时钟被篡改/严重漂移)-> 死。"""
+        far = CLOCK_SKEW_TOLERANCE_SECONDS + FUTURE_STALE_SECONDS + 100
+        future = (datetime.now() + timedelta(seconds=far)).isoformat()
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=future)
         assert r.is_alive(max_stale_seconds=90) is False
 
     def test_future_beyond_skew_is_dead(self):
-        """CRIT-2 后:未来漂移的容忍只有 CLOCK_SKEW_TOLERANCE_SECONDS(30s),
-        一个 120s 未来的时间戳已超出 -> 视为死(时钟被篡改/严重漂移),与更
-        宽松的 FUTURE_STALE_SECONDS 无关(后者对未来路径已是死代码)。"""
-        future = (datetime.now() + timedelta(seconds=120)).isoformat()
+        """未来漂移的容忍只有 CLOCK_SKEW_TOLERANCE_SECONDS;超出即视为死。
+        取 SKEW+60s 保证越界,与具体取值无关。"""
+        beyond = CLOCK_SKEW_TOLERANCE_SECONDS + 60
+        future = (datetime.now() + timedelta(seconds=beyond)).isoformat()
         r = AgentRecord(agent_id="test", hostname="h", pid=1, last_seen=future)
         assert r.is_alive(max_stale_seconds=90) is False
 
