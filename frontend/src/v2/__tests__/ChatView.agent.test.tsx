@@ -54,8 +54,8 @@ describe("ChatView agent integration", () => {
       focusConversationId: "dm-did:key:zAgent",
     });
 
-    expect(await screen.findByRole("heading", { name: "DM: test-agent" }))
-      .toBeTruthy();
+    // 6C 纤细头部:DM 去掉 "DM: " 前缀,展示名为 "test-agent"。
+    expect(await screen.findByText("test-agent")).toBeTruthy();
     await waitFor(() => {
       expect(onConversationSelect).toHaveBeenCalledWith("dm-did:key:zAgent");
     });

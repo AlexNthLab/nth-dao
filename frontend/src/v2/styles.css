@@ -902,6 +902,49 @@ select option {
  * 蓝、对方深灰;连发"成组"(同一人、≤5min 内的相邻消息收紧间距+贴合
  * 圆角);新消息 pop-in;agent 思考时显示三点跳动;输入区做成胶囊 +
  * 圆形发送钮。配色全部取自暗色模式,与现有深色外壳无缝衔接。 */
+/* 6C:纤细联系人式头部(替代原来重的 main-head)。居中、约 56px。 */
+.chat-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 56px;
+  padding: 8px 16px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--bg-root);
+}
+.chat-head-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background-image: var(--chat-out-grad);
+}
+.chat-head-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.2;
+}
+.chat-head-name { font-size: 14px; font-weight: 500; color: var(--fg-primary); }
+.chat-head-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-tertiary);
+}
+.chat-presence {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--status-ok);
+}
+
 .chat-thread {
   background: var(--bg-root);
   padding: 14px 18px 10px;

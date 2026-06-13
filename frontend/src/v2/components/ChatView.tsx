@@ -82,6 +82,13 @@ export function ChatView({
   const messages = selectedId ? messagesByConv[selectedId] ?? [] : [];
   const summaries = selectedId ? summariesByConv?.[selectedId] ?? [] : [];
   const isTyping = selectedId ? !!typingByConv?.[selectedId] : false;
+  // 6C:纤细头部用的展示名 + 头像首字。DM 去掉 "DM: " 前缀,频道保留 #。
+  const headName = selected
+    ? selected.kind === "dm"
+      ? selected.title.replace(/^DM:\s*/i, "")
+      : selected.title
+    : "";
+  const headInitial = headName.replace(/^#/, "").charAt(0).toUpperCase() || "·";
 
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -211,20 +218,31 @@ export function ChatView({
         className="main"
         style={{ display: "flex", flexDirection: "column" }}
       >
-        <div className="main-head" style={{ position: "static" }}>
+        {/* 6C:iMessage 式纤细头部——头像 + 名字 + 在线点。kind / DID /
+            最近活动 / 签名等"可验证"细节都在右侧 detail 栏,这里只留
+            最轻的身份锚点。 */}
+        <div className="chat-head">
           {selected ? (
             <>
-              <p className="main-eyebrow">
-                {selected.kind === "dm" ? "Direct message" : "Channel"}
-              </p>
-              <h1 className="main-title">{selected.title}</h1>
-              <p className="main-subtitle">{selected.subtitle}</p>
+              <div className="chat-head-avatar" aria-hidden="true">
+                {headInitial}
+              </div>
+              <div className="chat-head-meta">
+                <span className="chat-head-name">{headName}</span>
+                <span className="chat-head-sub">
+                  {selected.kind === "dm" ? (
+                    <>
+                      <span className="chat-presence" aria-hidden="true" />
+                      在线
+                    </>
+                  ) : (
+                    "频道"
+                  )}
+                </span>
+              </div>
             </>
           ) : (
-            <>
-              <p className="main-eyebrow">Chat</p>
-              <h1 className="main-title">Pick a conversation</h1>
-            </>
+            <span className="chat-head-name">选择一个对话</span>
           )}
         </div>
 
