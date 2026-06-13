@@ -86,6 +86,17 @@ export function ChatView({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // 5A:输入框随内容自适应高度(iMessage 行为)。先归零再取 scrollHeight,
+  // CSS 的 max-height 负责封顶、超出后内部滚动。依赖 draft,故发送后清空
+  // 也会收回一行,切换会话亦然。
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft, selectedId]);
   const toast = useToast();
 
   useEffect(() => {
@@ -335,6 +346,7 @@ export function ChatView({
 
             <form onSubmit={handleSend} className="chat-composer">
               <textarea
+                ref={inputRef}
                 className="chat-input"
                 rows={1}
                 value={draft}
