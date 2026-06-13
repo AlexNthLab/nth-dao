@@ -8,7 +8,7 @@ commerce 负责"干得怎样、钱怎么付"（execute→deliver→verify→sett
 
 里程碑：
   CS1 ✅  签名 trade 状态机（无真钱，manual 结算）
-  CS2 ⏳  DeterministicTestVerifier（复用 sandbox + execution receipt）
+  CS2 ✅  commerce↔market 绑定校验 + DeterministicTestVerifier（首个 SKU）
   CS3 ⏳  争议处理（DISPUTED → REFUNDED / 部分结算）
   CS4 ⏳  x402 testnet 真钱结算 adapter
 """
@@ -86,4 +86,29 @@ __all__ = [
     "REJECT_BAD_VERDICT",
     "REJECT_EVENT_SIG_INVALID",
     "REJECT_CHAIN_BROKEN",
+    # CS2a binding
+    "verify_trade_binding",
+    # CS2b verifier
+    "DeterministicTestVerifier",
+    "VerificationOutcome",
+    "sign_test_execution_receipt",
+    "SKU_TEST_EXECUTION",
 ]
+
+from nth_dao.commerce.binding import (
+    verify_trade_binding,
+    REJECT_NO_OPENED,
+    REJECT_ANN_ID_MISMATCH,
+    REJECT_ANN_SIG_INVALID,
+    REJECT_PUBLISHER_MISMATCH,
+    REJECT_CLAIM_RECEIPT_INVALID,
+    REJECT_CLAIMANT_MISMATCH,
+    REJECT_CLAIM_ANN_MISMATCH,
+    REJECT_CLAIM_RECEIPT_ID_MISMATCH,
+)
+from nth_dao.commerce.verifier import (
+    DeterministicTestVerifier,
+    VerificationOutcome,
+    sign_test_execution_receipt,
+    SKU_TEST_EXECUTION,
+)
