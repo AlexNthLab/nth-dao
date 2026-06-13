@@ -60,6 +60,26 @@ def test_resolver_filters_didless_dedups_and_caps_filter() -> None:
     assert peers[0].capabilities == ["repro", "analysis"]
 
 
+def test_resolve_caps_handshake_count_against_flood() -> None:
+    """审查加固回归:未认证发现可被灌入海量假记录;verify_identity 开时
+    每条触发一次阻塞握手。max_candidates 必须把昂贵握手数卡住,防 DoS/
+    反射式 DoS。"""
+    calls = {"n": 0}
+
+    def dispatch_for(peer):
+        def d(_prompt: str) -> PeerResponse:
+            calls["n"] += 1               # 计一次"握手 dispatch"
+            return PeerResponse(text="", receipt=None)  # 无 receipt → 握手必败
+        return d
+
+    flood = [_FakePeer(did=f"did:key:z{i}", capabilities=["x"]) for i in range(10)]
+    peers = resolve_a2a_peers(
+        flood, dispatch_for=dispatch_for, want_capabilities=["x"],
+        verify_identity=True, max_candidates=3)
+    assert peers == []          # 全是无 receipt 的假货,无人入组
+    assert calls["n"] == 3      # 只发起 3 次握手(被 max_candidates 卡住)
+
+
 def test_make_http_dispatch_parses_receipt_and_raises_on_non200() -> None:
     # 注入假 post:回带 receipt 的 result。
     def fake_ok(url, body, headers):

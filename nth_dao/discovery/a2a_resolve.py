@@ -102,6 +102,7 @@ def resolve_a2a_peers(
     dispatch_for: DispatchForFn,
     want_capabilities: Optional[Iterable[str]] = None,
     verify_identity: bool = False,
+    max_candidates: Optional[int] = 256,
     on_reject: Optional[Callable[[str, str], None]] = None,
 ) -> List[A2APeer]:
     """把发现记录映射成 A2APeer 列表。
@@ -114,14 +115,30 @@ def resolve_a2a_peers(
             应答,**证明 endpoint 确实掌握所声称 DID 的私钥**才入组 —— 关掉
             "冒名记录把任务误路由到错 endpoint"的最后缺口。默认 False(纯
             映射,适用于来源本就可信/本地的场景)。
+        max_candidates: **审查加固(DoS 上限)**。发现是未认证的,攻击者可
+            灌入海量假记录;verify_identity 开时每条都触发一次阻塞 dispatch
+            (网络往返),且记录可指向**第三方**端点,把协调者变成对其的
+            反射式 DoS。这里硬性只处理前 N 条;超出即停(剩余 on_reject
+            "over-limit")。调用方应在 resolve 前按能力/信誉先行收窄
+            ``discovered``——这是兜底,不是替代。None=不限(仅用于可信来源)。
         on_reject: (did, reason) 回调,记录被剔除的候选(可观测性)。
 
-    过滤:无 did / 重复 / 能力不符 / (开了校验时)身份证明不过 → 不入组。
+    过滤:无 did / 重复 / 能力不符 / 超量 / (开了校验时)身份证明不过 → 不入组。
+
+    ⚠️ 前置去重是"先到先得":``verify_identity=False`` 时,同一 DID 谁先
+    广播谁占位 —— 攻击者抢先广播即可劫持该 DID 的路由。**未认证来源必须
+    开 verify_identity=True**(此时冒名者过不了握手,先到也无效)。
     """
     want = set(want_capabilities) if want_capabilities else None
     out: List[A2APeer] = []
     seen: set[str] = set()
+    processed = 0
     for p in discovered:
+        if max_candidates is not None and processed >= max_candidates:
+            did = str(getattr(p, "did", "") or "")
+            if did and on_reject:
+                on_reject(did, "over-limit")
+            continue  # 超出上限:不再做阻塞握手,兜底防 DoS
         did = str(getattr(p, "did", "") or "")
         if not did or did in seen:
             if did and on_reject:
@@ -135,11 +152,14 @@ def resolve_a2a_peers(
         label = str(getattr(p, "label", "") or getattr(p, "agent_id", "") or did)
         dispatch = dispatch_for(p)
         if verify_identity:
+            processed += 1  # 握手是昂贵步:只对真正发起握手的候选计数
             ok, reason = verify_peer_identity(did, dispatch)
             if not ok:
                 if on_reject:
                     on_reject(did, f"identity:{reason}")
                 continue  # endpoint 证明不了它掌握该 DID → 拒(防冒名误路由)
+        else:
+            processed += 1
         out.append(A2APeer(did=did, capabilities=caps,
                            dispatch=dispatch, label=label))
         seen.add(did)
