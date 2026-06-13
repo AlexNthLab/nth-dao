@@ -200,10 +200,14 @@ def verify_announcement(ann: TaskAnnouncement) -> Tuple[bool, str]:
         return False, REJECT_ANN_CRYPTO_UNAVAILABLE
 
     # 必填字段（缺一即拒，对应 cap_token 的 shape 检查）
+    # 独立审查修复 (M4 R2)：用精确的"None 或空/纯空白字符串"判定，不用
+    # ``not val``。``not val`` 语义过载——not "   " 为 False（漏判纯空格）,
+    # 且若未来必填列表混入数值字段，not 0 为 True 会误拒合法的 0。这里
+    # 必填字段全是字符串，按字符串语义判空才正确且面向未来稳健。
     for required in ("kind", "announcement_id", "publisher_did", "title",
                      "publisher_sig"):
         val = getattr(ann, required, None)
-        if not val:
+        if val is None or (isinstance(val, str) and not val.strip()):
             return False, REJECT_ANN_MISSING_FIELD
 
     pub_did = ann.publisher_did

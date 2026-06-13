@@ -65,6 +65,23 @@ def test_verify_detects_tampered_reward() -> None:
     assert reason == "ann-sig-invalid"
 
 
+def test_verify_rejects_whitespace_only_required_field() -> None:
+    """独立审查回归 (M4 R2)：必填字段为纯空白串也算缺失。``not val``
+    会漏判 "   "（not "   " 为 False），改用按字符串语义判空后必拒。"""
+    pub = AgentIdentity.generate(label="publisher")
+    ann = sign_announcement(publisher=pub, title="real", reward_minor=1)
+    ann.title = "   "   # 纯空格 —— 应判缺失
+    ok, reason = verify_announcement(ann)
+    assert not ok
+    assert reason == "ann-missing-field"
+    # 空串同理
+    ann2 = sign_announcement(publisher=pub, title="real2", reward_minor=1)
+    ann2.publisher_sig = ""
+    ok2, reason2 = verify_announcement(ann2)
+    assert not ok2
+    assert reason2 == "ann-missing-field"
+
+
 def test_capability_set_is_sorted_and_deduped() -> None:
     pub = AgentIdentity.generate(label="publisher")
     ann = sign_announcement(

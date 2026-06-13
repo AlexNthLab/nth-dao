@@ -163,18 +163,44 @@ def _ref_to_partial_ann(ref: Dict[str, Any]) -> TaskAnnouncement:
 
     缺 input_schema / acceptance / publisher_sig（ref 不带）—— 但 match()
     只看四维 + 时效，不验签，所以够用。绝不能拿这个 partial 去认领。
+
+    独立审查修复 (M4 R2)：ref 来自**不可信** digest（联邦信任模型明确
+    说 digest 是提示，任何 source 含恶意都能签名推送）。因此对每个字段
+    都做**类型安全强转**，绝不裸 ``int()``/``list()`` —— 否则
+    ``"reward_minor":"abc"`` 或 ``"capability_set":12345`` 这种恶意 ref
+    会让消费方 ``int("abc")``/``list(int)`` 崩溃（DoS）。坏类型一律静默
+    回退默认值，让匹配照常进行（反正全文层还要再验签）。
     """
     return TaskAnnouncement(
-        announcement_id=str(ref.get("announcement_id", "")),
-        publisher_did=str(ref.get("publisher_did", "")),
+        announcement_id=_safe_str(ref.get("announcement_id")),
+        publisher_did=_safe_str(ref.get("publisher_did")),
         title="",
-        capability_set=list(ref.get("capability_set") or []),
-        context=str(ref.get("context") or "general"),
-        reward_minor=int(ref.get("reward_minor") or 0),
-        reward_asset=str(ref.get("reward_asset") or "credit"),
-        published_at_ms=int(ref.get("published_at_ms") or 0),
-        not_after=int(ref.get("not_after") or 0),
+        capability_set=_safe_str_list(ref.get("capability_set")),
+        context=_safe_str(ref.get("context")) or "general",
+        reward_minor=_safe_int(ref.get("reward_minor")),
+        reward_asset=_safe_str(ref.get("reward_asset")) or "credit",
+        published_at_ms=_safe_int(ref.get("published_at_ms")),
+        not_after=_safe_int(ref.get("not_after")),
     )
+
+
+def _safe_str(v: Any) -> str:
+    """不可信 ref 字段 → str；非字符串一律 ""（不强转，避免 str(dict) 噪音）。"""
+    return v if isinstance(v, str) else ""
+
+
+def _safe_int(v: Any) -> int:
+    """不可信 ref 字段 → int；bool/字符串/任何非 int 一律 0（绝不裸 int()）。"""
+    if isinstance(v, bool):
+        return 0
+    return v if isinstance(v, int) else 0
+
+
+def _safe_str_list(v: Any) -> List[str]:
+    """不可信 ref 字段 → list[str]；非 list 回退 []，非字符串元素剔除。"""
+    if not isinstance(v, list):
+        return []
+    return [x for x in v if isinstance(x, str)]
 
 
 def match_digest_refs(

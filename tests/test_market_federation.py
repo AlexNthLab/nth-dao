@@ -205,6 +205,29 @@ def test_forged_ref_in_digest_dropped_on_pull(tmp_path) -> None:
     assert len(pulled) == 1                # 只剩真的那条
 
 
+def test_malicious_ref_types_do_not_crash_consumer(tmp_path) -> None:
+    """独立审查回归 (M4 R2)：恶意 source 签名推送类型错乱的 ref
+    （reward_minor="abc" / capability_set=int / not_after=str）→ 消费方
+    match_digest_refs 必须**不崩**（联邦信任模型：digest 不可信，解析要
+    类型安全，绝不裸 int()/list()）。坏类型静默回退，全文层再兜底。"""
+    feed_a = MarketFeed(tmp_path / "A")
+    dao_a = AgentIdentity.generate(label="dao-A")
+    pub = AgentIdentity.generate(label="pub")
+    _pub(feed_a, pub, title="real", caps=["code_review"])
+    digest = build_digest(feed_a, dao_a)
+    # source 把字段类型搞乱，再重签（provenance 成立）
+    digest.refs[0]["reward_minor"] = "abc"
+    digest.refs[0]["capability_set"] = 12345
+    digest.refs[0]["not_after"] = "soon"
+    digest.refs[0]["published_at_ms"] = {"nested": "junk"}
+    digest.digest_sig = b64u_encode(dao_a.sign(canonical_json(digest.signing_body())))
+    assert verify_digest(digest)[0]   # 确实是 A 签的
+    sub = MarketSubscription(subscriber_did="did:key:zB", capabilities=["code_review"])
+    # 不崩即过（结果不重要，关键是 TypeError/ValueError 不抛出来）
+    hits = match_digest_refs(digest, sub)
+    assert isinstance(hits, list)
+
+
 def test_relay_can_censor_cannot_forge(tmp_path) -> None:
     """中继能丢公告（审查）但不能伪造：篡改 ref 后 digest 验签失败。"""
     feed_a = MarketFeed(tmp_path / "A")
