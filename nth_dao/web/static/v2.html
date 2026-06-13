@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- UI-1 (audit fix 2026-06-10): suppress Edge / Chrome auto-
+         translate prompts. The v2 console renders English UI chrome
+         around mostly-mono signature material (DIDs, hashes, JSON)
+         — auto-translate covers the right rail with a banner and
+         tries to translate code identifiers, both of which break
+         the UX. ``notranslate`` is the standard meta opt-out
+         honoured by Edge, Chrome, Firefox. -->
+    <meta name="google" content="notranslate" />
+    <meta http-equiv="Content-Language" content="en" />
+    <title>NTH DAO Console — v2 preview</title>
+    <script type="module" crossorigin src="/assets/v2-DvSoW54g.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/client-HTsjYbj7.js">
+    <link rel="stylesheet" crossorigin href="/assets/v2-C6SVNmV0.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

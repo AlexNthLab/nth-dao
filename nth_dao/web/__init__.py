@@ -2456,10 +2456,31 @@ def create_app(
             return HTMLResponse(_render_console_html(index_file, app.state.nth_console_token))
         return HTMLResponse(_frontend_missing_html(), status_code=503)
 
+    @app.get("/v2", response_class=HTMLResponse, response_model=None)
+    @app.get("/v2.html", response_class=HTMLResponse, response_model=None)
+    def console_v2():
+        # v2 控制台（agents 目录 / spawn / 任务流式输出）入口。
+        # 修复（2026-06-13）：之前 catch-all 把所有非 /api 路径都返回
+        # index.html(v1)，导致 v2 控制台**完全无法访问** —— 这正是
+        # "UI 里看不到 AGENT / 任务流" 的根因（用户一直在看 v1 控制台）。
+        v2_file = STATIC_DIR / "v2.html"
+        if v2_file.exists():
+            return HTMLResponse(
+                _render_console_html(v2_file, app.state.nth_console_token)
+            )
+        return HTMLResponse(_frontend_missing_html(), status_code=503)
+
     @app.get("/{path:path}", include_in_schema=False, response_model=None)
     def frontend_fallback(path: str):
         if path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
+        # v2 控制台的深链接（/v2/...）也路由到 v2.html，让前端路由接管。
+        if path == "v2" or path == "v2.html" or path.startswith("v2/"):
+            v2_file = STATIC_DIR / "v2.html"
+            if v2_file.exists():
+                return HTMLResponse(
+                    _render_console_html(v2_file, app.state.nth_console_token)
+                )
         index_file = STATIC_DIR / "index.html"
         if index_file.exists():
             return HTMLResponse(_render_console_html(index_file, app.state.nth_console_token))
