@@ -138,6 +138,16 @@ def test_claim_reflects_to_mission_step(tmp_path: Path) -> None:
         step = app.state.nth.missions.get(m.id).get_step("s1")
         assert step.status == "claimed", step.status
         assert step.assignee == agent_did
+
+        # 对抗审查回归:step 推进到 done 后,幂等重认领不得把它倒退回 claimed。
+        m2 = app.state.nth.missions.get(m.id)
+        m2.get_step("s1").status = "done"
+        app.state.nth.missions.save(m2)
+        cl2 = client.post(
+            f"/api/v2/market/{ann_id}/claim", json={"agent_did": agent_did},
+        )
+        assert cl2.status_code == 200, cl2.text  # 认领仍幂等成功
+        assert app.state.nth.missions.get(m.id).get_step("s1").status == "done"
     finally:
         client.post(f"/api/v2/agents/{agent_id}/stop")
 

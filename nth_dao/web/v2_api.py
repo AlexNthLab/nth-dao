@@ -259,6 +259,12 @@ def _reflect_claim_to_mission(
             return False
         for step in mission.steps:
             if announcement_id_for(mid, step.id) == announcement_id:
+                # 对抗审查:只允许 todo→claimed。认领是幂等的(同一 agent 重
+                # 认领仍返回 claimed),若无条件回写,一次幂等重认领会把已
+                # 推进到 active/done 的 step **倒退**回 claimed。已非 todo
+                # 就别动状态(可能已在干/已完成)。
+                if step.status != StepStatus.TODO.value:
+                    return False
                 step.status = StepStatus.CLAIMED.value
                 step.assignee = claimant_did
                 mstore.save(mission)
