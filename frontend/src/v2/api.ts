@@ -543,3 +543,15 @@ export async function announceTask(
 ): Promise<TaskAnnouncement> {
   return postJson<TaskAnnouncement>("/market/announce", body);
 }
+
+/** 让某个 supervised agent 认领一条任务(hub 铸 cap_token + 派发,agent 自签)。
+ *  返回 agent 的认领结果信封({result:{claimed, claimant_did, receipt_id, ...}})。 */
+export async function claimTask(
+  announcementId: string,
+  agentDid: string,
+): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>(
+    `/market/${encodeURIComponent(announcementId)}/claim`,
+    { agent_did: agentDid },
+  );
+}

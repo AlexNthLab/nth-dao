@@ -1494,7 +1494,8 @@ class ClaimTaskBody(_Model):
     """POST /api/v2/market/{ann_id}/claim 请求体:操作员选某个 supervised
     agent 去认领。hub 给该 agent 按需铸 cap_token(能力=任务所需),派发给
     agent,由 agent 用**自己的私钥**签认领收据(谁干谁签)。"""
-    agent_id: str = Field(..., description="去认领的 supervised agent 的 id。")
+    agent_did: str = Field(
+        ..., description="去认领的 supervised agent 的 DID(与 ask 同款按 DID 寻址)。")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2199,21 +2200,19 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="agent supervisor unavailable")
         matching = [
             r for r in sup.list_agents()
-            if r.agent_id == body.agent_id
+            if r.did == body.agent_did
             and r.a2a_port is not None and r.alive
         ]
         if not matching:
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"no live supervised agent id={body.agent_id!r} with "
+                    f"no live supervised agent did={body.agent_did!r} with "
                     "an a2a_port"
                 ),
             )
         rec = matching[0]
-        agent_did = getattr(rec, "did", "") or ""
-        if not agent_did:
-            raise HTTPException(status_code=409, detail="agent has no DID yet")
+        agent_did = body.agent_did
 
         ws = _state_workspace(request)
         if ws is None:
@@ -2253,7 +2252,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"agent {body.agent_id!r} has no cap_token; re-spawn it "
+                    f"agent {body.agent_did!r} has no cap_token; re-spawn it "
                     "so the hub can drive it"
                 ),
             )

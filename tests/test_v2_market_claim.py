@@ -53,14 +53,14 @@ def test_claim_closed_loop_agent_self_signs(tmp_path: Path) -> None:
         # spawn 后 agent 需 ~1 tick 轮询载入自己的 cap_token 才能鉴权调用方
         # (与 ask/summarize 同款 "not-yet-authorized" 启动时序),轮询重试。
         cl = client.post(
-            f"/api/v2/market/{ann_id}/claim", json={"agent_id": agent_id},
+            f"/api/v2/market/{ann_id}/claim", json={"agent_did": agent_did},
         )
         for _ in range(20):
             if "not-yet-authorized" not in cl.text:
                 break
             time.sleep(0.5)
             cl = client.post(
-                f"/api/v2/market/{ann_id}/claim", json={"agent_id": agent_id},
+                f"/api/v2/market/{ann_id}/claim", json={"agent_did": agent_did},
             )
         assert cl.status_code == 200, cl.text
         result = cl.json().get("result") or {}
@@ -78,7 +78,7 @@ def test_claim_closed_loop_agent_self_signs(tmp_path: Path) -> None:
 
         # 幂等:同一 agent 再认领同一条 → 仍 200、仍是它(claim_announcement 幂等)。
         cl2 = client.post(
-            f"/api/v2/market/{ann_id}/claim", json={"agent_id": agent_id},
+            f"/api/v2/market/{ann_id}/claim", json={"agent_did": agent_did},
         )
         assert cl2.status_code == 200, cl2.text
         assert (cl2.json().get("result") or {}).get("claimant_did") == agent_did
@@ -95,6 +95,6 @@ def test_claim_unknown_agent_404(tmp_path: Path) -> None:
     assert an.status_code == 200, an.text
     ann_id = an.json()["announcement_id"]
     r = client.post(
-        f"/api/v2/market/{ann_id}/claim", json={"agent_id": "nope"},
+        f"/api/v2/market/{ann_id}/claim", json={"agent_did": "did:key:znope"},
     )
     assert r.status_code == 404

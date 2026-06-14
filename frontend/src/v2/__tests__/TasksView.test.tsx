@@ -22,6 +22,8 @@ vi.mock("../api", () => ({
     { context: "code_review", count: 1 },
   ]),
   announceTask: vi.fn(),
+  fetchAgents: vi.fn().mockResolvedValue([]),
+  claimTask: vi.fn(),
 }));
 
 import { TasksView } from "../components/TasksView";
@@ -40,8 +42,8 @@ describe("TasksView", () => {
     expect(screen.getByText("look at the token check")).toBeTruthy();
     // 发布入口
     expect(screen.getByText("+ 发布任务")).toBeTruthy();
-    // 认领按钮先占位禁用(切片B 未建)
-    const claim = screen.getByText("认领(建设中)") as HTMLButtonElement;
+    // 认领按钮:无可用 agent(fetchAgents 返回 [])→ 禁用。
+    const claim = screen.getByText("认领") as HTMLButtonElement;
     expect(claim.disabled).toBe(true);
   });
 });

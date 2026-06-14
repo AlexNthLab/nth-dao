@@ -8,11 +8,13 @@
  * 自取数(import api),不经 App 状态,保持视图自洽。
  */
 import { useEffect, useState } from "react";
-import { announceTask, listOpenTasks, listTaskCategories } from "../api";
+import {
+  announceTask, claimTask, fetchAgents, listOpenTasks, listTaskCategories,
+} from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
 import { relativeTimeShort } from "../utils/time";
-import type { TaskAnnouncement, TaskCategory } from "../types-v2";
+import type { AgentEntry, TaskAnnouncement, TaskCategory } from "../types-v2";
 
 export function TasksView() {
   const toast = useToast();
@@ -34,9 +36,14 @@ export function TasksView() {
   const [fContext, setFContext] = useState("");
   const [fDesc, setFDesc] = useState("");
   const [publishing, setPublishing] = useState(false);
-  // 发布后 bump,触发任务 + 类别一起刷新(否则筛选没变,任务 effect 不会
-  // 重跑,新发的任务看不见)。
+  // 发布/认领后 bump,触发任务 + 类别 + agent 列表一起刷新(否则筛选没变,
+  // 任务 effect 不会重跑,新发/已认领的任务状态看不见)。
   const [reloadKey, setReloadKey] = useState(0);
+
+  // 认领:可驱动的 supervised agent + 当前选中的认领身份(按 DID)。
+  const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [claimAgent, setClaimAgent] = useState("");
+  const [claimingId, setClaimingId] = useState("");
 
   async function loadTasks(signal?: AbortSignal) {
     setLoading(true);
@@ -90,6 +97,49 @@ export function TasksView() {
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
+
+  // 可认领身份:拉可驱动的 supervised agent(supervised+alive+有 a2a_port)。
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchAgents(ac.signal)
+      .then((all) => {
+        const drivable = all.filter(
+          (a) => a.supervised && a.alive && a.a2a_port != null,
+        );
+        setAgents(drivable);
+        setClaimAgent((cur) => cur || drivable[0]?.did || "");
+      })
+      .catch(() => {
+        /* agent 列表拉取失败不打断浏览 */
+      });
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey]);
+
+  async function handleClaim(annId: string) {
+    if (!claimAgent || claimingId) return;
+    setClaimingId(annId);
+    try {
+      const res = await claimTask(annId, claimAgent);
+      const result = (res.result as Record<string, unknown>) || {};
+      if (result.claimed) {
+        toast.push(
+          `已认领 · 收据 ${String(result.receipt_id || "").slice(0, 12)}…`,
+          "success",
+        );
+        setReloadKey((k) => k + 1); // 任务离开广场
+      } else {
+        toast.push("认领未成功", "error");
+      }
+    } catch (e) {
+      toast.push(
+        `认领失败:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setClaimingId("");
+    }
+  }
 
   async function handlePublish(e: React.FormEvent) {
     e.preventDefault();
@@ -180,6 +230,24 @@ export function TasksView() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
+          {/* 认领身份:选一个可驱动的 agent,它会用自己的私钥认领+签收据。 */}
+          <label style={{ fontSize: 11, color: "var(--fg-tertiary)", marginTop: 4 }}>
+            认领身份
+          </label>
+          <select
+            value={claimAgent}
+            onChange={(e) => setClaimAgent(e.target.value)}
+            disabled={agents.length === 0}
+          >
+            <option value="">
+              {agents.length ? "选择认领 agent" : "无可用 agent(先 spawn)"}
+            </option>
+            {agents.map((a) => (
+              <option key={a.did} value={a.did}>
+                {a.label} ({a.did.slice(0, 12)}…)
+              </option>
+            ))}
+          </select>
         </div>
       </aside>
 
@@ -340,14 +408,19 @@ export function TasksView() {
                         ? ` · ${relativeTimeShort(new Date(t.published_at_ms).toISOString())}`
                         : ""}
                     </span>
-                    {/* 认领跨进程(切片B,agent 自己用私钥签),先占位禁用。 */}
+                    {/* 认领:用左栏所选 agent,由 agent 自己私钥签收据。 */}
                     <button
                       className="btn"
-                      disabled
-                      title="认领需 agent 端支持(切片B,跨进程,建设中)"
-                      style={{ marginLeft: "auto", opacity: 0.5 }}
+                      disabled={!claimAgent || claimingId === t.announcement_id}
+                      title={
+                        claimAgent
+                          ? "用所选 agent 认领(agent 自签收据)"
+                          : "先在左栏选一个认领 agent"
+                      }
+                      style={{ marginLeft: "auto" }}
+                      onClick={() => void handleClaim(t.announcement_id)}
                     >
-                      认领(建设中)
+                      {claimingId === t.announcement_id ? "认领中…" : "认领"}
                     </button>
                   </div>
                 </article>
