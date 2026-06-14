@@ -1,6 +1,14 @@
 """Local group chat server for NTH DAO.
 
-Run:
+⚠️ DEPRECATED (2026-06-14): group chat is now a first-class view in the v2
+console — the **Channels** tab, served by the main hub at ``/v2`` and backed
+by ``/api/v2/channels`` (with built-in agent listen-and-reply). That path
+shares the v2 dark theme, i18n, and agent supervisor; this standalone 8765
+server does NOT (no language switch, no agent auto-reply). It is kept only as
+a minimal self-contained demo of the GroupManager API. For real use, run the
+hub (``python -m nth_dao.web``) and open the Channels tab.
+
+Run (demo only):
     python examples/group_chat_server.py
 """
 
@@ -261,7 +269,10 @@ refresh(); setInterval(refresh,3000);
 def main() -> None:
     host = os.environ.get("NTH_CHAT_HOST", "127.0.0.1")
     port = int(os.environ.get("NTH_CHAT_PORT", "8765"))
-    print(f"NTH DAO group chat: http://{host}:{port}")
+    print("⚠️  DEPRECATED demo. Group chat is now the v2 console 'Channels'")
+    print("    tab (python -m nth_dao.web → open /v2). This 8765 server has")
+    print("    no language switch and no agent auto-reply.")
+    print(f"NTH DAO group chat (demo): http://{host}:{port}")
     print(f"workspace: {WORKSPACE}")
     uvicorn.run(app, host=host, port=port, log_level="info")
 

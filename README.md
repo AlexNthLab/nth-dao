@@ -464,7 +464,7 @@ layers.
 
 | File | What it shows |
 |------|---------------|
-| `examples/group_chat_server.py` | Local DAO group chat UI |
+| `examples/group_chat_server.py` | ⚠️ Deprecated — group chat is now a native view in the v2 console (`Channels` tab, served at `/v2`). Kept as a minimal standalone demo only. |
 | `examples/nth_demo.py` | Discovery and mission relay |
 | `examples/blackboard_demo.py` | Shared blackboard collaboration |
 | `examples/multi_backend_demo.py` | Cross-backend agent coordination |
