@@ -38,6 +38,7 @@ import { ChatView } from "./components/ChatView";
 import { CommandPalette } from "./components/CommandPalette";
 import { DecisionQueue } from "./components/DecisionQueue";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { LangProvider } from "./i18n";
 import { IconNav } from "./components/IconNav";
 import { MissionList, type NewMissionDraft } from "./components/MissionList";
 import { RulesView } from "./components/RulesView";
@@ -83,9 +84,11 @@ const MOCK_IDENTITY: IdentityHeader = {
 export default function App() {
   return (
     <ErrorBoundary>
-      <ToastProvider>
-        <AppInner />
-      </ToastProvider>
+      <LangProvider>
+        <ToastProvider>
+          <AppInner />
+        </ToastProvider>
+      </LangProvider>
     </ErrorBoundary>
   );
 }

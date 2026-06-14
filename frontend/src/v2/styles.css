@@ -281,6 +281,34 @@ select option {
 
 .topbar-spacer { flex: 1; }
 
+/* 语言切换:中 / EN 分段控件 */
+.lang-toggle {
+  display: inline-flex;
+  margin-right: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.lang-toggle-btn {
+  padding: 4px 9px;
+  font-size: 12px;
+  color: var(--fg-secondary);
+  background: transparent;
+  transition: all var(--m-fast) var(--ease);
+}
+
+.lang-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.lang-toggle-btn.active {
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+}
+
 .cmdk-trigger {
   display: flex;
   align-items: center;

@@ -14,10 +14,12 @@ import {
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
 import { relativeTimeShort } from "../utils/time";
+import { useLang } from "../i18n";
 import type { AgentEntry, TaskAnnouncement, TaskCategory } from "../types-v2";
 
 export function TasksView() {
   const toast = useToast();
+  const { t } = useLang();
   const [tasks, setTasks] = useState<TaskAnnouncement[]>([]);
   const [cats, setCats] = useState<TaskCategory[]>([]);
   const [loading, setLoading] = useState(false);
@@ -61,7 +63,7 @@ export function TasksView() {
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
         toast.push(
-          `加载任务失败:${e instanceof Error ? e.message : String(e)}`,
+          `${t("加载任务失败", "Failed to load tasks")}:${e instanceof Error ? e.message : String(e)}`,
           "error",
         );
       }
@@ -134,7 +136,7 @@ export function TasksView() {
       const result = (r.body.result as Record<string, unknown>) || {};
       if (r.status === 200 && result.claimed) {
         toast.push(
-          `已认领 · 收据 ${String(result.receipt_id || "").slice(0, 12)}…`,
+          `${t("已认领 · 收据", "Claimed · receipt")} ${String(result.receipt_id || "").slice(0, 12)}…`,
           "success",
         );
         setReloadKey((k) => k + 1); // 任务离开广场
@@ -142,11 +144,11 @@ export function TasksView() {
         const err = (r.body.error as Record<string, unknown>) || {};
         const msg =
           err.message || r.body.detail || `HTTP ${r.status}`;
-        toast.push(`认领失败:${String(msg)}`, "error");
+        toast.push(`${t("认领失败", "Claim failed")}:${String(msg)}`, "error");
       }
     } catch (e) {
       toast.push(
-        `认领失败:${e instanceof Error ? e.message : String(e)}`,
+        `${t("认领失败", "Claim failed")}:${e instanceof Error ? e.message : String(e)}`,
         "error",
       );
     } finally {
@@ -169,7 +171,7 @@ export function TasksView() {
         context: fContext.trim(),
         description: fDesc.trim(),
       });
-      toast.push("任务已发布", "success");
+      toast.push(t("任务已发布", "Task published"), "success");
       setFTitle("");
       setFCaps("");
       setFReward("");
@@ -179,7 +181,7 @@ export function TasksView() {
       setReloadKey((k) => k + 1); // 刷新任务 + 类别分面
     } catch (e) {
       toast.push(
-        `发布失败:${e instanceof Error ? e.message : String(e)}`,
+        `${t("发布失败", "Publish failed")}:${e instanceof Error ? e.message : String(e)}`,
         "error",
       );
     } finally {
@@ -191,7 +193,7 @@ export function TasksView() {
     <>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="sidebar-title">类别</span>
+          <span className="sidebar-title">{t("类别", "Categories")}</span>
           <span className="sidebar-count">{cats.length}</span>
         </div>
         <div className="sidebar-list">
@@ -200,7 +202,7 @@ export function TasksView() {
             onClick={() => setCtx("")}
           >
             <div className="sidebar-item-title">
-              <span>全部</span>
+              <span>{t("全部", "All")}</span>
             </div>
           </button>
           {cats.map((c) => (
@@ -228,24 +230,24 @@ export function TasksView() {
           }}
         >
           <input
-            placeholder="按能力筛选 (如 code_review)"
+            placeholder={t("按能力筛选 (如 code_review)", "Filter by capability (e.g. code_review)")}
             value={cap}
             onChange={(e) => setCap(e.target.value)}
           />
           <input
-            placeholder="赏金下限"
+            placeholder={t("赏金下限", "Min reward")}
             inputMode="numeric"
             value={minReward}
             onChange={(e) => setMinReward(e.target.value.replace(/[^0-9]/g, ""))}
           />
           <input
-            placeholder="搜索标题/详述"
+            placeholder={t("搜索标题/详述", "Search title / description")}
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
           {/* 认领身份:选一个可驱动的 agent,它会用自己的私钥认领+签收据。 */}
           <label style={{ fontSize: 11, color: "var(--fg-tertiary)", marginTop: 4 }}>
-            认领身份
+            {t("认领身份", "Claim as")}
           </label>
           <select
             value={claimAgent}
@@ -253,7 +255,9 @@ export function TasksView() {
             disabled={agents.length === 0}
           >
             <option value="">
-              {agents.length ? "选择认领 agent" : "无可用 agent(先 spawn)"}
+              {agents.length
+                ? t("选择认领 agent", "Select claiming agent")
+                : t("无可用 agent(先 spawn)", "No agent available (spawn one first)")}
             </option>
             {agents.map((a) => (
               <option key={a.did} value={a.did}>
@@ -275,11 +279,13 @@ export function TasksView() {
           }}
         >
           <div>
-            <p className="main-eyebrow">任务广场 · 发现可认领的活</p>
+            <p className="main-eyebrow">
+              {t("任务广场 · 发现可认领的活", "Task market · discover claimable work")}
+            </p>
             <h1 className="main-title">Tasks {loading ? "…" : `(${tasks.length})`}</h1>
           </div>
           <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
-            {showForm ? "取消" : "+ 发布任务"}
+            {showForm ? t("取消", "Cancel") : t("+ 发布任务", "+ Publish task")}
           </button>
         </div>
 
@@ -298,25 +304,25 @@ export function TasksView() {
               }}
             >
               <input
-                placeholder="任务标题 *"
+                placeholder={t("任务标题 *", "Task title *")}
                 value={fTitle}
                 maxLength={200}
                 onChange={(e) => setFTitle(e.target.value)}
               />
               <input
-                placeholder="所需能力,逗号分隔 (如 code_review, research)"
+                placeholder={t("所需能力,逗号分隔 (如 code_review, research)", "Required capabilities, comma-separated (e.g. code_review, research)")}
                 value={fCaps}
                 onChange={(e) => setFCaps(e.target.value)}
               />
               <div style={{ display: "flex", gap: 8 }}>
                 <input
-                  placeholder="类别 (context)"
+                  placeholder={t("类别 (context)", "Category (context)")}
                   value={fContext}
                   onChange={(e) => setFContext(e.target.value)}
                   style={{ flex: 1 }}
                 />
                 <input
-                  placeholder="赏金 (整数)"
+                  placeholder={t("赏金 (整数)", "Reward (integer)")}
                   inputMode="numeric"
                   value={fReward}
                   onChange={(e) => setFReward(e.target.value.replace(/[^0-9]/g, ""))}
@@ -324,7 +330,7 @@ export function TasksView() {
                 />
               </div>
               <textarea
-                placeholder="任务详述"
+                placeholder={t("任务详述", "Task description")}
                 value={fDesc}
                 maxLength={4000}
                 onChange={(e) => setFDesc(e.target.value)}
@@ -336,7 +342,7 @@ export function TasksView() {
                 disabled={!fTitle.trim() || publishing}
                 style={{ alignSelf: "flex-start" }}
               >
-                {publishing ? "发布中…" : "发布"}
+                {publishing ? t("发布中…", "Publishing…") : t("发布", "Publish")}
               </button>
             </form>
           )}
@@ -346,16 +352,16 @@ export function TasksView() {
               <div className="main-empty-icon">
                 <IconBriefcase size={36} />
               </div>
-              <p>没有匹配的开放任务。</p>
+              <p>{t("没有匹配的开放任务。", "No matching open tasks.")}</p>
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                换个筛选,或发布一条任务。
+                {t("换个筛选,或发布一条任务。", "Adjust filters, or publish a task.")}
               </p>
             </div>
           ) : (
             <div className="stack" style={{ gap: 10 }}>
-              {tasks.map((t) => (
+              {tasks.map((task) => (
                 <article
-                  key={t.announcement_id}
+                  key={task.announcement_id}
                   style={{
                     border: "1px solid var(--border)",
                     borderRadius: "var(--r-md)",
@@ -364,13 +370,13 @@ export function TasksView() {
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                    <strong style={{ fontSize: 14 }}>{t.title}</strong>
-                    {t.context && (
+                    <strong style={{ fontSize: 14 }}>{task.title}</strong>
+                    {task.context && (
                       <span className="pill dim" style={{ fontSize: 10 }}>
-                        {t.context}
+                        {task.context}
                       </span>
                     )}
-                    {t.reward_minor > 0 && (
+                    {task.reward_minor > 0 && (
                       <span
                         style={{
                           marginLeft: "auto",
@@ -379,11 +385,11 @@ export function TasksView() {
                           fontWeight: 500,
                         }}
                       >
-                        {t.reward_minor} {t.reward_asset}
+                        {task.reward_minor} {task.reward_asset}
                       </span>
                     )}
                   </div>
-                  {t.description && (
+                  {task.description && (
                     <p
                       style={{
                         margin: "6px 0 0",
@@ -391,14 +397,14 @@ export function TasksView() {
                         color: "var(--fg-secondary)",
                       }}
                     >
-                      {t.description}
+                      {task.description}
                     </p>
                   )}
-                  {t.capability_set.length > 0 && (
+                  {task.capability_set.length > 0 && (
                     <div
                       style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
                     >
-                      {t.capability_set.map((c) => (
+                      {task.capability_set.map((c) => (
                         <span key={c} className="pill dim" style={{ fontSize: 10 }}>
                           {c}
                         </span>
@@ -416,24 +422,26 @@ export function TasksView() {
                     }}
                   >
                     <span>
-                      发布者 {t.publisher_did.slice(0, 18)}…
-                      {t.published_at_ms
-                        ? ` · ${relativeTimeShort(new Date(t.published_at_ms).toISOString())}`
+                      {t("发布者", "By")} {task.publisher_did.slice(0, 18)}…
+                      {task.published_at_ms
+                        ? ` · ${relativeTimeShort(new Date(task.published_at_ms).toISOString())}`
                         : ""}
                     </span>
                     {/* 认领:用左栏所选 agent,由 agent 自己私钥签收据。 */}
                     <button
                       className="btn"
-                      disabled={!claimAgent || claimingId === t.announcement_id}
+                      disabled={!claimAgent || claimingId === task.announcement_id}
                       title={
                         claimAgent
-                          ? "用所选 agent 认领(agent 自签收据)"
-                          : "先在左栏选一个认领 agent"
+                          ? t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
+                          : t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
                       }
                       style={{ marginLeft: "auto" }}
-                      onClick={() => void handleClaim(t.announcement_id)}
+                      onClick={() => void handleClaim(task.announcement_id)}
                     >
-                      {claimingId === t.announcement_id ? "认领中…" : "认领"}
+                      {claimingId === task.announcement_id
+                        ? t("认领中…", "Claiming…")
+                        : t("认领", "Claim")}
                     </button>
                   </div>
                 </article>

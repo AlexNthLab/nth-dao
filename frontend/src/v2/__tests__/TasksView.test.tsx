@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "../components/Toast";
+import { LangProvider } from "../i18n";
 
 vi.mock("../api", () => ({
   listOpenTasks: vi.fn().mockResolvedValue([
@@ -33,9 +34,11 @@ afterEach(cleanup);
 describe("TasksView", () => {
   it("板子渲染任务、发布按钮、认领占位禁用", async () => {
     render(
-      <ToastProvider>
-        <TasksView />
-      </ToastProvider>,
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
     );
     // 公告卡片
     expect(await screen.findByText("review the auth PR")).toBeTruthy();
