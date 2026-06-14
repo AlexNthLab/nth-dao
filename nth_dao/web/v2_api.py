@@ -2457,6 +2457,57 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         return ann.to_dict()
 
+    # ── 任务市场联邦传输层(FED-1:serve 侧)─────────────────────────
+    # federation.py 已把数据模型/验签/信任模型做好;这里只把它包成 HTTP。
+    # 两个端点都匿名可读(只暴露本就可发现的公告摘要/全文,与 market/open
+    # 一致)。信任模型:digest 是不可信提示(带 source 签名=provenance),
+    # 全文带 publisher_sig 才是权威 —— 拉方两层都验。
+    @app.get("/api/v2/market/federation/digest")
+    def v2_market_fed_digest(request: Request) -> Dict[str, Any]:
+        """返回本节点 feed 的签名摘要(provenance),供对端发现。"""
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        if ws is None or identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(
+                status_code=503, detail="node identity/workspace unavailable")
+        # 没 feed 文件 = 没活可联邦;返回签名的空 digest,绝不 mkdir
+        # (避免被对端轮询时在从不发活的节点凭空造 market_feed/)。
+        if not (ws / "market_feed" / "announcements.jsonl").exists():
+            from nth_dao.b64u import b64u_encode
+            from nth_dao.canonical_json import canonical_json
+            from nth_dao.execution_receipt import now_ms
+            from nth_dao.market.federation import FeedDigest
+            empty = FeedDigest(
+                source_did=identity.as_did(), generated_at_ms=now_ms(),
+                high_seq=-1, refs=[],
+            )
+            empty.digest_sig = b64u_encode(
+                identity.sign(canonical_json(empty.signing_body())))
+            return empty.to_dict()
+        from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.federation import build_digest
+        return build_digest(MarketFeed(ws), identity).to_dict()
+
+    @app.get("/api/v2/market/federation/pull")
+    def v2_market_fed_pull(
+        request: Request, ids: str = "",
+    ) -> List[Dict[str, Any]]:
+        """按需拉全文:按 id 返回完整且已验签的公告(信任模型的"真相"层)。
+
+        ids = 逗号分隔(封顶 200,防滥用)。不存在/验不过的 id 静默略过。
+        """
+        ws = _state_workspace(request)
+        if ws is None or not (
+            ws / "market_feed" / "announcements.jsonl"
+        ).exists():
+            return []
+        id_list = [s.strip() for s in ids.split(",") if s.strip()][:200]
+        if not id_list:
+            return []
+        from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.federation import pull_announcements
+        return [a.to_dict() for a in pull_announcements(MarketFeed(ws), id_list)]
+
     @app.post("/api/v2/market/{announcement_id}/claim")
     async def v2_market_claim(
         announcement_id: str, body: ClaimTaskBody, request: Request,
