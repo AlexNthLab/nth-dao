@@ -38,6 +38,7 @@ export function ChannelsView() {
   const [newName, setNewName] = useState("");
   const [joinDid, setJoinDid] = useState("");
   const [awaiting, setAwaiting] = useState(false);
+  const [awaitTimedOut, setAwaitTimedOut] = useState(false);
   const awaitTimer = useRef<number | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
 
@@ -69,6 +70,8 @@ export function ChannelsView() {
   // 选中频道的消息:切换即拉 + 3s 轮询。
   useEffect(() => {
     if (!selectedId) { setMessages([]); return; }
+    setAwaiting(false);
+    setAwaitTimedOut(false);  // 切频道清掉上一个频道的等待态
     let cancelled = false;
     const cid = selectedId;
     async function loadMsgs() {
@@ -88,6 +91,7 @@ export function ChannelsView() {
     const last = messages[messages.length - 1];
     if (last && last.sender_id !== ME) {
       setAwaiting(false);
+      setAwaitTimedOut(false);  // agent 回帖到了,不是超时
       if (awaitTimer.current) window.clearTimeout(awaitTimer.current);
     }
   }, [messages, awaiting]);
@@ -115,12 +119,17 @@ export function ChannelsView() {
     if (!body || !selectedId || sending) return;
     setDraft("");
     setSending(true);
+    setAwaitTimedOut(false);
     try {
       await postChannelMessage(selectedId, body, ME);
       if (hasAgentMember) {
         setAwaiting(true);
         if (awaitTimer.current) window.clearTimeout(awaitTimer.current);
-        awaitTimer.current = window.setTimeout(() => setAwaiting(false), 30000);
+        // 30s 没等到回帖 → 撤指示并显式告知(不静默,补隐患②)。
+        awaitTimer.current = window.setTimeout(() => {
+          setAwaiting(false);
+          setAwaitTimedOut(true);
+        }, 30000);
       }
       const ms = await listChannelMessages(selectedId);
       setMessages(ms);
@@ -282,6 +291,12 @@ export function ChannelsView() {
                       </span>
                     </div>
                   </div>
+                </div>
+              )}
+              {awaitTimedOut && (
+                <div className="chat-system" style={{ fontSize: 11 }} aria-live="polite">
+                  {t("agent 未在 30s 内回复(可能没有在线 agent,或它出错了)。",
+                     "No agent reply within 30s — no online agent, or it errored.")}
                 </div>
               )}
             </div>
