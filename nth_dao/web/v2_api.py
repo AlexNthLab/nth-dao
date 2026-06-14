@@ -2017,6 +2017,7 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.orchestration.market_coordinator import (
             announce_step, announcement_id_for,
         )
+        from nth_dao.orchestration.mission import StepStatus
 
         store = getattr(request.app.state.nth, "missions", None)
         if store is None:
@@ -2044,6 +2045,17 @@ def register_v2_routes(app: FastAPI) -> None:
             d = existing.to_dict()
             d["already_announced"] = True
             return d
+        # 状态闸(对抗审查补):只有 TODO(未开工、可认领)的 step 能发上市场。
+        # 否则会把已认领/进行中/已完成/失败的 step 重新挂出去让人认领重做——
+        # 语义错误。已发过的走上面的幂等分支,不受此限。
+        if step.status != StepStatus.TODO.value:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"step is '{step.status}'; only 'todo' steps can be "
+                    f"announced to the market"
+                ),
+            )
         try:
             ann = announce_step(
                 feed, step,

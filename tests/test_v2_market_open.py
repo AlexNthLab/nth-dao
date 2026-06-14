@@ -203,6 +203,32 @@ def test_mission_step_announce_bridge(tmp_path: Path) -> None:
     ).status_code == 404
 
 
+def test_mission_step_announce_rejects_non_todo_step(tmp_path: Path) -> None:
+    # 对抗审查回归:只有 TODO 的 step 能发上市场;已完成/进行中的不行
+    # (否则把完成的活重新挂出去让人认领重做)。
+    from nth_dao.orchestration.mission import Mission
+
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    m = Mission.new(
+        title="L",
+        goal="g",
+        owner="admin",
+        steps=[{
+            "id": "done1",
+            "description": "already finished",
+            "required_capabilities": ["research"],
+        }],
+    )
+    # Mission.new 不读 step dict 的 status,显式置为 done。
+    m.steps[0].status = "done"
+    app.state.nth.missions.create(m)
+    r = client.post(f"/api/v2/missions/{m.id}/steps/done1/announce", json={})
+    assert r.status_code == 409, r.text
+    # 也没被发上广场。
+    assert client.get("/api/v2/market/open").json() == []
+
+
 def test_market_announce_caps_oversized_input(tmp_path: Path) -> None:
     # 对抗审查回归:超大输入会被签名+永久追加进 feed,必须在边界封顶。
     client = TestClient(create_app(tmp_path, require_console_auth=False))
