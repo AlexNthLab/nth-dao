@@ -38,7 +38,7 @@ import { ChatView } from "./components/ChatView";
 import { CommandPalette } from "./components/CommandPalette";
 import { DecisionQueue } from "./components/DecisionQueue";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { LangProvider } from "./i18n";
+import { LangProvider, useLang } from "./i18n";
 import { IconNav } from "./components/IconNav";
 import { MissionList, type NewMissionDraft } from "./components/MissionList";
 import { RulesView } from "./components/RulesView";
@@ -121,6 +121,7 @@ function AppInner() {
   /* 当前页签持久化(2026-06-14 修):刷新前把 active 落 localStorage,刷新后
    * 水合回来——否则刷新一律重置回 blackboard,用户在 Tasks 找活刷一下就被
    * 踢回首屏。校验合法 NavId,脏值/旧值降级 blackboard,绝不让坏值崩渲染。 */
+  const { t } = useLang();
   const [active, setActive] = useState<NavId>(loadActiveNav);
   useEffect(() => {
     try {
@@ -714,8 +715,14 @@ function AppInner() {
             sender_id: "system",
             sender_label: "system",
             body: hasAny
-              ? "⚠️ 本会话没绑定具体 agent,且节点上有多个可驱动 agent。请在 Agents 里选某个 agent 的 DM 再发。"
-              : "⚠️ 节点上没有可驱动的 agent(需 supervised + alive + a2a_port)。先在 Agents 里 spawn 一个。",
+              ? t(
+                  "⚠️ 本会话没绑定具体 agent,且节点上有多个可驱动 agent。请在 Agents 里选某个 agent 的 DM 再发。",
+                  "⚠️ This conversation isn't bound to a specific agent, and the node has multiple drivable agents. Open a specific agent's DM under Agents and send there.",
+                )
+              : t(
+                  "⚠️ 节点上没有可驱动的 agent(需 supervised + alive + a2a_port)。先在 Agents 里 spawn 一个。",
+                  "⚠️ No drivable agent on this node (needs supervised + alive + a2a_port). Spawn one under Agents first.",
+                ),
             created_at: new Date().toISOString(),
           },
         ],
@@ -769,7 +776,7 @@ function AppInner() {
         upsert(acc);
       });
       clearTyping();
-      upsert(acc || res.text || "(空回复)");
+      upsert(acc || res.text || t("(空回复)", "(empty reply)"));
     } catch (e) {
       clearTyping();
       upsert(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
@@ -854,7 +861,7 @@ function AppInner() {
       setFocusMissionId(created.id);
     } catch (e) {
       toast.push(
-        `创建 mission 失败:${e instanceof Error ? e.message : String(e)}`,
+        `${t("创建 mission 失败", "Failed to create mission")}:${e instanceof Error ? e.message : String(e)}`,
         "error",
       );
     }
@@ -867,7 +874,7 @@ function AppInner() {
       setMissions((prev) => prev.map((m) => (m.id === id ? updated : m)));
     } catch (e) {
       toast.push(
-        `启动 mission 失败:${e instanceof Error ? e.message : String(e)}`,
+        `${t("启动 mission 失败", "Failed to start mission")}:${e instanceof Error ? e.message : String(e)}`,
         "error",
       );
     }

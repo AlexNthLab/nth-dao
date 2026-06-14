@@ -17,6 +17,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { AgentDirectoryView } from "../components/AgentDirectoryView";
+import { LangProvider } from "../i18n";
 import type { AgentEntry } from "../types-v2";
 
 const baseAgent = (
@@ -49,7 +50,7 @@ describe("AgentDirectoryView — Phase G scope badge", () => {
         scope_model_allowlist: undefined,
       }),
     ];
-    render(<AgentDirectoryView agents={agents} {...noopProps} />);
+    render(<LangProvider><AgentDirectoryView agents={agents} {...noopProps} /></LangProvider>);
     // The agent's kind pill ("mock") is always visible; the scope
     // pill text "scope: …" must NOT be.
     expect(screen.queryByText(/^scope:/)).toBeNull();
@@ -62,7 +63,7 @@ describe("AgentDirectoryView — Phase G scope badge", () => {
         scope_model_allowlist: [],
       }),
     ];
-    render(<AgentDirectoryView agents={agents} {...noopProps} />);
+    render(<LangProvider><AgentDirectoryView agents={agents} {...noopProps} /></LangProvider>);
     const pill = screen.getByText("scope: closed");
     expect(pill).toBeTruthy();
     // Tooltip must explain WHY closed is a policy choice, not an
@@ -77,7 +78,7 @@ describe("AgentDirectoryView — Phase G scope badge", () => {
         scope_model_allowlist: ["claude-haiku-4-5", "claude-sonnet-4-6"],
       }),
     ];
-    render(<AgentDirectoryView agents={agents} {...noopProps} />);
+    render(<LangProvider><AgentDirectoryView agents={agents} {...noopProps} /></LangProvider>);
     // Both models are listed inline (joined by ", ").
     const pill = screen.getByText(
       "scope: claude-haiku-4-5, claude-sonnet-4-6",
@@ -100,7 +101,7 @@ describe("AgentDirectoryView — Phase G scope badge", () => {
         ],
       }),
     ];
-    render(<AgentDirectoryView agents={agents} {...noopProps} />);
+    render(<LangProvider><AgentDirectoryView agents={agents} {...noopProps} /></LangProvider>);
     // Shows first entry + count of the rest. 4 entries → "first +3".
     const pill = screen.getByText("scope: claude-haiku-4-5 +3");
     expect(pill).toBeTruthy();

@@ -23,6 +23,7 @@ import { useEffect, useState } from "react";
 import { IconPlus, IconTarget } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { progressColor, progressPct } from "../utils/mission";
+import { useLang } from "../i18n";
 import type { AgentEntry, MissionSummary } from "../types-v2";
 
 export interface MissionListProps {
@@ -74,6 +75,7 @@ function statusPill(s: MissionSummary["status"]): "ok" | "wait" | "bad" | "dim" 
 export function MissionList({
   missions, onCreate, onActivate, driverOptions, focusId, onFocusConsumed,
 }: MissionListProps) {
+  const { t } = useLang();
   const [selectedId, setSelectedId] = useState<string | null>(
     missions[0]?.id ?? null,
   );
@@ -247,22 +249,22 @@ export function MissionList({
                         disabled={m.steps_total === 0}
                         title={
                           m.steps_total === 0
-                            ? "先加步骤再启动(空 mission 没活可干)"
-                            : "开始执行这个 mission(planning → active)"
+                            ? t("先加步骤再启动(空 mission 没活可干)", "Add steps before starting (an empty mission has nothing to do)")
+                            : t("开始执行这个 mission(planning → active)", "Start executing this mission (planning → active)")
                         }
                         onClick={(e) => {
                           e.stopPropagation();
                           onActivate(m.id);
                         }}
                       >
-                        启动
+                        {t("启动", "Start")}
                       </button>
                       {m.steps_total === 0 && (
                         <span
                           className="muted"
                           style={{ fontSize: 11, marginLeft: 8 }}
                         >
-                          没有步骤,无法启动
+                          {t("没有步骤,无法启动", "No steps — can't start")}
                         </span>
                       )}
                     </div>
@@ -326,6 +328,7 @@ interface NewMissionFormProps {
 }
 
 function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
+  const { t } = useLang();
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
   const [stepsText, setStepsText] = useState("");
@@ -459,17 +462,23 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
               letterSpacing: "0.04em",
             }}
           >
-            Steps(每行一个,可留空)
+            {t("Steps(每行一个,可留空)", "Steps (one per line, optional)")}
           </label>
           <textarea
             value={stepsText}
             onChange={(e) => setStepsText(e.target.value)}
-            placeholder={"每行一个步骤,例如:\nreproduce the crash\nwrite a fix\nverify on staging"}
+            placeholder={t(
+              "每行一个步骤,例如:\nreproduce the crash\nwrite a fix\nverify on staging",
+              "One step per line, e.g.:\nreproduce the crash\nwrite a fix\nverify on staging",
+            )}
             rows={3}
             style={{ width: "100%", resize: "vertical" }}
           />
           <p className="muted" style={{ margin: "4px 0 0", fontSize: 11 }}>
-            没有步骤的 mission 会停在 planning(空规划态);加了步骤才能推进/发上市场。
+            {t(
+              "没有步骤的 mission 会停在 planning(空规划态);加了步骤才能推进/发上市场。",
+              "A mission with no steps stays in planning (empty plan); add steps to advance it or post to the market.",
+            )}
           </p>
         </div>
 

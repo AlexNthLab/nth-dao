@@ -24,6 +24,7 @@ import {
 } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { relativeTimeShort } from "../utils/time";
+import { useLang } from "../i18n";
 import type { AgentEntry, AgentSource } from "../types-v2";
 
 export interface AgentDirectoryViewProps {
@@ -94,6 +95,7 @@ export function AgentDirectoryView({
   agents, onAddByDid, onScanLan, onIssueCap, onSendMessage,
   onPingAgent, onA2AEcho, onAskAgent,
 }: AgentDirectoryViewProps) {
+  const { t } = useLang();
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [addOpen, setAddOpen] = useState(false);
@@ -836,7 +838,7 @@ export function AgentDirectoryView({
                   <textarea
                     value={workPrompt}
                     onChange={(e) => setWorkPrompt(e.target.value)}
-                    placeholder="给这个 agent 派一个任务（prompt）…"
+                    placeholder={t("给这个 agent 派一个任务（prompt）…", "Assign a task (prompt) to this agent…")}
                     rows={3}
                     style={{
                       width: "100%", resize: "vertical", fontSize: 12,

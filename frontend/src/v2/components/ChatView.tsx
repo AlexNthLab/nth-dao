@@ -27,6 +27,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChat, IconSend } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { useToast } from "./Toast";
+import { useLang } from "../i18n";
 import { relativeTimeShort } from "../utils/time";
 import type {
   ChatMessage, Conversation, ConversationSummary,
@@ -67,6 +68,7 @@ export function ChatView({
   focusConversationId,
   currentUserId = "admin",
 }: ChatViewProps) {
+  const { t } = useLang();
   const [summariesOpen, setSummariesOpen] = useState(true);
   const sorted = useMemo(
     () => conversations.slice().sort(
@@ -236,16 +238,16 @@ export function ChatView({
                   {selected.kind === "dm" ? (
                     <>
                       <span className="chat-presence" aria-hidden="true" />
-                      在线
+                      {t("在线", "Online")}
                     </>
                   ) : (
-                    "频道"
+                    t("频道", "Channel")
                   )}
                 </span>
               </div>
             </>
           ) : (
-            <span className="chat-head-name">选择一个对话</span>
+            <span className="chat-head-name">{t("选择一个对话", "Select a conversation")}</span>
           )}
         </div>
 
@@ -269,7 +271,7 @@ export function ChatView({
                       padding: 0,
                     }}
                   >
-                    📜 对话摘要 ({summaries.length}) {summariesOpen ? "▾" : "▸"}
+                    📜 {t("对话摘要", "Summary")} ({summaries.length}) {summariesOpen ? "▾" : "▸"}
                   </button>
                   {summariesOpen &&
                     summaries.map((s, i) => (
@@ -279,8 +281,11 @@ export function ChatView({
                       >
                         <div style={{ whiteSpace: "pre-wrap" }}>{s.summary_text}</div>
                         <div style={{ fontSize: 11, marginTop: 4, color: "var(--fg-tertiary)" }}>
-                          {s.verified ? "✓ 已验签" : `⚠️ 未验签(${s.reason})`} · 概括{" "}
-                          {s.covered_message_ids.length} 条 · signer{" "}
+                          {s.verified
+                            ? t("✓ 已验签", "✓ Verified")
+                            : `${t("⚠️ 未验签", "⚠️ Unverified")}(${s.reason})`}{" "}
+                          · {t("概括", "covers")}{" "}
+                          {s.covered_message_ids.length} {t("条", "msgs")} · signer{" "}
                           {s.agent_did.slice(0, 14)}…
                         </div>
                       </div>
@@ -305,15 +310,15 @@ export function ChatView({
                   // iMessage 式"成组":同一人、≤5min 内的相邻消息收紧间距
                   // 并贴合圆角,视觉上"连"成一串。
                   const GAP_MS = 5 * 60 * 1000;
-                  const t = new Date(m.created_at).getTime();
+                  const tMs = new Date(m.created_at).getTime();
                   const contFromPrev =
                     !!prev &&
                     prev.sender_id === m.sender_id &&
-                    t - new Date(prev.created_at).getTime() <= GAP_MS;
+                    tMs - new Date(prev.created_at).getTime() <= GAP_MS;
                   const contToNext =
                     !!next &&
                     next.sender_id === m.sender_id &&
-                    new Date(next.created_at).getTime() - t <= GAP_MS;
+                    new Date(next.created_at).getTime() - tMs <= GAP_MS;
                   // pop-in 只给最新一条:打开会话时不让整段历史一起抖。
                   // 若正在 typing,把 is-last 让给底部的三点行。
                   const isLast = i === messages.length - 1 && !isTyping;
@@ -354,7 +359,7 @@ export function ChatView({
                 <div className="chat-row in is-last" aria-live="polite">
                   <div className="chat-col">
                     <div className="chat-bubble">
-                      <span className="typing-dots" aria-label="对方正在输入">
+                      <span className="typing-dots" aria-label={t("对方正在输入", "typing")}>
                         <span />
                         <span />
                         <span />
@@ -378,7 +383,7 @@ export function ChatView({
                     void doSend();
                   }
                 }}
-                placeholder={`发消息给 ${selected.title}…`}
+                placeholder={`${t("发消息给", "Message")} ${selected.title}…`}
               />
               <button
                 type="submit"

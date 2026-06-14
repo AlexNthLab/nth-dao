@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatView } from "../components/ChatView";
 import { ToastProvider } from "../components/Toast";
+import { LangProvider } from "../i18n";
 import type { Conversation } from "../types-v2";
 
 // 测试隔离:本文件两个 render 测试间需卸载,否则第二个会看到第一个残留的
@@ -34,6 +35,7 @@ function renderChat(props: Partial<React.ComponentProps<typeof ChatView>> = {}) 
   const onSend = vi.fn().mockResolvedValue(undefined);
   const onConversationSelect = vi.fn().mockResolvedValue(undefined);
   render(
+    <LangProvider>
     <ToastProvider>
       <ChatView
         conversations={conversations}
@@ -43,7 +45,8 @@ function renderChat(props: Partial<React.ComponentProps<typeof ChatView>> = {}) 
         currentUserId="admin"
         {...props}
       />
-    </ToastProvider>,
+    </ToastProvider>
+    </LangProvider>,
   );
   return { onSend, onConversationSelect };
 }
@@ -110,7 +113,7 @@ describe("ChatView iMessage 风格渲染", () => {
 
   it("4C:typing 由会话级 prop 驱动,不靠消息文本", async () => {
     const { container, rerender } = render(
-      <ToastProvider>
+      <LangProvider><ToastProvider>
         <ChatView
           conversations={conversations}
           messagesByConv={msgs}
@@ -119,14 +122,14 @@ describe("ChatView iMessage 风格渲染", () => {
           focusConversationId="dm-did:key:zAgent"
           currentUserId="admin"
         />
-      </ToastProvider>,
+      </ToastProvider></LangProvider>,
     );
     await screen.findByText("再补一句");
     // 无 typing 态 → 没有三点。
     expect(container.querySelector(".typing-dots")).toBeNull();
 
     rerender(
-      <ToastProvider>
+      <LangProvider><ToastProvider>
         <ChatView
           conversations={conversations}
           messagesByConv={msgs}
@@ -136,7 +139,7 @@ describe("ChatView iMessage 风格渲染", () => {
           focusConversationId="dm-did:key:zAgent"
           currentUserId="admin"
         />
-      </ToastProvider>,
+      </ToastProvider></LangProvider>,
     );
     // 置位后底部出现三点指示器。
     expect(container.querySelector(".typing-dots")).toBeTruthy();
@@ -144,7 +147,7 @@ describe("ChatView iMessage 风格渲染", () => {
 
   it("连发成组 + 仅最新一条带入场动画类", async () => {
     const { container } = render(
-      <ToastProvider>
+      <LangProvider><ToastProvider>
         <ChatView
           conversations={conversations}
           messagesByConv={msgs}
@@ -153,7 +156,7 @@ describe("ChatView iMessage 风格渲染", () => {
           focusConversationId="dm-did:key:zAgent"
           currentUserId="admin"
         />
-      </ToastProvider>,
+      </ToastProvider></LangProvider>,
     );
     await screen.findByText("再补一句");
     const rows = container.querySelectorAll(".chat-row");
@@ -168,7 +171,7 @@ describe("ChatView iMessage 风格渲染", () => {
 
   it("typing 时 is-last 让给三点行,不重复", async () => {
     const { container } = render(
-      <ToastProvider>
+      <LangProvider><ToastProvider>
         <ChatView
           conversations={conversations}
           messagesByConv={msgs}
@@ -178,7 +181,7 @@ describe("ChatView iMessage 风格渲染", () => {
           focusConversationId="dm-did:key:zAgent"
           currentUserId="admin"
         />
-      </ToastProvider>,
+      </ToastProvider></LangProvider>,
     );
     await screen.findByText("在的,我看看");
     // 3 条消息 + 1 条 typing 行 = 4 行;is-last 仍唯一,且在 typing 行上。
