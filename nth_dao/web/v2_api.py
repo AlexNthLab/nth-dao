@@ -1355,6 +1355,9 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                 cap_token_dir=cap_token_dir,
                 receipt_persistor=_receipt_persistor,
                 decision_raiser=_decision_raiser,
+                # 切片B:spawn 的 agent 拿到同一 workspace,其 claim 方法
+                # 才够得到市场 feed/claim(与 announce/open 同一份)。
+                workspace=workspace,
             )
             state.v2_supervisor = sup
             logger.info(

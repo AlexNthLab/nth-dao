@@ -1604,6 +1604,7 @@ def _start_a2a_server(
     *,
     signer: Any = None,
     agent_id: str = "",
+    workspace: Optional[Path] = None,
 ) -> Tuple[Optional[int], Optional[socketserver.BaseServer]]:
     """Bind a stdlib HTTP server on 127.0.0.1:<random port> and
     serve ``identity_card`` from GET /ping plus a JSON-RPC-style
@@ -1853,11 +1854,74 @@ def _start_a2a_server(
                 # the buffered _respond at the bottom.
                 self._stream_ask(ask_backend, params, token)
                 return
+            elif method == "claim":
+                # 切片B:agent 用**自己的私钥**认领一条市场公告。hub 不持有
+                # agent 私钥,所以认领必须由 agent 自己签 —— 这是"谁干谁签"。
+                # cap_token 由 hub 按需铸好(subject=本 agent DID、能力=任务
+                # 所需)随 params 传入;feed/claim 走共享 workspace。
+                ann_id = str(params.get("announcement_id", "")).strip()
+                claim_cap = params.get("cap_token")
+                if not ann_id or not isinstance(claim_cap, dict):
+                    self._json_error(
+                        400, "bad-claim-params",
+                        "claim needs announcement_id + cap_token (dict)",
+                    )
+                    return
+                if workspace is None:
+                    self._json_error(
+                        503, "no-workspace",
+                        "agent started without --workspace; cannot reach "
+                        "market feed",
+                    )
+                    return
+                if signer is None or not getattr(signer, "can_sign", False):
+                    self._json_error(
+                        503, "no-signer",
+                        "agent cannot sign claim receipt (crypto unavailable)",
+                    )
+                    return
+                try:
+                    from nth_dao.market.claim import (
+                        ClaimConflict, ClaimRejected, ClaimStore,
+                        claim_announcement,
+                    )
+                    from nth_dao.market.feed import MarketFeed
+
+                    outcome = claim_announcement(
+                        MarketFeed(workspace),
+                        ClaimStore(workspace),
+                        ann_id,
+                        claimant=signer,
+                        cap_token=claim_cap,
+                    )
+                except ClaimConflict as exc:
+                    self._json_error(409, "claim-conflict", str(exc))
+                    return
+                except ClaimRejected as exc:
+                    self._json_error(
+                        403, getattr(exc, "reason", "claim-rejected")
+                        or "claim-rejected", str(exc),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._json_error(
+                        502, "claim-failed", f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+                response = {"result": {
+                    "claimed": True,
+                    "announcement_id": ann_id,
+                    "claimant_did": (
+                        signer.as_did() if hasattr(signer, "as_did") else ""
+                    ),
+                    "receipt_id": (outcome.receipt or {}).get("receipt_id", ""),
+                    "claim_record": outcome.claim_record,
+                }}
             else:
                 self._json_error(
                     404, "method-not-found",
                     f"method {method!r} not supported "
-                    "(Phase 5.2: echo, ask, ask-stream)",
+                    "(echo, ask, ask-stream, claim)",
                 )
                 return
             self._respond(
@@ -2241,6 +2305,17 @@ def main(argv: list[str] | None = None) -> int:
             "polling loop entirely (Phase 3a/3b mode)."
         ),
     )
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default="",
+        help=(
+            "Shared workspace root. Lets the agent reach the market "
+            "feed/claim store (workspace/market_feed, workspace/"
+            "market_claims) so the `claim` A2A method can claim a task "
+            "with the agent's OWN key. Empty disables claiming."
+        ),
+    )
     args = parser.parse_args(argv)
     # L-2 fix (2026-06-11): reject non-positive heartbeat — the
     # downstream max(0.1, heartbeat) would silently clamp to 100ms
@@ -2328,6 +2403,9 @@ def main(argv: list[str] | None = None) -> int:
         # unchanged).
         signer=identity,
         agent_id=args.id,
+        # 切片B:把共享 workspace 传进 handler,让 `claim` 方法够得到
+        # 市场 feed/claim store(用 agent 自己的私钥认领并签收据)。
+        workspace=Path(args.workspace) if args.workspace.strip() else None,
     )
 
     # SIGTERM is the conventional shutdown signal on POSIX; on

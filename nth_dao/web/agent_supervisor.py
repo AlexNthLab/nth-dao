@@ -325,6 +325,7 @@ class SubprocessRunner:
         self,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         handshake_timeout: Optional[float] = None,
+        workspace: Optional[Path] = None,
     ) -> None:
         # Phase 3c: env-var override is consulted ONCE at runner
         # construction. Per-spawn override would let one wild test
@@ -332,6 +333,10 @@ class SubprocessRunner:
         # hub launch and every spawn under that supervisor honours it.
         if handshake_timeout is None:
             handshake_timeout = _read_handshake_timeout_from_env()
+        # 切片B:共享 workspace,spawn 时作为 --workspace 传给子 agent,让它
+        # 够得到市场 feed/claim store 去认领。None → 子进程拿不到,claim 方法
+        # 返回 no-workspace(认领禁用,其余功能不受影响)。
+        self._workspace = workspace
         self._procs: Dict[str, subprocess.Popen] = {}
         # N-1 fix (2026-06-11): track BOTH stdout and stderr reader
         # threads so a future shutdown / health check can iterate
@@ -372,6 +377,9 @@ class SubprocessRunner:
             # AFTER the supervisor receives the DID handshake and
             # invokes the cap_token_issuer.
             cmd.extend(["--cap-token-file", cap_token_file_path])
+        if self._workspace is not None:
+            # 切片B:共享 workspace,让子 agent 的 claim 方法够到市场文件。
+            cmd.extend(["--workspace", str(self._workspace)])
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -1312,6 +1320,7 @@ def build_default_supervisor(
     cap_token_dir: Optional[Path] = None,
     receipt_persistor: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     decision_raiser: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    workspace: Optional[Path] = None,
 ) -> AgentSupervisor:
     """Production supervisor — uses SubprocessRunner. Tests
     construct their own with InMemoryRunner.
@@ -1358,7 +1367,7 @@ def build_default_supervisor(
                 event.get("event"), agent_id,
             )
 
-    runner = SubprocessRunner(on_event=_on_event)
+    runner = SubprocessRunner(on_event=_on_event, workspace=workspace)
     supervisor = AgentSupervisor(
         runner,
         cap_token_dir=cap_token_dir,
