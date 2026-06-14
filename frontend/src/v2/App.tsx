@@ -32,6 +32,7 @@ import {
 import { loadChat, saveChat } from "./chatStore";
 import { loadSummaries, appendSummary } from "./summaryStore";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
+import { TasksView } from "./components/TasksView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
 import { ChatView } from "./components/ChatView";
 import { CommandPalette } from "./components/CommandPalette";
@@ -888,6 +889,8 @@ function AppInner() {
         onViewCap={handleViewCap}
       />
     );
+  } else if (active === "tasks") {
+    view = <TasksView />;
   } else if (active === "agents") {
     view = (
       <AgentDirectoryView
@@ -992,6 +995,7 @@ function labelFor(id: NavId): string {
     case "blackboard": return "Blackboard";
     case "inbox":      return "Decisions";
     case "missions":   return "Missions";
+    case "tasks":      return "Tasks";
     case "rules":      return "Rules";
     case "agents":     return "Agents";
     case "audit":      return "Audit";

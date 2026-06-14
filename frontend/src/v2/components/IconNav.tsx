@@ -20,15 +20,16 @@
  */
 
 import {
-  IconChat, IconInbox, IconKey, IconLayout, IconScale, IconScroll,
-  IconSliders, IconTarget, IconUsers,
+  IconBriefcase, IconChat, IconInbox, IconKey, IconLayout, IconScale,
+  IconScroll, IconSliders, IconTarget, IconUsers,
 } from "./Icons";
 import type { NavId } from "../types-v2";
 
 const ITEMS: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: string }[] = [
-  { id: "blackboard", icon: IconLayout,  label: "Blackboard" },
-  { id: "missions",   icon: IconTarget,  label: "Missions" },
-  { id: "inbox",      icon: IconInbox,   label: "Decisions" },
+  { id: "blackboard", icon: IconLayout,     label: "Blackboard" },
+  { id: "missions",   icon: IconTarget,     label: "Missions" },
+  { id: "tasks",      icon: IconBriefcase,  label: "Tasks" },
+  { id: "inbox",      icon: IconInbox,      label: "Decisions" },
   { id: "agents",     icon: IconUsers,   label: "Agents" },
   { id: "rules",      icon: IconSliders, label: "Rules" },
   { id: "chat",       icon: IconChat,    label: "Chat" },

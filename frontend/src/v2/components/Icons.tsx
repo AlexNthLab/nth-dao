@@ -58,6 +58,14 @@ export const IconTarget = (p: Props) => (
   </Svg>
 );
 
+export const IconBriefcase = (p: Props) => (
+  <Svg {...p}>
+    <rect x="2" y="7" width="20" height="14" rx="2" />
+    <path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <path d="M2 13h20" />
+  </Svg>
+);
+
 export const IconScroll = (p: Props) => (
   <Svg {...p}>
     <path d="M19 17V5a2 2 0 0 0-2-2H4" />

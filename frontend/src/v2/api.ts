@@ -23,6 +23,7 @@
 
 import type {
   AgentEntry,
+  AnnounceTaskInput,
   CapTokenSummary,
   ChatMessage,
   Conversation,
@@ -33,6 +34,8 @@ import type {
   ProcessCard,
   ReceiptSummary,
   Rule,
+  TaskAnnouncement,
+  TaskCategory,
 } from "./types-v2";
 
 const BASE = "/api/v2";
@@ -475,4 +478,40 @@ export async function a2aEchoApi(
     body = { error: { code: "parse-failed", message: "non-JSON response" } };
   }
   return { status: res.status, body };
+}
+
+/** 任务广场:列开放公告(可选 context/capability/min_reward/q 过滤)。 */
+export async function listOpenTasks(
+  filters: {
+    context?: string;
+    capability?: string;
+    minReward?: number;
+    q?: string;
+  } = {},
+  signal?: AbortSignal,
+): Promise<TaskAnnouncement[]> {
+  const p = new URLSearchParams();
+  if (filters.context) p.set("context", filters.context);
+  if (filters.capability) p.set("capability", filters.capability);
+  if (filters.minReward) p.set("min_reward", String(filters.minReward));
+  if (filters.q) p.set("q", filters.q);
+  const qs = p.toString();
+  return getJson<TaskAnnouncement[]>(
+    `/market/open${qs ? `?${qs}` : ""}`,
+    signal,
+  );
+}
+
+/** 任务类别分面(context + 计数),给"按类别筛选"的 chips 用。 */
+export async function listTaskCategories(
+  signal?: AbortSignal,
+): Promise<TaskCategory[]> {
+  return getJson<TaskCategory[]>("/market/categories", signal);
+}
+
+/** 发布一条任务公告(本节点签名)。 */
+export async function announceTask(
+  body: AnnounceTaskInput,
+): Promise<TaskAnnouncement> {
+  return postJson<TaskAnnouncement>("/market/announce", body);
 }

@@ -1,0 +1,341 @@
+/**
+ * TasksView — 任务广场(发现态)。A2A 协调底座的核心面:发现可认领的活。
+ *
+ * 左栏:类别分面(context)+ 能力/赏金/搜索筛选。
+ * 主区:发布表单(+ 发布任务)+ 公告卡片列表(标题/类别/能力/赏金/发布者)。
+ * 认领按钮先占位禁用——认领是跨进程(切片B),由 agent 自己用私钥签。
+ *
+ * 自取数(import api),不经 App 状态,保持视图自洽。
+ */
+import { useEffect, useState } from "react";
+import { announceTask, listOpenTasks, listTaskCategories } from "../api";
+import { IconBriefcase } from "./Icons";
+import { useToast } from "./Toast";
+import { relativeTimeShort } from "../utils/time";
+import type { TaskAnnouncement, TaskCategory } from "../types-v2";
+
+export function TasksView() {
+  const toast = useToast();
+  const [tasks, setTasks] = useState<TaskAnnouncement[]>([]);
+  const [cats, setCats] = useState<TaskCategory[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  // 筛选
+  const [ctx, setCtx] = useState("");
+  const [cap, setCap] = useState("");
+  const [minReward, setMinReward] = useState("");
+  const [q, setQ] = useState("");
+
+  // 发布表单
+  const [showForm, setShowForm] = useState(false);
+  const [fTitle, setFTitle] = useState("");
+  const [fCaps, setFCaps] = useState("");
+  const [fReward, setFReward] = useState("");
+  const [fContext, setFContext] = useState("");
+  const [fDesc, setFDesc] = useState("");
+  const [publishing, setPublishing] = useState(false);
+
+  async function reload(signal?: AbortSignal) {
+    setLoading(true);
+    try {
+      const [t, c] = await Promise.all([
+        listOpenTasks(
+          {
+            context: ctx,
+            capability: cap,
+            minReward: minReward ? Number(minReward) : 0,
+            q,
+          },
+          signal,
+        ),
+        listTaskCategories(signal),
+      ]);
+      setTasks(t);
+      setCats(c);
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        toast.push(
+          `加载任务失败:${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const ac = new AbortController();
+    void reload(ac.signal);
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx, cap, minReward, q]);
+
+  async function handlePublish(e: React.FormEvent) {
+    e.preventDefault();
+    if (!fTitle.trim() || publishing) return;
+    setPublishing(true);
+    try {
+      await announceTask({
+        title: fTitle.trim(),
+        capability_set: fCaps
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        reward_minor: fReward ? Math.max(0, Math.floor(Number(fReward))) : 0,
+        context: fContext.trim(),
+        description: fDesc.trim(),
+      });
+      toast.push("任务已发布", "success");
+      setFTitle("");
+      setFCaps("");
+      setFReward("");
+      setFContext("");
+      setFDesc("");
+      setShowForm(false);
+      void reload();
+    } catch (e) {
+      toast.push(
+        `发布失败:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  return (
+    <>
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <span className="sidebar-title">类别</span>
+          <span className="sidebar-count">{cats.length}</span>
+        </div>
+        <div className="sidebar-list">
+          <button
+            className={`sidebar-item ${ctx === "" ? "active" : ""}`}
+            onClick={() => setCtx("")}
+          >
+            <div className="sidebar-item-title">
+              <span>全部</span>
+            </div>
+          </button>
+          {cats.map((c) => (
+            <button
+              key={c.context}
+              className={`sidebar-item ${ctx === c.context ? "active" : ""}`}
+              onClick={() => setCtx(c.context)}
+            >
+              <div className="sidebar-item-title">
+                <span className="truncate">{c.context}</span>
+                <span className="pill" style={{ marginLeft: "auto", fontSize: 10 }}>
+                  {c.count}
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+        <div
+          style={{
+            padding: "10px 12px",
+            borderTop: "1px solid var(--border)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <input
+            placeholder="按能力筛选 (如 code_review)"
+            value={cap}
+            onChange={(e) => setCap(e.target.value)}
+          />
+          <input
+            placeholder="赏金下限"
+            inputMode="numeric"
+            value={minReward}
+            onChange={(e) => setMinReward(e.target.value.replace(/[^0-9]/g, ""))}
+          />
+          <input
+            placeholder="搜索标题/详述"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+        </div>
+      </aside>
+
+      <section className="main" style={{ display: "flex", flexDirection: "column" }}>
+        <div
+          className="main-head"
+          style={{
+            position: "static",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <p className="main-eyebrow">任务广场 · 发现可认领的活</p>
+            <h1 className="main-title">Tasks {loading ? "…" : `(${tasks.length})`}</h1>
+          </div>
+          <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
+            {showForm ? "取消" : "+ 发布任务"}
+          </button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "16px 24px" }}>
+          {showForm && (
+            <form
+              onSubmit={handlePublish}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: "var(--r-md)",
+                padding: 14,
+                marginBottom: 16,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              <input
+                placeholder="任务标题 *"
+                value={fTitle}
+                maxLength={200}
+                onChange={(e) => setFTitle(e.target.value)}
+              />
+              <input
+                placeholder="所需能力,逗号分隔 (如 code_review, research)"
+                value={fCaps}
+                onChange={(e) => setFCaps(e.target.value)}
+              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  placeholder="类别 (context)"
+                  value={fContext}
+                  onChange={(e) => setFContext(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <input
+                  placeholder="赏金 (整数)"
+                  inputMode="numeric"
+                  value={fReward}
+                  onChange={(e) => setFReward(e.target.value.replace(/[^0-9]/g, ""))}
+                  style={{ width: 120 }}
+                />
+              </div>
+              <textarea
+                placeholder="任务详述"
+                value={fDesc}
+                maxLength={4000}
+                onChange={(e) => setFDesc(e.target.value)}
+                style={{ minHeight: 60 }}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={!fTitle.trim() || publishing}
+                style={{ alignSelf: "flex-start" }}
+              >
+                {publishing ? "发布中…" : "发布"}
+              </button>
+            </form>
+          )}
+
+          {tasks.length === 0 ? (
+            <div className="main-empty" style={{ minHeight: 200 }}>
+              <div className="main-empty-icon">
+                <IconBriefcase size={36} />
+              </div>
+              <p>没有匹配的开放任务。</p>
+              <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                换个筛选,或发布一条任务。
+              </p>
+            </div>
+          ) : (
+            <div className="stack" style={{ gap: 10 }}>
+              {tasks.map((t) => (
+                <article
+                  key={t.announcement_id}
+                  style={{
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--r-md)",
+                    padding: "12px 14px",
+                    background: "var(--bg-panel)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <strong style={{ fontSize: 14 }}>{t.title}</strong>
+                    {t.context && (
+                      <span className="pill" style={{ fontSize: 10 }}>
+                        {t.context}
+                      </span>
+                    )}
+                    {t.reward_minor > 0 && (
+                      <span
+                        style={{
+                          marginLeft: "auto",
+                          color: "var(--accent)",
+                          fontSize: 13,
+                          fontWeight: 500,
+                        }}
+                      >
+                        {t.reward_minor} {t.reward_asset}
+                      </span>
+                    )}
+                  </div>
+                  {t.description && (
+                    <p
+                      style={{
+                        margin: "6px 0 0",
+                        fontSize: 13,
+                        color: "var(--fg-secondary)",
+                      }}
+                    >
+                      {t.description}
+                    </p>
+                  )}
+                  {t.capability_set.length > 0 && (
+                    <div
+                      style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
+                    >
+                      {t.capability_set.map((c) => (
+                        <span key={c} className="pill" style={{ fontSize: 10 }}>
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      marginTop: 8,
+                      display: "flex",
+                      alignItems: "center",
+                      fontSize: 11,
+                      color: "var(--fg-tertiary)",
+                      fontFamily: "var(--t-mono)",
+                    }}
+                  >
+                    <span>
+                      发布者 {t.publisher_did.slice(0, 18)}…
+                      {t.published_at_ms
+                        ? ` · ${relativeTimeShort(new Date(t.published_at_ms).toISOString())}`
+                        : ""}
+                    </span>
+                    {/* 认领跨进程(切片B,agent 自己用私钥签),先占位禁用。 */}
+                    <button
+                      className="btn"
+                      disabled
+                      title="认领需 agent 端支持(切片B,跨进程,建设中)"
+                      style={{ marginLeft: "auto", opacity: 0.5 }}
+                    >
+                      认领(建设中)
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </>
+  );
+}

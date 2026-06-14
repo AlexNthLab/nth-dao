@@ -172,12 +172,47 @@ export type NavId =
   | "blackboard"
   | "inbox"
   | "missions"
+  | "tasks"
   | "rules"
   | "agents"
   | "audit"
   | "governance"
   | "delegate"
   | "chat";
+
+/** 任务广场公告(/api/v2/market/open 返回的一行)。发现态:可认领的活。 */
+export interface TaskAnnouncement {
+  announcement_id: string;
+  publisher_did: string;
+  title: string;
+  description?: string;
+  capability_set: string[];
+  context: string;
+  reward_minor: number;
+  reward_asset: string;
+  mission_id?: string;
+  published_at_ms?: number;
+  not_after?: number;
+  claimed?: boolean;
+}
+
+/** 类别分面(/api/v2/market/categories)。 */
+export interface TaskCategory {
+  context: string;
+  count: number;
+}
+
+/** 发布任务的请求体(POST /api/v2/market/announce)。 */
+export interface AnnounceTaskInput {
+  title: string;
+  description?: string;
+  capability_set?: string[];
+  reward_minor?: number;
+  reward_asset?: string;
+  context?: string;
+  mission_id?: string;
+  not_after?: number;
+}
 
 /** Agent directory entry — for both local helpers and discovered
  *  peers. The shape unifies three discovery sources (LAN mDNS,
