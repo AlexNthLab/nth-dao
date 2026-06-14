@@ -34,24 +34,23 @@ export function TasksView() {
   const [fContext, setFContext] = useState("");
   const [fDesc, setFDesc] = useState("");
   const [publishing, setPublishing] = useState(false);
+  // 发布后 bump,触发任务 + 类别一起刷新(否则筛选没变,任务 effect 不会
+  // 重跑,新发的任务看不见)。
+  const [reloadKey, setReloadKey] = useState(0);
 
-  async function reload(signal?: AbortSignal) {
+  async function loadTasks(signal?: AbortSignal) {
     setLoading(true);
     try {
-      const [t, c] = await Promise.all([
-        listOpenTasks(
-          {
-            context: ctx,
-            capability: cap,
-            minReward: minReward ? Number(minReward) : 0,
-            q,
-          },
-          signal,
-        ),
-        listTaskCategories(signal),
-      ]);
+      const t = await listOpenTasks(
+        {
+          context: ctx,
+          capability: cap,
+          minReward: minReward ? Number(minReward) : 0,
+          q,
+        },
+        signal,
+      );
       setTasks(t);
-      setCats(c);
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
         toast.push(
@@ -64,12 +63,33 @@ export function TasksView() {
     }
   }
 
+  async function loadCategories(signal?: AbortSignal) {
+    try {
+      setCats(await listTaskCategories(signal));
+    } catch {
+      // 分面是锦上添花,失败静默(不打断浏览)。
+    }
+  }
+
+  // 任务:筛选变化(文本防抖 300ms,避免逐键刷屏)或发布后(reloadKey)重拉。
+  // AbortController 取消上一笔,防乱序覆盖。
   useEffect(() => {
     const ac = new AbortController();
-    void reload(ac.signal);
+    const timer = setTimeout(() => void loadTasks(ac.signal), 300);
+    return () => {
+      clearTimeout(timer);
+      ac.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx, cap, minReward, q, reloadKey]);
+
+  // 类别分面是全局 facet(不随筛选变),只在挂载 + 发布后刷新。
+  useEffect(() => {
+    const ac = new AbortController();
+    void loadCategories(ac.signal);
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx, cap, minReward, q]);
+  }, [reloadKey]);
 
   async function handlePublish(e: React.FormEvent) {
     e.preventDefault();
@@ -93,7 +113,7 @@ export function TasksView() {
       setFContext("");
       setFDesc("");
       setShowForm(false);
-      void reload();
+      setReloadKey((k) => k + 1); // 刷新任务 + 类别分面
     } catch (e) {
       toast.push(
         `发布失败:${e instanceof Error ? e.message : String(e)}`,
@@ -128,7 +148,7 @@ export function TasksView() {
             >
               <div className="sidebar-item-title">
                 <span className="truncate">{c.context}</span>
-                <span className="pill" style={{ marginLeft: "auto", fontSize: 10 }}>
+                <span className="pill dim" style={{ marginLeft: "auto", fontSize: 10 }}>
                   {c.count}
                 </span>
               </div>
@@ -265,7 +285,7 @@ export function TasksView() {
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                     <strong style={{ fontSize: 14 }}>{t.title}</strong>
                     {t.context && (
-                      <span className="pill" style={{ fontSize: 10 }}>
+                      <span className="pill dim" style={{ fontSize: 10 }}>
                         {t.context}
                       </span>
                     )}
@@ -298,7 +318,7 @@ export function TasksView() {
                       style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
                     >
                       {t.capability_set.map((c) => (
-                        <span key={c} className="pill" style={{ fontSize: 10 }}>
+                        <span key={c} className="pill dim" style={{ fontSize: 10 }}>
                           {c}
                         </span>
                       ))}
