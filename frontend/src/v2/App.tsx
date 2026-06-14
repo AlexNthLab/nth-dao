@@ -90,12 +90,42 @@ export default function App() {
   );
 }
 
+/** 页签持久化的 localStorage 键(每 origin 私有)。 */
+const ACTIVE_NAV_KEY = "nth.v2.activeNav";
+
+/** 合法 NavId 白名单——存进来的脏值/旧版本遗留值一律不认,降级 blackboard。 */
+const VALID_NAV_IDS: ReadonlySet<NavId> = new Set<NavId>([
+  "blackboard", "inbox", "missions", "tasks", "rules",
+  "agents", "audit", "governance", "delegate", "chat",
+]);
+
+/** 从 localStorage 读回上次页签;无值/脏值/禁读一律降级 blackboard。 */
+function loadActiveNav(): NavId {
+  try {
+    const v = localStorage.getItem(ACTIVE_NAV_KEY);
+    if (v && VALID_NAV_IDS.has(v as NavId)) return v as NavId;
+  } catch {
+    /* 隐私模式禁读 —— 降级默认值 */
+  }
+  return "blackboard";
+}
+
 function AppInner() {
   /* Default landing = Blackboard (2026-06-14 重定:A2A 任务优先).
    * 项目第一性原则是 A2A 任务协调,落地页给"运行态总览"——每个 agent
    * 正在推进什么任务,而非聊天。Chat 是低频沟通入口,在 IconNav 里按
    * 频次下沉,不再是首屏。 */
-  const [active, setActive] = useState<NavId>("blackboard");
+  /* 当前页签持久化(2026-06-14 修):刷新前把 active 落 localStorage,刷新后
+   * 水合回来——否则刷新一律重置回 blackboard,用户在 Tasks 找活刷一下就被
+   * 踢回首屏。校验合法 NavId,脏值/旧值降级 blackboard,绝不让坏值崩渲染。 */
+  const [active, setActive] = useState<NavId>(loadActiveNav);
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_NAV_KEY, active);
+    } catch {
+      /* 配额满 / 隐私模式禁写 —— 静默降级,不影响导航本身 */
+    }
+  }, [active]);
   const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
   /* S5 fix (2026-06-10): track in-flight resolves by id and pass
    * the Set down to DecisionQueue so the main-head renders a
