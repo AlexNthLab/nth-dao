@@ -3425,12 +3425,56 @@ def _resolve_safe_bind_host() -> str:
     return requested
 
 
+def _repo_git_head() -> str:
+    """取本包所在仓库的 HEAD 短哈希 + 是否有未提交改动 —— 进程版本指纹。
+
+    路径从本文件位置反推(不写死),git 跑不通(未装 git/非 editable 安装/
+    无 .git)一律降级 ``unknown``,绝不让自检影响服务启动。
+    """
+    import subprocess
+
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        head = subprocess.check_output(
+            ["git", "-C", pkg_dir, "rev-parse", "--short", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        ).strip()
+        dirty = subprocess.check_output(
+            ["git", "-C", pkg_dir, "status", "--porcelain"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        ).strip()
+        return f"{head}{'+dirty' if dirty else ''}"
+    except Exception:
+        return "unknown"
+
+
+def _startup_selfcheck(app, host: str, port: int) -> None:
+    """启动横幅:打印进程版本指纹 + 路由总数 + 绑定信息。
+
+    解决"JS 重构了、Python 没重启"导致新路由报 405 的漂移:横幅里的
+    git HEAD 与 ``git log`` 对不上(或带 ``+dirty``)即说明进程旧了,重启
+    即可。整体 try 兜底 —— 自检本身绝不阻断服务启动。
+    """
+    try:
+        routes = [r for r in app.routes if hasattr(r, "methods")]
+        head = _repo_git_head()
+        print("=" * 56, flush=True)
+        print(f"  NTH DAO web  git HEAD = {head}", flush=True)
+        print(f"  路由总数 = {len(routes)}", flush=True)
+        print(f"  bind http://{host}:{port}", flush=True)
+        print("=" * 56, flush=True)
+    except Exception:  # 自检失败绝不拖垮启动
+        pass
+
+
 def main() -> None:
     import uvicorn
 
     host = _resolve_safe_bind_host()
     port = int(os.environ.get("NTH_PORT", "8080"))
-    uvicorn.run(create_app(require_console_auth=True), host=host, port=port)
+    app = create_app(require_console_auth=True)
+    _startup_selfcheck(app, host, port)
+    uvicorn.run(app, host=host, port=port)
 
 
 __all__ = ["app", "create_app", "main"]
