@@ -87,7 +87,7 @@ export async function summarizeAgent(
     }
     throw new Error(`summarize → HTTP ${res.status}: ${last.slice(0, 160)}`);
   }
-  throw new Error(`summarize: agent 未就绪 (${last.slice(0, 80)})`);
+  throw new Error(`summarize: agent not ready (${last.slice(0, 80)})`);
 }
 
 function authHeader(): Record<string, string> {
@@ -468,7 +468,7 @@ export async function askAgentStream(
   } catch (e) {
     if (timedOut) {
       throw new Error(
-        `ask-stream 超时:${Math.round(idleTimeoutMs / 1000)}s 无响应`,
+        `ask-stream timed out: no response for ${Math.round(idleTimeoutMs / 1000)}s`,
       );
     }
     throw e;

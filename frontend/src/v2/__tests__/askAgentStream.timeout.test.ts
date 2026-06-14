@@ -24,7 +24,7 @@ describe("askAgentStream 空闲超时", () => {
 
     const p = askAgentStream("did:key:z", "hi", () => {}, undefined, undefined, 1000);
     // 捕获 rejection,避免 unhandled;推进假计时器越过空闲阈值。
-    const assertion = expect(p).rejects.toThrow(/超时/);
+    const assertion = expect(p).rejects.toThrow(/timed out/);
     await vi.advanceTimersByTimeAsync(1100);
     await assertion;
     expect(fetchMock).toHaveBeenCalledOnce();
