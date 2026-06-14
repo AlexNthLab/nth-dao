@@ -204,6 +204,35 @@ def _seed_decisions() -> List[Dict[str, Any]]:
     ]
 
 
+def _mission_to_summary(m: Any) -> Dict[str, Any]:
+    """真实 Mission(orchestration.mission)→ v2 MissionSummary 形状。
+
+    driver 取 owner/owner_did(本层"谁推进"即 mission owner);next_actionable
+    取第一个 TODO step 的描述;cap_token_id 取 metadata。"""
+    from nth_dao.orchestration.mission import StepStatus
+
+    prog = m.progress()
+    nxt = next(
+        (s.description for s in m.steps if s.status == StepStatus.TODO.value),
+        None,
+    )
+    meta = getattr(m, "metadata", None) or {}
+    return {
+        "id": m.id,
+        "title": m.title,
+        "goal": m.goal,
+        "status": m.status,
+        "steps_total": prog["total"],
+        "steps_done": prog["done"],
+        "steps_in_progress": prog["active"],
+        "driver_label": getattr(m, "owner", "") or "",
+        "driver_did": getattr(m, "owner_did", "") or "",
+        "started_at": getattr(m, "created_at", "") or "",
+        "cap_token_id": meta.get("cap_token_id"),
+        "next_actionable": nxt,
+    }
+
+
 def _seed_missions() -> List[Dict[str, Any]]:
     """Mirrors mock.ts mockMissions — 2 entries. """
     return [
@@ -968,6 +997,19 @@ class MissionSummaryM(_Model):
     started_at: str
     cap_token_id: Optional[str] = None
     next_actionable: Optional[str] = None
+
+
+class CreateMissionStepBody(_Model):
+    description: str
+    required_capabilities: List[str] = Field(default_factory=list)
+
+
+class CreateMissionBody(_Model):
+    """POST /api/v2/missions 请求体:真正创建并落盘一个 mission(含 steps)。"""
+    title: str
+    goal: str = ""
+    driver: str = Field(default="", description="负责推进的 agent(mission owner)。")
+    steps: List[CreateMissionStepBody] = Field(default_factory=list)
 
 
 class ProcessCardM(_Model):
@@ -1814,9 +1856,73 @@ def register_v2_routes(app: FastAPI) -> None:
         return _resolve_decision(decision_id, request, sign=False)
 
     @app.get("/api/v2/missions", response_model=List[MissionSummaryM])
-    def v2_missions() -> List[Dict[str, Any]]:
-        # TODO Phase 2: load via nth_dao.orchestration.mission_store
-        return _seed_missions()
+    def v2_missions(request: Request) -> List[Dict[str, Any]]:
+        # 2026-06-14:接真实 mission store(替掉 seed mock)。store 在 →
+        # 返回真实 missions(可能为空 []);store 不在(罕见)→ 退回 seed
+        # 保证视图不空。不再凭空塞两条假 active mission 误导用户。
+        store = getattr(request.app.state.nth, "missions", None)
+        if store is None:
+            return _seed_missions()
+        try:
+            missions = store.list_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("v2_missions: list_all failed: %s", exc)
+            return _seed_missions()
+        return [_mission_to_summary(m) for m in missions]
+
+    @app.post("/api/v2/missions", response_model=MissionSummaryM)
+    def v2_missions_create(
+        body: CreateMissionBody, request: Request,
+    ) -> Dict[str, Any]:
+        """真正创建并落盘一个 mission(含 steps)。此前"+ New mission"是纯
+        前端假动作(m-local- id、不落库、刷新即失)——这条让它真正进
+        state.missions,从而能被 GET 读、被 Mission↔Task 桥用。
+
+        新 mission 默认 status=planning(空步骤天然是规划态);加了步骤、
+        开始执行后才进 active。POST 动作端点,auth 开启受控。
+        """
+        from nth_dao.orchestration.mission import Mission
+
+        store = getattr(request.app.state.nth, "missions", None)
+        if store is None:
+            raise HTTPException(status_code=503, detail="mission store unavailable")
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title must not be empty")
+        # 输入封顶(落盘 + 后续可能 announce 进 feed)。
+        if len(title) > 200 or len(body.goal) > 2000 or len(body.driver) > 128:
+            raise HTTPException(status_code=400, detail="title/goal/driver too long")
+        if len(body.steps) > 64:
+            raise HTTPException(status_code=400, detail="too many steps (max 64)")
+        step_dicts: List[Dict[str, Any]] = []
+        for s in body.steps:
+            desc = s.description.strip()
+            if not desc:
+                continue
+            if len(desc) > 500:
+                raise HTTPException(
+                    status_code=400, detail="step description too long (max 500)")
+            if len(s.required_capabilities) > 16:
+                raise HTTPException(
+                    status_code=400, detail="too many capabilities on a step")
+            step_dicts.append({
+                "description": desc,
+                "required_capabilities": [
+                    c.strip() for c in s.required_capabilities if c.strip()
+                ],
+            })
+        m = Mission.new(
+            title=title,
+            goal=body.goal.strip(),
+            owner=body.driver.strip(),
+            steps=step_dicts,
+        )
+        try:
+            store.create(m)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("v2_missions_create: store.create failed: %s", exc)
+            raise HTTPException(status_code=500, detail=f"create failed: {exc}")
+        return _mission_to_summary(m)
 
     @app.get("/api/v2/processes", response_model=List[ProcessCardM])
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
