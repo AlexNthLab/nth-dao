@@ -42,7 +42,10 @@ sidechain/.last_collected
 sidechain/reload.signal
 team_logs/*.jsonl
 blackboard/*.jsonl
-team_agents/*.json
+# agent 运行时状态:整个 team_agents/ 子树都忽略(含 requests/ 等子目录),
+# 只保留 .gitkeep 占位。原 `team_agents/*.json` 漏盖子目录(发布前门槛发现)。
+team_agents/*
+!team_agents/.gitkeep
 missions/*.json
 missions/*.lock
 team.json
@@ -60,6 +63,11 @@ team_trust/
 team_messages/
 group_chat_server*.log
 nth_dao_web*.log
+# 任务市场 runtime 数据 + 运行日志(发布前门槛补)
+market_feed/
+market_claims/
+*.out.log
+*.err.log
 
 # Frontend dependencies
 frontend/node_modules/
