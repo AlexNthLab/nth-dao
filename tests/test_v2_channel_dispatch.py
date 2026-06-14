@@ -17,6 +17,26 @@ from fastapi.testclient import TestClient
 from nth_dao.web import create_app
 
 
+def test_dispatch_semaphore_is_bounded() -> None:
+    # 审查隐患①修复:派发并发有界。能 acquire 到上限,满了非阻塞返回 False,
+    # 归还后恢复 —— 证明信号量是 BoundedSemaphore 且配额可回收。
+    from nth_dao.web.v2_api import (
+        _CHANNEL_DISPATCH_MAX, _CHANNEL_DISPATCH_SEM,
+    )
+
+    acquired = [_CHANNEL_DISPATCH_SEM.acquire(blocking=False)
+                for _ in range(_CHANNEL_DISPATCH_MAX)]
+    try:
+        assert all(acquired)
+        assert _CHANNEL_DISPATCH_SEM.acquire(blocking=False) is False  # 满了→丢弃
+    finally:
+        for _ in range(_CHANNEL_DISPATCH_MAX):
+            _CHANNEL_DISPATCH_SEM.release()
+    # 全部归还后,配额恢复。
+    assert _CHANNEL_DISPATCH_SEM.acquire(blocking=False) is True
+    _CHANNEL_DISPATCH_SEM.release()
+
+
 def test_channel_agent_listens_and_replies(tmp_path: Path) -> None:
     app = create_app(tmp_path, require_console_auth=False)
     client = TestClient(app)

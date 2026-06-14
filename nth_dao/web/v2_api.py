@@ -1872,12 +1872,20 @@ class JoinChannelBody(BaseModel):
     agent_id: str
 
 
+# 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
+# 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
+_CHANNEL_DISPATCH_MAX = 16
+_CHANNEL_DISPATCH_SEM = threading.BoundedSemaphore(_CHANNEL_DISPATCH_MAX)
+
+
 def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt):
     """P2 后台:问一个 agent 的 /a2a/ask,把回复回帖到频道。best-effort。
 
     用 agent 自己的 spawn cap_token 作 Authorization(与 claim/ask 同款注入);
     回帖经 groups.post_message 内部 API(不走 HTTP 端点)→ 不会再触发派发,
     天然杜绝 agent→agent 死循环。
+
+    配额由调用方 acquire、本函数 finally 归还(每个 in-flight 槽位一进一出)。
     """
     import urllib.error
     import urllib.request
@@ -1907,6 +1915,8 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
             groups.post_message(channel_id, sender_id=did, body=reply)
     except Exception as exc:  # noqa: BLE001
         logger.warning("channel agent dispatch failed for %s: %s", did, exc)
+    finally:
+        _CHANNEL_DISPATCH_SEM.release()  # 归还在飞配额
 
 
 def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message) -> None:
@@ -1953,11 +1963,23 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
             return
 
         for auth, did, port in targets:
-            threading.Thread(
-                target=_channel_ask_and_reply,
-                args=(groups, auth, did, port, channel_id, message.body),
-                daemon=True,
-            ).start()
+            # 并发封顶:抢一个在飞槽位,抢不到就丢弃这条派发(不堆线程)。
+            # 槽位由 _channel_ask_and_reply 的 finally 归还。
+            if not _CHANNEL_DISPATCH_SEM.acquire(blocking=False):
+                logger.warning(
+                    "channel dispatch saturated (>=%d in flight); "
+                    "dropping reply for %s", _CHANNEL_DISPATCH_MAX, did,
+                )
+                continue
+            try:
+                threading.Thread(
+                    target=_channel_ask_and_reply,
+                    args=(groups, auth, did, port, channel_id, message.body),
+                    daemon=True,
+                ).start()
+            except Exception as exc:  # noqa: BLE001
+                _CHANNEL_DISPATCH_SEM.release()  # 起线程失败,立刻归还配额
+                logger.warning("channel dispatch thread start failed: %s", exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("channel dispatch hook failed: %s", exc)
 
