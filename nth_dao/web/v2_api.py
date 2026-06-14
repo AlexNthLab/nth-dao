@@ -1490,6 +1490,13 @@ class AnnounceStepBody(_Model):
     reward_asset: str = Field(default="credit", description="赏金资产类型。")
 
 
+class ClaimTaskBody(_Model):
+    """POST /api/v2/market/{ann_id}/claim 请求体:操作员选某个 supervised
+    agent 去认领。hub 给该 agent 按需铸 cap_token(能力=任务所需),派发给
+    agent,由 agent 用**自己的私钥**签认领收据(谁干谁签)。"""
+    agent_id: str = Field(..., description="去认领的 supervised agent 的 id。")
+
+
 # ─────────────────────────────────────────────────────────────
 # Phase 3e: small helpers shared by the A2A POST proxy
 # ─────────────────────────────────────────────────────────────
@@ -2165,6 +2172,127 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=400, detail=f"publish rejected: {exc}",
             )
         return ann.to_dict()
+
+    @app.post("/api/v2/market/{announcement_id}/claim")
+    async def v2_market_claim(
+        announcement_id: str, body: ClaimTaskBody, request: Request,
+    ) -> Any:
+        """认领闭环(切片B):操作员选一个 supervised agent 去认领这条任务。
+
+        hub 不持有 agent 私钥,故认领必须由 agent 自己签(谁干谁签)。流程:
+        校验 agent 活着 → 读公告拿能力 → 给 agent **按需铸** cap_token
+        (subject=agent DID、能力=任务所需)→ 派发到 agent /a2a/claim(用
+        agent 自己的 spawn cap_token 做调用方鉴权)→ agent 用自己私钥
+        claim_announcement 并签 ClaimReceipt → 原样回传(含 409 冲突/403 拒)。
+        """
+        import asyncio
+        import urllib.error
+        import urllib.request
+
+        from nth_dao.cap_token import (
+            encode_authorization_header, sign_cap_token,
+        )
+        from nth_dao.market.feed import MarketFeed
+
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(status_code=503, detail="agent supervisor unavailable")
+        matching = [
+            r for r in sup.list_agents()
+            if r.agent_id == body.agent_id
+            and r.a2a_port is not None and r.alive
+        ]
+        if not matching:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no live supervised agent id={body.agent_id!r} with "
+                    "an a2a_port"
+                ),
+            )
+        rec = matching[0]
+        agent_did = getattr(rec, "did", "") or ""
+        if not agent_did:
+            raise HTTPException(status_code=409, detail="agent has no DID yet")
+
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        if not (ws / "market_feed" / "announcements.jsonl").exists():
+            raise HTTPException(status_code=404, detail="market feed is empty")
+        ann = MarketFeed(ws).get(announcement_id, include_expired=True)
+        if ann is None:
+            raise HTTPException(status_code=404, detail="announcement not found")
+
+        identity = _state_node_identity(request)
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(
+                status_code=503,
+                detail="node identity unavailable; cannot mint claim cap_token",
+            )
+        # 按需铸:subject=agent DID、能力=任务所需(claim_announcement 两侧归一)。
+        claim_token = sign_cap_token(
+            issuer=identity,
+            subject_did=agent_did,
+            capabilities=list(ann.capability_set),
+        )
+        store = _state_cap_tokens_store(request)
+        if store is not None:
+            # 审计:记入 cap_token store(可吊销)。失败不阻断认领,只告警。
+            try:
+                store.record(claim_token)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("v2_market_claim: cap_token record failed: %s", exc)
+
+        # 调用方鉴权:用 agent 自己的 spawn cap_token(与 ask 同款注入)。
+        token_id = getattr(rec, "cap_token_id", None)
+        auth_token = (
+            store.get(token_id) if (token_id and store is not None) else None
+        )
+        if not isinstance(auth_token, dict):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"agent {body.agent_id!r} has no cap_token; re-spawn it "
+                    "so the hub can drive it"
+                ),
+            )
+
+        body_bytes = json.dumps(
+            {"announcement_id": announcement_id, "cap_token": claim_token},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        url = f"http://127.0.0.1:{rec.a2a_port}/a2a/claim"
+        req_headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body_bytes)),
+            "Authorization": f"CapToken {encode_authorization_header(auth_token)}",
+        }
+        forward_timeout = _A2A_METHOD_TIMEOUTS.get("claim", _A2A_DEFAULT_TIMEOUT_S)
+
+        def _do_forward() -> Tuple[int, bytes]:
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=req_headers, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(  # noqa: S310
+                    req, timeout=forward_timeout,
+                ) as resp:
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as http_exc:
+                return http_exc.code, http_exc.read()
+
+        try:
+            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"claim dispatch failed at {url}: {exc}",
+            )
+        return JSONResponse(
+            status_code=resp_status,
+            content=_decode_or_passthrough(resp_body),
+        )
 
     @app.post("/api/v2/missions/{mission_id}/steps/{step_id}/announce")
     def v2_mission_step_announce(

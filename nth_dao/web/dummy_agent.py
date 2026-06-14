@@ -165,6 +165,10 @@ _A2A_METHOD_CAPABILITIES: Dict[str, str] = {
     # protocol-layer act ("peer sends a message to this agent and
     # gets a response") is identical; only the transport differs.
     "ask-stream": "a2a:message_send",
+    # 切片B:认领。调用方鉴权同 ask(a2a:message_send = "hub 可驱动本 agent")。
+    # 真正的认领授权是 params 里那张按需铸的 cap_token,由 claim_announcement
+    # 校验(能力子集 + subject==本 agent)。
+    "claim": "a2a:message_send",
 }
 
 
