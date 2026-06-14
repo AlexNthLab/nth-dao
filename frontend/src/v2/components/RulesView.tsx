@@ -14,6 +14,7 @@
 import { useMemo, useState } from "react";
 import { IconSliders, IconZap } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
+import { useLang } from "../i18n";
 import type { Rule } from "../types-v2";
 
 export interface RulesViewProps {
@@ -44,6 +45,7 @@ function statusPill(s: Rule["status"]): "ok" | "wait" | "dim" {
 export function RulesView({
   rules, onPause, onResume, onActivate, onDiscard, onEdit, onViewCap,
 }: RulesViewProps) {
+  const { t } = useLang();
   const sorted = useMemo(
     () =>
       rules.slice().sort((a, b) => {
@@ -72,7 +74,7 @@ export function RulesView({
     <>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="sidebar-title">Rules</span>
+          <span className="sidebar-title">{t("规则", "Rules")}</span>
           <span className="sidebar-count">{rules.length}</span>
         </div>
         <div className="sidebar-list">
@@ -101,14 +103,18 @@ export function RulesView({
       <section className="main">
         <div className="main-head">
           <p className="main-eyebrow">Rules</p>
-          <h1 className="main-title">Set your company boundaries</h1>
+          <h1 className="main-title">{t("设定你公司的边界", "Set your company boundaries")}</h1>
           <p className="main-subtitle">
-            Rules turn approval-required actions into auto-execute
-            ones. Each rule is bounded by a long-lived cap_token —
-            the cryptographic anchor of the authority you delegate.
+            {t(
+              "规则把「需审批」的动作变成「自动执行」。每条规则受一个长效 cap_token 约束 —— 你所委派权限的密码学锚点。",
+              "Rules turn approval-required actions into auto-execute ones. Each rule is bounded by a long-lived cap_token — the cryptographic anchor of the authority you delegate.",
+            )}
             {" "}
             <span style={{ color: "var(--accent)" }}>
-              {activeCount} active · {totalFires} fires in last 30d
+              {t(
+                `${activeCount} 条生效 · 近 30 天触发 ${totalFires} 次`,
+                `${activeCount} active · ${totalFires} fires in last 30d`,
+              )}
             </span>
           </p>
         </div>
@@ -149,13 +155,13 @@ export function RulesView({
 
                 <div style={{ display: "grid", gap: 12, margin: "16px 0" }}>
                   <div>
-                    <div className="detail-section-label">When</div>
+                    <div className="detail-section-label">{t("当", "When")}</div>
                     <p className="decision-card-rationale" style={{ marginTop: 4 }}>
                       {selected.when}
                     </p>
                   </div>
                   <div>
-                    <div className="detail-section-label">Then</div>
+                    <div className="detail-section-label">{t("则", "Then")}</div>
                     <p className="decision-card-rationale" style={{ marginTop: 4 }}>
                       {selected.then}
                     </p>
@@ -163,9 +169,9 @@ export function RulesView({
                 </div>
 
                 <div className="decision-card-meta">
-                  <span>fired <code>{selected.fired_30d}×</code> in last 30 days</span>
+                  <span>{t("近 30 天触发", "fired")} <code>{selected.fired_30d}×</code>{t("", " in last 30 days")}</span>
                   <span>
-                    last updated{" "}
+                    {t("最近更新", "last updated")}{" "}
                     {new Date(selected.updated_at).toLocaleDateString()}
                   </span>
                 </div>
@@ -179,7 +185,7 @@ export function RulesView({
                           className="btn btn-secondary"
                           onClick={() => onPause(selected.id)}
                         >
-                          Pause
+                          {t("暂停", "Pause")}
                         </button>
                       )}
                       {onEdit && (
@@ -188,7 +194,7 @@ export function RulesView({
                           className="btn btn-ghost"
                           onClick={() => onEdit(selected.id)}
                         >
-                          Edit
+                          {t("编辑", "Edit")}
                         </button>
                       )}
                     </>
@@ -200,7 +206,7 @@ export function RulesView({
                           className="btn btn-primary"
                           onClick={() => onActivate(selected.id)}
                         >
-                          <IconZap size={14} /> Activate
+                          <IconZap size={14} /> {t("启用", "Activate")}
                         </button>
                       )}
                       {onEdit && (
@@ -209,7 +215,7 @@ export function RulesView({
                           className="btn btn-ghost"
                           onClick={() => onEdit(selected.id)}
                         >
-                          Edit
+                          {t("编辑", "Edit")}
                         </button>
                       )}
                       {onDiscard && (
@@ -218,7 +224,7 @@ export function RulesView({
                           className="btn btn-danger"
                           onClick={() => onDiscard(selected.id)}
                         >
-                          Discard
+                          {t("丢弃", "Discard")}
                         </button>
                       )}
                     </>
@@ -230,7 +236,7 @@ export function RulesView({
                           className="btn btn-primary"
                           onClick={() => onResume(selected.id)}
                         >
-                          Resume
+                          {t("恢复", "Resume")}
                         </button>
                       )}
                       {onEdit && (
@@ -239,7 +245,7 @@ export function RulesView({
                           className="btn btn-ghost"
                           onClick={() => onEdit(selected.id)}
                         >
-                          Edit
+                          {t("编辑", "Edit")}
                         </button>
                       )}
                     </>
@@ -251,7 +257,7 @@ export function RulesView({
                       className="btn btn-ghost"
                       onClick={() => onViewCap(selected.cap_token_id)}
                     >
-                      View linked cap_token
+                      {t("查看关联 cap_token", "View linked cap_token")}
                     </button>
                   )}
                 </div>
@@ -262,10 +268,12 @@ export function RulesView({
               <div className="main-empty-icon">
                 <IconSliders size={36} />
               </div>
-              <p>No rules yet.</p>
+              <p>{t("还没有规则。", "No rules yet.")}</p>
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                Create your first rule to start moving routine
-                decisions to autopilot.
+                {t(
+                  "创建第一条规则,开始把常规决策交给自动驾驶。",
+                  "Create your first rule to start moving routine decisions to autopilot.",
+                )}
               </p>
             </div>
           )}
@@ -274,16 +282,16 @@ export function RulesView({
 
       <aside className="detail">
         <div className="detail-head">
-          <span className="detail-title">Rule detail</span>
+          <span className="detail-title">{t("规则详情", "Rule detail")}</span>
         </div>
         <div className="detail-body">
           {selected ? (
             <SignaturePanel
               value={selected}
-              title="Rule definition"
+              title={t("规则定义", "Rule definition")}
             />
           ) : (
-            <p className="muted">Select a rule to inspect.</p>
+            <p className="muted">{t("选择一条规则查看。", "Select a rule to inspect.")}</p>
           )}
         </div>
       </aside>

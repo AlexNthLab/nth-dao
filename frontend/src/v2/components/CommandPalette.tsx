@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconSearch } from "./Icons";
+import { useLang } from "../i18n";
 import type { CommandItem } from "../types-v2";
 
 export interface CommandPaletteProps {
@@ -23,6 +24,7 @@ export interface CommandPaletteProps {
 }
 
 export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
+  const { t } = useLang();
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -42,8 +44,8 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
     setQuery("");
     setHighlight(0);
     // Defer focus to next tick so the input mounts first.
-    const t = setTimeout(() => inputRef.current?.focus(), 0);
-    return () => clearTimeout(t);
+    const focusTimer = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(focusTimer);
   }, [open]);
 
   useEffect(() => {
@@ -137,7 +139,7 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
             ref={inputRef}
             className="cmdk-input"
             style={{ paddingLeft: 40 }}
-            placeholder="Type a command or search…"
+            placeholder={t("输入命令或搜索…", "Type a command or search…")}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKey}
@@ -159,7 +161,7 @@ export function CommandPalette({ open, items, onClose }: CommandPaletteProps) {
           aria-label="Matching commands"
         >
           {filtered.length === 0 && (
-            <div className="cmdk-empty">No matching command.</div>
+            <div className="cmdk-empty">{t("没有匹配的命令。", "No matching command.")}</div>
           )}
           {filtered.map((it, i) => (
             <button

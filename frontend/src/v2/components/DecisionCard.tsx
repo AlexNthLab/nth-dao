@@ -24,6 +24,7 @@ import { useState } from "react";
 import { IconBraces, IconCheck, IconClock, IconX } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { relativeFuture, relativeTime } from "../utils/time";
+import { useLang } from "../i18n";
 import type { Decision } from "../types-v2";
 
 export interface DecisionCardProps {
@@ -34,6 +35,7 @@ export interface DecisionCardProps {
 }
 
 export function DecisionCard({ decision, onApprove, onReject, onDefer }: DecisionCardProps) {
+  const { t } = useLang();
   const [showJson, setShowJson] = useState(false);
 
   return (
@@ -73,10 +75,10 @@ export function DecisionCard({ decision, onApprove, onReject, onDefer }: Decisio
         </div>
         <span className={`decision-card-impact ${decision.impact}`}>
           {decision.impact === "high"
-            ? "High impact"
+            ? t("高影响", "High impact")
             : decision.impact === "medium"
-              ? "On-policy"
-              : "Routine"}
+              ? t("策略内", "On-policy")
+              : t("常规", "Routine")}
         </span>
       </div>
 
@@ -89,7 +91,7 @@ export function DecisionCard({ decision, onApprove, onReject, onDefer }: Decisio
           </span>
         )}
         {decision.cap_expires_at && (
-          <span title="When the authorizing cap_token expires">
+          <span title={t("授权 cap_token 何时过期", "When the authorizing cap_token expires")}>
             <IconClock size={11} style={{ verticalAlign: "-1px" }} />{" "}
             cap {relativeFuture(decision.cap_expires_at)}
           </span>
@@ -99,7 +101,7 @@ export function DecisionCard({ decision, onApprove, onReject, onDefer }: Decisio
       {showJson && (
         <SignaturePanel
           value={decision.preview_receipt}
-          title="Preview receipt (would be signed on Approve)"
+          title={t("回执预览(批准时将签发)", "Preview receipt (would be signed on Approve)")}
         />
       )}
 
@@ -108,28 +110,28 @@ export function DecisionCard({ decision, onApprove, onReject, onDefer }: Decisio
           className="btn btn-primary"
           onClick={() => onApprove(decision.id)}
         >
-          <IconCheck size={14} /> Approve <kbd>⌘J</kbd>
+          <IconCheck size={14} /> {t("批准", "Approve")} <kbd>⌘J</kbd>
         </button>
         <button
           className="btn btn-secondary"
           onClick={() => onDefer(decision.id)}
         >
-          Defer 24h
+          {t("延后 24h", "Defer 24h")}
         </button>
         <button
           className="btn btn-danger"
           onClick={() => onReject(decision.id)}
         >
-          <IconX size={14} /> Reject
+          <IconX size={14} /> {t("拒绝", "Reject")}
         </button>
         <span style={{ flex: 1 }} />
         <button
           className="btn btn-ghost"
           onClick={() => setShowJson((v) => !v)}
-          title="Toggle signature inspector"
+          title={t("切换签名检视器", "Toggle signature inspector")}
         >
           <IconBraces size={14} />
-          {showJson ? "Hide JSON" : "Show JSON"}
+          {showJson ? t("隐藏 JSON", "Hide JSON") : t("显示 JSON", "Show JSON")}
         </button>
       </div>
     </article>

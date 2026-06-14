@@ -29,7 +29,17 @@ import { useEffect, useMemo, useState } from "react";
 import { IconLayout, IconPlus, IconZap } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { relativeTimeShort } from "../utils/time";
+import { useLang } from "../i18n";
 import type { ProcessCard, ProcessStage } from "../types-v2";
+
+/** 阶段名中文(COLUMNS 在模块级,渲染时用 t(STAGE_ZH[id], col.label))。 */
+const STAGE_ZH: Record<ProcessStage, string> = {
+  received: "待接收",
+  in_progress: "进行中",
+  awaiting_external: "等待外部",
+  blocked: "受阻",
+  done: "完成",
+};
 
 export interface BlackboardViewProps {
   processes: ProcessCard[];
@@ -65,6 +75,7 @@ const COLUMNS: { id: ProcessStage; label: string; pill: "ok" | "wait" | "bad" | 
 export function BlackboardView({
   processes, onCreate, workflowOptions,
 }: BlackboardViewProps) {
+  const { t } = useLang();
   const workflows = useMemo(
     () => Array.from(new Set(processes.map((p) => p.workflow))).sort(),
     [processes],
@@ -107,7 +118,7 @@ export function BlackboardView({
     <>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="sidebar-title">Workflows</span>
+          <span className="sidebar-title">{t("工作流", "Workflows")}</span>
           <span className="sidebar-count">{processes.length}</span>
         </div>
         <div className="sidebar-list">
@@ -116,10 +127,10 @@ export function BlackboardView({
             onClick={() => setActiveWorkflow("all")}
           >
             <div className="sidebar-item-title">
-              <span>All workflows</span>
+              <span>{t("全部工作流", "All workflows")}</span>
             </div>
             <div className="sidebar-item-meta">
-              <span>{processes.length} processes</span>
+              <span>{processes.length} {t("个流程", "processes")}</span>
             </div>
           </button>
           {workflows.map((wf) => {
@@ -156,14 +167,16 @@ export function BlackboardView({
             <p className="main-eyebrow">Blackboard</p>
             <h1 className="main-title">
               {activeWorkflow === "all"
-                ? "Operations"
+                ? t("运营总览", "Operations")
                 : activeWorkflow[0].toUpperCase() + activeWorkflow.slice(1)}
             </h1>
             <p className="main-subtitle">
-              What every agent is doing right now.{" "}
+              {t("每个 agent 此刻在做什么。", "What every agent is doing right now.")}{" "}
               <span style={{ color: "var(--accent)" }}>
-                {autoPct}% of active processes are running on autopilot
-                (Rule-authorized).
+                {t(
+                  `${autoPct}% 的活跃流程在自动驾驶(规则授权)。`,
+                  `${autoPct}% of active processes are running on autopilot (Rule-authorized).`,
+                )}
               </span>
             </p>
           </div>
@@ -172,10 +185,10 @@ export function BlackboardView({
               type="button"
               className="btn btn-primary"
               onClick={() => setCreateOpen(true)}
-              title="Start a new process — drops into Intake"
+              title={t("发起一个新流程 —— 落入待接收", "Start a new process — drops into Intake")}
               style={{ marginTop: 4, flexShrink: 0 }}
             >
-              <IconPlus size={14} /> New process
+              <IconPlus size={14} /> {t("新流程", "New process")}
             </button>
           )}
         </div>
@@ -229,7 +242,7 @@ export function BlackboardView({
                       borderBottom: "1px solid var(--border)",
                     }}
                   >
-                    <span className={`pill ${col.pill}`}>{col.label}</span>
+                    <span className={`pill ${col.pill}`}>{t(STAGE_ZH[col.id], col.label)}</span>
                     <span className="muted mono" style={{ fontSize: 11 }}>
                       {items.length}
                     </span>
@@ -320,7 +333,7 @@ export function BlackboardView({
                           borderRadius: "var(--r-sm)",
                         }}
                       >
-                        empty
+                        {t("空", "empty")}
                       </div>
                     )}
                   </div>
@@ -334,7 +347,7 @@ export function BlackboardView({
               <div className="main-empty-icon">
                 <IconLayout size={36} />
               </div>
-              <p>No processes in this workflow.</p>
+              <p>{t("这个工作流暂无流程。", "No processes in this workflow.")}</p>
             </div>
           )}
         </div>
@@ -342,28 +355,28 @@ export function BlackboardView({
 
       <aside className="detail">
         <div className="detail-head">
-          <span className="detail-title">Process detail</span>
+          <span className="detail-title">{t("流程详情", "Process detail")}</span>
         </div>
         <div className="detail-body">
           {selected ? (
             <>
               <div className="detail-section">
-                <div className="detail-section-label">State</div>
+                <div className="detail-section-label">{t("状态", "State")}</div>
                 <div className="detail-row">
-                  <span className="key">Stage</span>
+                  <span className="key">{t("阶段", "Stage")}</span>
                   <span className="value">{selected.stage}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Workflow</span>
+                  <span className="key">{t("工作流", "Workflow")}</span>
                   <span className="value">{selected.workflow}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Current agent</span>
+                  <span className="key">{t("当前 agent", "Current agent")}</span>
                   <span className="value">{selected.current_agent}</span>
                 </div>
                 {selected.next_agent && (
                   <div className="detail-row">
-                    <span className="key">Next agent</span>
+                    <span className="key">{t("下一个 agent", "Next agent")}</span>
                     <span className="value">{selected.next_agent}</span>
                   </div>
                 )}
@@ -375,30 +388,30 @@ export function BlackboardView({
                 )}
                 {selected.amount && (
                   <div className="detail-row">
-                    <span className="key">Amount</span>
+                    <span className="key">{t("金额", "Amount")}</span>
                     <span className="value">{selected.amount}</span>
                   </div>
                 )}
                 <div className="detail-row">
-                  <span className="key">Last update</span>
+                  <span className="key">{t("最近更新", "Last update")}</span>
                   <span className="value">
                     {new Date(selected.updated_at).toLocaleString()}
                   </span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Mode</span>
+                  <span className="key">{t("模式", "Mode")}</span>
                   <span className="value">
-                    {selected.auto ? "autopilot ⚡" : "manual"}
+                    {selected.auto ? t("自动驾驶 ⚡", "autopilot ⚡") : t("手动", "manual")}
                   </span>
                 </div>
               </div>
               <SignaturePanel
                 value={selected}
-                title="Process snapshot"
+                title={t("流程快照", "Process snapshot")}
               />
             </>
           ) : (
-            <p className="muted">Select a card to inspect.</p>
+            <p className="muted">{t("选择一张卡片查看。", "Select a card to inspect.")}</p>
           )}
         </div>
       </aside>
@@ -426,6 +439,7 @@ interface NewProcessFormProps {
 function NewProcessForm({
   workflowOptions, onCancel, onSubmit,
 }: NewProcessFormProps) {
+  const { t } = useLang();
   const [title, setTitle] = useState("");
   const [workflow, setWorkflow] = useState(workflowOptions[0] ?? "");
   const [customWorkflow, setCustomWorkflow] = useState("");
@@ -486,14 +500,14 @@ function NewProcessForm({
           color: "var(--accent)",
         }}
       >
-        Start a new process
+        {t("发起一个新流程", "Start a new process")}
       </h3>
       <p
         className="muted"
         style={{ margin: "0 0 12px", fontSize: 11 }}
       >
-        It drops into <strong>Intake</strong>. The driver agent will
-        pick it up on the next loop.
+        {t("它会落入", "It drops into")} <strong>{t("待接收", "Intake")}</strong>
+        {t("。驱动 agent 会在下一轮接手。", ". The driver agent will pick it up on the next loop.")}
       </p>
 
       <div className="stack" style={{ gap: 10 }}>
@@ -508,13 +522,13 @@ function NewProcessForm({
               letterSpacing: "0.04em",
             }}
           >
-            Title
+            {t("标题", "Title")}
           </label>
           <input
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Refund order #4521"
+            placeholder={t("例如:退款订单 #4521", "e.g. Refund order #4521")}
             required
             autoFocus
             style={{ width: "100%" }}
@@ -533,7 +547,7 @@ function NewProcessForm({
                 letterSpacing: "0.04em",
               }}
             >
-              Workflow
+              {t("工作流", "Workflow")}
             </label>
             <select
               value={workflow}
@@ -545,7 +559,7 @@ function NewProcessForm({
                   {wf}
                 </option>
               ))}
-              <option value="__new__">+ New workflow…</option>
+              <option value="__new__">{t("+ 新工作流…", "+ New workflow…")}</option>
             </select>
           </div>
           {usingCustom && (
@@ -560,13 +574,13 @@ function NewProcessForm({
                   letterSpacing: "0.04em",
                 }}
               >
-                New workflow name
+                {t("新工作流名", "New workflow name")}
               </label>
               <input
                 type="text"
                 value={customWorkflow}
                 onChange={(e) => setCustomWorkflow(e.target.value)}
-                placeholder="finance"
+                placeholder={t("如:财务", "finance")}
                 required={usingCustom}
                 style={{ width: "100%" }}
               />
@@ -585,7 +599,7 @@ function NewProcessForm({
               letterSpacing: "0.04em",
             }}
           >
-            Driver agent
+            {t("驱动 agent", "Driver agent")}
           </label>
           <input
             type="text"
@@ -608,13 +622,13 @@ function NewProcessForm({
               letterSpacing: "0.04em",
             }}
           >
-            Subtitle (optional)
+            {t("副标题(可选)", "Subtitle (optional)")}
           </label>
           <input
             type="text"
             value={subtitle}
             onChange={(e) => setSubtitle(e.target.value)}
-            placeholder="one-line context"
+            placeholder={t("一句话上下文", "one-line context")}
             style={{ width: "100%" }}
           />
         </div>
@@ -633,14 +647,14 @@ function NewProcessForm({
           className="btn"
           onClick={onCancel}
         >
-          Cancel
+          {t("取消", "Cancel")}
         </button>
         <button
           type="submit"
           className="btn btn-primary"
           disabled={!canSubmit}
         >
-          Create process
+          {t("创建流程", "Create process")}
         </button>
       </div>
     </form>
