@@ -158,6 +158,13 @@ export const fetchDecisions     = (s?: AbortSignal) =>
 export const fetchMissions      = (s?: AbortSignal) =>
   getJson<MissionSummary[]>("/missions", s);
 
+/** 把 mission 从 planning/paused 推进到 active(开始执行)。返回新 summary。 */
+export async function activateMission(id: string): Promise<MissionSummary> {
+  return postJson<MissionSummary>(
+    `/missions/${encodeURIComponent(id)}/activate`,
+  );
+}
+
 /** 真正创建一个 mission(落后端 store)。steps 是描述列表,每条转成
  *  {description, required_capabilities}。返回真实(非 m-local-)的 summary。 */
 export async function createMission(input: {

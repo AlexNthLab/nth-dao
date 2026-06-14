@@ -31,6 +31,8 @@ export interface MissionListProps {
    *  that opens the inline form. v1 captures locally; backend wires
    *  to POST /api/missions on integration. */
   onCreate?: (draft: NewMissionDraft) => void;
+  /** 启动一个 planning 的 mission(→active)。补齐"创建后卡 planning"。 */
+  onActivate?: (id: string) => void;
   /** Agents the user can pick as driver — populates the form's
    *  dropdown. Pass mockAgents in v1; /api/agents/list in v1.x. */
   driverOptions?: AgentEntry[];
@@ -70,7 +72,7 @@ function statusPill(s: MissionSummary["status"]): "ok" | "wait" | "bad" | "dim" 
 }
 
 export function MissionList({
-  missions, onCreate, driverOptions, focusId, onFocusConsumed,
+  missions, onCreate, onActivate, driverOptions, focusId, onFocusConsumed,
 }: MissionListProps) {
   const [selectedId, setSelectedId] = useState<string | null>(
     missions[0]?.id ?? null,
@@ -234,6 +236,35 @@ export function MissionList({
                         Next:
                       </span>{" "}
                       {m.next_actionable}
+                    </div>
+                  )}
+
+                  {onActivate && m.status === "planning" && (
+                    <div style={{ marginTop: 12 }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={m.steps_total === 0}
+                        title={
+                          m.steps_total === 0
+                            ? "先加步骤再启动(空 mission 没活可干)"
+                            : "开始执行这个 mission(planning → active)"
+                        }
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onActivate(m.id);
+                        }}
+                      >
+                        启动
+                      </button>
+                      {m.steps_total === 0 && (
+                        <span
+                          className="muted"
+                          style={{ fontSize: 11, marginLeft: 8 }}
+                        >
+                          没有步骤,无法启动
+                        </span>
+                      )}
                     </div>
                   )}
                 </article>

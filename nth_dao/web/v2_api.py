@@ -1924,6 +1924,52 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=f"create failed: {exc}")
         return _mission_to_summary(m)
 
+    @app.post(
+        "/api/v2/missions/{mission_id}/activate",
+        response_model=MissionSummaryM,
+    )
+    def v2_mission_activate(
+        mission_id: str, request: Request,
+    ) -> Dict[str, Any]:
+        """把 mission 从 planning/paused 推进到 active(开始执行)。
+
+        补齐"创建后卡在 planning"的最后一环:此前没有任何动作能把 mission
+        移出 planning。空 mission(0 步)不能启动——没活可干。已 active 则
+        幂等返回;终态(completed/failed/cancelled)拒。落盘持久。
+        """
+        from nth_dao.orchestration.mission import MissionStatus
+
+        store = getattr(request.app.state.nth, "missions", None)
+        if store is None:
+            raise HTTPException(status_code=503, detail="mission store unavailable")
+        m = store.get(mission_id)
+        if m is None:
+            raise HTTPException(status_code=404, detail="mission not found")
+        if m.status == MissionStatus.ACTIVE.value:
+            return _mission_to_summary(m)  # 幂等
+        if not m.steps:
+            raise HTTPException(
+                status_code=409,
+                detail="mission has no steps; add steps before activating",
+            )
+        if m.status not in (
+            MissionStatus.PLANNING.value, MissionStatus.PAUSED.value,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"mission is '{m.status}'; only planning/paused can "
+                    f"be activated"
+                ),
+            )
+        m.status = MissionStatus.ACTIVE.value
+        try:
+            store.save(m)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("v2_mission_activate: save failed: %s", exc)
+            raise HTTPException(status_code=500, detail=f"activate failed: {exc}")
+        return _mission_to_summary(m)
+
     @app.get("/api/v2/processes", response_model=List[ProcessCardM])
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
         live = _read_processes_from_blackboard(_state_blackboard(request))

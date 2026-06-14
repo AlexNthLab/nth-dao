@@ -55,6 +55,34 @@ def test_missions_empty_then_create_then_persist(tmp_path: Path) -> None:
     assert app.state.nth.missions.get(mid) is not None
 
 
+def test_mission_activate_planning_to_active(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    mid = client.post(
+        "/api/v2/missions",
+        json={"title": "M", "steps": [{"description": "step one"}]},
+    ).json()["id"]
+    assert client.get("/api/v2/missions").json()[0]["status"] == "planning"
+
+    r = client.post(f"/api/v2/missions/{mid}/activate")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "active"
+    # 落盘 + 幂等。
+    assert app.state.nth.missions.get(mid).status == "active"
+    assert client.post(f"/api/v2/missions/{mid}/activate").json()["status"] == "active"
+
+
+def test_mission_activate_rejects_empty_and_missing(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    # 不存在 → 404。
+    assert client.post("/api/v2/missions/nope/activate").status_code == 404
+    # 0 步的 mission 不能启动 → 409。
+    mid = client.post("/api/v2/missions", json={"title": "empty"}).json()["id"]
+    assert client.post(f"/api/v2/missions/{mid}/activate").status_code == 409
+
+
 def test_missions_create_validates(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path, require_console_auth=False))
     assert client.post(

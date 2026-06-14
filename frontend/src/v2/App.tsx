@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, askAgentStream, createMission, fetchAgents, fetchCapTokens,
+  a2aEchoApi, activateMission, askAgentStream, createMission, fetchAgents, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, pingAgentApi, probeHub,
   resolveDecisionApi, summarizeAgent,
@@ -826,6 +826,19 @@ function AppInner() {
     }
   }
 
+  /** 启动 mission(planning→active)。补齐"创建后卡 planning"的流转。 */
+  async function handleActivateMission(id: string) {
+    try {
+      const updated = await activateMission(id);
+      setMissions((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    } catch (e) {
+      toast.push(
+        `启动 mission 失败:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
+  }
+
   /** New process — drops in "received". Matches the Kanban Intake
    *  column and the autopilot dashboard's "what just arrived"
    *  visual cue. */
@@ -873,6 +886,7 @@ function AppInner() {
       <MissionList
         missions={missions}
         onCreate={handleCreateMission}
+        onActivate={handleActivateMission}
         driverOptions={agents}
         focusId={focusMissionId}
         onFocusConsumed={() => setFocusMissionId(null)}
