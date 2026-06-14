@@ -73,7 +73,8 @@ describe("ChatView agent integration", () => {
       "发消息给 DM: test-agent…",
     );
     fireEvent.change(composer, { target: { value: "run the task" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    // 默认语言 zh:发送按钮 aria-label 为"发送"(i18n 第二批后)。
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     await waitFor(() => {
       expect(onSend).toHaveBeenCalledWith(

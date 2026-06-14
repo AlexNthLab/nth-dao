@@ -96,13 +96,13 @@ export function MissionList({
     <>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="sidebar-title">Active missions</span>
+          <span className="sidebar-title">{t("进行中的 mission", "Active missions")}</span>
           <span className="sidebar-count">{missions.length}</span>
         </div>
         <div className="sidebar-list">
           {missions.length === 0 && (
             <p className="muted" style={{ padding: "12px 14px" }}>
-              No missions in flight.
+              {t("没有进行中的 mission。", "No missions in flight.")}
             </p>
           )}
           {missions.map((m) => (
@@ -137,10 +137,12 @@ export function MissionList({
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <p className="main-eyebrow">Missions</p>
-            <h1 className="main-title">What the agents are doing</h1>
+            <h1 className="main-title">{t("agent 正在做什么", "What the agents are doing")}</h1>
             <p className="main-subtitle">
-              Each mission represents a structured goal an AI agent is
-              executing on your behalf, bounded by a cap_token.
+              {t(
+                "每个 mission 是一个 AI agent 代你执行的结构化目标,受 cap_token 约束。",
+                "Each mission represents a structured goal an AI agent is executing on your behalf, bounded by a cap_token.",
+              )}
             </p>
           </div>
           {onCreate && (
@@ -148,10 +150,10 @@ export function MissionList({
               type="button"
               className="btn btn-primary"
               onClick={() => setCreateOpen(true)}
-              title="Start a new mission — picks a driver agent"
+              title={t("发起一个新 mission —— 选一个驱动 agent", "Start a new mission — picks a driver agent")}
               style={{ marginTop: 4, flexShrink: 0 }}
             >
-              <IconPlus size={14} /> New mission
+              <IconPlus size={14} /> {t("新 mission", "New mission")}
             </button>
           )}
         </div>
@@ -173,10 +175,10 @@ export function MissionList({
               <div className="main-empty-icon">
                 <IconTarget size={36} />
               </div>
-              <p>No active missions.</p>
+              <p>{t("没有进行中的 mission。", "No active missions.")}</p>
               {onCreate && (
                 <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-                  Press <kbd>+ New mission</kbd> above to start one.
+                  {t("点上方", "Press")} <kbd>{t("+ 新 mission", "+ New mission")}</kbd> {t("开始一个。", "above to start one.")}
                 </p>
               )}
             </div>
@@ -193,7 +195,7 @@ export function MissionList({
                     <div>
                       <h3 className="decision-card-title">{m.title}</h3>
                       <div className="decision-card-subject">
-                        <span>by {m.driver_label}</span>
+                        <span>{t("驱动", "by")} {m.driver_label}</span>
                         <span className="muted">·</span>
                         <code>{m.driver_did.slice(0, 20)}…</code>
                       </div>
@@ -221,8 +223,10 @@ export function MissionList({
                     </div>
                     <div className="decision-card-meta" style={{ marginTop: 8 }}>
                       <span>
-                        {m.steps_done} done · {m.steps_in_progress} in
-                        progress · {m.steps_total} total
+                        {t(
+                          `${m.steps_done} 完成 · ${m.steps_in_progress} 进行中 · 共 ${m.steps_total}`,
+                          `${m.steps_done} done · ${m.steps_in_progress} in progress · ${m.steps_total} total`,
+                        )}
                       </span>
                       {m.cap_token_id && (
                         <span>
@@ -235,7 +239,7 @@ export function MissionList({
                   {m.next_actionable && (
                     <div className="decision-card-rationale">
                       <span className="muted" style={{ fontSize: 11 }}>
-                        Next:
+                        {t("下一步:", "Next:")}
                       </span>{" "}
                       {m.next_actionable}
                     </div>
@@ -278,15 +282,15 @@ export function MissionList({
 
       <aside className="detail">
         <div className="detail-head">
-          <span className="detail-title">Mission detail</span>
+          <span className="detail-title">{t("Mission 详情", "Mission detail")}</span>
         </div>
         <div className="detail-body">
           {selected ? (
             <>
               <div className="detail-section">
-                <div className="detail-section-label">Identity</div>
+                <div className="detail-section-label">{t("身份", "Identity")}</div>
                 <div className="detail-row">
-                  <span className="key">Driver</span>
+                  <span className="key">{t("驱动", "Driver")}</span>
                   <span className="value">{selected.driver_label}</span>
                 </div>
                 <div className="detail-row">
@@ -294,7 +298,7 @@ export function MissionList({
                   <span className="value">{selected.cap_token_id || "—"}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Started</span>
+                  <span className="key">{t("开始于", "Started")}</span>
                   <span className="value">
                     {new Date(selected.started_at).toLocaleString()}
                   </span>
@@ -302,11 +306,11 @@ export function MissionList({
               </div>
               <SignaturePanel
                 value={selected}
-                title="Mission shape"
+                title={t("Mission 结构", "Mission shape")}
               />
             </>
           ) : (
-            <p className="muted">Select a mission to inspect.</p>
+            <p className="muted">{t("选择一个 mission 查看。", "Select a mission to inspect.")}</p>
           )}
         </div>
       </aside>
@@ -392,15 +396,16 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
           color: "var(--accent)",
         }}
       >
-        Start a new mission
+        {t("发起一个新 mission", "Start a new mission")}
       </h3>
       <p
         className="muted"
         style={{ margin: "0 0 12px", fontSize: 11 }}
       >
-        The driver agent will plan steps and request your approval —
-        unless you scope a cap_token, in which case it executes
-        autonomously within those bounds.
+        {t(
+          "驱动 agent 会规划步骤并请你审批 —— 除非你给一个 cap_token,那它就在该授权范围内自主执行。",
+          "The driver agent will plan steps and request your approval — unless you scope a cap_token, in which case it executes autonomously within those bounds.",
+        )}
       </p>
 
       <div className="stack" style={{ gap: 10 }}>
@@ -415,13 +420,13 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
               letterSpacing: "0.04em",
             }}
           >
-            Title
+            {t("标题", "Title")}
           </label>
           <input
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Draft Q3 launch announcement"
+            placeholder={t("例如:起草 Q3 发布公告", "e.g. Draft Q3 launch announcement")}
             required
             autoFocus
             style={{ width: "100%" }}
@@ -439,12 +444,12 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
               letterSpacing: "0.04em",
             }}
           >
-            Goal
+            {t("目标", "Goal")}
           </label>
           <textarea
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
-            placeholder="Describe the outcome you want, not the steps."
+            placeholder={t("描述你想要的结果,而不是步骤。", "Describe the outcome you want, not the steps.")}
             required
             rows={3}
             style={{ width: "100%", resize: "vertical" }}
@@ -493,7 +498,7 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
               letterSpacing: "0.04em",
             }}
           >
-            Driver agent
+            {t("驱动 agent", "Driver agent")}
           </label>
           {drivers.length > 0 ? (
             <select
@@ -533,7 +538,7 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
               letterSpacing: "0.04em",
             }}
           >
-            Cap_token (optional, enables autopilot for this mission)
+            {t("Cap_token(可选,给本 mission 开启自动驾驶)", "Cap_token (optional, enables autopilot for this mission)")}
           </label>
           <input
             type="text"
@@ -558,14 +563,14 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
           className="btn"
           onClick={onCancel}
         >
-          Cancel
+          {t("取消", "Cancel")}
         </button>
         <button
           type="submit"
           className="btn btn-primary"
           disabled={!canSubmit}
         >
-          Start mission
+          {t("启动 mission", "Start mission")}
         </button>
       </div>
     </form>

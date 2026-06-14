@@ -188,7 +188,7 @@ export function ChatView({
     <>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="sidebar-title">Conversations</span>
+          <span className="sidebar-title">{t("对话", "Conversations")}</span>
           <span className="sidebar-count">{sorted.length}</span>
         </div>
         <div className="sidebar-list">
@@ -297,9 +297,9 @@ export function ChatView({
                   <div className="main-empty-icon">
                     <IconChat size={36} />
                   </div>
-                  <p>No messages yet.</p>
+                  <p>{t("还没有消息。", "No messages yet.")}</p>
                   <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                    Start the conversation below.
+                    {t("在下面开始对话。", "Start the conversation below.")}
                   </p>
                 </div>
               ) : (
@@ -389,7 +389,7 @@ export function ChatView({
                 type="submit"
                 className="chat-send"
                 disabled={!draft.trim() || sending}
-                aria-label={sending ? "Sending message" : "Send message"}
+                aria-label={sending ? t("发送中", "Sending message") : t("发送", "Send message")}
               >
                 <IconSend size={16} />
               </button>
@@ -401,7 +401,7 @@ export function ChatView({
               <div className="main-empty-icon">
                 <IconChat size={36} />
               </div>
-              <p>No conversation selected.</p>
+              <p>{t("未选择对话。", "No conversation selected.")}</p>
             </div>
           </div>
         )}
@@ -409,25 +409,25 @@ export function ChatView({
 
       <aside className="detail">
         <div className="detail-head">
-          <span className="detail-title">Signed material</span>
+          <span className="detail-title">{t("已签名材料", "Signed material")}</span>
         </div>
         <div className="detail-body">
           {selected ? (
             <>
               <div className="detail-section">
-                <div className="detail-section-label">Conversation</div>
+                <div className="detail-section-label">{t("对话", "Conversation")}</div>
                 <div className="detail-row">
-                  <span className="key">Kind</span>
+                  <span className="key">{t("类型", "Kind")}</span>
                   <span className="value">{selected.kind}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Last activity</span>
+                  <span className="key">{t("最近活动", "Last activity")}</span>
                   <span className="value">
                     {new Date(selected.last_at).toLocaleString()}
                   </span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Unread</span>
+                  <span className="key">{t("未读", "Unread")}</span>
                   <span className="value">{selected.unread}</span>
                 </div>
               </div>
@@ -441,13 +441,14 @@ export function ChatView({
                     body: lastAgentMsg.body,
                     issued_at: lastAgentMsg.created_at,
                   }}
-                  title="Last signed message in this conversation"
+                  title={t("本对话最近一条已签名消息", "Last signed message in this conversation")}
                 />
               ) : (
                 <p className="muted" style={{ fontSize: 12 }}>
-                  No signed messages in this conversation yet. Agent
-                  replies are signed when an authorizing cap_token is
-                  in scope.
+                  {t(
+                    "本对话还没有已签名的消息。当有授权 cap_token 在作用域内时,agent 的回复会被签名。",
+                    "No signed messages in this conversation yet. Agent replies are signed when an authorizing cap_token is in scope.",
+                  )}
                 </p>
               )}
             </>

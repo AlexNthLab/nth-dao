@@ -314,7 +314,7 @@ export function AgentDirectoryView({
     <>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="sidebar-title">Agents</span>
+          <span className="sidebar-title">{t("Agents", "Agents")}</span>
           <span className="sidebar-count">{agents.length}</span>
         </div>
         <div className="sidebar-list">
@@ -323,7 +323,7 @@ export function AgentDirectoryView({
             onClick={() => setFilter("all")}
           >
             <div className="sidebar-item-title">
-              <span>All agents</span>
+              <span>{t("全部 agent", "All agents")}</span>
             </div>
             <div className="sidebar-item-meta">
               <span>{agents.length}</span>
@@ -349,11 +349,12 @@ export function AgentDirectoryView({
       <section className="main">
         <div className="main-head">
           <p className="main-eyebrow">Agents</p>
-          <h1 className="main-title">Who's available to work for you</h1>
+          <h1 className="main-title">{t("谁能为你干活", "Who's available to work for you")}</h1>
           <p className="main-subtitle">
-            Local helpers, hand-added contacts, and peers discovered
-            on your network. Issue a cap_token to delegate work; tap a
-            row to inspect their A2A capabilities.
+            {t(
+              "本地助手、手动添加的联系人,以及在你网络里发现的对等节点。签发 cap_token 即可委派工作;点一行查看它的 A2A 能力。",
+              "Local helpers, hand-added contacts, and peers discovered on your network. Issue a cap_token to delegate work; tap a row to inspect their A2A capabilities.",
+            )}
           </p>
         </div>
 
@@ -371,14 +372,14 @@ export function AgentDirectoryView({
               className="btn btn-primary"
               onClick={() => setAddOpen((v) => !v)}
             >
-              <IconUserPlus size={14} /> Add by DID
+              <IconUserPlus size={14} /> {t("按 DID 添加", "Add by DID")}
             </button>
             <button
               className="btn btn-secondary"
               onClick={handleScan}
               disabled={scanning}
             >
-              <IconWifi size={14} /> {scanning ? "Scanning…" : "Scan LAN"}
+              <IconWifi size={14} /> {scanning ? t("扫描中…", "Scanning…") : t("扫描局域网", "Scan LAN")}
             </button>
             <div
               style={{
@@ -401,7 +402,7 @@ export function AgentDirectoryView({
               </span>
               <input
                 style={{ paddingLeft: 36, width: "100%" }}
-                placeholder="Search by label, DID, or code…"
+                placeholder={t("按标签、DID 或代号搜索…", "Search by label, DID, or code…")}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 spellCheck={false}
@@ -420,9 +421,9 @@ export function AgentDirectoryView({
               }}
             >
               <form onSubmit={handleAdd} style={{ display: "grid", gap: 8 }}>
-                <div className="detail-section-label">Add agent by DID</div>
+                <div className="detail-section-label">{t("按 DID 添加 agent", "Add agent by DID")}</div>
                 <input
-                  placeholder="did:key:z6Mk… (paste the agent's DID)"
+                  placeholder={t("did:key:z6Mk…(粘贴 agent 的 DID)", "did:key:z6Mk… (paste the agent's DID)")}
                   value={newDid}
                   onChange={(e) => setNewDid(e.target.value)}
                   spellCheck={false}
@@ -430,7 +431,7 @@ export function AgentDirectoryView({
                   style={{ fontFamily: "var(--t-mono)", fontSize: 12 }}
                 />
                 <input
-                  placeholder="Label (your own name for this agent)"
+                  placeholder={t("标签(你给这个 agent 起的名)", "Label (your own name for this agent)")}
                   value={newLabel}
                   onChange={(e) => setNewLabel(e.target.value)}
                 />
@@ -440,20 +441,20 @@ export function AgentDirectoryView({
                     className="btn btn-primary"
                     disabled={!newDid.trim()}
                   >
-                    Add
+                    {t("添加", "Add")}
                   </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
                     onClick={() => setAddOpen(false)}
                   >
-                    Cancel
+                    {t("取消", "Cancel")}
                   </button>
                 </div>
                 <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                  The agent will appear under <strong>Contacts</strong>{" "}
-                  immediately. To grant authority, issue a cap_token from
-                  the Delegate tab.
+                  {t("该 agent 会立即出现在", "The agent will appear under")}{" "}
+                  <strong>{t("联系人", "Contacts")}</strong>
+                  {t("下。要授权,去 Delegate 页签签发一个 cap_token。", " immediately. To grant authority, issue a cap_token from the Delegate tab.")}
                 </p>
               </form>
             </div>
@@ -468,8 +469,8 @@ export function AgentDirectoryView({
                 </div>
                 <p>
                   {query
-                    ? "No agent matches that search."
-                    : "No agents in this category yet."}
+                    ? t("没有匹配该搜索的 agent。", "No agent matches that search.")
+                    : t("这个类别还没有 agent。", "No agents in this category yet.")}
                 </p>
               </div>
             )}
@@ -506,7 +507,7 @@ export function AgentDirectoryView({
                         gap: 8,
                       }}
                     >
-                      {a.label || "(unlabeled)"}
+                      {a.label || t("(未命名)", "(unlabeled)")}
                       {a.has_active_cap && (
                         <span
                           title="Active cap_token issued"
@@ -683,7 +684,7 @@ export function AgentDirectoryView({
                       onIssueCap(a.did);
                     }}
                   >
-                    <IconZap size={12} /> Issue cap_token
+                    <IconZap size={12} /> {t("签发 cap_token", "Issue cap_token")}
                   </button>
                   {onSendMessage && a.supervised && a.alive
                    && typeof a.a2a_port === "number" && (
@@ -696,7 +697,7 @@ export function AgentDirectoryView({
                       }}
                       aria-label={`Send a message to ${a.label || a.did}`}
                     >
-                      <IconSend size={12} /> Send message
+                      <IconSend size={12} /> {t("发消息", "Send message")}
                     </button>
                   )}
                   {/* Phase 3f: live wire test buttons. Only shown
@@ -715,7 +716,7 @@ export function AgentDirectoryView({
                       }}
                       title="GET /api/v2/agents/{did}/ping"
                     >
-                      Ping
+                      {t("探活", "Ping")}
                     </button>
                   )}
                   {onA2AEcho && a.supervised && a.alive
@@ -734,7 +735,7 @@ export function AgentDirectoryView({
                         "the auth check is live)"
                       }
                     >
-                      A2A echo
+                      {t("A2A echo", "A2A echo")}
                     </button>
                   )}
                 </div>
@@ -801,29 +802,29 @@ export function AgentDirectoryView({
 
       <aside className="detail">
         <div className="detail-head">
-          <span className="detail-title">Agent detail</span>
+          <span className="detail-title">{t("Agent 详情", "Agent detail")}</span>
         </div>
         <div className="detail-body">
           {selected ? (
             <>
               <div className="detail-section">
-                <div className="detail-section-label">Identity</div>
+                <div className="detail-section-label">{t("身份", "Identity")}</div>
                 <div className="detail-row">
-                  <span className="key">Label</span>
+                  <span className="key">{t("标签", "Label")}</span>
                   <span className="value">{selected.label || "—"}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Code</span>
+                  <span className="key">{t("代号", "Code")}</span>
                   <span className="value">{selected.code}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Source</span>
+                  <span className="key">{t("来源", "Source")}</span>
                   <span className="value">{SOURCE_LABEL[selected.source]}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="key">Has active cap</span>
+                  <span className="key">{t("有生效 cap", "Has active cap")}</span>
                   <span className="value">
-                    {selected.has_active_cap ? "yes" : "no"}
+                    {selected.has_active_cap ? t("是", "yes") : t("否", "no")}
                   </span>
                 </div>
               </div>
@@ -833,7 +834,7 @@ export function AgentDirectoryView({
                && typeof selected.a2a_port === "number" && (
                 <div className="detail-section">
                   <div className="detail-section-label">
-                    Run task {selected.kind ? `· ${selected.kind}` : ""}
+                    {t("派任务", "Run task")} {selected.kind ? `· ${selected.kind}` : ""}
                   </div>
                   <textarea
                     value={workPrompt}
@@ -854,7 +855,7 @@ export function AgentDirectoryView({
                       disabled={workStatus === "running" || !workPrompt.trim()}
                       onClick={() => void runAgentWork(selected.did)}
                     >
-                      {workStatus === "running" ? "Running…" : "Run"}
+                      {workStatus === "running" ? t("运行中…", "Running…") : t("运行", "Run")}
                     </button>
                     {workStatus === "running" && (
                       <button
@@ -862,7 +863,7 @@ export function AgentDirectoryView({
                         className="btn btn-ghost"
                         onClick={() => workAbort.current?.abort()}
                       >
-                        Stop
+                        {t("停止", "Stop")}
                       </button>
                     )}
                     {workMeta && (
@@ -906,11 +907,11 @@ export function AgentDirectoryView({
                     ? { agent_card: selected.agent_card }
                     : {}),
                 }}
-                title="Agent identity record"
+                title={t("Agent 身份记录", "Agent identity record")}
               />
             </>
           ) : (
-            <p className="muted">Select an agent to inspect.</p>
+            <p className="muted">{t("选择一个 agent 查看。", "Select an agent to inspect.")}</p>
           )}
         </div>
       </aside>
