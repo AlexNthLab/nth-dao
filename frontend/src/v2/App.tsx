@@ -35,6 +35,7 @@ import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { TasksView } from "./components/TasksView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
 import { ChatView } from "./components/ChatView";
+import { ChannelsView } from "./components/ChannelsView";
 import { CommandPalette } from "./components/CommandPalette";
 import { DecisionQueue } from "./components/DecisionQueue";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -984,6 +985,8 @@ function AppInner() {
         currentUserId={MOCK_IDENTITY.agent_id}
       />
     );
+  } else if (active === "channels") {
+    view = <ChannelsView />;
   } else {
     view = (
       <>
@@ -1054,6 +1057,7 @@ function labelFor(id: NavId): string {
     case "tasks":      return "Tasks";
     case "rules":      return "Rules";
     case "agents":     return "Agents";
+    case "channels":   return "Channels";
     case "audit":      return "Audit";
     case "governance": return "Governance";
     case "delegate":   return "Delegate";

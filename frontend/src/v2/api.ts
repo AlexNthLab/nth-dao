@@ -25,6 +25,8 @@ import type {
   AgentEntry,
   AnnounceTaskInput,
   CapTokenSummary,
+  Channel,
+  ChannelMessage,
   ChatMessage,
   Conversation,
   ConversationSummary,
@@ -572,3 +574,29 @@ export async function claimTask(
   }
   return { status: res.status, body };
 }
+
+/* ── 频道(收编自 8765 群聊,P3)──────────────────────────────── */
+export const listChannels = (s?: AbortSignal) =>
+  getJson<Channel[]>("/channels", s);
+
+export const createChannel = (name: string, topic = "") =>
+  postJson<Channel>("/channels", { name, topic });
+
+export const listChannelMessages = (channelId: string, s?: AbortSignal) =>
+  getJson<ChannelMessage[]>(
+    `/channels/${encodeURIComponent(channelId)}/messages`, s,
+  );
+
+export const postChannelMessage = (
+  channelId: string, body: string, agentId = "admin",
+) =>
+  postJson<ChannelMessage>(
+    `/channels/${encodeURIComponent(channelId)}/messages`,
+    { agent_id: agentId, body },
+  );
+
+export const joinChannel = (channelId: string, agentId: string) =>
+  postJson<Channel>(
+    `/channels/${encodeURIComponent(channelId)}/join`,
+    { agent_id: agentId },
+  );

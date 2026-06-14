@@ -175,10 +175,32 @@ export type NavId =
   | "tasks"
   | "rules"
   | "agents"
+  | "channels"
   | "audit"
   | "governance"
   | "delegate"
   | "chat";
+
+/** 频道(收编自 8765 群聊,/api/v2/channels)。 */
+export interface Channel {
+  channel_id: string;
+  name: string;
+  topic: string;
+  created_by: string;
+  is_private: boolean;
+  member_ids: string[];
+  created_at: string;
+}
+
+/** 频道消息(/api/v2/channels/{id}/messages 一行)。 */
+export interface ChannelMessage {
+  message_id: string;
+  channel_id: string;
+  sender_id: string;
+  body: string;
+  kind: string;
+  created_at: string;
+}
 
 /** 任务广场公告(/api/v2/market/open 返回的一行)。发现态:可认领的活。 */
 export interface TaskAnnouncement {

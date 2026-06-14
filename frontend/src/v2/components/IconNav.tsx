@@ -20,7 +20,7 @@
  */
 
 import {
-  IconBriefcase, IconChat, IconInbox, IconKey, IconLayout, IconScale,
+  IconBriefcase, IconChat, IconHash, IconInbox, IconKey, IconLayout, IconScale,
   IconScroll, IconSliders, IconTarget, IconUsers,
 } from "./Icons";
 import type { NavId } from "../types-v2";
@@ -31,6 +31,7 @@ const ITEMS: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: s
   { id: "tasks",      icon: IconBriefcase,  label: "Tasks" },
   { id: "inbox",      icon: IconInbox,      label: "Decisions" },
   { id: "agents",     icon: IconUsers,   label: "Agents" },
+  { id: "channels",   icon: IconHash,    label: "Channels" },
   { id: "rules",      icon: IconSliders, label: "Rules" },
   { id: "chat",       icon: IconChat,    label: "Chat" },
   { id: "audit",      icon: IconScroll,  label: "Audit" },
