@@ -1410,6 +1410,27 @@ class SpawnAgentBody(_Model):
     )
 
 
+class AnnounceTaskBody(_Model):
+    """POST /api/v2/market/announce 请求体:往任务市场发一条公告。"""
+    title: str = Field(..., description="任务标题(必填)。")
+    description: str = Field(default="", description="任务详述。")
+    capability_set: List[str] = Field(
+        default_factory=list,
+        description="认领方需具备的能力(空=无能力门槛,任意 agent 可认领)。",
+    )
+    reward_minor: int = Field(
+        default=0, ge=0,
+        description="赏金,整数最小单位(禁 float,与 receipt 经济字段一致)。",
+    )
+    reward_asset: str = Field(default="credit", description="赏金资产类型。")
+    context: str = Field(default="general", description="任务上下文/分类。")
+    mission_id: str = Field(default="", description="关联的上层 Mission(可选)。")
+    not_after: int = Field(
+        default=0, ge=0,
+        description="过期时间(epoch ms);0=不过期。",
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Phase 3e: small helpers shared by the A2A POST proxy
 # ─────────────────────────────────────────────────────────────
@@ -1843,6 +1864,58 @@ def register_v2_routes(app: FastAPI) -> None:
             out.append(d)
         out.reverse()  # 新→老
         return out
+
+    @app.post("/api/v2/market/announce")
+    def v2_market_announce(
+        body: AnnounceTaskBody, request: Request,
+    ) -> Dict[str, Any]:
+        """发布一条任务公告到市场 feed(本节点签名)。让"任务广场"非空。
+
+        这是 publish 路径——browse(/market/open)与 claim 都依赖有公告可
+        发现。发布者=本节点身份(operator 代表本 DAO 发活)。POST 状态变更
+        动作,auth 开启时受控(不吃匿名旁路)。
+        """
+        from nth_dao.market.announcement import sign_announcement
+        from nth_dao.market.feed import MarketFeed
+
+        if not body.title.strip():
+            raise HTTPException(status_code=400, detail="title must not be empty")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        identity = _state_node_identity(request)
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "node identity unavailable; cannot sign announcement. "
+                    "Bootstrap the workspace identity first (install pynacl)."
+                ),
+            )
+        try:
+            ann = sign_announcement(
+                publisher=identity,
+                title=body.title.strip(),
+                capability_set=list(body.capability_set or []),
+                context=body.context or "general",
+                reward_minor=int(body.reward_minor),
+                reward_asset=body.reward_asset or "credit",
+                mission_id=body.mission_id or "",
+                description=body.description or "",
+                not_after=int(body.not_after or 0),
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"announce rejected: {exc}",
+            )
+        try:
+            # publish 会先验签再落盘(feed 里永远只有可独立验证的公告)。
+            MarketFeed(ws).publish(ann)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"publish rejected: {exc}",
+            )
+        return ann.to_dict()
 
     @app.get("/api/v2/agents", response_model=List[AgentEntryM])
     def v2_agents(request: Request) -> List[Dict[str, Any]]:

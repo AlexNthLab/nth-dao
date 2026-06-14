@@ -72,3 +72,41 @@ def test_market_open_read_has_no_filesystem_side_effects(tmp_path: Path) -> None
     assert client.get("/api/v2/market/open").status_code == 200
     assert not (tmp_path / "market_feed").exists()
     assert not (tmp_path / "market_claims").exists()
+
+
+def test_market_announce_then_open_shows_it(tmp_path: Path) -> None:
+    # publish 路径:announce 一条 → 广场(/market/open)立刻能发现它。
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    r = client.post(
+        "/api/v2/market/announce",
+        json={
+            "title": "review PR 42",
+            "capability_set": ["code_review"],
+            "reward_minor": 50,
+        },
+    )
+    assert r.status_code == 200, r.text
+    ann_id = r.json()["announcement_id"]
+    assert ann_id
+
+    rows = client.get("/api/v2/market/open").json()
+    hit = next((x for x in rows if x["announcement_id"] == ann_id), None)
+    assert hit is not None
+    assert hit["title"] == "review PR 42"
+    assert hit["reward_minor"] == 50
+    assert hit["claimed"] is False
+
+
+def test_market_announce_rejects_empty_title(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    r = client.post("/api/v2/market/announce", json={"title": "   "})
+    assert r.status_code == 400
+
+
+def test_market_announce_rejects_negative_reward(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    r = client.post(
+        "/api/v2/market/announce",
+        json={"title": "x", "reward_minor": -1},
+    )
+    assert r.status_code == 422  # pydantic ge=0
