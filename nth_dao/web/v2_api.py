@@ -1872,6 +1872,96 @@ class JoinChannelBody(BaseModel):
     agent_id: str
 
 
+def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt):
+    """P2 后台:问一个 agent 的 /a2a/ask,把回复回帖到频道。best-effort。
+
+    用 agent 自己的 spawn cap_token 作 Authorization(与 claim/ask 同款注入);
+    回帖经 groups.post_message 内部 API(不走 HTTP 端点)→ 不会再触发派发,
+    天然杜绝 agent→agent 死循环。
+    """
+    import urllib.error
+    import urllib.request
+
+    from nth_dao.cap_token import encode_authorization_header
+
+    try:
+        body_bytes = json.dumps({"prompt": prompt}, ensure_ascii=False).encode("utf-8")
+        url = f"http://127.0.0.1:{a2a_port}/a2a/ask"
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body_bytes)),
+            "Authorization": f"CapToken {encode_authorization_header(auth_token)}",
+        }
+        timeout = _A2A_METHOD_TIMEOUTS.get("ask", _A2A_DEFAULT_TIMEOUT_S)
+        req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            raw = resp.read()
+        content = _decode_or_passthrough(raw)
+        reply = ""
+        if isinstance(content, dict):
+            result = content.get("result")
+            if isinstance(result, dict):
+                reply = str(result.get("response") or "")
+        reply = reply.strip()
+        if reply:
+            groups.post_message(channel_id, sender_id=did, body=reply)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("channel agent dispatch failed for %s: %s", did, exc)
+
+
+def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message) -> None:
+    """P2:频道收到**人类**消息后,派发给频道里可驱动的 agent 成员,各自回帖。
+
+    可驱动 = supervisor 里 alive + 有 a2a_port + 有 cap_token、且 did 在频道
+    member_ids 里。防环:作者本身是可驱动 agent(它的回帖)→ 不派发。
+    整体 try 兜底:派发失败绝不影响发消息本身。
+    """
+    try:
+        # groups 挂在 app.state.nth;supervisor 挂在 app.state(见
+        # _state_supervisor)。两者 state 对象不同,别搞混。
+        groups = getattr(request.app.state.nth, "groups", None)
+        sup = getattr(request.app.state, "v2_supervisor", None)  # 只用已构建的
+        if groups is None or sup is None:
+            return
+        channel = groups.get_channel(channel_id)
+        if channel is None:
+            return
+        members = set(channel.member_ids or [])
+        store = _state_cap_tokens_store(request)
+
+        targets: List[Tuple[Any, str, int]] = []  # (auth_token, did, a2a_port)
+        driver_dids: set = set()
+        for rec in sup.list_agents():
+            did = getattr(rec, "did", "") or ""
+            port = getattr(rec, "a2a_port", None)
+            tok_id = getattr(rec, "cap_token_id", None)
+            if did not in members or not isinstance(port, int) or not tok_id:
+                continue
+            try:
+                alive = bool(rec.to_agent_entry().get("alive"))
+            except Exception:  # noqa: BLE001
+                alive = False
+            if not alive:
+                continue
+            driver_dids.add(did)
+            auth = store.get(tok_id) if store is not None else None
+            if isinstance(auth, dict):
+                targets.append((auth, did, port))
+
+        # 防环:消息作者本身就是可驱动 agent → 这是 agent 的回帖,不再派发。
+        if message.sender_id in driver_dids:
+            return
+
+        for auth, did, port in targets:
+            threading.Thread(
+                target=_channel_ask_and_reply,
+                args=(groups, auth, did, port, channel_id, message.body),
+                daemon=True,
+            ).start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("channel dispatch hook failed: %s", exc)
+
+
 def register_v2_routes(app: FastAPI) -> None:
     """Attach the /api/v2/* read endpoints to ``app``.
 
@@ -1978,6 +2068,8 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=403, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
+        # P2:人类消息→派发给频道里可驱动的 agent 成员→回帖(后台、防环)。
+        _maybe_dispatch_to_channel_agents(request, channel_id, msg)
         return msg.to_dict()
 
     @app.post("/api/v2/channels/{channel_id}/join")
