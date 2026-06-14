@@ -74,6 +74,10 @@ def announce_step(
         reward_minor=reward_minor,
         reward_asset=reward_asset,
         description=str(getattr(step, "description", "")),
+        # 2026-06-14 修复:mission_id 此前只用于派生确定性 announcement_id,
+        # 却没写进公告本体 → 回链丢失(announcement.py 约束 B 形同虚设,
+        # Mission↔Task 桥断)。现在签进 body(被签名覆盖、可验)。
+        mission_id=mission_id,
         announcement_id=announcement_id_for(mission_id, step_id),
     )
     feed.publish(ann)

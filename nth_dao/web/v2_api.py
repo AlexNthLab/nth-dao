@@ -1431,6 +1431,15 @@ class AnnounceTaskBody(_Model):
     )
 
 
+class AnnounceStepBody(_Model):
+    """POST .../missions/{mid}/steps/{sid}/announce 请求体:把 mission step
+    发成可认领的市场 Task(Mission↔Task 之桥)。能力/标题/描述取自 step,
+    赏金由操作员在发布时设定。"""
+    reward_minor: int = Field(
+        default=0, ge=0, description="赏金,整数最小单位(禁 float)。")
+    reward_asset: str = Field(default="credit", description="赏金资产类型。")
+
+
 # ─────────────────────────────────────────────────────────────
 # Phase 3e: small helpers shared by the A2A POST proxy
 # ─────────────────────────────────────────────────────────────
@@ -1990,6 +1999,66 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=400, detail=f"publish rejected: {exc}",
             )
         return ann.to_dict()
+
+    @app.post("/api/v2/missions/{mission_id}/steps/{step_id}/announce")
+    def v2_mission_step_announce(
+        mission_id: str,
+        step_id: str,
+        body: AnnounceStepBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Mission↔Task 之桥:把一个 mission step 发成可认领的市场 Task。
+
+        能力/标题/描述取自 step,赏金由操作员设定,公告带 mission_id 回链。
+        announcement_id 由 (mission_id, step_id) 确定性派生 → 幂等:重复发
+        同一 step 不会在广场上变两条(已发则直接返回原条)。本节点签名。
+        """
+        from nth_dao.market.feed import MarketFeed
+        from nth_dao.orchestration.market_coordinator import (
+            announce_step, announcement_id_for,
+        )
+
+        store = getattr(request.app.state.nth, "missions", None)
+        if store is None:
+            raise HTTPException(status_code=503, detail="mission store unavailable")
+        mission = store.get(mission_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="mission not found")
+        step = mission.get_step(step_id)
+        if step is None:
+            raise HTTPException(status_code=404, detail="step not found")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        identity = _state_node_identity(request)
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(
+                status_code=503,
+                detail="node identity unavailable; cannot sign announcement.",
+            )
+        feed = MarketFeed(ws)
+        aid = announcement_id_for(mission_id, step_id)
+        # 幂等:这个 step 已经发过就直接返回,不重复 append 同 id 的行。
+        existing = feed.get(aid, include_expired=True)
+        if existing is not None:
+            d = existing.to_dict()
+            d["already_announced"] = True
+            return d
+        try:
+            ann = announce_step(
+                feed, step,
+                publisher=identity,
+                mission_id=mission_id,
+                reward_minor=int(body.reward_minor),
+                reward_asset=body.reward_asset or "credit",
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"announce rejected: {exc}",
+            )
+        d = ann.to_dict()
+        d["already_announced"] = False
+        return d
 
     @app.get("/api/v2/agents", response_model=List[AgentEntryM])
     def v2_agents(request: Request) -> List[Dict[str, Any]]:

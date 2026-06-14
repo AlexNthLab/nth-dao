@@ -150,6 +150,59 @@ def test_market_open_filters_and_categories(tmp_path: Path) -> None:
     assert cats == {"code_review": 2, "research": 1}
 
 
+def test_mission_step_announce_bridge(tmp_path: Path) -> None:
+    # Mission↔Task 之桥:把真实 mission 的 step 发成市场 Task,带 mission_id 回链。
+    from nth_dao.orchestration.mission import Mission
+
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    m = Mission.new(
+        title="Launch",
+        goal="ship v1",
+        owner="admin",
+        steps=[{
+            "id": "s1",
+            "description": "review the auth PR",
+            "required_capabilities": ["code_review"],
+        }],
+    )
+    app.state.nth.missions.create(m)
+
+    r = client.post(
+        f"/api/v2/missions/{m.id}/steps/s1/announce",
+        json={"reward_minor": 25},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["mission_id"] == m.id
+    assert r.json()["already_announced"] is False
+    ann_id = r.json()["announcement_id"]
+
+    # 出现在广场,带 mission_id + 取自 step 的能力。
+    rows = client.get("/api/v2/market/open").json()
+    hit = next((x for x in rows if x["announcement_id"] == ann_id), None)
+    assert hit is not None
+    assert hit["mission_id"] == m.id
+    assert "code_review" in hit["capability_set"]
+    assert hit["reward_minor"] == 25
+
+    # 幂等:再发同一 step 不重复(确定性 announcement_id)。
+    r2 = client.post(
+        f"/api/v2/missions/{m.id}/steps/s1/announce", json={"reward_minor": 25},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["already_announced"] is True
+    rows2 = client.get("/api/v2/market/open").json()
+    assert sum(1 for x in rows2 if x["announcement_id"] == ann_id) == 1
+
+    # 不存在的 mission / step → 404。
+    assert client.post(
+        "/api/v2/missions/nope/steps/s1/announce", json={},
+    ).status_code == 404
+    assert client.post(
+        f"/api/v2/missions/{m.id}/steps/nope/announce", json={},
+    ).status_code == 404
+
+
 def test_market_announce_caps_oversized_input(tmp_path: Path) -> None:
     # 对抗审查回归:超大输入会被签名+永久追加进 feed,必须在边界封顶。
     client = TestClient(create_app(tmp_path, require_console_auth=False))
