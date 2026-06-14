@@ -1851,6 +1851,27 @@ def _resolve_decision(
     }
 
 
+class CreateChannelBody(BaseModel):
+    """新建频道入参(收编自 8765 群聊)。"""
+
+    name: str
+    topic: str = ""
+    created_by: str = "admin"
+
+
+class ChannelMessageBody(BaseModel):
+    """频道发消息入参。agent_id 即发送者(人类 admin 或某 agent 的 id)。"""
+
+    agent_id: str = "admin"
+    body: str
+
+
+class JoinChannelBody(BaseModel):
+    """把一个 agent 加进频道成员的入参。"""
+
+    agent_id: str
+
+
 def register_v2_routes(app: FastAPI) -> None:
     """Attach the /api/v2/* read endpoints to ``app``.
 
@@ -1871,6 +1892,104 @@ def register_v2_routes(app: FastAPI) -> None:
     @app.get("/api/v2/identity")
     def v2_identity() -> Dict[str, Any]:
         return _seed_identity()
+
+    # ── 频道(收编自 8765 群聊,P1)────────────────────────────────
+    # 复用 app.state.nth.groups(GroupManager,已挂在 state 上),不重造
+    # 后端。GroupManager 抛 PermissionError → 403、ValueError → 404/400。
+    def _groups(request: Request):
+        g = getattr(request.app.state.nth, "groups", None)
+        if g is None:
+            raise HTTPException(status_code=503, detail="group manager unavailable")
+        return g
+
+    @app.get("/api/v2/channels")
+    def v2_channels(request: Request, actor_id: str = "") -> List[Dict[str, Any]]:
+        """列频道。actor_id 留空时只看公开频道(私有频道需成员身份)。"""
+        return [c.to_dict() for c in _groups(request).list_channels(actor_id=actor_id)]
+
+    @app.post("/api/v2/channels")
+    def v2_channel_create(
+        body: CreateChannelBody, request: Request,
+    ) -> Dict[str, Any]:
+        """新建频道。"""
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name must not be empty")
+        if len(name) > 80 or len(body.topic) > 200:
+            raise HTTPException(status_code=400, detail="name/topic too long")
+        try:
+            ch = _groups(request).create_channel(
+                name=name,
+                created_by=body.created_by.strip() or "admin",
+                topic=body.topic.strip(),
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return ch.to_dict()
+
+    @app.get("/api/v2/channels/{channel_id}")
+    def v2_channel_get(channel_id: str, request: Request) -> Dict[str, Any]:
+        ch = _groups(request).get_channel(channel_id)
+        if ch is None:
+            raise HTTPException(status_code=404, detail="channel not found")
+        return ch.to_dict()
+
+    @app.get("/api/v2/channels/{channel_id}/messages")
+    def v2_channel_messages(
+        channel_id: str, request: Request, actor_id: str = "", limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        g = _groups(request)
+        if g.get_channel(channel_id) is None:
+            raise HTTPException(status_code=404, detail="channel not found")
+        capped = min(max(limit, 1), 500)
+        return [
+            m.to_dict()
+            for m in g.list_messages(channel_id, actor_id=actor_id, limit=capped)
+        ]
+
+    @app.post("/api/v2/channels/{channel_id}/messages")
+    def v2_channel_post(
+        channel_id: str, body: ChannelMessageBody, request: Request,
+    ) -> Dict[str, Any]:
+        """频道发消息。返回落盘后的 Message。
+
+        P2 将在此挂"频道消息→派发给成员 agent→回帖"的监听(带防环:
+        只对人类作者的消息触发,不对 agent 回帖再触发)。
+        """
+        text = body.body.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="body must not be empty")
+        if len(text) > 4000:
+            raise HTTPException(status_code=400, detail="body too long (max 4000)")
+        try:
+            msg = _groups(request).post_message(
+                channel_id, sender_id=body.agent_id.strip() or "admin", body=text,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return msg.to_dict()
+
+    @app.post("/api/v2/channels/{channel_id}/join")
+    def v2_channel_join(
+        channel_id: str, body: JoinChannelBody, request: Request,
+    ) -> Dict[str, Any]:
+        """把一个 agent 加进频道成员列表(P3 的'频道加 agent'入口)。"""
+        agent_id = body.agent_id.strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="agent_id must not be empty")
+        try:
+            ch = _groups(request).add_channel_member(
+                channel_id, agent_id=agent_id, added_by="",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        return ch.to_dict()
 
     @app.get("/api/v2/decisions", response_model=List[DecisionM])
     def v2_decisions(request: Request) -> List[Dict[str, Any]]:
