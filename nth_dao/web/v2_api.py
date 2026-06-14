@@ -1984,6 +1984,63 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
         logger.warning("channel dispatch hook failed: %s", exc)
 
 
+_FED_POLLER_LOCK = threading.Lock()
+
+
+def _read_fed_peers(ws: Optional[Path]) -> List[str]:
+    """联邦 peer 列表(去重保序):NTH_FED_PEERS(逗号分隔)+ 可选
+    ``<ws>/federation/peers.json``(字符串数组)。各 peer 是对端 hub 的
+    base URL(如 https://xxx.trycloudflare.com)。"""
+    peers: List[str] = [
+        p.strip() for p in os.environ.get("NTH_FED_PEERS", "").split(",")
+        if p.strip()
+    ]
+    if ws is not None:
+        pf = ws / "federation" / "peers.json"
+        if pf.exists():
+            try:
+                data = json.loads(pf.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    peers += [str(p).strip() for p in data if str(p).strip()]
+            except Exception:  # noqa: BLE001
+                pass
+    seen: set = set()
+    out: List[str] = []
+    for p in peers:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _state_market_fed_cache(request: Request):
+    """懒建任务市场联邦缓存 + 起后台 poller —— 仅当配了 peers 才启动(没配
+    则零开销返回 None)。单例挂 app.state.market_fed_cache,双检锁防并发重建。"""
+    state = request.app.state
+    cache = getattr(state, "market_fed_cache", None)
+    if cache is not None:
+        return cache
+    ws = _state_workspace(request)
+    if not _read_fed_peers(ws):
+        return None  # 没配 peers → 不联邦
+    with _FED_POLLER_LOCK:
+        cache = getattr(state, "market_fed_cache", None)
+        if cache is None:
+            from .market_federation_poll import FederationCache, start_poller
+            cache = FederationCache()
+            try:
+                interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
+            except ValueError:
+                interval = 20.0
+            start_poller(lambda: _read_fed_peers(ws), cache, interval_s=interval)
+            state.market_fed_cache = cache
+            logger.info(
+                "nth market federation poller started (%d peers, %.0fs)",
+                len(_read_fed_peers(ws)), interval,
+            )
+    return cache
+
+
 def register_v2_routes(app: FastAPI) -> None:
     """Attach the /api/v2/* read endpoints to ``app``.
 
@@ -2327,36 +2384,59 @@ def register_v2_routes(app: FastAPI) -> None:
         # 不该有文件系统副作用——否则任何一次只读 GET 都会在从不用市场的
         # 节点工作区里凭空造出 market_feed/ 与 market_claims/。feed 日志不
         # 存在 ⇒ 还没有任何公告 ⇒ 直接返回 [],不触碰磁盘。
-        if not (ws / "market_feed" / "announcements.jsonl").exists():
-            return []
-        try:
-            feed = MarketFeed(ws)
-            claims = ClaimStore(ws)
-        except OSError as e:  # noqa: BLE001
-            logger.debug("v2_market_open: market store unavailable: %s", e)
-            return []
-        # poll(since_seq=-1) 默认已跳过过期;再排掉已认领的 → 只剩"可认领"。
-        # 上限 500 防一次性读爆;FIFO(老→新),展示前翻成"新→老"更贴发现
-        # 板直觉。注:开放公告超 500 时最新的会被截断,留待分页(切片后续)。
-        pr = feed.poll(since_seq=-1, limit=500)
         out: List[Dict[str, Any]] = []
-        for ann in pr.announcements:
-            if claims.is_claimed(ann.announcement_id):
-                continue
+
+        def _passes(ann: Any) -> bool:
             if want_ctx and ann.context != want_ctx:
-                continue
+                return False
             if want_cap:
                 have = {normalize_capability(c) for c in ann.capability_set}
                 if want_cap not in have:
-                    continue
+                    return False
             if min_reward and ann.reward_minor < min_reward:
-                continue
+                return False
             if ql and ql not in ann.title.lower() and ql not in ann.description.lower():
-                continue
-            d = ann.to_dict()
-            d["claimed"] = False
-            out.append(d)
-        out.reverse()  # 新→老
+                return False
+            return True
+
+        # 本地 feed:存在才读(避免只读 GET 在从不发活的节点 mkdir)。
+        # poll(-1) 默认跳过期;再排已认领 → 只剩"可认领"。上限 500;FIFO→翻新→老。
+        if (ws / "market_feed" / "announcements.jsonl").exists():
+            try:
+                feed = MarketFeed(ws)
+                claims = ClaimStore(ws)
+            except OSError as e:  # noqa: BLE001
+                logger.debug("v2_market_open: market store unavailable: %s", e)
+                feed = claims = None  # type: ignore[assignment]
+            if feed is not None:
+                local: List[Dict[str, Any]] = []
+                for ann in feed.poll(since_seq=-1, limit=500).announcements:
+                    if claims.is_claimed(ann.announcement_id):
+                        continue
+                    if not _passes(ann):
+                        continue
+                    d = ann.to_dict()
+                    d["claimed"] = False
+                    local.append(d)
+                local.reverse()  # 新→老
+                out.extend(local)
+
+        # 联邦合并(FED-2):对端发现到的公告(已双层验签)。本地优先去重;
+        # 同套筛选;标 federated + source_peer。认领权威在主 DAO,这里只做发现。
+        cache = _state_market_fed_cache(request)
+        if cache is not None:
+            local_ids = {d["announcement_id"] for d in out}
+            for aid, entry in cache.snapshot().items():
+                if aid in local_ids:
+                    continue
+                ann = entry["ann"]
+                if not _passes(ann):
+                    continue
+                d = ann.to_dict()
+                d["claimed"] = False
+                d["federated"] = True
+                d["source_peer"] = entry.get("source", "")
+                out.append(d)
         return out
 
     @app.get("/api/v2/market/categories")
