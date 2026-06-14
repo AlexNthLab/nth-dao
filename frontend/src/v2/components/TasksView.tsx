@@ -120,16 +120,29 @@ export function TasksView() {
     if (!claimAgent || claimingId) return;
     setClaimingId(annId);
     try {
-      const res = await claimTask(annId, claimAgent);
-      const result = (res.result as Record<string, unknown>) || {};
-      if (result.claimed) {
+      let r = await claimTask(annId, claimAgent);
+      // 刚 spawn 的 agent 头一两秒还没轮询载入自己的 cap_token,认领会 401
+      // not-yet-authorized。退避自动重试(最多 ~4s),省得让用户手动重点。
+      for (let i = 0; i < 6; i++) {
+        const isStartup =
+          r.status === 401
+          && JSON.stringify(r.body).includes("not-yet-authorized");
+        if (!isStartup) break;
+        await new Promise((res) => setTimeout(res, 700));
+        r = await claimTask(annId, claimAgent);
+      }
+      const result = (r.body.result as Record<string, unknown>) || {};
+      if (r.status === 200 && result.claimed) {
         toast.push(
           `已认领 · 收据 ${String(result.receipt_id || "").slice(0, 12)}…`,
           "success",
         );
         setReloadKey((k) => k + 1); // 任务离开广场
       } else {
-        toast.push("认领未成功", "error");
+        const err = (r.body.error as Record<string, unknown>) || {};
+        const msg =
+          err.message || r.body.detail || `HTTP ${r.status}`;
+        toast.push(`认领失败:${String(msg)}`, "error");
       }
     } catch (e) {
       toast.push(

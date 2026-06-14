@@ -86,6 +86,62 @@ def test_claim_closed_loop_agent_self_signs(tmp_path: Path) -> None:
         client.post(f"/api/v2/agents/{agent_id}/stop")
 
 
+def test_claim_reflects_to_mission_step(tmp_path: Path) -> None:
+    # 目标↔市场回流:mission step → 发上广场 → 认领 → step 自动标 CLAIMED。
+    from nth_dao.orchestration.mission import Mission
+
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    sp = client.post(
+        "/api/v2/agents/spawn",
+        json={"kind": "mock", "label": "w", "capabilities": []},
+    )
+    assert sp.status_code in (200, 201), sp.text
+    agent_did = sp.json()["did"]
+    agent_id = sp.json()["agent_id"]
+
+    try:
+        m = Mission.new(
+            title="M", goal="g", owner="admin",
+            steps=[{
+                "id": "s1", "description": "review",
+                "required_capabilities": ["code_review"],
+            }],
+        )
+        app.state.nth.missions.create(m)
+
+        an = client.post(
+            f"/api/v2/missions/{m.id}/steps/s1/announce",
+            json={"reward_minor": 5},
+        )
+        assert an.status_code == 200, an.text
+        assert an.json()["mission_id"] == m.id
+        ann_id = an.json()["announcement_id"]
+        # step 此刻仍是 todo。
+        assert app.state.nth.missions.get(m.id).get_step("s1").status == "todo"
+
+        cl = client.post(
+            f"/api/v2/market/{ann_id}/claim", json={"agent_did": agent_did},
+        )
+        for _ in range(20):
+            if "not-yet-authorized" not in cl.text:
+                break
+            time.sleep(0.5)
+            cl = client.post(
+                f"/api/v2/market/{ann_id}/claim", json={"agent_did": agent_did},
+            )
+        assert cl.status_code == 200, cl.text
+        assert (cl.json().get("result") or {}).get("claimed") is True
+
+        # 回流:对应 mission step 现在 CLAIMED + assignee = 该 agent。
+        step = app.state.nth.missions.get(m.id).get_step("s1")
+        assert step.status == "claimed", step.status
+        assert step.assignee == agent_did
+    finally:
+        client.post(f"/api/v2/agents/{agent_id}/stop")
+
+
 def test_claim_unknown_agent_404(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path, require_console_auth=False))
     an = client.post(

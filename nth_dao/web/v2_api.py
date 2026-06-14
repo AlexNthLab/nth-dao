@@ -233,6 +233,43 @@ def _mission_to_summary(m: Any) -> Dict[str, Any]:
     }
 
 
+def _reflect_claim_to_mission(
+    request: Request, ann: Any, announcement_id: str, claimant_did: str,
+) -> bool:
+    """认领成功后回流:把对应 mission step 标 CLAIMED + 记 assignee
+    (目标↔市场双向同步的最后一段)。只对带 mission_id 的公告(由
+    announce_step 发的)做;独立 announce 的没有 mission 归属,跳过。
+
+    步骤定位用确定性 announcement_id_for(mid, step.id) 反查匹配,避免解析
+    标题。best-effort:认领已成功(agent 已签收据、任务已下架),回流失败
+    只告警、不回滚认领。返回是否更新了某个 step。
+    """
+    mid = getattr(ann, "mission_id", "") or ""
+    if not mid:
+        return False
+    try:
+        from nth_dao.orchestration.market_coordinator import announcement_id_for
+        from nth_dao.orchestration.mission import StepStatus
+
+        mstore = getattr(request.app.state.nth, "missions", None)
+        if mstore is None:
+            return False
+        mission = mstore.get(mid)
+        if mission is None:
+            return False
+        for step in mission.steps:
+            if announcement_id_for(mid, step.id) == announcement_id:
+                step.status = StepStatus.CLAIMED.value
+                step.assignee = claimant_did
+                mstore.save(mission)
+                return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "claim->mission reflect failed for %s: %s", announcement_id, exc,
+        )
+    return False
+
+
 def _seed_missions() -> List[Dict[str, Any]]:
     """Mirrors mock.ts mockMissions — 2 entries. """
     return [
@@ -2305,10 +2342,16 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=502,
                 detail=f"claim dispatch failed at {url}: {exc}",
             )
-        return JSONResponse(
-            status_code=resp_status,
-            content=_decode_or_passthrough(resp_body),
-        )
+        content = _decode_or_passthrough(resp_body)
+        # 目标↔市场回流:认领成功(200 + result.claimed)→ 把对应 mission
+        # step 标 CLAIMED + 记 assignee。best-effort,不影响认领本身的结果。
+        if resp_status == 200 and isinstance(content, dict):
+            result = content.get("result")
+            if isinstance(result, dict) and result.get("claimed"):
+                _reflect_claim_to_mission(
+                    request, ann, announcement_id, agent_did,
+                )
+        return JSONResponse(status_code=resp_status, content=content)
 
     @app.post("/api/v2/missions/{mission_id}/steps/{step_id}/announce")
     def v2_mission_step_announce(

@@ -545,13 +545,30 @@ export async function announceTask(
 }
 
 /** 让某个 supervised agent 认领一条任务(hub 铸 cap_token + 派发,agent 自签)。
- *  返回 agent 的认领结果信封({result:{claimed, claimant_did, receipt_id, ...}})。 */
+ *  返回 {status, body} 而非 throw —— 调用方要据状态码/错误码区分"刚 spawn
+ *  的 agent 还没载入 cap_token(401 not-yet-authorized,可重试)"与真失败。 */
 export async function claimTask(
   announcementId: string,
   agentDid: string,
-): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>(
-    `/market/${encodeURIComponent(announcementId)}/claim`,
-    { agent_did: agentDid },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(
+    `${BASE}/market/${encodeURIComponent(announcementId)}/claim`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...authHeader(),
+      },
+      body: JSON.stringify({ agent_did: agentDid }),
+    },
   );
+  let body: Record<string, unknown>;
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  return { status: res.status, body };
 }
