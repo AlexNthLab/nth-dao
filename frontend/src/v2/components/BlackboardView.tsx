@@ -283,7 +283,7 @@ export function BlackboardView({
                           </h4>
                           {p.auto && (
                             <span
-                              title="Rule-authorized auto-execute"
+                              title={t("规则授权·自动执行", "Rule-authorized auto-execute")}
                               style={{
                                 color: "var(--accent)",
                                 display: "flex",
