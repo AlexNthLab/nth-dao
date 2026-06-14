@@ -2230,10 +2230,27 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail="node identity unavailable; cannot mint claim cap_token",
             )
         # 按需铸:subject=agent DID、能力=任务所需(claim_announcement 两侧归一)。
+        # 对抗审查加固(2026-06-14):
+        #  ① 能力来自公告,而公告由**发布方**控制(联邦场景可能是远端、不可
+        #     信)。只铸自由格式的**市场技能**,显式剔除保留作用域(nth:/a2a:),
+        #     防一条声明特权 scope 的公告让 hub 把特权铸进本节点 agent 的 token。
+        #     正常公告(仅市场技能)不受影响;滥用公告会在 claim 端因能力不足
+        #     被拒(fail-closed),恰为正确行为。
+        #  ② scope_task_id 绑到本公告 —— token 只为这次认领,不可挪用别的任务。
+        #  ③ 短 TTL(5min):单次认领立即用,最小权限。
+        market_caps = [
+            c for c in (ann.capability_set or [])
+            if isinstance(c, str) and c.strip()
+            and not c.strip().lower().startswith(("nth:", "a2a:"))
+        ]
         claim_token = sign_cap_token(
             issuer=identity,
             subject_did=agent_did,
-            capabilities=list(ann.capability_set),
+            # 无能力门槛的公告(permissionless)给一个惰性占位,满足"非空"约束;
+            # claim_announcement 对空 need_skills 任意 have 都通过,占位无副作用。
+            capabilities=market_caps or ["task:open"],
+            scope_task_id=announcement_id,
+            ttl_ms=300_000,
         )
         store = _state_cap_tokens_store(request)
         if store is not None:
