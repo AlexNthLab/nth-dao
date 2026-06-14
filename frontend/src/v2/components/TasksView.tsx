@@ -376,6 +376,22 @@ export function TasksView() {
                         {task.context}
                       </span>
                     )}
+                    {task.federated && (
+                      <span
+                        className="pill"
+                        title={t(
+                          `来自对端 DAO:${task.source_peer || ""}`,
+                          `From peer DAO: ${task.source_peer || ""}`,
+                        )}
+                        style={{
+                          fontSize: 10,
+                          color: "var(--accent)",
+                          borderColor: "var(--accent-muted)",
+                        }}
+                      >
+                        {t("联邦", "federated")}
+                      </span>
+                    )}
                     {task.reward_minor > 0 && (
                       <span
                         style={{
@@ -430,18 +446,29 @@ export function TasksView() {
                     {/* 认领:用左栏所选 agent,由 agent 自己私钥签收据。 */}
                     <button
                       className="btn"
-                      disabled={!claimAgent || claimingId === task.announcement_id}
+                      disabled={
+                        !claimAgent
+                        || claimingId === task.announcement_id
+                        || !!task.federated
+                      }
                       title={
-                        claimAgent
-                          ? t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
-                          : t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
+                        task.federated
+                          ? t(
+                              "联邦任务的认领需在来源 DAO 进行(本地无认领权威)",
+                              "Federated tasks must be claimed at their source DAO (no local claim authority)",
+                            )
+                          : claimAgent
+                            ? t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
+                            : t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
                       }
                       style={{ marginLeft: "auto" }}
                       onClick={() => void handleClaim(task.announcement_id)}
                     >
                       {claimingId === task.announcement_id
                         ? t("认领中…", "Claiming…")
-                        : t("认领", "Claim")}
+                        : task.federated
+                          ? t("源端认领", "at source")
+                          : t("认领", "Claim")}
                     </button>
                   </div>
                 </article>

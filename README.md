@@ -472,6 +472,15 @@ layers.
 | `examples/sync_demo.py` | Multi-terminal Git sync |
 | `examples/team_entrypoint.py` | Production-style CLI entrypoint |
 
+## Task market federation (multi-node)
+
+Independent nodes can discover each other's published tasks without a central
+index. Set `NTH_FED_PEERS` (comma-separated peer hub URLs) or
+`<workspace>/federation/peers.json`; each node then pulls peers' signed feed
+digests and surfaces their tasks (with a **`federated`** badge) in the Tasks
+view. Two-layer trust: digest = provenance, full announcement's `publisher_sig`
+= authority. See **[docs/federation.md](docs/federation.md)**.
+
 ## Migration Notice
 
 NTH DAO is a hard rename. Existing forks or local checkouts should update their

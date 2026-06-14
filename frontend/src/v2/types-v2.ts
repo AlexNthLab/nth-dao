@@ -216,6 +216,10 @@ export interface TaskAnnouncement {
   published_at_ms?: number;
   not_after?: number;
   claimed?: boolean;
+  /** FED-2:经联邦从对端 DAO 发现的公告(非本地发布)。 */
+  federated?: boolean;
+  /** 该联邦公告来自哪个 peer hub(base URL)。 */
+  source_peer?: string;
 }
 
 /** 类别分面(/api/v2/market/categories)。 */
