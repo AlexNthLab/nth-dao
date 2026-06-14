@@ -110,3 +110,24 @@ def test_market_announce_rejects_negative_reward(tmp_path: Path) -> None:
         json={"title": "x", "reward_minor": -1},
     )
     assert r.status_code == 422  # pydantic ge=0
+
+
+def test_market_announce_caps_oversized_input(tmp_path: Path) -> None:
+    # 对抗审查回归:超大输入会被签名+永久追加进 feed,必须在边界封顶。
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    assert client.post(
+        "/api/v2/market/announce", json={"title": "x" * 201},
+    ).status_code == 400
+    assert client.post(
+        "/api/v2/market/announce",
+        json={"title": "ok", "description": "d" * 4001},
+    ).status_code == 400
+    assert client.post(
+        "/api/v2/market/announce",
+        json={"title": "ok", "capability_set": [f"c{i}" for i in range(33)]},
+    ).status_code == 400
+    # 一个超长能力名也要拒。
+    assert client.post(
+        "/api/v2/market/announce",
+        json={"title": "ok", "capability_set": ["x" * 101]},
+    ).status_code == 400

@@ -1880,6 +1880,27 @@ def register_v2_routes(app: FastAPI) -> None:
 
         if not body.title.strip():
             raise HTTPException(status_code=400, detail="title must not be empty")
+        # 输入上限(对抗审查补):公告会被签名并追加进 append-only feed
+        # (近似账本、无内置清理),不设限则一条超大 description/能力表就是
+        # 永久膨胀。在落盘前于 HTTP 边界封顶,给清晰 400。
+        if len(body.title) > 200:
+            raise HTTPException(status_code=400, detail="title too long (max 200)")
+        if len(body.description) > 4000:
+            raise HTTPException(
+                status_code=400, detail="description too long (max 4000)")
+        if len(body.capability_set) > 32:
+            raise HTTPException(
+                status_code=400, detail="too many capabilities (max 32)")
+        if any(len(c) > 100 for c in body.capability_set):
+            raise HTTPException(
+                status_code=400, detail="capability name too long (max 100)")
+        if (
+            len(body.reward_asset) > 32
+            or len(body.context) > 64
+            or len(body.mission_id) > 128
+        ):
+            raise HTTPException(
+                status_code=400, detail="reward_asset/context/mission_id too long")
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
