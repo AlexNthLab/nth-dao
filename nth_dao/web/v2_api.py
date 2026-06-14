@@ -1008,7 +1008,12 @@ class CreateMissionBody(_Model):
     """POST /api/v2/missions 请求体:真正创建并落盘一个 mission(含 steps)。"""
     title: str
     goal: str = ""
-    driver: str = Field(default="", description="负责推进的 agent(mission owner)。")
+    driver: str = Field(default="", description="负责推进的 agent 标签(owner)。")
+    driver_did: str = Field(
+        default="",
+        description="driver agent 的 DID(owner_did)。DID 为本的系统里必须留存,"
+                    "否则 mission 只知人类标签、不知密码学身份。",
+    )
     steps: List[CreateMissionStepBody] = Field(default_factory=list)
 
 
@@ -1890,7 +1895,12 @@ def register_v2_routes(app: FastAPI) -> None:
         if not title:
             raise HTTPException(status_code=400, detail="title must not be empty")
         # 输入封顶(落盘 + 后续可能 announce 进 feed)。
-        if len(title) > 200 or len(body.goal) > 2000 or len(body.driver) > 128:
+        if (
+            len(title) > 200
+            or len(body.goal) > 2000
+            or len(body.driver) > 128
+            or len(body.driver_did) > 256
+        ):
             raise HTTPException(status_code=400, detail="title/goal/driver too long")
         if len(body.steps) > 64:
             raise HTTPException(status_code=400, detail="too many steps (max 64)")
@@ -1915,6 +1925,7 @@ def register_v2_routes(app: FastAPI) -> None:
             title=title,
             goal=body.goal.strip(),
             owner=body.driver.strip(),
+            owner_did=body.driver_did.strip(),  # 留存 driver 的密码学身份
             steps=step_dicts,
         )
         try:

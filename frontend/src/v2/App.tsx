@@ -814,6 +814,7 @@ function AppInner() {
         title: draft.title,
         goal: draft.goal,
         driver: draft.driver_label,
+        driverDid: draft.driver_did,
         steps: draft.steps,
       });
       setMissions((prev) => [created, ...prev]);

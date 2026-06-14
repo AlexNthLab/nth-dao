@@ -30,6 +30,7 @@ def test_missions_empty_then_create_then_persist(tmp_path: Path) -> None:
             "title": "Mumo debug",
             "goal": "stabilize the OS",
             "driver": "fulfillment-bot",
+            "driver_did": "did:key:zDriverABC",
             "steps": [
                 {"description": "reproduce the crash",
                  "required_capabilities": ["debug"]},
@@ -45,6 +46,7 @@ def test_missions_empty_then_create_then_persist(tmp_path: Path) -> None:
     assert body["steps_total"] == 2
     assert body["steps_done"] == 0
     assert body["driver_label"] == "fulfillment-bot"
+    assert body["driver_did"] == "did:key:zDriverABC"  # 对抗审查:DID 不再被丢
     assert body["next_actionable"] == "reproduce the crash"  # 第一个 TODO
 
     mid = body["id"]

@@ -171,12 +171,14 @@ export async function createMission(input: {
   title: string;
   goal?: string;
   driver?: string;
+  driverDid?: string;
   steps?: string[];
 }): Promise<MissionSummary> {
   return postJson<MissionSummary>("/missions", {
     title: input.title,
     goal: input.goal ?? "",
     driver: input.driver ?? "",
+    driver_did: input.driverDid ?? "",
     steps: (input.steps ?? []).map((d) => ({
       description: d,
       required_capabilities: [],
