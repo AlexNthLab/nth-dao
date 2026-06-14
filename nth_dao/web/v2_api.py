@@ -1917,8 +1917,15 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail="name must not be empty")
         if len(name) > 80 or len(body.topic) > 200:
             raise HTTPException(status_code=400, detail="name/topic too long")
+        g = _groups(request)
+        # 幂等防冲(对抗审查发现):create_channel 无条件覆写 channel.json,
+        # 同名重建会冲掉已加入的成员 + topic。先查存在 → 有则原样返回,
+        # 绝不重建。get_channel(name) 与 create 用同一 _safe_id,id 一致。
+        existing = g.get_channel(name)
+        if existing is not None:
+            return existing.to_dict()
         try:
-            ch = _groups(request).create_channel(
+            ch = g.create_channel(
                 name=name,
                 created_by=body.created_by.strip() or "admin",
                 topic=body.topic.strip(),

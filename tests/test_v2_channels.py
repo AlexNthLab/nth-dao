@@ -49,6 +49,24 @@ def test_channel_join_adds_member(tmp_path: Path) -> None:
     assert r2.json()["member_ids"].count("did:key:zWorker") == 1
 
 
+def test_recreate_channel_does_not_clobber(tmp_path: Path) -> None:
+    # 对抗审查回归:重复建同名频道不得冲掉已加入成员 / 已设 topic。
+    # 用全新频道名(create_app 会预置 "general",避开它才测得准)。
+    c = _client(tmp_path)
+    r0 = c.post("/api/v2/channels", json={"name": "engineering", "topic": "v1"})
+    assert r0.status_code == 200, r0.text
+    assert r0.json()["topic"] == "v1"  # 全新频道,topic 确实落了
+    c.post("/api/v2/channels/engineering/join", json={"agent_id": "did:key:zA"})
+    # 同名重建 → 幂等返回既有,成员/topic 原样保留(不被重置)。
+    r = c.post("/api/v2/channels", json={"name": "engineering", "topic": "v2-attempt"})
+    assert r.status_code == 200, r.text
+    assert "did:key:zA" in r.json()["member_ids"]
+    assert r.json()["topic"] == "v1"
+    ch = c.get("/api/v2/channels/engineering").json()
+    assert "did:key:zA" in ch["member_ids"]
+    assert ch["topic"] == "v1"
+
+
 def test_channel_error_paths(tmp_path: Path) -> None:
     c = _client(tmp_path)
     # 不存在的频道发消息 → 404。
