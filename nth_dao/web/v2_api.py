@@ -1985,6 +1985,8 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
 
 
 _FED_POLLER_LOCK = threading.Lock()
+# 单个联邦 digest 的 ref 上限(serve 侧防无界响应;超出由拉方带 since 翻页)。
+_FED_DIGEST_PAGE = 500
 
 
 def _read_fed_peers(ws: Optional[Path]) -> List[str]:
@@ -2543,8 +2545,14 @@ def register_v2_routes(app: FastAPI) -> None:
     # 一致)。信任模型:digest 是不可信提示(带 source 签名=provenance),
     # 全文带 publisher_sig 才是权威 —— 拉方两层都验。
     @app.get("/api/v2/market/federation/digest")
-    def v2_market_fed_digest(request: Request) -> Dict[str, Any]:
-        """返回本节点 feed 的签名摘要(provenance),供对端发现。"""
+    def v2_market_fed_digest(
+        request: Request, since: int = -1,
+    ) -> Dict[str, Any]:
+        """返回本节点 feed 的签名摘要(provenance),供对端发现。
+
+        ``since`` = 上次的 high_seq 游标(增量);每页封顶 _FED_DIGEST_PAGE 条,
+        响应有界。拉方带 since=high_seq 翻下一页直到 refs 空。
+        """
         ws = _state_workspace(request)
         identity = _state_node_identity(request)
         if ws is None or identity is None or not getattr(identity, "can_sign", False):
@@ -2566,7 +2574,9 @@ def register_v2_routes(app: FastAPI) -> None:
             return empty.to_dict()
         from nth_dao.market.feed import MarketFeed
         from nth_dao.market.federation import build_digest
-        return build_digest(MarketFeed(ws), identity).to_dict()
+        return build_digest(
+            MarketFeed(ws), identity, since_seq=since, limit=_FED_DIGEST_PAGE,
+        ).to_dict()
 
     @app.get("/api/v2/market/federation/pull")
     def v2_market_fed_pull(

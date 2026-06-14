@@ -78,6 +78,31 @@ def test_market_open_merges_federated_from_peer(tmp_path: Path) -> None:
     assert fed[0]["claimed"] is False
 
 
+def test_digest_pagination_covers_whole_feed(tmp_path: Path, monkeypatch) -> None:
+    # FED-1 审查修复:digest serve 侧封顶 + 拉方翻页。把每页设 2、发 5 条,
+    # 翻页须覆盖全部(否则只会拿到前 2 条)。
+    import nth_dao.web.v2_api as v2_api
+    monkeypatch.setattr(v2_api, "_FED_DIGEST_PAGE", 2)
+
+    b = TestClient(create_app(tmp_path / "b", require_console_auth=False))
+    ids = [
+        b.post(
+            "/api/v2/market/announce",
+            json={"title": f"task {i}", "capability_set": []},
+        ).json()["announcement_id"]
+        for i in range(5)
+    ]
+    # 单次 digest 确实被截到 2 条(证明 serve 侧封顶生效)。
+    page = b.get("/api/v2/market/federation/digest?since=-1").json()
+    assert len(page["refs"]) == 2
+
+    # 但 federate_once 翻页 → 5 条全收。
+    entries = federate_once(["https://peer-b.example"], _http_get_via(b))
+    for aid in ids:
+        assert aid in entries, f"翻页应覆盖 {aid}"
+    assert len(entries) == 5
+
+
 def test_unsigned_or_bad_peer_yields_nothing(tmp_path: Path) -> None:
     # 对端返回垃圾(验签失败)→ 一条都不收(fail-closed)。
     def bad_get(url: str):

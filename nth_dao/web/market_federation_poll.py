@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from nth_dao.execution_receipt import now_ms
 from nth_dao.market.announcement import TaskAnnouncement, verify_announcement
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 HttpGetJson = Callable[[str], Any]
 
 _PULL_BATCH = 100   # 一次 pull 的 id 上限(serve 侧封顶 200,这里留余量)
+_MAX_DIGEST_PAGES = 50   # digest 翻页安全上限(防恶意 peer 永不收敛)
 _HTTP_TIMEOUT_S = 8.0
 
 
@@ -41,41 +42,68 @@ def _urllib_get_json(url: str) -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _collect_ids_via_digest(
+    base: str, http_get: HttpGetJson,
+) -> Optional[List[str]]:
+    """增量翻页拉对端 digest,收集所有 ref 的 announcement_id(去重保序)。
+
+    带 ``since=high_seq`` 一页页翻,直到游标不再推进(到底)或撞安全上限。
+    任一页 provenance 验不过 → 返回 None(整个 peer 不可信,fail-closed)。
+    """
+    collected: List[str] = []
+    seen: set = set()
+    cursor = -1
+    for _ in range(_MAX_DIGEST_PAGES):
+        try:
+            draw = http_get(
+                f"{base}/api/v2/market/federation/digest?since={cursor}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fed: digest fetch failed %s: %s", base, exc)
+            break
+        if not isinstance(draw, dict):
+            break
+        try:
+            digest = FeedDigest.from_dict(draw)
+        except Exception:  # noqa: BLE001
+            break
+        ok, why = verify_digest(digest)   # provenance:source_did 签的这批 refs
+        if not ok:
+            logger.warning("fed: peer %s digest verify failed: %s", base, why)
+            return None
+        for r in digest.refs:
+            if isinstance(r, dict) and isinstance(r.get("announcement_id"), str):
+                aid = r["announcement_id"]
+                if aid not in seen:
+                    seen.add(aid)
+                    collected.append(aid)
+        if digest.high_seq <= cursor:   # 游标没推进 → 到底/防死循环
+            break
+        cursor = digest.high_seq
+    return collected
+
+
 def pull_from_peer(
     peer_base: str, http_get: HttpGetJson = _urllib_get_json,
 ) -> List[TaskAnnouncement]:
-    """从一个 peer 拉取**已双层验签**的开放公告。任何失败 → 返回 []。"""
+    """从一个 peer 拉取**已双层验签**的开放公告(digest 翻页 + 全文分批拉)。
+
+    provenance 验不过 / 任何失败 → 返回 [](fail-closed)。
+    """
     base = peer_base.rstrip("/")
-    try:
-        draw = http_get(f"{base}/api/v2/market/federation/digest")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("fed: digest fetch failed %s: %s", base, exc)
-        return []
-    if not isinstance(draw, dict):
-        return []
-    try:
-        digest = FeedDigest.from_dict(draw)
-    except Exception:  # noqa: BLE001
-        return []
-    ok, why = verify_digest(digest)   # provenance:是 source_did 签的这批 refs
-    if not ok:
-        logger.warning("fed: peer %s digest verify failed: %s", base, why)
-        return []
-    ids = [
-        r["announcement_id"]
-        for r in digest.refs
-        if isinstance(r, dict) and isinstance(r.get("announcement_id"), str)
-    ][:_PULL_BATCH]
-    if not ids:
-        return []
-    try:
-        praw = http_get(
-            f"{base}/api/v2/market/federation/pull?ids={','.join(ids)}")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("fed: pull failed %s: %s", base, exc)
+    ids = _collect_ids_via_digest(base, http_get)
+    if not ids:   # None(不可信)或 [](无活)
         return []
     out: List[TaskAnnouncement] = []
-    if isinstance(praw, list):
+    for i in range(0, len(ids), _PULL_BATCH):
+        batch = ids[i:i + _PULL_BATCH]
+        try:
+            praw = http_get(
+                f"{base}/api/v2/market/federation/pull?ids={','.join(batch)}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fed: pull failed %s: %s", base, exc)
+            continue
+        if not isinstance(praw, list):
+            continue
         for item in praw:
             if not isinstance(item, dict):
                 continue

@@ -101,14 +101,18 @@ def build_digest(
     since_seq: int = -1,
     include_expired: bool = False,
     now_ms_override: int = 0,
+    limit: "Any" = None,  # Optional[int]：每个 digest 最多多少 ref，None=不限
 ) -> FeedDigest:
     """从本地 feed 生成签名摘要，供广播。
 
     只收 since_seq 之后、未过期的公告，每条压成 ref（匹配字段）。
     digest 由 source DAO 的 DID 签名（provenance）。
+
+    ``limit`` 封顶单个 digest 的 ref 数（serve 侧防无界响应）；截断时
+    ``high_seq`` 停在已收末尾，拉方据此带 ``since`` 翻下一页。
     """
     poll = feed.poll(
-        since_seq, include_expired=include_expired,
+        since_seq, limit=limit, include_expired=include_expired,
         now_ms_override=now_ms_override,
     )
     refs: List[Dict[str, Any]] = []
