@@ -112,6 +112,44 @@ def test_market_announce_rejects_negative_reward(tmp_path: Path) -> None:
     assert r.status_code == 422  # pydantic ge=0
 
 
+def test_market_open_filters_and_categories(tmp_path: Path) -> None:
+    # 分类/检索:按 context / capability / min_reward / q 过滤 + 类别分面。
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    def announce(**kw):
+        r = client.post("/api/v2/market/announce", json=kw)
+        assert r.status_code == 200, r.text
+
+    announce(title="review the auth PR", capability_set=["code_review"],
+             context="code_review", reward_minor=100)
+    announce(title="research market sizing", capability_set=["research"],
+             context="research", reward_minor=10)
+    announce(title="review small typo", capability_set=["code_review"],
+             context="code_review", reward_minor=5)
+
+    def titles(**params):
+        return {x["title"] for x in client.get(
+            "/api/v2/market/open", params=params).json()}
+
+    assert len(titles()) == 3
+    # 按类别。
+    assert titles(context="research") == {"research market sizing"}
+    # 按能力(与认领同套归一)。
+    assert titles(capability="code_review") == {
+        "review the auth PR", "review small typo"}
+    # 按赏金下限。
+    assert titles(min_reward=50) == {"review the auth PR"}
+    # 文本搜索。
+    assert titles(q="typo") == {"review small typo"}
+    # 组合(交集):code_review 类 + 赏金>=50。
+    assert titles(context="code_review", min_reward=50) == {"review the auth PR"}
+
+    # 类别分面带计数。
+    cats = {c["context"]: c["count"] for c in
+            client.get("/api/v2/market/categories").json()}
+    assert cats == {"code_review": 2, "research": 1}
+
+
 def test_market_announce_caps_oversized_input(tmp_path: Path) -> None:
     # 对抗审查回归:超大输入会被签名+永久追加进 feed,必须在边界封顶。
     client = TestClient(create_app(tmp_path, require_console_auth=False))

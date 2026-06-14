@@ -1825,20 +1825,38 @@ def register_v2_routes(app: FastAPI) -> None:
         return _seed_rules()
 
     @app.get("/api/v2/market/open")
-    def v2_market_open(request: Request) -> List[Dict[str, Any]]:
+    def v2_market_open(
+        request: Request,
+        context: str = "",
+        capability: str = "",
+        min_reward: int = 0,
+        q: str = "",
+    ) -> List[Dict[str, Any]]:
         """任务广场(发现态):列出 feed 里未认领、未过期的开放任务公告。
 
         数据源是 nth_dao.market 的 A2A 任务市场(MarketFeed + ClaimStore),
         此前完全没接进 UI——而"发现可认领的活"正是 A2A 协调底座的核心面。
         这是读路径(安全方法,匿名可读,与其他 v2 读端点一致);认领是状态
         变更动作,另设受控端点。
+
+        分类/检索(任务多时按能力/喜好/价值挑选):
+          context     — 按类别精确过滤(公告的 context 字段)。
+          capability  — 只留 capability_set 含该能力的(与认领同套归一,
+                        避免"筛得到却认不了")。
+          min_reward  — 赏金下限(整数最小单位)。
+          q           — 标题/详述子串搜索(大小写不敏感)。
+        多个条件取交集。空=不过滤。
         """
         from nth_dao.market.claim import ClaimStore
         from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.vocabulary import normalize_capability
 
         ws = _state_workspace(request)
         if ws is None:
             return []
+        want_cap = normalize_capability(capability) if capability.strip() else ""
+        want_ctx = context.strip()
+        ql = q.strip().lower()
         # 自审修复:MarketFeed/ClaimStore 的构造会 mkdir。读端点(且匿名)
         # 不该有文件系统副作用——否则任何一次只读 GET 都会在从不用市场的
         # 节点工作区里凭空造出 market_feed/ 与 market_claims/。feed 日志不
@@ -1859,11 +1877,46 @@ def register_v2_routes(app: FastAPI) -> None:
         for ann in pr.announcements:
             if claims.is_claimed(ann.announcement_id):
                 continue
+            if want_ctx and ann.context != want_ctx:
+                continue
+            if want_cap:
+                have = {normalize_capability(c) for c in ann.capability_set}
+                if want_cap not in have:
+                    continue
+            if min_reward and ann.reward_minor < min_reward:
+                continue
+            if ql and ql not in ann.title.lower() and ql not in ann.description.lower():
+                continue
             d = ann.to_dict()
             d["claimed"] = False
             out.append(d)
         out.reverse()  # 新→老
         return out
+
+    @app.get("/api/v2/market/categories")
+    def v2_market_categories(request: Request) -> List[Dict[str, Any]]:
+        """任务广场的类别分面:列出未认领公告里出现过的 context + 计数,
+        给前端做"按类别筛选"的 chips。空 feed → []。涌现式分类(无固定
+        词表),贴去中心化:类别由发布者的 context 自然长出来。"""
+        from nth_dao.market.claim import ClaimStore
+        from nth_dao.market.feed import MarketFeed
+
+        ws = _state_workspace(request)
+        if ws is None or not (
+            ws / "market_feed" / "announcements.jsonl"
+        ).exists():
+            return []
+        feed = MarketFeed(ws)
+        claims = ClaimStore(ws)
+        counts: Dict[str, int] = {}
+        for ann in feed.poll(since_seq=-1, limit=500).announcements:
+            if claims.is_claimed(ann.announcement_id):
+                continue
+            counts[ann.context] = counts.get(ann.context, 0) + 1
+        return sorted(
+            ({"context": k, "count": v} for k, v in counts.items()),
+            key=lambda x: (-x["count"], x["context"]),
+        )
 
     @app.post("/api/v2/market/announce")
     def v2_market_announce(
