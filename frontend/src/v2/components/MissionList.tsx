@@ -51,6 +51,9 @@ export interface NewMissionDraft {
   driver_did: string;
   driver_label: string;
   cap_token_id?: string;
+  /** 步骤描述列表(每行一个);有步骤的 mission 才能进入执行/发上市场,
+   *  否则生来就是空的 planning。 */
+  steps?: string[];
 }
 
 // (pct() / status-color logic moved to ../utils/mission, audit L4)
@@ -294,6 +297,7 @@ interface NewMissionFormProps {
 function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
+  const [stepsText, setStepsText] = useState("");
   const [driverDid, setDriverDid] = useState(drivers[0]?.did ?? "");
   const [capToken, setCapToken] = useState("");
 
@@ -329,6 +333,10 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
       driver_did: driverDid,
       driver_label: driver?.label ?? driverDid.slice(0, 16),
       cap_token_id: capToken.trim() || undefined,
+      steps: stepsText
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
     });
   }
 
@@ -407,6 +415,31 @@ function NewMissionForm({ drivers, onCancel, onSubmit }: NewMissionFormProps) {
             rows={3}
             style={{ width: "100%", resize: "vertical" }}
           />
+        </div>
+
+        <div>
+          <label
+            style={{
+              display: "block",
+              fontSize: 11,
+              color: "var(--fg-tertiary)",
+              marginBottom: 4,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            Steps(每行一个,可留空)
+          </label>
+          <textarea
+            value={stepsText}
+            onChange={(e) => setStepsText(e.target.value)}
+            placeholder={"每行一个步骤,例如:\nreproduce the crash\nwrite a fix\nverify on staging"}
+            rows={3}
+            style={{ width: "100%", resize: "vertical" }}
+          />
+          <p className="muted" style={{ margin: "4px 0 0", fontSize: 11 }}>
+            没有步骤的 mission 会停在 planning(空规划态);加了步骤才能推进/发上市场。
+          </p>
         </div>
 
         <div>

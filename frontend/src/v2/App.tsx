@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, askAgentStream, fetchAgents, fetchCapTokens,
+  a2aEchoApi, askAgentStream, createMission, fetchAgents, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, pingAgentApi, probeHub,
   resolveDecisionApi, summarizeAgent,
@@ -805,24 +805,25 @@ function AppInner() {
    *  The selection is a child-state concern; v1 sidestep via a
    *  `selectedMissionId` lifted to App.tsx is overkill — we use
    *  a `pendingFocusMissionId` to nudge MissionList instead. */
-  function handleCreateMission(draft: NewMissionDraft) {
-    const m: MissionSummary = {
-      id: `m-local-${Date.now()}`,
-      title: draft.title,
-      goal: draft.goal,
-      status: "planning",
-      steps_total: 0,
-      steps_done: 0,
-      steps_in_progress: 0,
-      driver_label: draft.driver_label || "unknown",
-      driver_did: draft.driver_did,
-      cap_token_id: draft.cap_token_id,
-      started_at: new Date().toISOString(),
-    };
-    setMissions((prev) => [m, ...prev]);
-    setFocusMissionId(m.id);
-    // TODO: POST /api/missions with the draft; reconcile id on
-    // response. Until then the local id (m-local-*) is fine.
+  async function handleCreateMission(draft: NewMissionDraft) {
+    // 2026-06-14:真正落后端(替掉此前纯前端 m-local- 假动作 —— 那种刷新
+    // 即失、不进 store、用不了 Mission↔Task 桥)。后端返回真实 summary
+    // (含真 id + 步骤计数 + planning/active),前置进列表并聚焦。
+    try {
+      const created = await createMission({
+        title: draft.title,
+        goal: draft.goal,
+        driver: draft.driver_label,
+        steps: draft.steps,
+      });
+      setMissions((prev) => [created, ...prev]);
+      setFocusMissionId(created.id);
+    } catch (e) {
+      toast.push(
+        `创建 mission 失败:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
   }
 
   /** New process — drops in "received". Matches the Kanban Intake

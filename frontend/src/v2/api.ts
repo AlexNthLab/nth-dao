@@ -157,6 +157,25 @@ export const fetchDecisions     = (s?: AbortSignal) =>
   getJson<Decision[]>("/decisions", s);
 export const fetchMissions      = (s?: AbortSignal) =>
   getJson<MissionSummary[]>("/missions", s);
+
+/** 真正创建一个 mission(落后端 store)。steps 是描述列表,每条转成
+ *  {description, required_capabilities}。返回真实(非 m-local-)的 summary。 */
+export async function createMission(input: {
+  title: string;
+  goal?: string;
+  driver?: string;
+  steps?: string[];
+}): Promise<MissionSummary> {
+  return postJson<MissionSummary>("/missions", {
+    title: input.title,
+    goal: input.goal ?? "",
+    driver: input.driver ?? "",
+    steps: (input.steps ?? []).map((d) => ({
+      description: d,
+      required_capabilities: [],
+    })),
+  });
+}
 export const fetchProcesses     = (s?: AbortSignal) =>
   getJson<ProcessCard[]>("/processes", s);
 export const fetchReceipts      = (s?: AbortSignal) =>
