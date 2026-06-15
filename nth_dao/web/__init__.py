@@ -381,6 +381,12 @@ class WebState:
         # read-only - in that case all DID-emitting endpoints degrade
         # to "did": "" rather than raising.
         self.node_identity: Optional[Any] = None
+        # Spine(Phase 2b 接线):本 workspace 的统一签名因果日志,**单例**——
+        # 写入者用内存链头 + 锁,必须全进程共享一个;每请求新建会让并发 append
+        # 读到同一链头、各自写同 seq → 分叉。由 _bootstrap 在 node_identity 就绪后
+        # 建;node_identity 缺失 / 日志损坏时降级为 None(market 等回退到只写自身
+        # feed,不影子双写)。
+        self.spine: Optional[Any] = None
         # LAN DID publish (2026-06-07): the running mDNS responder, or
         # None when ``NTH_LAN_PUBLISH=0`` / zeroconf is missing / startup
         # failed. Closed by ``_register_shutdown_hooks`` on process exit
@@ -2591,6 +2597,22 @@ def _bootstrap(state: WebState) -> None:
     # Cache on the state so endpoints can read without re-parsing the
     # identity file on every request.
     state.node_identity = node_identity
+
+    # Spine(Phase 2b):node_identity 就绪后建本 workspace 的签名因果日志(影子
+    # 双写目标)。失败 / 日志损坏只降级为 None,**绝不阻断 hub 启动**(market
+    # 回退到只写自身 feed;operator 可离线 verify_chain 排查)。
+    if node_identity is not None and getattr(node_identity, "can_sign", False):
+        try:
+            from ..spine import SignedEventLog
+            state.spine = SignedEventLog(
+                state.workspace / "spine" / "events.jsonl", node_identity,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "spine init failed (%s); market dual-write disabled "
+                "(feed-only). Run verify_chain to inspect the log.", exc,
+            )
+            state.spine = None
 
     config = state.membership.load_config()
     if not config.admin_ids and not config.member_ids:

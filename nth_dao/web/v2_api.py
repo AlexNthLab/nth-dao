@@ -1200,6 +1200,19 @@ def _state_node_identity(request: Request) -> Optional[Any]:
         return None
 
 
+def _state_spine(request: Request) -> Optional[Any]:
+    """本 workspace 的 spine 单例(__init__._bootstrap 建,全进程共享)。
+
+    缺失(node_identity 不可签 / 日志损坏 / 未接线)→ None,调用方回退到只写
+    自身 feed(影子双写关闭)。绝不在此处新建实例——单例由 _bootstrap 持有,
+    每请求新建会让并发 append 分叉。
+    """
+    try:
+        return request.app.state.nth.spine
+    except AttributeError:
+        return None
+
+
 def _state_receipts_store(request: Request) -> Optional[Any]:
     """ReceiptStore from app.state.nth.receipts. Returns None if
     state isn't wired. """
@@ -2547,7 +2560,9 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         try:
             # publish 会先验签再落盘(feed 里永远只有可独立验证的公告)。
-            MarketFeed(ws).publish(ann)
+            # Phase 2b:同时影子双写进 spine(单例;缺失则只写 feed)。spine
+            # 失败不阻断发布(MarketFeed.publish 内部 best-effort)。
+            MarketFeed(ws, spine=_state_spine(request)).publish(ann)
         except ValueError as exc:
             raise HTTPException(
                 status_code=400, detail=f"publish rejected: {exc}",
