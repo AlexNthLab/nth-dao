@@ -28,14 +28,18 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from nth_dao.market.announcement import (
     TaskAnnouncement,
     verify_announcement,
 )
+from nth_dao.market.projection import EVENT_MARKET_ANNOUNCE
 from nth_dao.util.io import InterProcessLock
 from nth_dao.util.jsonl_safe import safe_append_jsonl
+
+if TYPE_CHECKING:
+    from nth_dao.spine.log import SignedEventLog
 
 logger = logging.getLogger("nth_dao.market.feed")
 
@@ -59,10 +63,14 @@ class PollResult:
 class MarketFeed:
     """单 DAO 的任务公告 feed。文件持久、append-only、游标可补齐。"""
 
-    def __init__(self, root: PathLike) -> None:
+    def __init__(
+        self, root: PathLike, *, spine: "Optional[SignedEventLog]" = None,
+    ) -> None:
         self.root = Path(root) / "market_feed"
         self.root.mkdir(parents=True, exist_ok=True)
         self.log_path = self.root / "announcements.jsonl"
+        # Phase 2 影子双写:接线后 publish 同时把公告记入 spine(可选,默认关)。
+        self._spine = spine
 
     # ── 发布 ─────────────────────────────────────────────────────
 
@@ -85,6 +93,17 @@ class MarketFeed:
         # safe_append_jsonl 持锁 + fsync：跨进程并发发布安全，且
         # crash 不会丢已确认的 append。
         safe_append_jsonl(self.log_path, ann.to_dict())
+        # Phase 2 影子双写:同时把公告记入 spine(若已接线)。feed 仍是当前
+        # 事实源,故 spine 失败**不阻断发布**(best-effort,仅告警);后续 Phase
+        # 把读路径切到 spine 前,会反转顺序并改成强一致。
+        if self._spine is not None:
+            try:
+                self._spine.append(EVENT_MARKET_ANNOUNCE, ann.to_dict())
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "spine shadow-write failed for announcement %s",
+                    ann.announcement_id, exc_info=True,
+                )
 
     # ── 拉取（补齐）──────────────────────────────────────────────
 
