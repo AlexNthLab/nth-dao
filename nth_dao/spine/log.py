@@ -34,8 +34,17 @@ class SignedEventLog:
 
     def _load_head(self) -> None:
         last: Optional[SpineEvent] = None
-        for ev in self.read_all():
-            last = ev
+        try:
+            for ev in self.read_all():
+                last = ev
+        except Exception as exc:  # noqa: BLE001
+            # 拒绝在损坏日志上构造写入者(否则会在坏行后续写 → 永久分叉)。
+            # 报清晰错误而非裸 JSONDecodeError;定位用 verify_chain。
+            raise ValueError(
+                f"spine log at {self._path} is corrupt and cannot be opened "
+                f"for appending; run verify_chain on a clean handle to locate "
+                f"the break ({exc})"
+            ) from exc
         if last is not None:
             self._head_hash = last.content_hash
             self._head_seq = last.seq
@@ -84,17 +93,32 @@ class SignedEventLog:
             return ev
 
     def verify_chain(self) -> Tuple[bool, str]:
-        """整段重放校验:seq 从 0 单调、prev_hash 逐条链上、每条签名有效。"""
+        """整段重放校验:seq 从 0 单调、prev_hash 逐条链上、每条签名有效。
+
+        **必须 fail-closed**:对损坏行(非法 JSON / 结构不合法 / 缺字段)返回
+        ``(False, reason)``,绝不抛异常 —— 篡改恰会制造这种坏行,完整性校验崩溃
+        等于漏过篡改。故这里自己防御式解析,不走严格的 ``read_all``。
+        """
+        if not self._path.exists():
+            return True, "ok"   # 空日志合法
         expected_prev = GENESIS_PREV
         expected_seq = 0
-        for ev in self.read_all():
-            if ev.seq != expected_seq:
-                return False, f"seq gap at {ev.seq} (expected {expected_seq})"
-            if ev.prev_hash != expected_prev:
-                return False, f"chain break at seq {ev.seq}"
-            ok, why = verify_event(ev)
-            if not ok:
-                return False, f"event {ev.seq}: {why}"
-            expected_prev = ev.content_hash
-            expected_seq += 1
+        with self._path.open("r", encoding="utf-8") as f:
+            for lineno, raw in enumerate(f):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    ev = SpineEvent.from_dict(json.loads(raw))
+                except Exception as exc:  # noqa: BLE001
+                    return False, f"line {lineno}: unparseable ({exc})"
+                if ev.seq != expected_seq:
+                    return False, f"seq gap at {ev.seq} (expected {expected_seq})"
+                if ev.prev_hash != expected_prev:
+                    return False, f"chain break at seq {ev.seq}"
+                ok, why = verify_event(ev)
+                if not ok:
+                    return False, f"event {ev.seq}: {why}"
+                expected_prev = ev.content_hash
+                expected_seq += 1
         return True, "ok"

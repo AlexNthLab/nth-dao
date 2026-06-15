@@ -84,6 +84,32 @@ def test_tamper_prev_hash_breaks_chain(tmp_path: Path) -> None:
     assert not ok
 
 
+def test_corrupt_line_fails_closed_not_crash(tmp_path: Path) -> None:
+    # 对抗审查发现:损坏行(非法 JSON / 结构坏)必须返回 False,不能抛异常。
+    # 用**已构造的 handle** 校验(模拟"在跑的进程持有日志句柄,文件被静默篡改")。
+    p = tmp_path / "events.jsonl"
+    log = SignedEventLog(p, _id())
+    log.append("t", {"n": 1})
+    log.append("t", {"n": 2})
+    line0 = p.read_text(encoding="utf-8").splitlines()[0]
+
+    # ① 第二行换成非法 JSON → verify_chain 返回 False(不抛)。
+    p.write_text(line0 + "\n{not json]\n", encoding="utf-8")
+    ok, why = log.verify_chain()
+    assert not ok and "unparseable" in why
+
+    # ② 结构坏:payload 不是 dict(JSON 合法但 from_dict 失败)→ 仍 False。
+    _rewrite_line(p, 1, {"seq": 1, "prev_hash": "0" * 64, "type": "t",
+                         "payload": "notdict", "author_did": "did:key:zX",
+                         "ts_ms": 1, "content_hash": "", "sig": ""})
+    ok2, _ = log.verify_chain()
+    assert not ok2
+
+    # ③ 构造写入者拒绝打开损坏日志(清晰错误,不裸崩)。
+    with pytest.raises(ValueError, match="corrupt"):
+        SignedEventLog(p, _id())
+
+
 def test_event_authored_by_other_did_verifies(tmp_path: Path) -> None:
     # 事件用作者 DID 的公钥校验(非日志持有者),跨主体可验。
     author = _id()
