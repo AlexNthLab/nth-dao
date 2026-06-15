@@ -37,7 +37,6 @@ import { BlackboardView, type NewProcessDraft } from "./components/BlackboardVie
 import { ChatView } from "./components/ChatView";
 import { ChannelsView } from "./components/ChannelsView";
 import { CommandPalette } from "./components/CommandPalette";
-import { DecisionQueue } from "./components/DecisionQueue";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LangProvider, useLang } from "./i18n";
 import { IconNav } from "./components/IconNav";
@@ -47,6 +46,7 @@ import { AuditView } from "./components/AuditView";
 import { GovernanceView } from "./components/GovernanceView";
 import { DelegateView } from "./components/DelegateView";
 import { ReputationView } from "./components/ReputationView";
+import { InboxView } from "./components/InboxView";
 import { StatusBar } from "./components/StatusBar";
 import { ToastProvider, useToast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
@@ -512,7 +512,7 @@ function AppInner() {
       { id: "nav-agents",     title: "Go to Agents",      shortcut: "G P", run: () => setActive("agents") },
       { id: "nav-audit",      title: "Go to Audit",       shortcut: "G A", run: () => setActive("audit") },
       { id: "nav-governance", title: "Go to Governance",  shortcut: "G V", run: () => setActive("governance") },
-      { id: "nav-delegate",   title: "Go to Delegate",    shortcut: "G D", run: () => setActive("delegate") },
+      { id: "nav-delegate",   title: "Go to Authorizations (Inbox)", shortcut: "G D", run: () => setActive("inbox") },
       { id: "nav-reputation", title: "Go to Reputation",  shortcut: "G E", run: () => setActive("reputation") },
       { id: "nav-chat",       title: "Go to Chat",        shortcut: "G C", run: () => setActive("chat") },
       {
@@ -925,7 +925,7 @@ function AppInner() {
     );
   } else if (active === "inbox") {
     view = (
-      <DecisionQueue
+      <InboxView
         decisions={decisions}
         onApprove={handleApprove}
         onReject={handleReject}

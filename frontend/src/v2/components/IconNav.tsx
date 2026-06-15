@@ -19,7 +19,7 @@
 
 import { useState } from "react";
 import {
-  IconBriefcase, IconChat, IconHash, IconInbox, IconKey, IconLayout, IconScale,
+  IconBriefcase, IconChat, IconHash, IconInbox, IconLayout, IconScale,
   IconScroll, IconSliders, IconStar, IconTarget, IconUsers,
 } from "./Icons";
 import type { NavId } from "../types-v2";
@@ -31,8 +31,7 @@ type Item = {
 };
 
 const PRIMARY: Item[] = [
-  { id: "inbox",      icon: IconInbox,     label: "Decisions" },
-  { id: "delegate",   icon: IconKey,       label: "Delegate" },
+  { id: "inbox",      icon: IconInbox,     label: "Inbox" },
   { id: "tasks",      icon: IconBriefcase, label: "Tasks" },
   { id: "agents",     icon: IconUsers,     label: "Agents" },
   { id: "audit",      icon: IconScroll,    label: "Audit" },
