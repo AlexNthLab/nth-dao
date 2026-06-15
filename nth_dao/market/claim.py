@@ -40,15 +40,19 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from nth_dao.cap_token import verify_cap_token
 from nth_dao.execution_receipt import (
     TimelineEntry, now_ms, sign_receipt, verify_receipt,
 )
 from nth_dao.market.announcement import TaskAnnouncement
+from nth_dao.market.projection import EVENT_MARKET_CLAIM
 from nth_dao.market.vocabulary import normalize_capability
 from nth_dao.util.io import InterProcessLock, atomic_write_json, safe_id, safe_load_json
+
+if TYPE_CHECKING:
+    from nth_dao.spine.log import SignedEventLog
 
 logger = logging.getLogger("nth_dao.market.claim")
 
@@ -66,6 +70,32 @@ REJECT_CLAIMANT_BELOW_POLICY = "claimant-below-policy"  # 信誉不满足发布�
 REJECT_CLAIMANT_REP_MISSING = "claimant-reputation-missing"  # 有门槛但没给信誉
 
 CLAIM_STATUS_CLAIMED = "claimed"
+
+
+def _spine_record_claim(
+    spine: "Optional[SignedEventLog]", claim_record: Dict[str, Any],
+) -> None:
+    """best-effort:把一条认领记入 spine(``market.claim`` 事件)。
+
+    spine 是影子,认领权威仍是 ClaimStore 的 CAS;spine 失败只告警,**绝不影响
+    认领结果**。payload 取 claim_record 的标识字段(不含整份 receipt,保持 lean;
+    收据入 spine 是 Phase 3 的 ``receipt.record`` 事件)。
+    """
+    if spine is None:
+        return
+    try:
+        spine.append(EVENT_MARKET_CLAIM, {
+            "announcement_id": claim_record.get("announcement_id", ""),
+            "claimant_did": claim_record.get("claimant_did", ""),
+            "publisher_did": claim_record.get("publisher_did", ""),
+            "cap_token_id": claim_record.get("cap_token_id", ""),
+            "claimed_at_ms": int(claim_record.get("claimed_at_ms", 0)),
+        })
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "spine shadow-write failed for claim %s",
+            claim_record.get("announcement_id", "?"), exc_info=True,
+        )
 
 
 class ClaimConflict(Exception):
@@ -151,6 +181,7 @@ def claim_announcement(
     revoked_ids: Optional[set] = None,
     claimant_reputation: "Any" = None,  # M5: ReputationProfile（仅当公告设了 claimant_policy 才需要）
     now_ms_override: int = 0,
+    spine: "Optional[SignedEventLog]" = None,
 ) -> ClaimOutcome:
     """原子认领一条公告。
 
@@ -293,6 +324,8 @@ def claim_announcement(
             "receipt": receipt,
         }
         atomic_write_json(path, claim_record)
+        # Phase 2c 影子双写:CAS 成功后把认领记入 spine(best-effort)。
+        _spine_record_claim(spine, claim_record)
         return ClaimOutcome(claim_record=claim_record, receipt=receipt)
 
 
@@ -374,6 +407,7 @@ def record_foreign_claim(
     revoked_ids: Optional[set] = None,
     claimant_reputation: "Any" = None,
     now_ms_override: int = 0,
+    spine: "Optional[SignedEventLog]" = None,
 ) -> ClaimOutcome:
     """跨 DAO 认领的「验 + CAS」侧:来源 DAO 接受外部 agent **预签**的
     ClaimReceipt,验证后 CAS 落盘。**绝不重签**(收据已由 claimant 签)。
@@ -479,4 +513,6 @@ def record_foreign_claim(
             "foreign": True,      # 标记：跨 DAO 认领
         }
         atomic_write_json(path, claim_record)
+        # Phase 2c 影子双写:CAS 成功后把认领记入 spine(best-effort)。
+        _spine_record_claim(spine, claim_record)
         return ClaimOutcome(claim_record=claim_record, receipt=receipt)

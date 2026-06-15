@@ -2663,6 +2663,9 @@ def register_v2_routes(app: FastAPI) -> None:
             outcome = record_foreign_claim(
                 MarketFeed(ws), ClaimStore(ws), announcement_id,
                 body.cap_token, body.receipt,
+                # Phase 2c:跨 DAO 认领发生在本 hub 进程 → 影子双写 market.claim
+                # 进 hub 的 spine 单例(缺失则只 CAS,不阻断)。
+                spine=_state_spine(request),
             )
         except ClaimConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))

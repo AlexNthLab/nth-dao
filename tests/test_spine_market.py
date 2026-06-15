@@ -11,7 +11,9 @@ import pytest
 
 pytest.importorskip("nacl")
 
+from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
 from nth_dao.identity import AgentIdentity
+from nth_dao.market import ClaimStore, claim_announcement
 from nth_dao.market.announcement import sign_announcement
 from nth_dao.market.feed import MarketFeed
 from nth_dao.market.projection import (
@@ -86,4 +88,38 @@ def test_claim_event_excludes_from_open(tmp_path: Path) -> None:
     proj = MarketAnnounceProjection()
     replay(spine.read_all(), proj)
     assert proj.open() == []
+    assert proj.open(include_claimed=True)[0].announcement_id == a1.announcement_id
+
+
+def test_real_claim_dual_writes_and_projection_excludes(tmp_path: Path) -> None:
+    # Phase 2c:真实认领(claim_announcement)在 CAS 成功后双写 market.claim;
+    # spine 重建出"announce 后被 claim 排除"的开放视图。
+    node = AgentIdentity.generate()
+    issuer = AgentIdentity.generate()
+    pub = AgentIdentity.generate()
+    claimant = AgentIdentity.generate()
+    spine = SignedEventLog(tmp_path / "spine.jsonl", node)
+    feed = MarketFeed(tmp_path / "ws", spine=spine)
+    store = ClaimStore(tmp_path / "ws")
+
+    a1 = _ann(pub, "claimable")
+    feed.publish(a1)   # market.announce → spine
+
+    token = sign_cap_token(
+        issuer=issuer, subject_did=claimant.as_did(),
+        capabilities=["code_review", CAP_NTH_RECEIPT_SIGN],
+    )
+    out = claim_announcement(
+        feed, store, a1.announcement_id,
+        claimant=claimant, cap_token=token, spine=spine,
+    )
+    assert out.claim_record["status"] == "claimed"
+
+    ok, why = spine.verify_chain()
+    assert ok, why
+    assert [e.type for e in spine.read_all()] == ["market.announce", "market.claim"]
+
+    proj = MarketAnnounceProjection()
+    replay(spine.read_all(), proj)
+    assert proj.open() == []   # 已认领 → 不在 open
     assert proj.open(include_claimed=True)[0].announcement_id == a1.announcement_id
