@@ -169,6 +169,7 @@ _A2A_METHOD_CAPABILITIES: Dict[str, str] = {
     # 真正的认领授权是 params 里那张按需铸的 cap_token,由 claim_announcement
     # 校验(能力子集 + subject==本 agent)。
     "claim": "a2a:message_send",
+    "claim-sign": "a2a:message_send",
 }
 
 
@@ -1921,11 +1922,58 @@ def _start_a2a_server(
                     "receipt_id": (outcome.receipt or {}).get("receipt_id", ""),
                     "claim_record": outcome.claim_record,
                 }}
+            elif method == "claim-sign":
+                # XDAO-2:跨 DAO 认领的「只签」侧。agent 用**自己的私钥**为一条
+                # **外部**公告自签 cap_token + ClaimReceipt,**不落盘**(本地没
+                # 这条公告)。产物回给 hub,转投到公告主 DAO 的 /claim-foreign
+                # 落 CAS。permissionless:自签 cap_token,来源侧验签即可。
+                ann_dict = params.get("announcement")
+                if not isinstance(ann_dict, dict) or not ann_dict.get(
+                    "announcement_id"
+                ):
+                    self._json_error(
+                        400, "bad-claim-sign-params",
+                        "claim-sign needs announcement (full signed dict)",
+                    )
+                    return
+                if signer is None or not getattr(signer, "can_sign", False):
+                    self._json_error(
+                        503, "no-signer",
+                        "agent cannot sign (crypto unavailable)",
+                    )
+                    return
+                try:
+                    from nth_dao.cap_token import (
+                        CAP_NTH_RECEIPT_SIGN, sign_cap_token,
+                    )
+                    from nth_dao.market.announcement import TaskAnnouncement
+                    from nth_dao.market.claim import sign_claim_receipt
+
+                    ann = TaskAnnouncement.from_dict(ann_dict)
+                    cap = sign_cap_token(
+                        issuer=signer, subject_did=signer.as_did(),
+                        capabilities=[
+                            *ann.capability_set, CAP_NTH_RECEIPT_SIGN,
+                        ],
+                    )
+                    receipt = sign_claim_receipt(ann, signer, cap)
+                except Exception as exc:  # noqa: BLE001
+                    self._json_error(
+                        502, "claim-sign-failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+                response = {"result": {
+                    "cap_token": cap,
+                    "receipt": receipt,
+                    "announcement_id": ann.announcement_id,
+                    "claimant_did": signer.as_did(),
+                }}
             else:
                 self._json_error(
                     404, "method-not-found",
                     f"method {method!r} not supported "
-                    "(echo, ask, ask-stream, claim)",
+                    "(echo, ask, ask-stream, claim, claim-sign)",
                 )
                 return
             self._respond(

@@ -685,6 +685,20 @@ def create_app(
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
 
+        # 跨 DAO 认领提交(XDAO-2,crypto-authorized):外部 DAO 的 agent 提交
+        # 已签名的认领。授权靠 record_foreign_claim 的逐项验签(收据 publisher
+        # 自验 + cap_token + 绑定),**不需要本节点的 console token**(外部节点
+        # 没有)。匿名放行,与联邦读端点同理——攻击者最多提交一个密码学合法
+        # 的认领(=正当行为),无法伪造,也不借用 hub 任何权限(非 confused
+        # deputy:端点只是把自授权的认领落 CAS,不驱动本地 agent/网络)。
+        if (
+            request.method == "POST"
+            and request.url.path.startswith("/api/v2/market/")
+            and request.url.path.endswith("/claim-foreign")
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
         if not require_console_auth:
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)

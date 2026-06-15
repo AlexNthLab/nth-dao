@@ -1872,6 +1872,13 @@ class JoinChannelBody(BaseModel):
     agent_id: str
 
 
+class ForeignClaimBody(BaseModel):
+    """跨 DAO 认领提交体(XDAO-2):外部 agent 预签的认领产物。"""
+
+    cap_token: Dict[str, Any]
+    receipt: Dict[str, Any]
+
+
 # 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
 # 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
 _CHANNEL_DISPATCH_MAX = 16
@@ -2597,6 +2604,45 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.market.feed import MarketFeed
         from nth_dao.market.federation import pull_announcements
         return [a.to_dict() for a in pull_announcements(MarketFeed(ws), id_list)]
+
+    @app.post("/api/v2/market/{announcement_id}/claim-foreign")
+    def v2_market_claim_foreign(
+        announcement_id: str, body: ForeignClaimBody, request: Request,
+    ) -> Dict[str, Any]:
+        """跨 DAO 认领·来源 DAO 侧(XDAO-2):接受外部 agent 预签的
+        ClaimReceipt,``record_foreign_claim`` 逐项验签 + CAS 落盘。
+
+        本节点是该公告的**认领权威**(公告在本地 feed)。外部 agent 在它自己
+        的节点签好收据后 POST 到这里落地。匿名(crypto-authorized):授权全靠
+        验签,不吃本节点 console token(外部节点没有)。中间件已对本路径放行。
+        """
+        from nth_dao.market.claim import (
+            ClaimConflict, ClaimRejected, ClaimStore, record_foreign_claim,
+        )
+        from nth_dao.market.feed import MarketFeed
+
+        ws = _state_workspace(request)
+        if ws is None or not (
+            ws / "market_feed" / "announcements.jsonl"
+        ).exists():
+            raise HTTPException(status_code=404, detail="announcement not found")
+        try:
+            outcome = record_foreign_claim(
+                MarketFeed(ws), ClaimStore(ws), announcement_id,
+                body.cap_token, body.receipt,
+            )
+        except ClaimConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ClaimRejected as exc:
+            raise HTTPException(
+                status_code=403, detail=f"{exc.reason}: {exc.detail}")
+        return {
+            "claimed": True,
+            "announcement_id": announcement_id,
+            "claimant_did": outcome.claim_record.get("claimant_did", ""),
+            "receipt_id": outcome.claim_record.get("receipt_id", ""),
+            "foreign": True,
+        }
 
     @app.post("/api/v2/market/{announcement_id}/claim")
     async def v2_market_claim(
