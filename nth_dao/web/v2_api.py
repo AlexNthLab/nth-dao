@@ -1994,6 +1994,12 @@ class CapDecisionBody(BaseModel):
     reason: str = ""
 
 
+class AcceptBody(BaseModel):
+    """验收入参:确认哪个 agent 完成了任务。"""
+
+    completer_did: str
+
+
 # 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
 # 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
 _CHANNEL_DISPATCH_MAX = 16
@@ -2594,6 +2600,51 @@ def register_v2_routes(app: FastAPI) -> None:
         rep["active_source"] = source
         return rep
 
+    @app.post("/api/v2/market/{announcement_id}/accept")
+    def v2_market_accept(
+        announcement_id: str, body: AcceptBody, request: Request,
+    ) -> Dict[str, Any]:
+        """发布方验收:确认 completer 交付了任务,记 market.acceptance(交付证明,
+        信誉据此从"承接"升级为"交付")。token-gated。
+
+        校验:本节点是该公告**发布方**(只能验收自己发的活)+ completer 已**认领**
+        该公告(没接过的不能被验收)。
+        """
+        from nth_dao.market.acceptance import sign_acceptance
+        from nth_dao.market.claim import ClaimStore
+        from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.projection import EVENT_MARKET_ACCEPTANCE
+
+        spine = _state_spine(request)
+        identity = _state_node_identity(request)
+        ws = _state_workspace(request)
+        if spine is None or ws is None or identity is None or not getattr(
+            identity, "can_sign", False
+        ):
+            raise HTTPException(
+                status_code=503, detail="spine / identity / workspace unavailable")
+        if not (ws / "market_feed" / "announcements.jsonl").exists():
+            raise HTTPException(status_code=404, detail="announcement not found")
+        ann = MarketFeed(ws).get(announcement_id)
+        if ann is None:
+            raise HTTPException(status_code=404, detail="announcement not found")
+        if ann.publisher_did != identity.as_did():
+            raise HTTPException(
+                status_code=403, detail="only the publisher can accept this task")
+        claim = ClaimStore(ws).get(announcement_id)
+        if not claim or claim.get("claimant_did") != body.completer_did:
+            raise HTTPException(
+                status_code=409,
+                detail="completer has not claimed this task")
+        stmt = sign_acceptance(
+            publisher=identity, announcement_id=announcement_id,
+            completer_did=body.completer_did)
+        ev = spine.append(EVENT_MARKET_ACCEPTANCE, stmt)
+        return {
+            "accepted": True, "announcement_id": announcement_id,
+            "completer_did": body.completer_did, "seq": ev.seq,
+        }
+
     @app.post("/api/v2/market/announce")
     def v2_market_announce(
         body: AnnounceTaskBody, request: Request,
@@ -2899,6 +2950,7 @@ def register_v2_routes(app: FastAPI) -> None:
         return {
             "did": r.did, "score": r.score,
             "tasks_claimed": r.tasks_claimed,
+            "tasks_accepted": r.tasks_accepted,
             "tasks_published": r.tasks_published,
             "disputed_claims": r.disputed_claims,
         }

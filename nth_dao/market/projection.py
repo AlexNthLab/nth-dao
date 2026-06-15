@@ -18,6 +18,7 @@ from nth_dao.spine.projection import Projection
 
 EVENT_MARKET_ANNOUNCE = "market.announce"
 EVENT_MARKET_CLAIM = "market.claim"
+EVENT_MARKET_ACCEPTANCE = "market.acceptance"   # 发布方验收(交付证明),信誉用
 
 
 class MarketAnnounceProjection(Projection):

@@ -20,7 +20,12 @@ from nth_dao.dispute.projection import (
     EVENT_DISPUTE_OPEN,
     EVENT_DISPUTE_RESOLVE,
 )
-from nth_dao.market.projection import EVENT_MARKET_ANNOUNCE, EVENT_MARKET_CLAIM
+from nth_dao.market.acceptance import verify_acceptance
+from nth_dao.market.projection import (
+    EVENT_MARKET_ACCEPTANCE,
+    EVENT_MARKET_ANNOUNCE,
+    EVENT_MARKET_CLAIM,
+)
 from nth_dao.spine.event import SpineEvent
 from nth_dao.spine.projection import Projection
 
@@ -32,14 +37,11 @@ _DISPUTE_EVENTS = (
 @dataclass
 class ReputationRecord:
     did: str
-    tasks_claimed: int = 0
+    tasks_claimed: int = 0       # 承接(自证)
+    tasks_accepted: int = 0      # 交付且被发布方验收(真工作量证明)
     tasks_published: int = 0
-    disputed_claims: int = 0
-
-    @property
-    def score(self) -> int:
-        """净未争议贡献(透明公式:承接数 − 被争议承接数)。"""
-        return self.tasks_claimed - self.disputed_claims
+    disputed_claims: int = 0     # 承接里被开过争议的
+    score: int = 0               # 净信誉 = 被验收交付 − 被争议的被验收交付
 
 
 class ReputationProjection(Projection):
@@ -53,11 +55,13 @@ class ReputationProjection(Projection):
         # 承接 / 发布都按 announcement_id **集合**累计 → 同一公告重复事件只计一次
         # (幂等、两侧对称;计数器会被重复 announce/claim 事件重复计数)。
         self._claimed: Dict[str, Set[str]] = {}     # did → {announcement_id}
+        self._accepted: Dict[str, Set[str]] = {}    # completer did → {announcement_id}
         self._published: Dict[str, Set[str]] = {}   # did → {announcement_id}
         self._disputed_anns: Set[str] = set()
 
     def reset(self) -> None:
         self._claimed.clear()
+        self._accepted.clear()
         self._published.clear()
         self._disputed_anns.clear()
 
@@ -70,6 +74,11 @@ class ReputationProjection(Projection):
             cl = p.get("claimant_did")
             if isinstance(cl, str) and cl:
                 self._claimed.setdefault(cl, set()).add(aid)
+        elif event.type == EVENT_MARKET_ACCEPTANCE:
+            ok, _ = verify_acceptance(p)   # 只采信发布方签名有效的验收(防伪造刷分)
+            cp = p.get("completer_did")
+            if ok and isinstance(cp, str) and cp:
+                self._accepted.setdefault(cp, set()).add(aid)
         elif event.type == EVENT_MARKET_ANNOUNCE:
             pub = p.get("publisher_did")
             if isinstance(pub, str) and pub:
@@ -79,23 +88,29 @@ class ReputationProjection(Projection):
 
     def _record(self, did: str) -> ReputationRecord:
         claimed = self._claimed.get(did, set())
+        accepted = self._accepted.get(did, set())
+        # 净信誉 = 被验收交付 − 被验收交付里被争议的(恒 ≥0)。承接不计入 score
+        # (接了不等于交付),仅作 tasks_claimed 上下文展示。
+        disputed_accepted = len(accepted & self._disputed_anns)
         return ReputationRecord(
             did=did,
             tasks_claimed=len(claimed),
+            tasks_accepted=len(accepted),
             tasks_published=len(self._published.get(did, set())),
             disputed_claims=len(claimed & self._disputed_anns),
+            score=len(accepted) - disputed_accepted,
         )
 
     def get(self, did: str) -> ReputationRecord:
         return self._record(did)
 
     def all(self) -> List[ReputationRecord]:
-        dids = set(self._claimed) | set(self._published)
+        dids = set(self._claimed) | set(self._published) | set(self._accepted)
         return [self._record(d) for d in dids]
 
     def top(self, n: int = 50) -> List[ReputationRecord]:
-        """按 score → 承接数 → did 排序(确定性)。"""
+        """按 score → 交付数 → 承接数 → did 排序(确定性)。"""
         return sorted(
             self.all(),
-            key=lambda r: (-r.score, -r.tasks_claimed, r.did),
+            key=lambda r: (-r.score, -r.tasks_accepted, -r.tasks_claimed, r.did),
         )[: max(0, n)]
