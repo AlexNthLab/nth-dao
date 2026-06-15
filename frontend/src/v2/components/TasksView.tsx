@@ -31,6 +31,10 @@ export function TasksView() {
   const [minReward, setMinReward] = useState("");
   const [q, setQ] = useState("");
 
+  // 市场化分区 + 排序。market=可承接的活(本节点+联邦);mine=我发布的。
+  const [tab, setTab] = useState<"market" | "mine">("market");
+  const [sort, setSort] = useState<"recent" | "reward">("recent");
+
   // 发布表单
   const [showForm, setShowForm] = useState(false);
   const [fTitle, setFTitle] = useState("");
@@ -47,6 +51,14 @@ export function TasksView() {
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [claimAgent, setClaimAgent] = useState("");
   const [claimingId, setClaimingId] = useState("");
+
+  // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
+  const myTasks = tasks.filter((x) => !x.federated);
+  const shown = [...(tab === "mine" ? myTasks : tasks)].sort((a, b) =>
+    sort === "reward"
+      ? (b.reward_minor || 0) - (a.reward_minor || 0)
+      : (b.published_at_ms || 0) - (a.published_at_ms || 0),
+  );
 
   async function loadTasks(signal?: AbortSignal) {
     setLoading(true);
@@ -288,9 +300,9 @@ export function TasksView() {
         >
           <div>
             <p className="main-eyebrow">
-              {t("任务广场 · 发现可认领的活", "Task market · discover claimable work")}
+              {t("任务市场 · 发现并承接各 DAO 的活", "Task marketplace · discover & take on work across DAOs")}
             </p>
-            <h1 className="main-title">Tasks {loading ? "…" : `(${tasks.length})`}</h1>
+            <h1 className="main-title">Tasks {loading ? "…" : `(${shown.length})`}</h1>
           </div>
           <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
             {showForm ? t("取消", "Cancel") : t("+ 发布任务", "+ Publish task")}
@@ -298,6 +310,45 @@ export function TasksView() {
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", padding: "16px 24px" }}>
+          {/* 市场分区(可承接 vs 我发布的)+ 排序 */}
+          <div
+            style={{
+              display: "flex", alignItems: "center", gap: 10,
+              marginBottom: 14, flexWrap: "wrap",
+            }}
+          >
+            <button
+              className={`btn ${tab === "market" ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize: 12 }}
+              onClick={() => setTab("market")}
+              title={t("各 DAO 发布的、可承接的活(含联邦)", "Claimable work from across DAOs (incl. federated)")}
+            >
+              {t("市场", "Market")} ({tasks.length})
+            </button>
+            <button
+              className={`btn ${tab === "mine" ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize: 12 }}
+              onClick={() => setTab("mine")}
+              title={t("本节点发布、供他人认领的活", "Tasks this DAO published for others to claim")}
+            >
+              {t("我发布的", "My published")} ({myTasks.length})
+            </button>
+            <span style={{ flex: 1 }} />
+            <label
+              className="muted"
+              style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}
+            >
+              {t("排序", "Sort")}
+              <select
+                value={sort}
+                onChange={(e) => setSort(e.target.value as "recent" | "reward")}
+              >
+                <option value="recent">{t("最新", "Newest")}</option>
+                <option value="reward">{t("赏金高→低", "Reward ↓")}</option>
+              </select>
+            </label>
+          </div>
+
           {showForm && (
             <form
               onSubmit={handlePublish}
@@ -355,19 +406,25 @@ export function TasksView() {
             </form>
           )}
 
-          {tasks.length === 0 ? (
+          {shown.length === 0 ? (
             <div className="main-empty" style={{ minHeight: 200 }}>
               <div className="main-empty-icon">
                 <IconBriefcase size={36} />
               </div>
-              <p>{t("没有匹配的开放任务。", "No matching open tasks.")}</p>
+              <p>
+                {tab === "mine"
+                  ? t("你还没发布任务。", "You haven't published any tasks.")
+                  : t("市场上暂无可承接的活。", "No claimable work on the market.")}
+              </p>
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                {t("换个筛选,或发布一条任务。", "Adjust filters, or publish a task.")}
+                {tab === "mine"
+                  ? t("点右上「+ 发布任务」放一条出去。", "Use “+ Publish task” to put one out.")
+                  : t("换个筛选,或配置 NTH_FED_PEERS 接入更多 DAO。", "Adjust filters, or set NTH_FED_PEERS to reach more DAOs.")}
               </p>
             </div>
           ) : (
             <div className="stack" style={{ gap: 10 }}>
-              {tasks.map((task) => (
+              {shown.map((task) => (
                 <article
                   key={task.announcement_id}
                   style={{
@@ -398,6 +455,15 @@ export function TasksView() {
                         }}
                       >
                         {t("联邦", "federated")}
+                      </span>
+                    )}
+                    {!task.federated && (
+                      <span
+                        className="pill dim"
+                        style={{ fontSize: 10 }}
+                        title={t("本节点发布", "Published by this DAO")}
+                      >
+                        {t("本节点", "local")}
                       </span>
                     )}
                     {task.reward_minor > 0 && (
