@@ -26,7 +26,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   a2aEchoApi, activateMission, askAgentStream, createMission, fetchAgents, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
-  fetchProcesses, fetchReceipts, pingAgentApi, probeHub,
+  fetchProcesses, fetchReceipts, listCapRequests, listDisputes, pingAgentApi, probeHub,
   resolveDecisionApi, summarizeAgent,
 } from "./api";
 import { loadChat, saveChat } from "./chatStore";
@@ -141,6 +141,8 @@ function AppInner() {
     }
   }, [active]);
   const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
+  // 待办角标的额外计数 = 待批授权请求 + 开放争议(统一「待办」也含这两类)。
+  const [inboxExtra, setInboxExtra] = useState(0);
   /* S5 fix (2026-06-10): track in-flight resolves by id and pass
    * the Set down to DecisionQueue so the main-head renders a
    * "Signing N receipt(s)…" banner during the optimistic-remove
@@ -244,10 +246,14 @@ function AppInner() {
         fetchConversations(ctrl.signal),
         fetchCapTokens(ctrl.signal),
         fetchReceipts(ctrl.signal),
+        // 统一「待办」角标:授权请求(待批)+ 争议(开放)也算"需要你拍板"。
+        listCapRequests(ctrl.signal),
+        listDisputes(ctrl.signal),
       ]);
       if (cancelled) return;
       const [
         decRes, misRes, procRes, agRes, convRes, capRes, recRes,
+        capReqRes, dispRes,
       ] = settled;
       if (decRes.status === "fulfilled")  setDecisions(decRes.value);
       if (misRes.status === "fulfilled")  setMissions(misRes.value);
@@ -256,6 +262,12 @@ function AppInner() {
       if (convRes.status === "fulfilled") setConversations(convRes.value);
       if (capRes.status === "fulfilled")  setCapTokens(capRes.value);
       if (recRes.status === "fulfilled")  setReceipts(recRes.value);
+      // 待办额外计数 = 待批授权 + 开放争议(取数失败则记 0,不阻断)。
+      const pendingCaps = capReqRes.status === "fulfilled"
+        ? capReqRes.value.filter((c) => c.status === "pending").length : 0;
+      const openDisputes = dispRes.status === "fulfilled"
+        ? dispRes.value.filter((d) => d.status === "open").length : 0;
+      setInboxExtra(pendingCaps + openDisputes);
 
       const failures = settled.filter((r) => r.status === "rejected").length;
       const totalEndpoints = settled.length;
@@ -1050,7 +1062,7 @@ function AppInner() {
 
       <IconNav
         active={active}
-        decisionCount={decisions.length}
+        decisionCount={decisions.length + inboxExtra}
         onNav={setActive}
       />
 
