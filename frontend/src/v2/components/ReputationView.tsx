@@ -44,8 +44,8 @@ export function ReputationView() {
           <p className="main-eyebrow">{t("信誉 · 可验证贡献", "Reputation · verifiable contribution")}</p>
           <h1 className="main-title">{t("信誉榜", "Leaderboard")}</h1>
           <p className="main-subtitle">
-            {t("净分 = 承接数 − 被争议承接数(透明、可解释)。",
-              "Score = tasks claimed − disputed claims (transparent and explainable).")}
+            {t("净分 = 被发布方验收的交付数 − 被争议的交付数(承接≠交付;只有被验收的交付才计分)。",
+              "Score = publisher-accepted deliveries − disputed deliveries (claiming ≠ delivering; only accepted deliveries count).")}
           </p>
         </div>
         <div className="main-body">
@@ -62,6 +62,7 @@ export function ReputationView() {
                   <th style={{ padding: "8px 6px", width: 36 }}>#</th>
                   <th style={{ padding: "8px 6px" }}>{t("DID", "DID")}</th>
                   <th style={{ padding: "8px 6px", textAlign: "right" }}>{t("净分", "Score")}</th>
+                  <th style={{ padding: "8px 6px", textAlign: "right" }}>{t("交付", "Delivered")}</th>
                   <th style={{ padding: "8px 6px", textAlign: "right" }}>{t("承接", "Claimed")}</th>
                   <th style={{ padding: "8px 6px", textAlign: "right" }}>{t("发布", "Published")}</th>
                   <th style={{ padding: "8px 6px", textAlign: "right" }}>{t("被争议", "Disputed")}</th>
@@ -73,6 +74,7 @@ export function ReputationView() {
                     <td style={{ padding: "8px 6px", color: MUTED }}>{i + 1}</td>
                     <td style={{ padding: "8px 6px", fontFamily: "var(--font-mono)", fontSize: 12, wordBreak: "break-all" }}>{r.did}</td>
                     <td style={{ padding: "8px 6px", textAlign: "right", fontWeight: 500 }}>{r.score}</td>
+                    <td style={{ padding: "8px 6px", textAlign: "right", color: r.tasks_accepted ? "var(--color-text-success,#1d9e75)" : MUTED }}>{r.tasks_accepted}</td>
                     <td style={{ padding: "8px 6px", textAlign: "right" }}>{r.tasks_claimed}</td>
                     <td style={{ padding: "8px 6px", textAlign: "right" }}>{r.tasks_published}</td>
                     <td style={{ padding: "8px 6px", textAlign: "right", color: r.disputed_claims ? "var(--color-text-danger,#e24b4a)" : MUTED }}>{r.disputed_claims}</td>

@@ -634,6 +634,7 @@ export interface ReputationRecord {
   did: string;
   score: number;
   tasks_claimed: number;
+  tasks_accepted: number;
   tasks_published: number;
   disputed_claims: number;
 }
