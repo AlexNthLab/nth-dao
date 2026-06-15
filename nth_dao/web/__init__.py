@@ -98,6 +98,9 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONSOLE_TOKEN_ENV = "NTH_CONSOLE_TOKEN"
 CONSOLE_TOKEN_DIR_ENV = "NTH_CONSOLE_TOKEN_DIR"
 CONSOLE_TOKEN_FILENAME = "console.token"
+# 公网部署设为 0/false:页面不再内嵌全权 console token(否则"任何拿到 URL 的人
+# GET / 即得全权 token")。默认 1(本地便利:浏览器加载即自带令牌)。
+CONSOLE_TOKEN_IN_PAGE_ENV = "NTH_CONSOLE_TOKEN_IN_PAGE"
 
 # DID persistence (2026-06-08): a stable alias so the source-of-add tag
 # used by /api/agents/add doesn't require an inline import in the
@@ -635,6 +638,8 @@ def create_app(
     app.state.nth = state
     app.state.nth_console_token = _load_or_create_console_token()
     app.state.nth_require_console_auth = require_console_auth
+    # 公网部署可关掉"页面内嵌 token"(NTH_CONSOLE_TOKEN_IN_PAGE=0)。
+    app.state.nth_embed_console_token = _embed_console_token_in_page()
 
     @app.middleware("http")
     async def _console_auth_middleware(request: Request, call_next):
@@ -2497,7 +2502,9 @@ def create_app(
         f = STATIC_DIR / file_name
         if f.exists():
             return _html_shell(
-                _render_console_html(f, app.state.nth_console_token))
+                _render_console_html(
+                    f, app.state.nth_console_token,
+                    embed_token=app.state.nth_embed_console_token))
         return _html_shell(_frontend_missing_html(), 503)
 
     # 默认入口 = v2 聊天优先控制台（2026-06-14）。此前 `/` 服务的是 v1
@@ -2536,11 +2543,15 @@ def create_app(
             f = STATIC_DIR / "index.html"
             if f.exists():
                 return _html_shell(
-                    _render_console_html(f, app.state.nth_console_token))
+                    _render_console_html(
+                        f, app.state.nth_console_token,
+                        embed_token=app.state.nth_embed_console_token))
         v2_file = STATIC_DIR / "v2.html"
         if v2_file.exists():
             return _html_shell(
-                _render_console_html(v2_file, app.state.nth_console_token))
+                _render_console_html(
+                    v2_file, app.state.nth_console_token,
+                    embed_token=app.state.nth_embed_console_token))
         return JSONResponse(
             {"detail": "frontend assets are not built; run npm --prefix frontend run build"},
             status_code=503,
@@ -3370,13 +3381,51 @@ def _frontend_missing_html() -> str:
 </html>"""
 
 
-def _render_console_html(index_file: Path, token: str) -> str:
+def _embed_console_token_in_page() -> bool:
+    """是否把 console token 直接注入页面(默认 True,本地便利)。
+
+    公网部署应设 ``NTH_CONSOLE_TOKEN_IN_PAGE=0``:页面不再内嵌全权 token,改由
+    测试者带外索取后存浏览器 ``localStorage``(见 ``_render_console_html`` 的引导
+    脚本)—— 杜绝"任何拿到 URL 的人 GET / 即得全权 token"。读面仍匿名可浏览。
+    """
+    raw = os.environ.get(CONSOLE_TOKEN_IN_PAGE_ENV, "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+# 公网模式引导脚本:页面**不含** token。从 localStorage 取(测试者带外索取后用
+# 角落按钮粘贴);只读访客不受打扰(不强制 prompt),写操作才需令牌。纯 DOM 角落
+# 按钮,不碰 React 根。app 仍读同一个 ``window.__NTH_CONSOLE_TOKEN__``(本脚本在
+# <head> 同步设好,先于 body 里的 bundle 运行)。
+_CONSOLE_TOKEN_BOOTSTRAP_JS = (
+    "<script>(function(){var K=\"nth_console_token\";"
+    "function g(){try{return localStorage.getItem(K)||\"\"}catch(e){return\"\"}}"
+    "window.__NTH_CONSOLE_TOKEN__=g()||undefined;"
+    "window.nthSetToken=function(t){try{localStorage.setItem(K,t||\"\")}catch(e){}location.reload()};"
+    "window.nthClearToken=function(){try{localStorage.removeItem(K)}catch(e){}location.reload()};"
+    "window.addEventListener(\"DOMContentLoaded\",function(){"
+    "var b=document.createElement(\"button\");"
+    "b.textContent=g()?\"\\uD83D\\uDD13 \\u5199\\u5165\\u4ee4\\u724c\":\"\\uD83D\\uDD11 \\u8bbe\\u7f6e\\u5199\\u5165\\u4ee4\\u724c\";"
+    "b.style.cssText=\"position:fixed;right:12px;bottom:12px;z-index:2147483647;"
+    "padding:6px 10px;font:12px sans-serif;border:1px solid #888;border-radius:6px;"
+    "background:#1c1c1e;color:#eee;cursor:pointer;opacity:.85\";"
+    "b.onclick=function(){if(g()){if(confirm(\"\\u6e05\\u9664\\u5df2\\u5b58\\u7684\\u5199\\u5165\\u4ee4\\u724c?\"))window.nthClearToken();}"
+    "else{var t=prompt(\"\\u7c98\\u8d34\\u5199\\u5165\\u4ee4\\u724c(\\u5411\\u8fd0\\u8425\\u8005\\u5e26\\u5916\\u7d22\\u53d6):\");if(t)window.nthSetToken(t);}};"
+    "document.body.appendChild(b);});})();</script>"
+)
+
+
+def _render_console_html(
+    index_file: Path, token: str, *, embed_token: bool = True,
+) -> str:
     html = index_file.read_text(encoding="utf-8")
-    snippet = (
-        "<script>"
-        f"window.__NTH_CONSOLE_TOKEN__ = {json.dumps(token)};"
-        "</script>"
-    )
+    if embed_token:
+        snippet = (
+            "<script>"
+            f"window.__NTH_CONSOLE_TOKEN__ = {json.dumps(token)};"
+            "</script>"
+        )
+    else:
+        snippet = _CONSOLE_TOKEN_BOOTSTRAP_JS   # 页面不含 token
     if "</head>" in html:
         return html.replace("</head>", f"  {snippet}\n  </head>", 1)
     return snippet + html
