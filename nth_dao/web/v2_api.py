@@ -1982,6 +1982,18 @@ class DisputeStatementBody(BaseModel):
     statement: Dict[str, Any]
 
 
+class CapRequestBody(BaseModel):
+    """能力授予请求提交体(授权收件箱):requester **预签**的 cap.request。"""
+
+    statement: Dict[str, Any]
+
+
+class CapDecisionBody(BaseModel):
+    """审批决议入参(拒绝时可带原因)。"""
+
+    reason: str = ""
+
+
 # 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
 # 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
 _CHANNEL_DISPATCH_MAX = 16
@@ -2882,6 +2894,121 @@ def register_v2_routes(app: FastAPI) -> None:
             "founder_did": gproj.founder_did,
             "policy": gproj.policy.to_dict(),
         }
+
+    # ── 授权收件箱(consent 层):cap-token 授予请求 ──────────────────────
+    # 写(请求/批准/拒绝)走正常鉴权(公网 hub token-gated);列读匿名,但**不**
+    # 泄露已签发的 cap_token 全文(bearer 凭据),只给 token_id/时效等元数据。
+
+    def _cap_projection(request: Request):
+        from nth_dao.authz import CapRequestProjection
+        events = _verified_spine_events(request)
+        if events is None:
+            return None
+        proj = CapRequestProjection()
+        for ev in events:
+            proj.apply(ev)
+        return proj
+
+    @app.post("/api/v2/cap-requests")
+    def v2_cap_request(body: CapRequestBody, request: Request) -> Dict[str, Any]:
+        """记录一条 requester 预签的能力授予请求(cap.request)到 hub spine。"""
+        from nth_dao.authz import record_cap_request
+        spine = _state_spine(request)
+        if spine is None:
+            raise HTTPException(
+                status_code=503, detail="spine unavailable; cannot record request")
+        try:
+            ev = record_cap_request(spine, body.statement)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "recorded": True,
+            "request_id": str(body.statement.get("request_id", "")),
+            "seq": ev.seq,
+        }
+
+    @app.get("/api/v2/cap-requests")
+    def v2_cap_requests_list(request: Request) -> List[Dict[str, Any]]:
+        """列出授予请求(CapRequestProjection 回放)。匿名读。
+
+        ⚠️ 已批准项只回 token_id / 时效**元数据**,**不**回 cap_token 全文 ——
+        全文是 bearer 凭据,匿名读泄露即等于把能力发给所有人。
+        """
+        proj = _cap_projection(request)
+        if proj is None:
+            return []
+        out: List[Dict[str, Any]] = []
+        for rec in proj.all():
+            item: Dict[str, Any] = {
+                "request_id": rec.request_id,
+                "requester_did": rec.requester_did,
+                "capabilities": rec.capabilities,
+                "reason": rec.reason,
+                "scope": rec.scope,
+                "status": rec.status,
+                "decided_by_did": rec.decided_by_did,
+                "decided_at_ms": rec.decided_at_ms,
+            }
+            if rec.cap_token:   # 只元数据,绝不回全文 token
+                item["token_id"] = rec.cap_token.get("token_id", "")
+                item["token_not_after"] = rec.cap_token.get("not_after", 0)
+            out.append(item)
+        return out
+
+    @app.post("/api/v2/cap-requests/{request_id}/approve")
+    def v2_cap_approve(request_id: str, request: Request) -> Dict[str, Any]:
+        """批准:本节点签发 cap_token 给 requester,记 cap.grant。token-gated。
+
+        授权(谁能批)= 操作员(写口受 console auth);未来可叠治理 can()。
+        """
+        from nth_dao.authz import grant_cap_request
+        spine = _state_spine(request)
+        identity = _state_node_identity(request)
+        if spine is None or identity is None or not getattr(
+            identity, "can_sign", False
+        ):
+            raise HTTPException(
+                status_code=503, detail="spine or signer identity unavailable")
+        proj = _cap_projection(request)
+        rec = proj.get(request_id) if proj else None
+        if rec is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        if rec.status != "pending":
+            raise HTTPException(
+                status_code=409, detail=f"request already {rec.status}")
+        token = grant_cap_request(
+            spine, issuer=identity, request_id=request_id,
+            requester_did=rec.requester_did, capabilities=rec.capabilities,
+            scope=rec.scope)
+        return {
+            "granted": True, "request_id": request_id,
+            "token_id": token.get("token_id", ""),
+            "subject_did": token.get("subject_did", ""),
+        }
+
+    @app.post("/api/v2/cap-requests/{request_id}/deny")
+    def v2_cap_deny(
+        request_id: str, body: CapDecisionBody, request: Request,
+    ) -> Dict[str, Any]:
+        """拒绝:记 cap.deny(决策者身份在案)。token-gated。"""
+        from nth_dao.authz import deny_cap_request
+        spine = _state_spine(request)
+        identity = _state_node_identity(request)
+        if spine is None or identity is None or not getattr(
+            identity, "can_sign", False
+        ):
+            raise HTTPException(
+                status_code=503, detail="spine or signer identity unavailable")
+        proj = _cap_projection(request)
+        rec = proj.get(request_id) if proj else None
+        if rec is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        if rec.status != "pending":
+            raise HTTPException(
+                status_code=409, detail=f"request already {rec.status}")
+        deny_cap_request(
+            spine, decider=identity, request_id=request_id, reason=body.reason)
+        return {"denied": True, "request_id": request_id}
 
     @app.post("/api/v2/market/federated/claim")
     async def v2_market_federated_claim(
