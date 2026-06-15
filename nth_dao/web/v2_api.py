@@ -2895,6 +2895,40 @@ def register_v2_routes(app: FastAPI) -> None:
             "policy": gproj.policy.to_dict(),
         }
 
+    def _reputation_record_dict(r) -> Dict[str, Any]:
+        return {
+            "did": r.did, "score": r.score,
+            "tasks_claimed": r.tasks_claimed,
+            "tasks_published": r.tasks_published,
+            "disputed_claims": r.disputed_claims,
+        }
+
+    @app.get("/api/v2/reputation")
+    def v2_reputation(request: Request) -> List[Dict[str, Any]]:
+        """从 spine 派生的可验证信誉(ReputationProjection 回放,top 排序)。匿名读。
+
+        贡献直接从签名的 market.claim/announce 数出,dispute 减分 —— 非中心打分,
+        任何节点回放同一日志得同一信誉。
+        """
+        from nth_dao.reputation_spine import ReputationProjection
+        events = _verified_spine_events(request)
+        if events is None:
+            return []
+        proj = ReputationProjection()
+        for ev in events:
+            proj.apply(ev)
+        return [_reputation_record_dict(r) for r in proj.top(100)]
+
+    @app.get("/api/v2/reputation/{did}")
+    def v2_reputation_one(did: str, request: Request) -> Dict[str, Any]:
+        """单个 DID 的可验证信誉。匿名读。"""
+        from nth_dao.reputation_spine import ReputationProjection
+        events = _verified_spine_events(request)
+        proj = ReputationProjection()
+        for ev in (events or []):
+            proj.apply(ev)
+        return _reputation_record_dict(proj.get(did))
+
     # ── 授权收件箱(consent 层):cap-token 授予请求 ──────────────────────
     # 写(请求/批准/拒绝)走正常鉴权(公网 hub token-gated);列读匿名,但**不**
     # 泄露已签发的 cap_token 全文(bearer 凭据),只给 token_id/时效等元数据。
