@@ -16,6 +16,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import socket
 import threading
 import time
 import urllib.error
@@ -141,13 +142,29 @@ def fetch_peer_list(
     return []
 
 
-def _is_safe_gossip_url(url: str) -> bool:
-    """对 **gossip 发现的(不可信)** peer URL 做 SSRF 防护:必须 https + 公网
-    host(拒 localhost / loopback / 私网 / 链路本地 / 保留段)。
+def _ip_is_internal(ip: Any) -> bool:
+    """该 IP 是否落在内网/元数据/不可路由段(SSRF 必拒)。"""
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
 
-    配置的 seed peer **不**走这个(运营者自负其责,允许 http://localhost 等
-    本地联调)。发现到的来自网络数据,恶意节点可塞 169.254.169.254(云元数据)
-    或内网地址诱导 hub 去连 —— 这里挡掉。
+
+def _is_safe_gossip_url(
+    url: str, *, resolve: Callable[..., list] = socket.getaddrinfo,
+) -> bool:
+    """对 **gossip 发现的(不可信)** peer URL 做 SSRF 防护:必须 https + 公网 host。
+
+    拒 localhost/.local;原始 IP 直接判段;**域名则解析,任一 A/AAAA 落内网/元数据
+    段即拒**(挡"注册一个指向内网的域名"绕过 IP 守卫的 SSRF)。解析失败 →
+    fail-closed(拒)。
+
+    ⚠️ 残留:DNS rebinding(校验通过后、连接前改解析)需把连接**钉死到已校验的
+    IP** 才能根治;正式上线前应叠**网络层出口管控**(只禁 RFC1918/链路本地)做纵深
+    防御(见 docs/federation.md)。
+
+    配置的 seed peer **不**走这个(运营者自负其责,允许 http://localhost 等本地联调)。
+    ``resolve`` 可注入,默认 ``socket.getaddrinfo``(便于测试不起真 DNS)。
     """
     try:
         u = urlsplit(url)
@@ -158,16 +175,26 @@ def _is_safe_gossip_url(url: str) -> bool:
     host = (u.hostname or "").lower()
     if not host or host == "localhost" or host.endswith(".local"):
         return False
+    # 原始 IP:直接判段(无需解析)。
     try:
-        ip = ipaddress.ip_address(host)
+        return not _ip_is_internal(ipaddress.ip_address(host))
     except ValueError:
-        # 域名:无法在不解析的情况下断定;已要求 https + 非 localhost/.local。
-        # (完整防护需解析 + IP 校验 + 防 DNS rebinding,留作后续硬化。)
-        return True
-    return not (
-        ip.is_private or ip.is_loopback or ip.is_link_local
-        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-    )
+        pass
+    # 域名:解析,任一返回 IP 落内网即拒;解析失败/无结果 → fail-closed。
+    try:
+        infos = resolve(host, None)
+    except Exception:  # noqa: BLE001
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError, TypeError):
+            return False   # 解析结果不可解读 → 当不安全
+        if _ip_is_internal(ip):
+            return False
+    return True
 
 
 def federate_once(
@@ -176,6 +203,7 @@ def federate_once(
     *,
     now_ms_override: int = 0,
     max_peers: int = _MAX_GOSSIP_PEERS,
+    resolve: Callable[..., list] = socket.getaddrinfo,
 ) -> Dict[str, Dict[str, Any]]:
     """对 peer 图做 **BFS 传递发现**:从 seed 出发,拉每个 peer 的任务 + 它的
     peer 列表(gossip 成员),把新 peer 入队继续展开,直到无新 peer 或撞
@@ -207,7 +235,7 @@ def federate_once(
             nxt = p.rstrip("/")
             if (
                 nxt and nxt not in seen and nxt not in queue
-                and _is_safe_gossip_url(nxt)
+                and _is_safe_gossip_url(nxt, resolve=resolve)
                 and len(seen) + len(queue) < max_peers
             ):
                 queue.append(nxt)

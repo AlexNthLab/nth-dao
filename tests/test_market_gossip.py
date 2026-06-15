@@ -25,6 +25,17 @@ C_URL = "https://node-c.example"
 B_URL = "https://node-b.example"
 
 
+def _resolve_public(host, *a, **k):
+    """测试用 DNS:把 *.example 假域名映射到一个公网 IP(过 SSRF 校验);
+    含 'internal' 的域名映射到内网 IP(被 SSRF 拒)。不起真 DNS。"""
+    ip = "10.0.0.9" if "internal" in host else "93.184.216.34"
+    return [(2, 1, 6, "", (ip, 0))]
+
+
+def _resolve_never(host, *a, **k):  # 断言:原始 IP/localhost 分支不该触发解析
+    raise AssertionError(f"不应解析 {host}(原始 IP/localhost 应短路)")
+
+
 def test_gossip_transitive_discovery(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("NTH_FED_PEERS", raising=False)
 
@@ -58,7 +69,7 @@ def test_gossip_transitive_discovery(tmp_path: Path, monkeypatch) -> None:
     assert fetch_peer_list(B_URL, http_get) == [C_URL]
 
     # A 只把 B 当 seed → BFS 经 B 的 peer 列表传递发现 C → 拉到 C 的任务。
-    entries = federate_once([B_URL], http_get)
+    entries = federate_once([B_URL], http_get, resolve=_resolve_public)
     assert aid in entries, "应经 B 传递发现(gossip)到 C 的任务"
     assert entries[aid]["source"].rstrip("/") == C_URL
 
@@ -85,7 +96,8 @@ def test_gossip_bounded_and_loop_safe(tmp_path: Path, monkeypatch) -> None:
         full = u.path + (f"?{u.query}" if u.query else "")
         return (c if "node-c" in u.netloc else b).get(full).json()
 
-    entries = federate_once([B_URL], http_get, max_peers=8)  # 有环也必须收敛
+    entries = federate_once(
+        [B_URL], http_get, max_peers=8, resolve=_resolve_public)  # 有环也必须收敛
     assert aid in entries
 
 
@@ -114,20 +126,52 @@ def test_gossip_rejects_internal_urls_ssrf(tmp_path: Path, monkeypatch) -> None:
             return b.get(full).json()
         raise AssertionError(f"SSRF:poller 连了被禁地址 {url}")
 
-    entries = federate_once([B_URL], http_get)
+    # 原始 IP/localhost 必须在解析前短路:_resolve_never 被调到就炸。
+    entries = federate_once([B_URL], http_get, resolve=_resolve_never)
     assert entries == {}  # B 没任务,且坏 peer 一个都没被连
+    assert all("node-b" in urlsplit(u).netloc for u in fetched)
+
+
+def test_gossip_rejects_domain_resolving_to_internal(tmp_path: Path, monkeypatch) -> None:
+    # Option A 核心:peer 报一个**域名**,但它解析到内网 IP → BFS 必须不连。
+    monkeypatch.delenv("NTH_FED_PEERS", raising=False)
+    b_ws = tmp_path / "b"
+    (b_ws / "federation").mkdir(parents=True, exist_ok=True)
+    # 域名本身看起来无害(https + 非 localhost),但 _resolve_public 把含
+    # 'internal' 的域名解析到 10.0.0.9 → 应被拒。
+    (b_ws / "federation" / "peers.json").write_text(
+        json.dumps(["https://db-internal.example"]), encoding="utf-8")
+    b = TestClient(create_app(b_ws, require_console_auth=False))
+
+    fetched: list = []
+
+    def http_get(url: str):
+        fetched.append(url)
+        u = urlsplit(url)
+        if "node-b" in u.netloc:
+            return b.get(u.path + (f"?{u.query}" if u.query else "")).json()
+        raise AssertionError(f"SSRF:连了解析到内网的域名 {url}")
+
+    entries = federate_once([B_URL], http_get, resolve=_resolve_public)
+    assert entries == {}
     assert all("node-b" in urlsplit(u).netloc for u in fetched)
 
 
 def test_is_safe_gossip_url_unit() -> None:
     from nth_dao.web.market_federation_poll import _is_safe_gossip_url as ok
-    assert ok("https://nodeC.trycloudflare.com")
-    assert ok("https://1.2.3.4/")            # 公网 IP
-    assert not ok("http://nodeC.example")    # 非 https
-    assert not ok("https://localhost/")
-    assert not ok("https://127.0.0.1/")
-    assert not ok("http://169.254.169.254/")  # 链路本地 + http
-    assert not ok("https://10.0.0.5/")        # 私网
-    assert not ok("https://192.168.1.1/")
-    assert not ok("https://[::1]/")           # ipv6 loopback
-    assert not ok("not a url at all")
+    # 公网:域名解析到公网 IP / 原始公网 IP → 放行。
+    assert ok("https://node-pub.example", resolve=_resolve_public)
+    assert ok("https://1.2.3.4/")             # 原始公网 IP,不解析
+    # 域名解析到内网 → 拒(Option A 新增防护)。
+    assert not ok("https://db-internal.example", resolve=_resolve_public)
+    # 解析失败 → fail-closed。
+    assert not ok("https://nx.example", resolve=_resolve_never)
+    # 非 https / localhost / 原始内网 IP → 解析前即拒。
+    assert not ok("http://node-pub.example", resolve=_resolve_never)
+    assert not ok("https://localhost/", resolve=_resolve_never)
+    assert not ok("https://127.0.0.1/", resolve=_resolve_never)
+    assert not ok("http://169.254.169.254/", resolve=_resolve_never)
+    assert not ok("https://10.0.0.5/", resolve=_resolve_never)
+    assert not ok("https://192.168.1.1/", resolve=_resolve_never)
+    assert not ok("https://[::1]/", resolve=_resolve_never)   # ipv6 loopback
+    assert not ok("not a url at all", resolve=_resolve_never)
