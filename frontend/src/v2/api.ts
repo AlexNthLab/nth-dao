@@ -575,6 +575,36 @@ export async function claimTask(
   return { status: res.status, body };
 }
 
+/** 跨 DAO 认领(XDAO-3):联邦发现的任务,本地 hub 让本地 agent 自签 →
+ *  转投到公告主 DAO 的 /claim-foreign 落 CAS。来源由 hub 从联邦缓存取。 */
+export async function claimFederatedTask(
+  announcementId: string,
+  agentDid: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(
+    `${BASE}/market/federated/claim`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...authHeader(),
+      },
+      body: JSON.stringify({
+        announcement_id: announcementId, agent_did: agentDid,
+      }),
+    },
+  );
+  let body: Record<string, unknown>;
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  return { status: res.status, body };
+}
+
 /* ── 频道(收编自 8765 群聊,P3)──────────────────────────────── */
 export const listChannels = (s?: AbortSignal) =>
   getJson<Channel[]>("/channels", s);

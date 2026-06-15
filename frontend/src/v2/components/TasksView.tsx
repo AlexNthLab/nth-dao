@@ -9,7 +9,8 @@
  */
 import { useEffect, useState } from "react";
 import {
-  announceTask, claimTask, fetchAgents, listOpenTasks, listTaskCategories,
+  announceTask, claimFederatedTask, claimTask, fetchAgents, listOpenTasks,
+  listTaskCategories,
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
@@ -118,11 +119,15 @@ export function TasksView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
-  async function handleClaim(annId: string) {
+  async function handleClaim(annId: string, federated = false) {
     if (!claimAgent || claimingId) return;
     setClaimingId(annId);
+    const doClaim = () =>
+      federated
+        ? claimFederatedTask(annId, claimAgent)
+        : claimTask(annId, claimAgent);
     try {
-      let r = await claimTask(annId, claimAgent);
+      let r = await doClaim();
       // 刚 spawn 的 agent 头一两秒还没轮询载入自己的 cap_token,认领会 401
       // not-yet-authorized。退避自动重试(最多 ~4s),省得让用户手动重点。
       for (let i = 0; i < 6; i++) {
@@ -131,9 +136,12 @@ export function TasksView() {
           && JSON.stringify(r.body).includes("not-yet-authorized");
         if (!isStartup) break;
         await new Promise((res) => setTimeout(res, 700));
-        r = await claimTask(annId, claimAgent);
+        r = await doClaim();
       }
-      const result = (r.body.result as Record<string, unknown>) || {};
+      // 本地 claim 回 {result:{claimed,receipt_id}};跨 DAO claim-foreign 回
+      // {claimed,receipt_id,...} 直挂在 body。两种都认。
+      const result =
+        (r.body.result as Record<string, unknown>) || r.body;
       if (r.status === 200 && result.claimed) {
         toast.push(
           `${t("已认领 · 收据", "Claimed · receipt")} ${String(result.receipt_id || "").slice(0, 12)}…`,
@@ -447,27 +455,25 @@ export function TasksView() {
                     <button
                       className="btn"
                       disabled={
-                        !claimAgent
-                        || claimingId === task.announcement_id
-                        || !!task.federated
+                        !claimAgent || claimingId === task.announcement_id
                       }
                       title={
-                        task.federated
-                          ? t(
-                              "联邦任务的认领需在来源 DAO 进行(本地无认领权威)",
-                              "Federated tasks must be claimed at their source DAO (no local claim authority)",
-                            )
-                          : claimAgent
-                            ? t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
-                            : t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
+                        !claimAgent
+                          ? t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
+                          : task.federated
+                            ? t(
+                                "跨 DAO 认领:本地 agent 自签收据 → 回投到来源 DAO 落地",
+                                "Cross-DAO claim: your local agent signs, routed to the source DAO",
+                              )
+                            : t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
                       }
                       style={{ marginLeft: "auto" }}
-                      onClick={() => void handleClaim(task.announcement_id)}
+                      onClick={() => void handleClaim(task.announcement_id, task.federated)}
                     >
                       {claimingId === task.announcement_id
                         ? t("认领中…", "Claiming…")
                         : task.federated
-                          ? t("源端认领", "at source")
+                          ? t("跨 DAO 认领", "claim (cross-DAO)")
                           : t("认领", "Claim")}
                     </button>
                   </div>

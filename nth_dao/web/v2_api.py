@@ -1879,6 +1879,14 @@ class ForeignClaimBody(BaseModel):
     receipt: Dict[str, Any]
 
 
+class FederatedClaimBody(BaseModel):
+    """跨 DAO 认领·本地编排入参(XDAO-3)。source_peer 刻意**不**收 —— 来源
+    取自本节点联邦缓存(可信、已配置的 peer),防被诱导转投到攻击者节点。"""
+
+    announcement_id: str
+    agent_did: str
+
+
 # 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
 # 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
 _CHANNEL_DISPATCH_MAX = 16
@@ -2643,6 +2651,111 @@ def register_v2_routes(app: FastAPI) -> None:
             "receipt_id": outcome.claim_record.get("receipt_id", ""),
             "foreign": True,
         }
+
+    @app.post("/api/v2/market/federated/claim")
+    async def v2_market_federated_claim(
+        body: FederatedClaimBody, request: Request,
+    ) -> Any:
+        """跨 DAO 认领·本地 hub 编排(XDAO-3):把 XDAO-1/2 串成一键。
+
+        联邦发现的外部任务 → 本地 agent ``claim-sign`` 自签 cap_token+收据 →
+        转投到公告**主 DAO** 的 ``/claim-foreign`` 落 CAS → 回传结果。
+        来源取自本节点**联邦缓存**(已配置 peer,SSRF-safe),不信请求体。
+        """
+        import asyncio
+        import urllib.error
+        import urllib.request
+
+        from nth_dao.cap_token import encode_authorization_header
+
+        sup = _state_supervisor(request)
+        if sup is None:
+            raise HTTPException(status_code=503, detail="agent supervisor unavailable")
+        matching = [
+            r for r in sup.list_agents()
+            if r.did == body.agent_did and r.a2a_port is not None and r.alive
+        ]
+        if not matching:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no live supervised agent did={body.agent_did!r}")
+        rec = matching[0]
+
+        # 公告全文 + 来源:取自联邦缓存(已双层验签 + 来源=配置 peer)。
+        cache = _state_market_fed_cache(request)
+        entry = (
+            cache.snapshot().get(body.announcement_id) if cache is not None else None
+        )
+        if entry is None:
+            raise HTTPException(
+                status_code=404,
+                detail="federated announcement not in cache (refresh Tasks first)")
+        ann = entry["ann"]
+        source_peer = str(entry.get("source") or "").rstrip("/")
+        if not source_peer:
+            raise HTTPException(
+                status_code=409, detail="unknown source peer for this announcement")
+
+        # 调用方鉴权:agent 自己的 spawn cap_token(与 ask/claim 同款注入)。
+        store = _state_cap_tokens_store(request)
+        token_id = getattr(rec, "cap_token_id", None)
+        auth_token = (
+            store.get(token_id) if (token_id and store is not None) else None
+        )
+        if not isinstance(auth_token, dict):
+            raise HTTPException(
+                status_code=409,
+                detail=f"agent {body.agent_did!r} has no cap_token; re-spawn it")
+        auth_hdr = f"CapToken {encode_authorization_header(auth_token)}"
+        timeout = _A2A_METHOD_TIMEOUTS.get("claim", _A2A_DEFAULT_TIMEOUT_S)
+
+        def _post(url: str, payload: Dict[str, Any], *, auth: bool, to: float):
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json; charset=utf-8",
+                "Content-Length": str(len(data)),
+                "Accept": "application/json",
+            }
+            if auth:
+                headers["Authorization"] = auth_hdr
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=to) as resp:  # noqa: S310
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.read()
+
+        # 1) 本地 agent claim-sign(自签 cap_token + ClaimReceipt)。
+        sign_url = f"http://127.0.0.1:{rec.a2a_port}/a2a/claim-sign"
+        try:
+            s_status, s_body = await asyncio.to_thread(
+                _post, sign_url, {"announcement": ann.to_dict()},
+                auth=True, to=timeout,
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HTTPException(status_code=502, detail=f"claim-sign dispatch failed: {exc}")
+        s_content = _decode_or_passthrough(s_body)
+        if s_status != 200 or not isinstance(s_content, dict):
+            return JSONResponse(
+                status_code=s_status if s_status >= 400 else 502, content=s_content)
+        result = s_content.get("result") or {}
+        cap_token, receipt = result.get("cap_token"), result.get("receipt")
+        if not isinstance(cap_token, dict) or not isinstance(receipt, dict):
+            raise HTTPException(
+                status_code=502, detail="agent claim-sign returned no cap_token/receipt")
+
+        # 2) 转投到主 DAO 的 /claim-foreign 落 CAS。
+        fwd_url = f"{source_peer}/api/v2/market/{body.announcement_id}/claim-foreign"
+        try:
+            f_status, f_body = await asyncio.to_thread(
+                _post, fwd_url, {"cap_token": cap_token, "receipt": receipt},
+                auth=False, to=15.0,
+            )
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HTTPException(
+                status_code=502, detail=f"forward to source peer failed: {exc}")
+        return JSONResponse(
+            status_code=f_status, content=_decode_or_passthrough(f_body))
 
     @app.post("/api/v2/market/{announcement_id}/claim")
     async def v2_market_claim(
