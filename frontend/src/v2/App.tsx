@@ -45,6 +45,7 @@ import { MissionList, type NewMissionDraft } from "./components/MissionList";
 import { RulesView } from "./components/RulesView";
 import { AuditView } from "./components/AuditView";
 import { GovernanceView } from "./components/GovernanceView";
+import { DelegateView } from "./components/DelegateView";
 import { StatusBar } from "./components/StatusBar";
 import { ToastProvider, useToast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
@@ -993,6 +994,8 @@ function AppInner() {
     view = <AuditView />;
   } else if (active === "governance") {
     view = <GovernanceView />;
+  } else if (active === "delegate") {
+    view = <DelegateView />;
   } else {
     view = (
       <>

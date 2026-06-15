@@ -593,6 +593,41 @@ export const getEvidence = (announcementId: string, s?: AbortSignal) =>
 export const getGovernancePolicy = (s?: AbortSignal) =>
   getJson<GovernancePolicyView>("/governance/policy", s);
 
+// ── 授权收件箱(consent 层):cap-token 授予请求 ─────────────────────────
+
+export interface CapRequestSummary {
+  request_id: string;
+  requester_did: string;
+  capabilities: string[];
+  reason: string;
+  scope: Record<string, unknown>;
+  status: string;
+  decided_by_did: string;
+  decided_at_ms: number;
+  token_id?: string;
+  token_not_after?: number;
+}
+
+/** 列出能力授予请求(已批准项只含 token_id 元数据,不含 token 全文)。 */
+export const listCapRequests = (s?: AbortSignal) =>
+  getJson<CapRequestSummary[]>("/cap-requests", s);
+
+/** 批准:本节点签发 cap_token(token-gated,带 Bearer)。 */
+export async function approveCapRequest(
+  requestId: string,
+): Promise<{ granted: boolean; token_id: string; subject_did: string }> {
+  return postJson(`/cap-requests/${encodeURIComponent(requestId)}/approve`);
+}
+
+/** 拒绝(可带原因,token-gated)。 */
+export async function denyCapRequest(
+  requestId: string,
+  reason = "",
+): Promise<{ denied: boolean }> {
+  return postJson(
+    `/cap-requests/${encodeURIComponent(requestId)}/deny`, { reason });
+}
+
 /** 发布一条任务公告(本节点签名)。 */
 export async function announceTask(
   body: AnnounceTaskInput,
