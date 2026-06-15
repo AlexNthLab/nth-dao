@@ -1213,6 +1213,22 @@ def _state_spine(request: Request) -> Optional[Any]:
         return None
 
 
+def _verified_spine_events(request: Request) -> Optional[list]:
+    """hub spine 的**已验证**事件列表(Phase 4c 读端统一入口)。
+
+    spine 缺失 → None(调用方返回空视图);链完整性校验失败 → 503,**绝不**把可能
+    被篡改的数据投影出去(fail-closed)。校验通过才回放投影。
+    """
+    spine = _state_spine(request)
+    if spine is None:
+        return None
+    ok, why = spine.verify_chain()
+    if not ok:
+        raise HTTPException(
+            status_code=503, detail=f"spine integrity check failed: {why}")
+    return list(spine.read_all())
+
+
 def _state_receipts_store(request: Request) -> Optional[Any]:
     """ReceiptStore from app.state.nth.receipts. Returns None if
     state isn't wired. """
@@ -1898,6 +1914,14 @@ class FederatedClaimBody(BaseModel):
 
     announcement_id: str
     agent_did: str
+
+
+class DisputeStatementBody(BaseModel):
+    """争议声明提交体(Phase 4c):当事方**预签**的争议声明(open/evidence/resolve)。
+
+    statement 是自包含、自验证的签名 dict;服务端 record_dispute 验签后落 spine。"""
+
+    statement: Dict[str, Any]
 
 
 # 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
@@ -2678,6 +2702,121 @@ def register_v2_routes(app: FastAPI) -> None:
             "claimant_did": outcome.claim_record.get("claimant_did", ""),
             "receipt_id": outcome.claim_record.get("receipt_id", ""),
             "foreign": True,
+        }
+
+    # ── 争议 / 审计 / 治理(Phase 4c:把 spine 投影接进 HTTP)──────────────
+    # 写:接受当事方**预签**的争议声明,record_dispute 落 hub spine。走正常鉴权
+    #   (公网 hub auth 开时 token-gated;不新开匿名写口)。
+    # 读:对 hub spine verify_chain 后回放投影(GET 走 /api/v2 匿名读旁路)。
+
+    @app.post("/api/v2/disputes")
+    def v2_dispute_record(
+        body: DisputeStatementBody, request: Request,
+    ) -> Dict[str, Any]:
+        """记录一条已签争议声明(open/evidence/resolve)到 hub spine。
+
+        crypto-authorized:声明自带 signer 签名,record_dispute 验签后落盘,验不过
+        → 400。仲裁**授权**(谁有权 resolve)不在此拦,由读端按当前治理策略标注
+        (未授权的 resolve 记入可审计但不被采信)。
+        """
+        from nth_dao.dispute import record_dispute
+        spine = _state_spine(request)
+        if spine is None:
+            raise HTTPException(
+                status_code=503, detail="spine unavailable; cannot record dispute")
+        try:
+            ev = record_dispute(spine, body.statement)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        stmt = body.statement
+        return {
+            "recorded": True,
+            "dispute_id": str(stmt.get("dispute_id", "")),
+            "type": str(stmt.get("type", "")),
+            "seq": ev.seq,
+        }
+
+    @app.get("/api/v2/disputes")
+    def v2_disputes_list(request: Request) -> List[Dict[str, Any]]:
+        """列出本节点 spine 上的争议(DisputeProjection 回放)。匿名读。
+
+        已裁决的标 ``arbiter_authorized``:据**当前治理策略**判定裁决者是否有权
+        (闭合 Phase 3 缺口)。policy 未立宪时为 None(无从判定)。
+        """
+        from nth_dao.dispute import DisputeProjection
+        from nth_dao.governance import (
+            ACTION_DISPUTE_RESOLVE, PolicyProjection, can,
+        )
+        events = _verified_spine_events(request)
+        if events is None:
+            return []
+        dproj = DisputeProjection()
+        gproj = PolicyProjection()
+        for ev in events:
+            dproj.apply(ev)
+            gproj.apply(ev)
+        out: List[Dict[str, Any]] = []
+        for rec in dproj.all():
+            authorized = None
+            if rec.status == "resolved" and gproj.established and rec.arbiter_did:
+                authorized = can(
+                    gproj.policy, rec.arbiter_did, ACTION_DISPUTE_RESOLVE).allowed
+            out.append({
+                "dispute_id": rec.dispute_id,
+                "announcement_id": rec.announcement_id,
+                "opener_did": rec.opener_did,
+                "status": rec.status,
+                "ruling": rec.ruling,
+                "arbiter_did": rec.arbiter_did,
+                "arbiter_authorized": authorized,
+                "statement_count": len(rec.statements),
+            })
+        return out
+
+    @app.get("/api/v2/market/{announcement_id}/evidence")
+    def v2_market_evidence(
+        announcement_id: str, request: Request,
+    ) -> Dict[str, Any]:
+        """回放一条公告的证据链(audit.reconstruct_evidence)。匿名读、逐项重验。"""
+        from nth_dao.audit import reconstruct_evidence
+        events = _verified_spine_events(request)
+        if events is None:
+            return {
+                "announcement_id": announcement_id,
+                "all_verified": True, "items": [],
+            }
+        chain = reconstruct_evidence(events, announcement_id)
+        return {
+            "announcement_id": announcement_id,
+            "all_verified": chain.all_verified,
+            "items": [
+                {
+                    "seq": i.seq, "type": i.type, "author_did": i.author_did,
+                    "ts_ms": i.ts_ms, "verified": i.verified, "summary": i.summary,
+                }
+                for i in chain.items
+            ],
+        }
+
+    @app.get("/api/v2/governance/policy")
+    def v2_governance_policy(request: Request) -> Dict[str, Any]:
+        """当前生效治理策略(PolicyProjection 回放 governance 事件)。匿名读。"""
+        from nth_dao.governance import PolicyProjection
+        events = _verified_spine_events(request)
+        empty = {"roles": {}, "grants": {}, "constraints": {}}
+        if events is None:
+            return {
+                "established": False, "version": 0,
+                "founder_did": "", "policy": empty,
+            }
+        gproj = PolicyProjection()
+        for ev in events:
+            gproj.apply(ev)
+        return {
+            "established": gproj.established,
+            "version": gproj.version,
+            "founder_did": gproj.founder_did,
+            "policy": gproj.policy.to_dict(),
         }
 
     @app.post("/api/v2/market/federated/claim")
