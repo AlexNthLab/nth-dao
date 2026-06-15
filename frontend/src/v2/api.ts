@@ -539,6 +539,60 @@ export async function listTaskCategories(
   return getJson<TaskCategory[]>("/market/categories", signal);
 }
 
+// ── Phase 4c/5:审计 / 争议 / 治理(消费 spine 投影端点)─────────────────
+
+export interface DisputeSummary {
+  dispute_id: string;
+  announcement_id: string;
+  opener_did: string;
+  status: string;
+  ruling: Record<string, unknown>;
+  arbiter_did: string;
+  arbiter_authorized: boolean | null;
+  statement_count: number;
+}
+
+export interface EvidenceItem {
+  seq: number;
+  type: string;
+  author_did: string;
+  ts_ms: number;
+  verified: boolean;
+  summary: string;
+}
+
+export interface EvidenceChain {
+  announcement_id: string;
+  all_verified: boolean;
+  items: EvidenceItem[];
+}
+
+export interface GovernancePolicyView {
+  established: boolean;
+  version: number;
+  founder_did: string;
+  policy: {
+    roles: Record<string, string[]>;
+    grants: Record<string, string[]>;
+    constraints: Record<string, unknown>;
+  };
+}
+
+/** 列出本节点 spine 上的争议(DisputeProjection 回放)。 */
+export const listDisputes = (s?: AbortSignal) =>
+  getJson<DisputeSummary[]>("/disputes", s);
+
+/** 回放一条公告的证据链(逐项独立验证)。 */
+export const getEvidence = (announcementId: string, s?: AbortSignal) =>
+  getJson<EvidenceChain>(
+    `/market/${encodeURIComponent(announcementId)}/evidence`,
+    s,
+  );
+
+/** 当前生效治理策略(PolicyProjection 回放)。 */
+export const getGovernancePolicy = (s?: AbortSignal) =>
+  getJson<GovernancePolicyView>("/governance/policy", s);
+
 /** 发布一条任务公告(本节点签名)。 */
 export async function announceTask(
   body: AnnounceTaskInput,

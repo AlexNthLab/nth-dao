@@ -43,6 +43,8 @@ import { LangProvider, useLang } from "./i18n";
 import { IconNav } from "./components/IconNav";
 import { MissionList, type NewMissionDraft } from "./components/MissionList";
 import { RulesView } from "./components/RulesView";
+import { AuditView } from "./components/AuditView";
+import { GovernanceView } from "./components/GovernanceView";
 import { StatusBar } from "./components/StatusBar";
 import { ToastProvider, useToast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
@@ -987,6 +989,10 @@ function AppInner() {
     );
   } else if (active === "channels") {
     view = <ChannelsView />;
+  } else if (active === "audit") {
+    view = <AuditView />;
+  } else if (active === "governance") {
+    view = <GovernanceView />;
   } else {
     view = (
       <>
