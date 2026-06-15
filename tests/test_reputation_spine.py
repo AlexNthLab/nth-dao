@@ -72,6 +72,22 @@ def test_order_independent_dispute_before_claim(tmp_path: Path) -> None:
     assert ar.tasks_claimed == 1 and ar.disputed_claims == 1 and ar.score == 0
 
 
+def test_published_and_claimed_dedup_by_announcement(tmp_path: Path) -> None:
+    # 对抗审查修复:同一公告出现两条 announce / claim 事件 → 各只计一次(对称去重)。
+    node, pub, agent = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "spine.jsonl", node)
+    a1 = sign_announcement(publisher=pub, title="t", capability_set=["x"])
+    spine.append("market.announce", a1.to_dict())
+    spine.append("market.announce", a1.to_dict())                       # 重复 announce
+    spine.append("market.claim", _claim_payload(a1.announcement_id, agent, pub))
+    spine.append("market.claim", _claim_payload(a1.announcement_id, agent, pub))  # 重复 claim
+
+    proj = ReputationProjection()
+    replay(spine.read_all(), proj)
+    assert proj.get(pub.as_did()).tasks_published == 1
+    assert proj.get(agent.as_did()).tasks_claimed == 1
+
+
 def test_unknown_did_zero(tmp_path: Path) -> None:
     spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
     proj = ReputationProjection()

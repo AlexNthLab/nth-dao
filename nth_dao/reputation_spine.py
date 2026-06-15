@@ -50,8 +50,10 @@ class ReputationProjection(Projection):
     """
 
     def __init__(self) -> None:
-        self._claimed: Dict[str, Set[str]] = {}   # did → {announcement_id}
-        self._published: Dict[str, int] = {}
+        # 承接 / 发布都按 announcement_id **集合**累计 → 同一公告重复事件只计一次
+        # (幂等、两侧对称;计数器会被重复 announce/claim 事件重复计数)。
+        self._claimed: Dict[str, Set[str]] = {}     # did → {announcement_id}
+        self._published: Dict[str, Set[str]] = {}   # did → {announcement_id}
         self._disputed_anns: Set[str] = set()
 
     def reset(self) -> None:
@@ -61,26 +63,26 @@ class ReputationProjection(Projection):
 
     def apply(self, event: SpineEvent) -> None:
         p = event.payload if isinstance(event.payload, dict) else {}
+        aid = p.get("announcement_id")
+        if not (isinstance(aid, str) and aid):
+            return
         if event.type == EVENT_MARKET_CLAIM:
             cl = p.get("claimant_did")
-            aid = p.get("announcement_id")
-            if isinstance(cl, str) and cl and isinstance(aid, str) and aid:
+            if isinstance(cl, str) and cl:
                 self._claimed.setdefault(cl, set()).add(aid)
         elif event.type == EVENT_MARKET_ANNOUNCE:
             pub = p.get("publisher_did")
             if isinstance(pub, str) and pub:
-                self._published[pub] = self._published.get(pub, 0) + 1
+                self._published.setdefault(pub, set()).add(aid)
         elif event.type in _DISPUTE_EVENTS:
-            aid = p.get("announcement_id")
-            if isinstance(aid, str) and aid:
-                self._disputed_anns.add(aid)
+            self._disputed_anns.add(aid)
 
     def _record(self, did: str) -> ReputationRecord:
         claimed = self._claimed.get(did, set())
         return ReputationRecord(
             did=did,
             tasks_claimed=len(claimed),
-            tasks_published=self._published.get(did, 0),
+            tasks_published=len(self._published.get(did, set())),
             disputed_claims=len(claimed & self._disputed_anns),
         )
 
