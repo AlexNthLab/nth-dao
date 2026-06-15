@@ -101,13 +101,13 @@ export default function App() {
 /** 页签持久化的 localStorage 键(每 origin 私有)。 */
 const ACTIVE_NAV_KEY = "nth.v2.activeNav";
 
-/** 合法 NavId 白名单——存进来的脏值/旧版本遗留值一律不认,降级 blackboard。 */
+/** 合法 NavId 白名单——存进来的脏值/旧版本遗留值一律不认,降级默认页。 */
 const VALID_NAV_IDS: ReadonlySet<NavId> = new Set<NavId>([
   "blackboard", "inbox", "missions", "tasks", "rules",
-  "agents", "audit", "governance", "delegate", "chat",
+  "agents", "channels", "audit", "governance", "delegate", "reputation", "chat",
 ]);
 
-/** 从 localStorage 读回上次页签;无值/脏值/禁读一律降级 blackboard。 */
+/** 从 localStorage 读回上次页签;无值/脏值/禁读一律降级默认页。 */
 function loadActiveNav(): NavId {
   try {
     const v = localStorage.getItem(ACTIVE_NAV_KEY);
@@ -115,8 +115,13 @@ function loadActiveNav(): NavId {
   } catch {
     /* 隐私模式禁读 —— 降级默认值 */
   }
-  return "blackboard";
+  return DEFAULT_NAV;
 }
+
+/** 默认落地(2026 重排):从 Blackboard(实时监控,已降级)改为 Decisions ——
+ * AI-first 下人的首屏应是"需要你拍板的事",而非持续监工。空也无妨(= 没有
+ * 待办,本身就是好消息)。 */
+const DEFAULT_NAV: NavId = "inbox";
 
 function AppInner() {
   /* Default landing = Blackboard (2026-06-14 重定:A2A 任务优先).
