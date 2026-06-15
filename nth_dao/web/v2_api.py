@@ -1229,6 +1229,64 @@ def _verified_spine_events(request: Request) -> Optional[list]:
     return list(spine.read_all())
 
 
+def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
+    """本地开放公告列表(Phase 2d:**可切事实源**)。
+
+    默认从 feed+ClaimStore(现状,零风险);``NTH_MARKET_READ_SOURCE=spine`` 时改从
+    **spine 投影**读(须先 backfill + ``/market/reconcile`` 显示 in_sync 再切)。spine
+    缺失 / 链损坏 → **fail-safe 回退 feed**,绝不中断市场。两路口径一致(未过期 ∩
+    未认领)、同 ``passes`` 过滤、同上限 500、新→老。
+    """
+    ws = _state_workspace(request)
+    if ws is None:
+        return []
+    source = os.environ.get("NTH_MARKET_READ_SOURCE", "feed").strip().lower()
+
+    if source == "spine":
+        spine = _state_spine(request)
+        if spine is not None:
+            ok, _why = spine.verify_chain()
+            if ok:
+                from nth_dao.market.projection import MarketAnnounceProjection
+                from nth_dao.spine import replay
+                proj = MarketAnnounceProjection()
+                replay(spine.read_all(), proj)
+                spine_local: List[Dict[str, Any]] = []
+                for ann in proj.open():
+                    if not passes(ann):
+                        continue
+                    d = ann.to_dict()
+                    d["claimed"] = False
+                    spine_local.append(d)
+                spine_local.sort(key=lambda d: -(d.get("published_at_ms") or 0))
+                return spine_local[:500]
+            logger.warning(
+                "market read=spine but chain invalid; falling back to feed")
+        # spine 不可用 → 落回 feed(下方)
+
+    if not (ws / "market_feed" / "announcements.jsonl").exists():
+        return []
+    from nth_dao.market.claim import ClaimStore
+    from nth_dao.market.feed import MarketFeed
+    try:
+        feed = MarketFeed(ws)
+        claims = ClaimStore(ws)
+    except OSError as e:  # noqa: BLE001
+        logger.debug("v2_market_open: market store unavailable: %s", e)
+        return []
+    local: List[Dict[str, Any]] = []
+    for ann in feed.poll(since_seq=-1, limit=500).announcements:
+        if claims.is_claimed(ann.announcement_id):
+            continue
+        if not passes(ann):
+            continue
+        d = ann.to_dict()
+        d["claimed"] = False
+        local.append(d)
+    local.reverse()   # 新→老
+    return local
+
+
 def _state_receipts_store(request: Request) -> Optional[Any]:
     """ReceiptStore from app.state.nth.receipts. Returns None if
     state isn't wired. """
@@ -2424,8 +2482,6 @@ def register_v2_routes(app: FastAPI) -> None:
           q           — 标题/详述子串搜索(大小写不敏感)。
         多个条件取交集。空=不过滤。
         """
-        from nth_dao.market.claim import ClaimStore
-        from nth_dao.market.feed import MarketFeed
         from nth_dao.market.vocabulary import normalize_capability
 
         ws = _state_workspace(request)
@@ -2453,27 +2509,9 @@ def register_v2_routes(app: FastAPI) -> None:
                 return False
             return True
 
-        # 本地 feed:存在才读(避免只读 GET 在从不发活的节点 mkdir)。
-        # poll(-1) 默认跳过期;再排已认领 → 只剩"可认领"。上限 500;FIFO→翻新→老。
-        if (ws / "market_feed" / "announcements.jsonl").exists():
-            try:
-                feed = MarketFeed(ws)
-                claims = ClaimStore(ws)
-            except OSError as e:  # noqa: BLE001
-                logger.debug("v2_market_open: market store unavailable: %s", e)
-                feed = claims = None  # type: ignore[assignment]
-            if feed is not None:
-                local: List[Dict[str, Any]] = []
-                for ann in feed.poll(since_seq=-1, limit=500).announcements:
-                    if claims.is_claimed(ann.announcement_id):
-                        continue
-                    if not _passes(ann):
-                        continue
-                    d = ann.to_dict()
-                    d["claimed"] = False
-                    local.append(d)
-                local.reverse()  # 新→老
-                out.extend(local)
+        # 本地 open 集合(Phase 2d:事实源可切 feed→spine,默认 feed,fail-safe
+        # 回退;口径与原逻辑一致。见 _market_local_open)。
+        out.extend(_market_local_open(request, _passes))
 
         # 联邦合并(FED-2):对端发现到的公告(已双层验签)。本地优先去重;
         # 同套筛选;标 federated + source_peer。认领权威在主 DAO,这里只做发现。
@@ -2517,6 +2555,32 @@ def register_v2_routes(app: FastAPI) -> None:
             ({"context": k, "count": v} for k, v in counts.items()),
             key=lambda x: (-x["count"], x["context"]),
         )
+
+    @app.get("/api/v2/market/reconcile")
+    def v2_market_reconcile(request: Request) -> Dict[str, Any]:
+        """新旧事实源对账(Phase 2d):feed+ClaimStore 的 open 集 vs spine 投影。
+
+        切读前的"双跑对账"诊断:``in_sync=true`` 才宜把 NTH_MARKET_READ_SOURCE
+        切到 spine。``active_source`` 标注当前生效源。spine/feed 缺失 → available=false。
+        """
+        from nth_dao.market.claim import ClaimStore
+        from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.reconcile import reconcile_market
+
+        ws = _state_workspace(request)
+        spine = _state_spine(request)
+        source = os.environ.get("NTH_MARKET_READ_SOURCE", "feed").strip().lower()
+        if ws is None or spine is None or not (
+            ws / "market_feed" / "announcements.jsonl"
+        ).exists():
+            return {
+                "available": False, "active_source": source,
+                "reason": "spine or market feed unavailable",
+            }
+        rep = reconcile_market(MarketFeed(ws), ClaimStore(ws), spine)
+        rep["available"] = True
+        rep["active_source"] = source
+        return rep
 
     @app.post("/api/v2/market/announce")
     def v2_market_announce(
