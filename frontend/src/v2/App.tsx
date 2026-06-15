@@ -46,6 +46,7 @@ import { RulesView } from "./components/RulesView";
 import { AuditView } from "./components/AuditView";
 import { GovernanceView } from "./components/GovernanceView";
 import { DelegateView } from "./components/DelegateView";
+import { ReputationView } from "./components/ReputationView";
 import { StatusBar } from "./components/StatusBar";
 import { ToastProvider, useToast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
@@ -507,6 +508,7 @@ function AppInner() {
       { id: "nav-audit",      title: "Go to Audit",       shortcut: "G A", run: () => setActive("audit") },
       { id: "nav-governance", title: "Go to Governance",  shortcut: "G V", run: () => setActive("governance") },
       { id: "nav-delegate",   title: "Go to Delegate",    shortcut: "G D", run: () => setActive("delegate") },
+      { id: "nav-reputation", title: "Go to Reputation",  shortcut: "G E", run: () => setActive("reputation") },
       { id: "nav-chat",       title: "Go to Chat",        shortcut: "G C", run: () => setActive("chat") },
       {
         id: "new-mission",
@@ -996,6 +998,8 @@ function AppInner() {
     view = <GovernanceView />;
   } else if (active === "delegate") {
     view = <DelegateView />;
+  } else if (active === "reputation") {
+    view = <ReputationView />;
   } else {
     view = (
       <>
@@ -1070,6 +1074,7 @@ function labelFor(id: NavId): string {
     case "audit":      return "Audit";
     case "governance": return "Governance";
     case "delegate":   return "Delegate";
+    case "reputation": return "Reputation";
     case "chat":       return "Chat";
   }
 }

@@ -21,7 +21,7 @@
 
 import {
   IconBriefcase, IconChat, IconHash, IconInbox, IconKey, IconLayout, IconScale,
-  IconScroll, IconSliders, IconTarget, IconUsers,
+  IconScroll, IconSliders, IconStar, IconTarget, IconUsers,
 } from "./Icons";
 import type { NavId } from "../types-v2";
 
@@ -37,6 +37,7 @@ const ITEMS: { id: NavId; icon: React.ComponentType<{ size?: number }>; label: s
   { id: "audit",      icon: IconScroll,  label: "Audit" },
   { id: "governance", icon: IconScale,   label: "Governance" },
   { id: "delegate",   icon: IconKey,     label: "Delegate" },
+  { id: "reputation", icon: IconStar,    label: "Reputation" },
 ];
 
 export interface IconNavProps {

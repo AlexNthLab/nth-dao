@@ -84,6 +84,12 @@ export const IconScale = (p: Props) => (
   </Svg>
 );
 
+export const IconStar = (p: Props) => (
+  <Svg {...p}>
+    <path d="M12 3l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 18.8 6.2 21.9l1.1-6.5L2.6 9.8l6.5-.9L12 3z" />
+  </Svg>
+);
+
 export const IconKey = (p: Props) => (
   <Svg {...p}>
     <circle cx="8" cy="15" r="4" />

@@ -628,6 +628,20 @@ export async function denyCapRequest(
     `/cap-requests/${encodeURIComponent(requestId)}/deny`, { reason });
 }
 
+// ── 信誉(spine 原生:从签名贡献派生)─────────────────────────────────
+
+export interface ReputationRecord {
+  did: string;
+  score: number;
+  tasks_claimed: number;
+  tasks_published: number;
+  disputed_claims: number;
+}
+
+/** 信誉榜(ReputationProjection 回放,top 排序)。 */
+export const listReputation = (s?: AbortSignal) =>
+  getJson<ReputationRecord[]>("/reputation", s);
+
 /** 发布一条任务公告(本节点签名)。 */
 export async function announceTask(
   body: AnnounceTaskInput,
