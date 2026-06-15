@@ -63,6 +63,8 @@ from nth_dao.market.federation import (
 )
 from nth_dao.market.claim import (
     claim_announcement,
+    sign_claim_receipt,
+    record_foreign_claim,
     ClaimStore,
     ClaimOutcome,
     ClaimConflict,
@@ -74,6 +76,8 @@ from nth_dao.market.claim import (
     REJECT_SKILL_INSUFFICIENT,
     REJECT_CLAIMANT_BELOW_POLICY,
     REJECT_CLAIMANT_REP_MISSING,
+    REJECT_RECEIPT_INVALID,
+    REJECT_RECEIPT_BINDING,
     CLAIM_STATUS_CLAIMED,
 )
 from nth_dao.market.reputation import (
@@ -113,6 +117,8 @@ __all__ = [
     "REJECT_PUBLISHER_BELOW_TRUST",
     # M3
     "claim_announcement",
+    "sign_claim_receipt",
+    "record_foreign_claim",
     "ClaimStore",
     "ClaimOutcome",
     "ClaimConflict",
@@ -122,6 +128,8 @@ __all__ = [
     "REJECT_CAP_TOKEN_INVALID",
     "REJECT_SUBJECT_MISMATCH",
     "REJECT_SKILL_INSUFFICIENT",
+    "REJECT_RECEIPT_INVALID",
+    "REJECT_RECEIPT_BINDING",
     "CLAIM_STATUS_CLAIMED",
     # M4 federation
     "FeedDigest",

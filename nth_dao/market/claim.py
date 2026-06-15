@@ -43,7 +43,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from nth_dao.cap_token import verify_cap_token
-from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
+from nth_dao.execution_receipt import (
+    TimelineEntry, now_ms, sign_receipt, verify_receipt,
+)
 from nth_dao.market.announcement import TaskAnnouncement
 from nth_dao.market.vocabulary import normalize_capability
 from nth_dao.util.io import InterProcessLock, atomic_write_json, safe_id, safe_load_json
@@ -289,6 +291,185 @@ def claim_announcement(
             # 收据全文嵌入，便于幂等返回 + 离线审计（收据自带签名，
             # 落盘后被篡改也会 verify_receipt 失败）
             "receipt": receipt,
+        }
+        atomic_write_json(path, claim_record)
+        return ClaimOutcome(claim_record=claim_record, receipt=receipt)
+
+
+# ── 跨 DAO 认领(XDAO-1)──────────────────────────────────────────────
+# 把 claim_announcement 的"验 + 锁内签 + CAS"原子三合一**拆成两半**,让
+# 认领能跨节点:agent(有私钥)在自己这边只签收据,来源 DAO(认领权威、
+# 持有公告 + ClaimStore)收下预签收据后验证 + CAS 落盘。现有
+# claim_announcement 不动(本地认领照旧)。
+
+REJECT_RECEIPT_INVALID = "claim-receipt-invalid"   # 收据签名/结构验不过
+REJECT_RECEIPT_BINDING = "claim-receipt-binding"   # 收据没绑定到本公告/claimant
+
+
+def _claim_timeline(ann: TaskAnnouncement, claimant_did: str, claimed_at: int) -> List[TimelineEntry]:
+    """认领收据的 timeline —— 与 claim_announcement 锁内签的**同构**,
+    保证来源侧 record_foreign_claim 能用同一套绑定校验。"""
+    return [
+        TimelineEntry(
+            timestamp=int(claimed_at),
+            type="nth.task_claimed",
+            payload={
+                "announcement_id": ann.announcement_id,
+                "claimant_did": claimant_did,
+                "publisher_did": ann.publisher_did,
+                "cap_token_id": "",  # 占位:不进绑定校验(token_id 另在记录里)
+                "capability_set": list(ann.capability_set),
+                "reward_minor": ann.reward_minor,
+                "reward_asset": ann.reward_asset,
+                "mission_id": ann.mission_id,
+                "claimed_at_ms": int(claimed_at),
+            },
+        ),
+    ]
+
+
+def sign_claim_receipt(
+    ann: TaskAnnouncement,
+    claimant: "Any",  # AgentIdentity，必须 can_sign
+    cap_token: Dict[str, Any],
+    *,
+    now_ms_override: int = 0,
+) -> Dict[str, Any]:
+    """跨 DAO 认领的「只签」侧:agent(有私钥)为一条公告签 ClaimReceipt,
+    **不做 CAS、不落盘**。产出的收据 + cap_token 交给来源 DAO 的
+    ``record_foreign_claim`` 去验 + CAS。
+
+    不做权威校验(那是来源侧的事),但仍要求 ``cap_token.subject == claimant``
+    —— 否则签了来源也会拒,早失败更清晰。``goal_id`` 绑定到该公告。
+    """
+    claimant_did = claimant.as_did()
+    if str(cap_token.get("subject_did", "")) != claimant_did:
+        raise ClaimRejected(
+            REJECT_SUBJECT_MISMATCH,
+            f"token subject={cap_token.get('subject_did')!r} "
+            f"!= claimant={claimant_did!r}",
+        )
+    claimed_at = now_ms_override or now_ms()
+    timeline = _claim_timeline(ann, claimant_did, claimed_at)
+    return sign_receipt(
+        timeline, claimant,
+        goal_id=f"market:claim:{ann.announcement_id}",
+        authorizing_cap_token=cap_token,
+    )
+
+
+def record_foreign_claim(
+    feed: "Any",  # MarketFeed（来源 DAO 的，含该公告）
+    claim_store: ClaimStore,  # 来源 DAO 的认领权威 store
+    announcement_id: str,
+    cap_token: Dict[str, Any],
+    receipt: Dict[str, Any],
+    *,
+    revoked_ids: Optional[set] = None,
+    claimant_reputation: "Any" = None,
+    now_ms_override: int = 0,
+) -> ClaimOutcome:
+    """跨 DAO 认领的「验 + CAS」侧:来源 DAO 接受外部 agent **预签**的
+    ClaimReceipt,验证后 CAS 落盘。**绝不重签**(收据已由 claimant 签)。
+
+    这是信任边界 —— 收据来自不可信网络,逐项严验(任一不过即 ClaimRejected):
+      1. 公告存在 / 未过期(本地 feed)。
+      2. ``verify_receipt`` —— 收据签名有效(binds signer_did → timeline)。
+      3. ``claimant_did := receipt.signer_did``;``cap_token.subject_did == claimant_did``。
+      4. ``verify_cap_token`` —— crypto / 时效 / 撤销。
+      5. **绑定本公告**(防重放到别的公告 / 换 claimant):
+         ``goal_id == market:claim:{id}`` 且 timeline payload 的
+         ``announcement_id``/``claimant_did`` 一致。
+      6. 技能子集(两侧 normalize,与 discovery 一致)。
+      7. ``claimant_policy``(若公告设了;权威侧自算信誉)。
+      8. CAS 锁内 read-check-write,落盘**传入的** receipt(不重签)。
+    """
+    claimed_at = now_ms_override or now_ms()
+
+    # 1. 公告
+    ann: Optional[TaskAnnouncement] = feed.get(announcement_id, include_expired=True)
+    if ann is None:
+        raise ClaimRejected(REJECT_ANN_NOT_FOUND, announcement_id)
+    if ann.is_expired(now_ms_override):
+        raise ClaimRejected(REJECT_ANN_EXPIRED, announcement_id)
+
+    # 2. 收据签名(真相层:agent 用自己的私钥签的)
+    if not isinstance(receipt, dict) or not verify_receipt(receipt):
+        raise ClaimRejected(REJECT_RECEIPT_INVALID, "claim receipt signature invalid")
+    claimant_did = str(receipt.get("signer_did", ""))
+    if not claimant_did:
+        raise ClaimRejected(REJECT_RECEIPT_INVALID, "receipt missing signer_did")
+
+    # 3. cap_token subject 必须就是签收据的 claimant
+    if str(cap_token.get("subject_did", "")) != claimant_did:
+        raise ClaimRejected(
+            REJECT_SUBJECT_MISMATCH,
+            f"token subject={cap_token.get('subject_did')!r} != claimant={claimant_did!r}",
+        )
+
+    # 4. 验 cap_token
+    ok, reason = verify_cap_token(
+        cap_token, now_ms_override=now_ms_override, revoked_ids=revoked_ids,
+    )
+    if not ok:
+        raise ClaimRejected(REJECT_CAP_TOKEN_INVALID, reason)
+
+    # 5. 收据绑定本公告(防重放 / 换标的)
+    if str(receipt.get("goal_id", "")) != f"market:claim:{announcement_id}":
+        raise ClaimRejected(
+            REJECT_RECEIPT_BINDING, "receipt goal_id does not bind this announcement")
+    timeline = receipt.get("timeline") or []
+    payload = timeline[0].get("payload", {}) if (timeline and isinstance(timeline[0], dict)) else {}
+    if (
+        payload.get("announcement_id") != announcement_id
+        or payload.get("claimant_did") != claimant_did
+    ):
+        raise ClaimRejected(
+            REJECT_RECEIPT_BINDING,
+            "receipt timeline does not bind this announcement/claimant")
+
+    # 6. 技能子集
+    need_skills = {normalize_capability(c) for c in ann.capability_set}
+    need_skills.discard("")
+    have_skills = {normalize_capability(c) for c in cap_token.get("capabilities", [])}
+    if not need_skills <= have_skills:
+        raise ClaimRejected(
+            REJECT_SKILL_INSUFFICIENT,
+            f"announcement needs {sorted(need_skills)}, token grants {sorted(have_skills)}")
+
+    # 7. claimant_policy(若公告设了门槛)
+    policy = ann.claimant_policy or {}
+    if policy:
+        if claimant_reputation is None:
+            raise ClaimRejected(
+                REJECT_CLAIMANT_REP_MISSING,
+                f"announcement sets claimant_policy {policy} but no "
+                "claimant_reputation was supplied to verify against")
+        ok_rep, rep_reason = claimant_reputation.meets(policy)
+        if not ok_rep:
+            raise ClaimRejected(REJECT_CLAIMANT_BELOW_POLICY, rep_reason)
+
+    # 8. CAS（落盘传入的 receipt，不重签）
+    path = claim_store._path(announcement_id)
+    with _thread_lock_for(str(path)), InterProcessLock(path):
+        existing = safe_load_json(path, fallback=None)
+        if existing is not None:
+            if existing.get("claimant_did") == claimant_did:
+                return ClaimOutcome(
+                    claim_record=existing, receipt=existing.get("receipt", {}))
+            raise ClaimConflict(
+                f"announcement {announcement_id} already claimed by "
+                f"{existing.get('claimant_did')}")
+        claim_record = {
+            "announcement_id": announcement_id,
+            "status": CLAIM_STATUS_CLAIMED,
+            "claimant_did": claimant_did,
+            "publisher_did": ann.publisher_did,
+            "cap_token_id": str(cap_token.get("token_id", "")),
+            "claimed_at_ms": int(claimed_at),
+            "receipt_id": receipt.get("receipt_id", ""),
+            "receipt": receipt,   # 外部预签收据，原样落盘（自带签名，篡改即失效）
+            "foreign": True,      # 标记：跨 DAO 认领
         }
         atomic_write_json(path, claim_record)
         return ClaimOutcome(claim_record=claim_record, receipt=receipt)
