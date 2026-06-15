@@ -13,6 +13,7 @@ federation.py docstring),跨 DAO 认领是后续的事。
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import threading
@@ -20,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from nth_dao.execution_receipt import now_ms
 from nth_dao.market.announcement import TaskAnnouncement, verify_announcement
@@ -32,6 +34,7 @@ HttpGetJson = Callable[[str], Any]
 
 _PULL_BATCH = 100   # 一次 pull 的 id 上限(serve 侧封顶 200,这里留余量)
 _MAX_DIGEST_PAGES = 50   # digest 翻页安全上限(防恶意 peer 永不收敛)
+_MAX_GOSSIP_PEERS = 64   # 一轮 BFS 最多访问多少 peer(传递发现的安全上限)
 _HTTP_TIMEOUT_S = 8.0
 
 
@@ -117,25 +120,97 @@ def pull_from_peer(
     return out
 
 
+def fetch_peer_list(
+    peer_base: str, http_get: HttpGetJson = _urllib_get_json,
+) -> List[str]:
+    """拉一个 peer 公开的 peer 列表(gossip 的「成员」层)。失败 → []。
+
+    这是**不可信提示**:对端报的 peer 只是线索,本节点会直连那个 peer 再
+    双层验签它的任务 —— 恶意 peer 报假地址至多让你白连一次,伪造不了任务。
+    """
+    base = peer_base.rstrip("/")
+    try:
+        raw = http_get(f"{base}/api/v2/market/federation/peers")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("fed: peer-list fetch failed %s: %s", base, exc)
+        return []
+    if isinstance(raw, dict):
+        peers = raw.get("peers")
+        if isinstance(peers, list):
+            return [p for p in peers if isinstance(p, str) and p.strip()]
+    return []
+
+
+def _is_safe_gossip_url(url: str) -> bool:
+    """对 **gossip 发现的(不可信)** peer URL 做 SSRF 防护:必须 https + 公网
+    host(拒 localhost / loopback / 私网 / 链路本地 / 保留段)。
+
+    配置的 seed peer **不**走这个(运营者自负其责,允许 http://localhost 等
+    本地联调)。发现到的来自网络数据,恶意节点可塞 169.254.169.254(云元数据)
+    或内网地址诱导 hub 去连 —— 这里挡掉。
+    """
+    try:
+        u = urlsplit(url)
+    except Exception:  # noqa: BLE001
+        return False
+    if u.scheme != "https":
+        return False
+    host = (u.hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(".local"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # 域名:无法在不解析的情况下断定;已要求 https + 非 localhost/.local。
+        # (完整防护需解析 + IP 校验 + 防 DNS rebinding,留作后续硬化。)
+        return True
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
 def federate_once(
     peers: List[str],
     http_get: HttpGetJson = _urllib_get_json,
     *,
     now_ms_override: int = 0,
+    max_peers: int = _MAX_GOSSIP_PEERS,
 ) -> Dict[str, Dict[str, Any]]:
-    """对所有 peer 拉一轮,返回 {announcement_id: {"ann":.., "source": peer}}。
+    """对 peer 图做 **BFS 传递发现**:从 seed 出发,拉每个 peer 的任务 + 它的
+    peer 列表(gossip 成员),把新 peer 入队继续展开,直到无新 peer 或撞
+    ``max_peers``。返回 {announcement_id: {"ann":.., "source": peer}}。
 
-    去重(多 peer 中继同一公告 → 先到先得)+ 跳过已过期。
+    任务仍**直连源 DAO 拉取 + 双层验签**(信任模型不变);gossip 只扩大「连谁」。
+    seen 去重 + max_peers 上限 → 防环、防恶意 peer 把图撑爆。
     """
     now = now_ms_override or now_ms()
     merged: Dict[str, Dict[str, Any]] = {}
-    for peer in peers:
+    seen: set = set()
+    queue: List[str] = list(dict.fromkeys(
+        p.rstrip("/") for p in peers if p and p.strip()))
+    while queue and len(seen) < max_peers:
+        peer = queue.pop(0)
+        if peer in seen:
+            continue
+        seen.add(peer)
+        # 任务:直连该 peer 拉全文 + 验签。
         for ann in pull_from_peer(peer, http_get):
             if ann.announcement_id in merged:
                 continue
             if ann.is_expired(now_ms_override=now):
                 continue
             merged[ann.announcement_id] = {"ann": ann, "source": peer}
+        # gossip:学这个 peer 的 peer 列表 → 传递发现下一跳。
+        # 发现到的是不可信网络数据 → 必须过 SSRF 公网校验才入队。
+        for p in fetch_peer_list(peer, http_get):
+            nxt = p.rstrip("/")
+            if (
+                nxt and nxt not in seen and nxt not in queue
+                and _is_safe_gossip_url(nxt)
+                and len(seen) + len(queue) < max_peers
+            ):
+                queue.append(nxt)
     return merged
 
 

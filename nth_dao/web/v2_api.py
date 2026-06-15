@@ -2613,6 +2613,16 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.market.federation import pull_announcements
         return [a.to_dict() for a in pull_announcements(MarketFeed(ws), id_list)]
 
+    @app.get("/api/v2/market/federation/peers")
+    def v2_market_fed_peers(request: Request) -> Dict[str, Any]:
+        """本节点已配置的联邦 peer 列表(gossip 的「成员」层,FED-B)。匿名读。
+
+        供对端**传递发现**:你只需配几个 peer,经它们的 peer 列表逐跳就能
+        发现整张可达网络的任务。只暴露已配置的 URL(本就是运营者填的发现入口)。
+        任务真伪不靠这个 —— 发现到的 peer 仍被直连 + 双层验签。
+        """
+        return {"peers": _read_fed_peers(_state_workspace(request))}
+
     @app.post("/api/v2/market/{announcement_id}/claim-foreign")
     def v2_market_claim_foreign(
         announcement_id: str, body: ForeignClaimBody, request: Request,
