@@ -2631,6 +2631,10 @@ def register_v2_routes(app: FastAPI) -> None:
         if ann.publisher_did != identity.as_did():
             raise HTTPException(
                 status_code=403, detail="only the publisher can accept this task")
+        if body.completer_did == ann.publisher_did:
+            # 防 self-dealing:发布方不能给"自己认领自己发的活"验收刷分。
+            raise HTTPException(
+                status_code=400, detail="publisher cannot accept their own claim")
         claim = ClaimStore(ws).get(announcement_id)
         if not claim or claim.get("claimant_did") != body.completer_did:
             raise HTTPException(

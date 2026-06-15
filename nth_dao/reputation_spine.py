@@ -57,12 +57,14 @@ class ReputationProjection(Projection):
         self._claimed: Dict[str, Set[str]] = {}     # did → {announcement_id}
         self._accepted: Dict[str, Set[str]] = {}    # completer did → {announcement_id}
         self._published: Dict[str, Set[str]] = {}   # did → {announcement_id}
+        self._ann_publisher: Dict[str, str] = {}    # announcement_id → 真发布方 did
         self._disputed_anns: Set[str] = set()
 
     def reset(self) -> None:
         self._claimed.clear()
         self._accepted.clear()
         self._published.clear()
+        self._ann_publisher.clear()
         self._disputed_anns.clear()
 
     def apply(self, event: SpineEvent) -> None:
@@ -74,15 +76,22 @@ class ReputationProjection(Projection):
             cl = p.get("claimant_did")
             if isinstance(cl, str) and cl:
                 self._claimed.setdefault(cl, set()).add(aid)
-        elif event.type == EVENT_MARKET_ACCEPTANCE:
-            ok, _ = verify_acceptance(p)   # 只采信发布方签名有效的验收(防伪造刷分)
-            cp = p.get("completer_did")
-            if ok and isinstance(cp, str) and cp:
-                self._accepted.setdefault(cp, set()).add(aid)
         elif event.type == EVENT_MARKET_ANNOUNCE:
             pub = p.get("publisher_did")
             if isinstance(pub, str) and pub:
                 self._published.setdefault(pub, set()).add(aid)
+                self._ann_publisher.setdefault(aid, pub)   # 首条 announce 定发布方
+        elif event.type == EVENT_MARKET_ACCEPTANCE:
+            cp = p.get("completer_did")
+            ok, _ = verify_acceptance(p)
+            # 防伪造刷分(尤其联邦回放):验收签名有效 + 验收人确为该公告**真发布
+            # 方** + completer 确实**认领过**该公告(三者皆备才计交付)。
+            if (
+                ok and isinstance(cp, str) and cp
+                and self._ann_publisher.get(aid) == p.get("publisher_did")
+                and aid in self._claimed.get(cp, set())
+            ):
+                self._accepted.setdefault(cp, set()).add(aid)
         elif event.type in _DISPUTE_EVENTS:
             self._disputed_anns.add(aid)
 

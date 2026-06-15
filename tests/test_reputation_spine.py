@@ -130,6 +130,31 @@ def test_published_and_claimed_dedup_by_announcement(tmp_path: Path) -> None:
     assert proj.get(agent.as_did()).tasks_claimed == 1
 
 
+def test_acceptance_from_non_publisher_not_credited(tmp_path: Path) -> None:
+    # 联邦伪造防护:非真发布方对公告签验收 → 不计分。
+    node, realpub, fakepub, agent = _id(), _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "spine.jsonl", node)
+    a1 = sign_announcement(publisher=realpub, title="t", capability_set=["x"])
+    spine.append("market.announce", a1.to_dict())
+    spine.append("market.claim", _claim_payload(a1.announcement_id, agent, realpub))
+    spine.append("market.acceptance", sign_acceptance(
+        publisher=fakepub, announcement_id=a1.announcement_id,
+        completer_did=agent.as_did()))                    # 假发布方签的验收
+    assert _project_get(spine, agent.as_did()).tasks_accepted == 0
+
+
+def test_acceptance_without_claim_not_credited(tmp_path: Path) -> None:
+    # 验收一个没认领过的人 → 不计分。
+    node, pub, agent = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "spine.jsonl", node)
+    a1 = sign_announcement(publisher=pub, title="t", capability_set=["x"])
+    spine.append("market.announce", a1.to_dict())         # 无 market.claim
+    spine.append("market.acceptance", sign_acceptance(
+        publisher=pub, announcement_id=a1.announcement_id,
+        completer_did=agent.as_did()))
+    assert _project_get(spine, agent.as_did()).tasks_accepted == 0
+
+
 def test_unknown_did_zero(tmp_path: Path) -> None:
     spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
     proj = ReputationProjection()

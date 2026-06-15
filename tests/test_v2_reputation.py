@@ -72,3 +72,15 @@ def test_accept_endpoint_lifts_reputation_to_delivery(tmp_path: Path) -> None:
     other = AgentIdentity.generate()
     assert client.post(f"/api/v2/market/{aid}/accept",
                        json={"completer_did": other.as_did()}).status_code == 409
+
+
+def test_self_acceptance_rejected(tmp_path: Path) -> None:
+    # 防 self-dealing:发布方给自己验收 → 400。
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    r = client.post("/api/v2/market/announce", json={
+        "title": "t", "capability_set": ["x"], "reward_minor": 0})
+    aid = r.json()["announcement_id"]
+    pub_did = r.json()["publisher_did"]
+    assert client.post(f"/api/v2/market/{aid}/accept",
+                       json={"completer_did": pub_did}).status_code == 400
