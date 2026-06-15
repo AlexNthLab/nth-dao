@@ -138,6 +138,18 @@ def test_sign_rejects_subject_mismatch(tmp_path) -> None:
     assert e.value.reason == REJECT_SUBJECT_MISMATCH
 
 
+def test_record_rejects_receipt_token_mismatch(tmp_path) -> None:
+    # 加固:收据绑定到签它时那张 cap_token(payload.cap_token_id 在签名体内)。
+    # 换一张 token(同 subject、技能够,但 token_id 不同)提交 → 绑定校验拒。
+    feed, store, pub, agent, ann = _setup(tmp_path)
+    token_a = _selfissue(agent, ["code_review"])
+    receipt = sign_claim_receipt(ann, agent, token_a)
+    token_b = _selfissue(agent, ["code_review", "extra_skill"])  # token_id 必不同
+    with pytest.raises(ClaimRejected) as e:
+        record_foreign_claim(feed, store, ann.announcement_id, token_b, receipt)
+    assert e.value.reason == REJECT_RECEIPT_BINDING
+
+
 def test_skill_insufficient(tmp_path) -> None:
     feed, store, pub, agent, ann = _setup(tmp_path, caps=("legal_review",))
     token = _selfissue(agent, ["code_review"])  # 缺 legal_review

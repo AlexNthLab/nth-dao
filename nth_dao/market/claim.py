@@ -306,9 +306,14 @@ REJECT_RECEIPT_INVALID = "claim-receipt-invalid"   # 收据签名/结构验不�
 REJECT_RECEIPT_BINDING = "claim-receipt-binding"   # 收据没绑定到本公告/claimant
 
 
-def _claim_timeline(ann: TaskAnnouncement, claimant_did: str, claimed_at: int) -> List[TimelineEntry]:
+def _claim_timeline(
+    ann: TaskAnnouncement, claimant_did: str, cap_token_id: str, claimed_at: int,
+) -> List[TimelineEntry]:
     """认领收据的 timeline —— 与 claim_announcement 锁内签的**同构**,
-    保证来源侧 record_foreign_claim 能用同一套绑定校验。"""
+    保证来源侧 record_foreign_claim 能用同一套绑定校验。
+
+    payload 里写入 ``cap_token_id``(在签名体内)→ 把收据牢牢绑到那张授权
+    token,来源侧据此堵掉 receipt/token 张冠李戴。"""
     return [
         TimelineEntry(
             timestamp=int(claimed_at),
@@ -317,7 +322,7 @@ def _claim_timeline(ann: TaskAnnouncement, claimant_did: str, claimed_at: int) -
                 "announcement_id": ann.announcement_id,
                 "claimant_did": claimant_did,
                 "publisher_did": ann.publisher_did,
-                "cap_token_id": "",  # 占位:不进绑定校验(token_id 另在记录里)
+                "cap_token_id": cap_token_id,
                 "capability_set": list(ann.capability_set),
                 "reward_minor": ann.reward_minor,
                 "reward_asset": ann.reward_asset,
@@ -350,7 +355,8 @@ def sign_claim_receipt(
             f"!= claimant={claimant_did!r}",
         )
     claimed_at = now_ms_override or now_ms()
-    timeline = _claim_timeline(ann, claimant_did, claimed_at)
+    cap_token_id = str(cap_token.get("token_id", ""))
+    timeline = _claim_timeline(ann, claimant_did, cap_token_id, claimed_at)
     return sign_receipt(
         timeline, claimant,
         goal_id=f"market:claim:{ann.announcement_id}",
@@ -423,10 +429,11 @@ def record_foreign_claim(
     if (
         payload.get("announcement_id") != announcement_id
         or payload.get("claimant_did") != claimant_did
+        or str(payload.get("cap_token_id", "")) != str(cap_token.get("token_id", ""))
     ):
         raise ClaimRejected(
             REJECT_RECEIPT_BINDING,
-            "receipt timeline does not bind this announcement/claimant")
+            "receipt timeline does not bind this announcement/claimant/cap_token")
 
     # 6. 技能子集
     need_skills = {normalize_capability(c) for c in ann.capability_set}
