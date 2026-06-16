@@ -1218,15 +1218,27 @@ def _verified_spine_events(request: Request) -> Optional[list]:
 
     spine 缺失 → None(调用方返回空视图);链完整性校验失败 → 503,**绝不**把可能
     被篡改的数据投影出去(fail-closed)。校验通过才回放投影。
+
+    性能(2026 优化):按 ``head_hash`` 缓存在 spine 实例上 —— 链头未变(没有新
+    append)就直接返回上次的已验证事件,免去每次 verify_chain(读全文 + 全链验签)+
+    read_all(再读一遍)。append 改变 head_hash → 缓存失效、下次重新校验。单写者
+    模型下读多写少,命中率高;并发下最坏用到稍旧快照(下次自愈),无需加锁。
     """
     spine = _state_spine(request)
     if spine is None:
         return None
+    head = spine.head_hash
+    cache = getattr(spine, "_v2_verified_cache", None)   # (head_hash, events) | None
+    if cache is not None and cache[0] == head:
+        return cache[1]
     ok, why = spine.verify_chain()
     if not ok:
         raise HTTPException(
             status_code=503, detail=f"spine integrity check failed: {why}")
-    return list(spine.read_all())
+    events = list(spine.read_all())
+    # 用读完后的 head 作键(若校验期间有并发 append,键与事件更一致)。
+    spine._v2_verified_cache = (spine.head_hash, events)
+    return events
 
 
 def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
