@@ -86,8 +86,15 @@ class ExecutionState:
 class CheckpointProjection(Projection):
     """折叠 ``exec.checkpoint`` → 每个 execution 的**最新有效**恢复点。
 
-    归属锁:首条 checkpoint 定 executor_did,后续只认同一执行者(防劫持/回退)。
-    last-wins(spine 序):最后一条同执行者 checkpoint 即恢复点。
+    归属锁:首条 checkpoint 定 executor_did,后续只认同一执行者(防他人回退/劫持)。
+    last-wins(spine 序):最后一条同执行者 checkpoint 即恢复点(按 spine 顺序,不假设
+    ``step`` 可比较)。
+
+    ⚠️ **接线假设(对抗审查标注)**:first-wins 仅当"首条记录者就是合法执行者"才安全。
+    它**挡不住抢跑**——恶意方对别人正跑的 execution_id 抢先签一条即可占 owner、把真
+    执行者锁在外面。所以接线层(未来的 record 端点)**必须**保证只有合法执行者能记录:
+    execution_id 由任务/认领系统发给认领者,且端点认证调用者 DID == executor_did。
+    本投影只做密码学层面的"同一执行者"约束,合法性绑定在上游。
     """
 
     def __init__(self) -> None:
