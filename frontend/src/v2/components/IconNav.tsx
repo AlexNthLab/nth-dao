@@ -20,7 +20,7 @@
 import { useState } from "react";
 import {
   IconBriefcase, IconChat, IconHash, IconInbox, IconLayout, IconScale,
-  IconScroll, IconSliders, IconStar, IconTarget, IconUsers,
+  IconScroll, IconSliders, IconStar, IconTarget, IconUserPlus, IconUsers,
 } from "./Icons";
 import type { NavId } from "../types-v2";
 
@@ -43,6 +43,7 @@ const MORE: Item[] = [
   { id: "missions",   icon: IconTarget,    label: "Missions" },
   { id: "rules",      icon: IconSliders,   label: "Rules" },
   { id: "reputation", icon: IconStar,      label: "Reputation" },
+  { id: "contacts",   icon: IconUserPlus,  label: "Contacts" },
   { id: "channels",   icon: IconHash,      label: "Channels" },
   { id: "chat",       icon: IconChat,      label: "Chat" },
 ];

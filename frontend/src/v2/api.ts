@@ -709,6 +709,66 @@ export async function claimFederatedTask(
   return { status: res.status, body };
 }
 
+// ── 社交(Phase 社交:关注单向免确认 / 好友双向需对方 accept)────────────
+
+export interface SocialRoster {
+  did: string;
+  following: string[];
+  followers: string[];
+  friends: string[];
+  pending_incoming: string[];
+  pending_outgoing: string[];
+}
+
+export interface SocialRelationship {
+  following?: boolean;
+  followed_by?: boolean;
+  friend?: boolean;
+  request_outgoing?: boolean;
+  request_incoming?: boolean;
+}
+
+export interface SocialProfile {
+  did: string;
+  relationship: SocialRelationship;
+  followers_count: number;
+  friends_count: number;
+}
+
+interface SocialAck {
+  recorded: boolean;
+  type: string;
+  target_did: string;
+  seq: number;
+}
+
+/** 本节点社交名册:关注/粉丝/好友 + 待我确认的好友请求(进收件箱)。 */
+export const fetchSocialMe = (s?: AbortSignal) =>
+  getJson<SocialRoster>("/social/me", s);
+
+/** 从本节点视角看与某 DID 的关系 + 该 DID 公开计数。 */
+export const fetchSocialProfile = (did: string, s?: AbortSignal) =>
+  getJson<SocialProfile>(`/social/${encodeURIComponent(did)}`, s);
+
+/** 关注(单向、免对方确认,token-gated)。 */
+export const followDid = (targetDid: string) =>
+  postJson<SocialAck>("/social/follow", { target_did: targetDid });
+/** 取消关注。 */
+export const unfollowDid = (targetDid: string) =>
+  postJson<SocialAck>("/social/unfollow", { target_did: targetDid });
+/** 发好友请求(需对方 accept 才成好友)。 */
+export const friendRequest = (targetDid: string) =>
+  postJson<SocialAck>("/social/friend/request", { target_did: targetDid });
+/** 接受某 DID 的好友请求 → 互为好友。 */
+export const friendAccept = (targetDid: string) =>
+  postJson<SocialAck>("/social/friend/accept", { target_did: targetDid });
+/** 拒绝某 DID 的好友请求。 */
+export const friendDecline = (targetDid: string) =>
+  postJson<SocialAck>("/social/friend/decline", { target_did: targetDid });
+/** 解除好友 / 撤回未决请求。 */
+export const friendRemove = (targetDid: string) =>
+  postJson<SocialAck>("/social/friend/remove", { target_did: targetDid });
+
 /* ── 频道(收编自 8765 群聊,P3)──────────────────────────────── */
 export const listChannels = (s?: AbortSignal) =>
   getJson<Channel[]>("/channels", s);

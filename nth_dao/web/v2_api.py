@@ -2012,6 +2012,12 @@ class AcceptBody(BaseModel):
     completer_did: str
 
 
+class SocialTargetBody(BaseModel):
+    """社交动作入参(关注/好友):只需关系对象 DID;发起方=本节点身份,服务端签名。"""
+
+    target_did: str
+
+
 # 频道 agent 派发的全局并发上限:防公网刷消息时 daemon 线程爆炸(审查
 # 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
 _CHANNEL_DISPATCH_MAX = 16
@@ -3111,6 +3117,187 @@ def register_v2_routes(app: FastAPI) -> None:
         deny_cap_request(
             spine, decider=identity, request_id=request_id, reason=body.reason)
         return {"denied": True, "request_id": request_id}
+
+    # ── 社交层(Phase 社交):关注(单向)/ 好友(双向需确认)─────────────────
+    # 发起方=本节点身份(operator 即本节点,与 accept/approve 同),服务端用
+    # node_identity 签名后落 spine。写口 token-gated;读匿名回放 SocialProjection。
+
+    def _social_projection(request: Request):
+        from nth_dao.social import SocialProjection
+        events = _verified_spine_events(request)
+        if events is None:
+            return None
+        proj = SocialProjection()
+        for ev in events:
+            proj.apply(ev)
+        return proj
+
+    def _ensure_social_poller(request: Request) -> None:
+        """配了联邦 peer 时,惰性起一次社交语句拉取 poller(把别人发给我的
+        关注/好友请求/接受拉进本地 spine)。没配 peer → 零开销。单次起,双检锁。"""
+        state = request.app.state
+        if getattr(state, "social_fed_started", False):
+            return
+        ws = _state_workspace(request)
+        if not _read_fed_peers(ws):
+            return
+        identity = _state_node_identity(request)
+        if identity is None or not hasattr(identity, "as_did"):
+            return
+        with _FED_POLLER_LOCK:
+            if getattr(state, "social_fed_started", False):
+                return
+            from .social_federation_poll import start_social_poller
+            try:
+                interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
+            except ValueError:
+                interval = 20.0
+            # 只捕获 app(进程级稳定单例),**不**把 per-request 的 request 关进
+            # 常驻线程闭包(否则泄漏请求对象、且语义错位)。
+            app_ref = request.app
+            self_did = identity.as_did()
+
+            def _get_spine():
+                try:
+                    return app_ref.state.nth.spine
+                except AttributeError:
+                    return None
+
+            start_social_poller(
+                get_self_did=lambda: self_did,
+                get_peers=lambda: _read_fed_peers(ws),
+                get_spine=_get_spine,
+                interval_s=interval,
+            )
+            state.social_fed_started = True
+            logger.info(
+                "nth social federation poller started (%d peers, %.0fs)",
+                len(_read_fed_peers(ws)), interval,
+            )
+
+    def _record_social_action(
+        request: Request, statement_type: str, target_did: str,
+    ) -> Dict[str, Any]:
+        from nth_dao.social import record_social, sign_social_statement
+        spine = _state_spine(request)
+        identity = _state_node_identity(request)
+        if spine is None or identity is None or not getattr(
+            identity, "can_sign", False
+        ):
+            raise HTTPException(
+                status_code=503, detail="spine or signer identity unavailable")
+        try:
+            stmt = sign_social_statement(
+                signer=identity, statement_type=statement_type,
+                target_did=target_did)
+            ev = record_social(spine, stmt)
+        except ValueError as exc:   # 自指 / target 空 / 签名无效
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "recorded": True, "type": statement_type,
+            "target_did": target_did, "seq": ev.seq,
+        }
+
+    @app.post("/api/v2/social/follow")
+    def v2_social_follow(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
+        """本节点关注 target_did(单向、免对方确认)。token-gated。"""
+        from nth_dao.social import FOLLOW
+        return _record_social_action(request, FOLLOW, body.target_did)
+
+    @app.post("/api/v2/social/unfollow")
+    def v2_social_unfollow(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
+        """取消关注。token-gated。"""
+        from nth_dao.social import UNFOLLOW
+        return _record_social_action(request, UNFOLLOW, body.target_did)
+
+    @app.post("/api/v2/social/friend/request")
+    def v2_social_friend_request(
+        body: SocialTargetBody, request: Request,
+    ) -> Dict[str, Any]:
+        """向 target_did 发好友请求(需对方 accept 才成好友)。token-gated。"""
+        from nth_dao.social import FRIEND_REQUEST
+        return _record_social_action(request, FRIEND_REQUEST, body.target_did)
+
+    @app.post("/api/v2/social/friend/accept")
+    def v2_social_friend_accept(
+        body: SocialTargetBody, request: Request,
+    ) -> Dict[str, Any]:
+        """接受 target_did 的好友请求 → 互为好友。token-gated。"""
+        from nth_dao.social import FRIEND_ACCEPT
+        return _record_social_action(request, FRIEND_ACCEPT, body.target_did)
+
+    @app.post("/api/v2/social/friend/decline")
+    def v2_social_friend_decline(
+        body: SocialTargetBody, request: Request,
+    ) -> Dict[str, Any]:
+        """拒绝 target_did 的好友请求。token-gated。"""
+        from nth_dao.social import FRIEND_DECLINE
+        return _record_social_action(request, FRIEND_DECLINE, body.target_did)
+
+    @app.post("/api/v2/social/friend/remove")
+    def v2_social_friend_remove(
+        body: SocialTargetBody, request: Request,
+    ) -> Dict[str, Any]:
+        """解除与 target_did 的好友关系(或撤回未决请求)。token-gated。"""
+        from nth_dao.social import FRIEND_REMOVE
+        return _record_social_action(request, FRIEND_REMOVE, body.target_did)
+
+    @app.get("/api/v2/social/me")
+    def v2_social_me(request: Request) -> Dict[str, Any]:
+        """本节点社交名册:关注/粉丝/好友 + 待我确认的好友请求(进收件箱)。匿名读。"""
+        _ensure_social_poller(request)   # 看名册时确保联邦拉取在跑(配了 peer 才起)
+        identity = _state_node_identity(request)
+        me = identity.as_did() if identity and hasattr(identity, "as_did") else ""
+        proj = _social_projection(request)
+        if proj is None or not me:
+            return {
+                "did": me, "following": [], "followers": [], "friends": [],
+                "pending_incoming": [], "pending_outgoing": [],
+            }
+        return {
+            "did": me,
+            "following": proj.following(me),
+            "followers": proj.followers(me),
+            "friends": proj.friends(me),
+            "pending_incoming": proj.pending_incoming(me),
+            "pending_outgoing": proj.pending_outgoing(me),
+        }
+
+    @app.get("/api/v2/social/{did}")
+    def v2_social_one(did: str, request: Request) -> Dict[str, Any]:
+        """从本节点视角看与某 DID 的关系 + 该 DID 的公开关注/好友计数。匿名读。"""
+        identity = _state_node_identity(request)
+        me = identity.as_did() if identity and hasattr(identity, "as_did") else ""
+        proj = _social_projection(request)
+        if proj is None:
+            return {
+                "did": did, "relationship": {}, "followers_count": 0,
+                "friends_count": 0,
+            }
+        return {
+            "did": did,
+            "relationship": proj.relationship(me, did) if me else {},
+            "followers_count": len(proj.followers(did)),
+            "friends_count": len(proj.friends(did)),
+        }
+
+    @app.get("/api/v2/social/federation/pull")
+    def v2_social_fed_pull(
+        request: Request, since: int = -1,
+    ) -> List[Dict[str, Any]]:
+        """本节点**自己签发**(actor==self)的社交语句,供对端拉取后按 target 收件。
+        匿名读(语句自带签名,拉方 ingest 时逐条验签 + 只收发给自己的)。
+
+        ``since`` = 上次 seq 游标(增量);每页封顶 500,拉方带 since 翻页。
+        只暴露本节点自己的出边(关注/好友请求/接受),不转发他人语句。
+        """
+        spine = _state_spine(request)
+        identity = _state_node_identity(request)
+        if spine is None or identity is None or not hasattr(identity, "as_did"):
+            return []
+        from nth_dao.social.federation import local_social_statements
+        return local_social_statements(
+            spine, identity.as_did(), since_seq=since, limit=500)
 
     @app.post("/api/v2/market/federated/claim")
     async def v2_market_federated_claim(

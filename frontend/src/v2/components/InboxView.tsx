@@ -14,6 +14,9 @@ import { useEffect, useState } from "react";
 import {
   approveCapRequest,
   denyCapRequest,
+  fetchSocialMe,
+  friendAccept,
+  friendDecline,
   listCapRequests,
   listDisputes,
   type CapRequestSummary,
@@ -31,7 +34,8 @@ const BAD = "var(--color-text-danger, #e24b4a)";
 type InboxItem =
   | { kind: "decision"; key: string; title: string; data: Decision }
   | { kind: "cap"; key: string; title: string; data: CapRequestSummary }
-  | { kind: "dispute"; key: string; title: string; data: DisputeSummary };
+  | { kind: "dispute"; key: string; title: string; data: DisputeSummary }
+  | { kind: "friend"; key: string; title: string; data: { did: string } };
 
 export interface InboxViewProps {
   decisions: Decision[];
@@ -56,17 +60,20 @@ export function InboxView(props: InboxViewProps) {
   const toast = useToast();
   const [caps, setCaps] = useState<CapRequestSummary[]>([]);
   const [disputes, setDisputes] = useState<DisputeSummary[]>([]);
+  const [friendReqs, setFriendReqs] = useState<string[]>([]);
   const [selKey, setSelKey] = useState<string>("");
   const [busy, setBusy] = useState("");
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
     const ac = new AbortController();
-    Promise.allSettled([listCapRequests(ac.signal), listDisputes(ac.signal)])
-      .then(([c, d]) => {
-        if (c.status === "fulfilled") setCaps(c.value);
-        if (d.status === "fulfilled") setDisputes(d.value);
-      });
+    Promise.allSettled([
+      listCapRequests(ac.signal), listDisputes(ac.signal), fetchSocialMe(ac.signal),
+    ]).then(([c, d, s]) => {
+      if (c.status === "fulfilled") setCaps(c.value);
+      if (d.status === "fulfilled") setDisputes(d.value);
+      if (s.status === "fulfilled") setFriendReqs(s.value.pending_incoming);
+    });
     return () => ac.abort();
   }, [reload]);
 
@@ -79,6 +86,9 @@ export function InboxView(props: InboxViewProps) {
     ...disputes.filter((x) => x.status === "open").map((x): InboxItem => ({
       kind: "dispute", key: `dispute:${x.dispute_id}`,
       title: `${t("争议", "Dispute")}: ${x.announcement_id.slice(0, 12)}…`, data: x })),
+    ...friendReqs.map((did): InboxItem => ({
+      kind: "friend", key: `friend:${did}`,
+      title: `${t("好友请求", "Friend request")}: ${did.slice(0, 16)}…`, data: { did } })),
   ];
   const sel = items.find((i) => i.key === selKey) ?? items[0];
 
@@ -91,6 +101,25 @@ export function InboxView(props: InboxViewProps) {
       } else {
         await denyCapRequest(id, "");
         toast.push(t("已拒绝", "Denied"), "info");
+      }
+      setSelKey("");
+      setReload((n) => n + 1);
+    } catch {
+      toast.push(t("操作失败 —— 需要写入令牌(右下角设置)", "Action failed — needs a write token"), "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function friendAct(did: string, kind: "accept" | "decline") {
+    setBusy(did);
+    try {
+      if (kind === "accept") {
+        await friendAccept(did);
+        toast.push(t("已成为好友", "Now friends"), "success");
+      } else {
+        await friendDecline(did);
+        toast.push(t("已拒绝", "Declined"), "info");
       }
       setSelKey("");
       setReload((n) => n + 1);
@@ -127,6 +156,7 @@ export function InboxView(props: InboxViewProps) {
                 {it.kind === "decision" && chip("var(--color-text-info,#378add)", t("决策", "Decision"))}
                 {it.kind === "cap" && chip("var(--color-text-warning,#ba7517)", t("授权", "Grant"))}
                 {it.kind === "dispute" && chip(BAD, t("争议", "Dispute"))}
+                {it.kind === "friend" && chip("var(--color-text-info,#378add)", t("好友", "Friend"))}
               </span>
               <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis" }}>{it.title}</span>
             </button>
@@ -208,6 +238,28 @@ export function InboxView(props: InboxViewProps) {
               <p className="muted" style={{ fontSize: 13 }}>
                 {t("到「审计」查看完整证据链并裁决。", "Open Audit to replay the full evidence chain and resolve.")}
               </p>
+            </div>
+          )}
+
+          {sel?.kind === "friend" && (
+            <div style={{ border: CARD, borderRadius: 12, padding: 16 }}>
+              <div style={{ marginBottom: 10 }}>{chip("var(--color-text-info,#378add)", t("好友请求", "friend request"))}</div>
+              <p style={{ margin: "0 0 14px", fontFamily: "var(--font-mono)", fontSize: 11, color: MUTED, wordBreak: "break-all" }}>
+                {sel.data.did}
+              </p>
+              <p className="muted" style={{ margin: "0 0 14px", fontSize: 13 }}>
+                {t("接受后双方互为好友(双方签名,任一方可解除)。", "Accepting makes you mutual friends (both signed; either side can remove).")}
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button disabled={busy === sel.data.did} onClick={() => friendAct(sel.data.did, "accept")}
+                  style={{ fontSize: 13, padding: "7px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${OK}`, background: "var(--color-background-success, rgba(29,158,117,0.1))", color: OK }}>
+                  {t("接受", "Accept")}
+                </button>
+                <button disabled={busy === sel.data.did} onClick={() => friendAct(sel.data.did, "decline")}
+                  style={{ fontSize: 13, padding: "7px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${BAD}`, background: "transparent", color: BAD }}>
+                  {t("拒绝", "Decline")}
+                </button>
+              </div>
             </div>
           )}
         </div>

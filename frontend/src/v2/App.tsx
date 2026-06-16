@@ -26,7 +26,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   a2aEchoApi, activateMission, askAgentStream, createMission, fetchAgents, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
-  fetchProcesses, fetchReceipts, listCapRequests, listDisputes, pingAgentApi, probeHub,
+  fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
   resolveDecisionApi, summarizeAgent,
 } from "./api";
 import { loadChat, saveChat } from "./chatStore";
@@ -45,6 +45,7 @@ import { RulesView } from "./components/RulesView";
 import { AuditView } from "./components/AuditView";
 import { GovernanceView } from "./components/GovernanceView";
 import { ReputationView } from "./components/ReputationView";
+import { ContactsView } from "./components/ContactsView";
 import { InboxView } from "./components/InboxView";
 import { StatusBar } from "./components/StatusBar";
 import { ToastProvider, useToast } from "./components/Toast";
@@ -103,7 +104,7 @@ const ACTIVE_NAV_KEY = "nth.v2.activeNav";
 /** 合法 NavId 白名单——存进来的脏值/旧版本遗留值一律不认,降级默认页。 */
 const VALID_NAV_IDS: ReadonlySet<NavId> = new Set<NavId>([
   "blackboard", "inbox", "missions", "tasks", "rules",
-  "agents", "channels", "audit", "governance", "reputation", "chat",
+  "agents", "channels", "audit", "governance", "reputation", "contacts", "chat",
 ]);
 
 /** 从 localStorage 读回上次页签;无值/脏值/禁读一律降级默认页。 */
@@ -245,14 +246,16 @@ function AppInner() {
         fetchConversations(ctrl.signal),
         fetchCapTokens(ctrl.signal),
         fetchReceipts(ctrl.signal),
-        // 统一「待办」角标:授权请求(待批)+ 争议(开放)也算"需要你拍板"。
+        // 统一「待办」角标:授权请求(待批)+ 争议(开放)+ 好友请求(待确认)
+        // 也算"需要你拍板"。
         listCapRequests(ctrl.signal),
         listDisputes(ctrl.signal),
+        fetchSocialMe(ctrl.signal),
       ]);
       if (cancelled) return;
       const [
         decRes, misRes, procRes, agRes, convRes, capRes, recRes,
-        capReqRes, dispRes,
+        capReqRes, dispRes, socialRes,
       ] = settled;
       if (decRes.status === "fulfilled")  setDecisions(decRes.value);
       if (misRes.status === "fulfilled")  setMissions(misRes.value);
@@ -266,7 +269,9 @@ function AppInner() {
         ? capReqRes.value.filter((c) => c.status === "pending").length : 0;
       const openDisputes = dispRes.status === "fulfilled"
         ? dispRes.value.filter((d) => d.status === "open").length : 0;
-      setInboxExtra(pendingCaps + openDisputes);
+      const friendReqs = socialRes.status === "fulfilled"
+        ? socialRes.value.pending_incoming.length : 0;
+      setInboxExtra(pendingCaps + openDisputes + friendReqs);
 
       const failures = settled.filter((r) => r.status === "rejected").length;
       const totalEndpoints = settled.length;
@@ -525,6 +530,7 @@ function AppInner() {
       { id: "nav-governance", title: "Go to Governance",  shortcut: "G V", run: () => setActive("governance") },
       { id: "nav-delegate",   title: "Go to Authorizations (Inbox)", shortcut: "G D", run: () => setActive("inbox") },
       { id: "nav-reputation", title: "Go to Reputation",  shortcut: "G E", run: () => setActive("reputation") },
+      { id: "nav-contacts",   title: "Go to Contacts",    shortcut: "G F", run: () => setActive("contacts") },
       { id: "nav-chat",       title: "Go to Chat",        shortcut: "G C", run: () => setActive("chat") },
       {
         id: "new-mission",
@@ -1014,6 +1020,8 @@ function AppInner() {
     view = <GovernanceView />;
   } else if (active === "reputation") {
     view = <ReputationView />;
+  } else if (active === "contacts") {
+    view = <ContactsView />;
   } else {
     view = (
       <>
@@ -1088,6 +1096,7 @@ function labelFor(id: NavId): string {
     case "audit":      return "Audit";
     case "governance": return "Governance";
     case "reputation": return "Reputation";
+    case "contacts":   return "Contacts";
     case "chat":       return "Chat";
   }
 }

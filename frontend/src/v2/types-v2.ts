@@ -179,6 +179,7 @@ export type NavId =
   | "audit"
   | "governance"
   | "reputation"
+  | "contacts"
   | "chat";
 
 /** 频道(收编自 8765 群聊,/api/v2/channels)。 */
