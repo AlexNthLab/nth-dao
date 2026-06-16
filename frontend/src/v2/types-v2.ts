@@ -178,7 +178,6 @@ export type NavId =
   | "channels"
   | "audit"
   | "governance"
-  | "delegate"
   | "reputation"
   | "chat";
 

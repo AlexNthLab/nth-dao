@@ -44,7 +44,6 @@ import { MissionList, type NewMissionDraft } from "./components/MissionList";
 import { RulesView } from "./components/RulesView";
 import { AuditView } from "./components/AuditView";
 import { GovernanceView } from "./components/GovernanceView";
-import { DelegateView } from "./components/DelegateView";
 import { ReputationView } from "./components/ReputationView";
 import { InboxView } from "./components/InboxView";
 import { StatusBar } from "./components/StatusBar";
@@ -104,7 +103,7 @@ const ACTIVE_NAV_KEY = "nth.v2.activeNav";
 /** 合法 NavId 白名单——存进来的脏值/旧版本遗留值一律不认,降级默认页。 */
 const VALID_NAV_IDS: ReadonlySet<NavId> = new Set<NavId>([
   "blackboard", "inbox", "missions", "tasks", "rules",
-  "agents", "channels", "audit", "governance", "delegate", "reputation", "chat",
+  "agents", "channels", "audit", "governance", "reputation", "chat",
 ]);
 
 /** 从 localStorage 读回上次页签;无值/脏值/禁读一律降级默认页。 */
@@ -561,7 +560,7 @@ function AppInner() {
         id: "issue-cap",
         title: "Issue cap_token to a helper agent",
         hint: "Delegate scoped authority for the next N hours",
-        run: () => setActive("delegate"),
+        run: () => setActive("inbox"),
       },
       {
         id: "verify-receipt",
@@ -831,9 +830,9 @@ function AppInner() {
     toast.push("LAN scan complete. No new peers found.", "info");
   }
   function handleIssueCap(did: string) {
-    setActive("delegate");
+    setActive("inbox");
     toast.push(
-      `Pivoting to Delegate to issue cap_token for ${did.slice(0, 16)}…`,
+      `Opening Inbox to authorize cap_token for ${did.slice(0, 16)}…`,
       "info",
     );
   }
@@ -853,7 +852,7 @@ function AppInner() {
   function handleActivateRule(id: string) { transitionRule(id, `Rule ${id} activated.`, "success"); }
   function handleDiscardRule(id: string)  { transitionRule(id, `Rule ${id} discarded.`, "success"); }
   function handleEditRule(id: string)     { toast.push(`Edit Rule ${id} (form coming in v1.x).`, "info"); }
-  function handleViewCap(capId: string)   { toast.push(`Cap_token ${capId} — opening Delegate view.`, "info"); setActive("delegate"); }
+  function handleViewCap(capId: string)   { toast.push(`Cap_token ${capId} — opening Inbox.`, "info"); setActive("inbox"); }
 
   /* ── create-task handlers (audit fix 2026-06-10:
    *    "需要有添加/发起任务功能") ───────────────────────────────── */
@@ -1013,8 +1012,6 @@ function AppInner() {
     view = <AuditView />;
   } else if (active === "governance") {
     view = <GovernanceView />;
-  } else if (active === "delegate") {
-    view = <DelegateView />;
   } else if (active === "reputation") {
     view = <ReputationView />;
   } else {
@@ -1090,7 +1087,6 @@ function labelFor(id: NavId): string {
     case "channels":   return "Channels";
     case "audit":      return "Audit";
     case "governance": return "Governance";
-    case "delegate":   return "Delegate";
     case "reputation": return "Reputation";
     case "chat":       return "Chat";
   }
