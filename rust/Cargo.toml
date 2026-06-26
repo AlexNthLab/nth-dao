@@ -1,0 +1,49 @@
+# NTH DAO Rust kernel workspace
+#
+# This is an independent Rust port of the nth-dao wire-protocol layer,
+# positioned per docs/CONFORMANCE.md: a Rust/Go/TS implementation is
+# wire-compatible with the Python reference iff its conformance runner
+# produces zero failures against nth_dao/conformance/vectors.json.
+#
+# The Python package under nth_dao/ is the source of truth; this Rust
+# tree never edits it. Each crate here is a standalone library so the
+# risk radius of any PR is confined to this rust/ directory.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/nth-core",
+    "crates/nth-conformance",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+authors = ["NTH DAO contributors"]
+repository = "https://github.com/AlexNthLab/nth-dao"
+description = "Rust kernel for NTH DAO wire protocols"
+
+# Shared dependency versions across crates.
+[workspace.dependencies]
+sha2 = "0.10"
+# Enable dalek's `zeroize` feature so SigningKey/VerifyingKey secret material
+# is overwritten on drop. This is the documented hygiene path for ed25519-
+# dalek 2.x: the crate impls Zeroize behind this feature flag, so we don't
+# need a Zeroizing<T> wrapper (which would require SigningKey: Zeroize at
+# the type level — only available with this feature on).
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+serde = { version = "1", features = ["derive"] }
+# arbitrary_precision: preserve integer magnitude exactly so a JSON token
+# like 18446744073709551616 (2^64) stays an integer, not a lossy f64. This
+# is required for byte-for-byte parity with Python's arbitrary-precision int
+# in canonical_json. Without it, serde_json silently downgrades large ints
+# to f64 and our validate() wrongly rejects them as floats.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+hex = "0.4"
+thiserror = "1"
+
+# nth-core is a pure library: no network, no filesystem, no I/O.
+# Everything it does is deterministic byte juggling over inputs the
+# caller provides, which keeps it trivially testable and portable.

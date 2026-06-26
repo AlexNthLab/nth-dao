@@ -1,0 +1,5 @@
+# Rust build artifacts — never commit these.
+# Note: Cargo.lock IS committed because this workspace ships binaries
+# (nth-conformance); reproducible builds for binaries want the lockfile.
+/target
+**/*.rs.bk

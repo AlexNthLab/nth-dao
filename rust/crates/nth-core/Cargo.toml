@@ -1,0 +1,24 @@
+[package]
+name = "nth-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "NTH DAO wire-protocol primitives: canonical JSON, Ed25519, did:key, fingerprints"
+
+[dependencies]
+sha2.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Used in tests to derive keypairs from the deterministic seeds the
+# conformance suite fixes (alice_seed = 0x01, bob_seed = 0x02, ...).
+# ed25519-dalek already pulls rand_core; redeclaring here keeps the
+# version pinned at the workspace level for test code.
+rand_core = "0.6"
