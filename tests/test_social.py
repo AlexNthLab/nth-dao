@@ -9,11 +9,13 @@ pytest.importorskip("nacl")
 
 from nth_dao.identity import AgentIdentity
 from nth_dao.social import (
+    BLOCK,
     FOLLOW,
     FRIEND_ACCEPT,
     FRIEND_DECLINE,
     FRIEND_REMOVE,
     FRIEND_REQUEST,
+    UNBLOCK,
     UNFOLLOW,
     SocialProjection,
     record_social,
@@ -173,3 +175,57 @@ def test_record_fail_closed(tmp_path: Path) -> None:
     s["sig"] = "forged"
     with pytest.raises(ValueError, match="invalid social statement"):
         record_social(spine, s)
+
+
+# ── 屏蔽(#3)──────────────────────────────────────────────────
+
+def test_block_purges_existing_and_suppresses_future(tmp_path: Path) -> None:
+    """A 屏蔽 B:清除既有所有边,且之后 B 的关注/好友请求一律不进图。"""
+    node, a, b = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    # 先建立关系:B 关注 A、B 请求 A、A 接受 → 好友
+    record_social(spine, sign_social_statement(signer=b, statement_type=FOLLOW, target_did=a.as_did()))
+    record_social(spine, sign_social_statement(signer=b, statement_type=FRIEND_REQUEST, target_did=a.as_did()))
+    record_social(spine, sign_social_statement(signer=a, statement_type=FRIEND_ACCEPT, target_did=b.as_did()))
+    # A 屏蔽 B
+    record_social(spine, sign_social_statement(signer=a, statement_type=BLOCK, target_did=b.as_did()))
+    p = _proj(spine)
+    assert p.blocked(a.as_did()) == [b.as_did()]
+    assert p.friends(a.as_did()) == []          # 好友被清
+    assert p.followers(a.as_did()) == []         # 粉丝被清
+    # 屏蔽后 B 再关注 A → 不进图
+    record_social(spine, sign_social_statement(signer=b, statement_type=FOLLOW, target_did=a.as_did()))
+    p2 = _proj(spine)
+    assert p2.followers(a.as_did()) == []
+
+
+def test_block_is_symmetric_cut(tmp_path: Path) -> None:
+    """A 屏蔽 B 后,连 A 自己想关注 B 也不成(任一方屏蔽即双向切断)。"""
+    node, a, b = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    record_social(spine, sign_social_statement(signer=a, statement_type=BLOCK, target_did=b.as_did()))
+    record_social(spine, sign_social_statement(signer=a, statement_type=FOLLOW, target_did=b.as_did()))
+    assert _proj(spine).following(a.as_did()) == []
+
+
+def test_unblock_allows_again_but_no_auto_restore(tmp_path: Path) -> None:
+    node, a, b = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    record_social(spine, sign_social_statement(signer=b, statement_type=FOLLOW, target_did=a.as_did()))
+    record_social(spine, sign_social_statement(signer=a, statement_type=BLOCK, target_did=b.as_did()))
+    record_social(spine, sign_social_statement(signer=a, statement_type=UNBLOCK, target_did=b.as_did()))
+    p = _proj(spine)
+    assert p.blocked(a.as_did()) == []
+    assert p.followers(a.as_did()) == []          # 旧关注不自动恢复
+    # 解除后 B 重新关注 → 这次进图
+    record_social(spine, sign_social_statement(signer=b, statement_type=FOLLOW, target_did=a.as_did()))
+    assert _proj(spine).followers(a.as_did()) == [b.as_did()]
+
+
+def test_relationship_block_flags(tmp_path: Path) -> None:
+    node, a, b = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    record_social(spine, sign_social_statement(signer=a, statement_type=BLOCK, target_did=b.as_did()))
+    p = _proj(spine)
+    assert p.relationship(a.as_did(), b.as_did())["blocked"] is True
+    assert p.relationship(b.as_did(), a.as_did())["blocked_by"] is True

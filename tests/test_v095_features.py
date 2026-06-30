@@ -1,4 +1,4 @@
-﻿"""v0.9.5 鈥?AgentLedger + Guardian recovery + A2A translation tests."""
+"""v0.9.5 鈥?AgentLedger + Guardian recovery + A2A translation tests."""
 
 import json
 
@@ -419,16 +419,16 @@ def test_agent_card_from_assembles_well_formed_card(tmp_path):
         capabilities=["code_review"],
         endpoint_url="https://alice.example/a2a",
     )
-    # Architect audit M-3 (2026-06-07): A2A v0.3.0 Agent Card has no
-    # canonical top-level ``id`` field - agent identity is carried by
-    # ``url`` and (for richer identity) under the ``x-nth-dao`` vendor
-    # extension. Pre-fix this test pinned a non-spec top-level ``id``.
+    # A2A v1.0.1 Agent Card has no canonical top-level ``id`` field;
+    # agent identity is carried by supportedInterfaces plus, for richer
+    # identity, under the ``x-nth-dao`` vendor extension.
     assert "id" not in card
     assert card["x-nth-dao"]["agent_did"] == alice.as_did()
     assert card["x-nth-dao"]["agent_did"].startswith("did:key:z")
     assert card["name"] == "Alice's Agent"
-    assert card["url"] == "https://alice.example/a2a"
-    assert card["preferredTransport"] == "JSONRPC"
+    assert card["supportedInterfaces"][0]["url"] == "https://alice.example/a2a"
+    assert card["supportedInterfaces"][0]["protocolBinding"] == "HTTP+JSON"
+    assert card["supportedInterfaces"][0]["protocolVersion"] == "1.0.1"
     assert isinstance(card["capabilities"], dict)
     assert card["defaultInputModes"] == ["application/json"]
     assert len(card["skills"]) == 1

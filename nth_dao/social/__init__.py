@@ -13,21 +13,25 @@
 from typing import Any, Dict
 
 from nth_dao.social.projection import (
+    EVENT_BLOCK,
     EVENT_FOLLOW,
     EVENT_FRIEND_ACCEPT,
     EVENT_FRIEND_DECLINE,
     EVENT_FRIEND_REMOVE,
     EVENT_FRIEND_REQUEST,
+    EVENT_UNBLOCK,
     EVENT_UNFOLLOW,
     SocialProjection,
 )
 from nth_dao.social.statement import (
+    BLOCK,
     FOLLOW,
     FRIEND_ACCEPT,
     FRIEND_DECLINE,
     FRIEND_REMOVE,
     FRIEND_REQUEST,
     SOCIAL_STATEMENT_KIND,
+    UNBLOCK,
     UNFOLLOW,
     sign_social_statement,
     verify_social_statement,
@@ -54,6 +58,8 @@ __all__ = [
     "FRIEND_ACCEPT",
     "FRIEND_DECLINE",
     "FRIEND_REMOVE",
+    "BLOCK",
+    "UNBLOCK",
     "sign_social_statement",
     "verify_social_statement",
     "EVENT_FOLLOW",
@@ -62,6 +68,8 @@ __all__ = [
     "EVENT_FRIEND_ACCEPT",
     "EVENT_FRIEND_DECLINE",
     "EVENT_FRIEND_REMOVE",
+    "EVENT_BLOCK",
+    "EVENT_UNBLOCK",
     "SocialProjection",
     "record_social",
 ]

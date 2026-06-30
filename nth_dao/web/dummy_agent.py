@@ -1274,13 +1274,26 @@ class _HermesAskBackend(_AskBackend):
                 response = agent.chat(prompt)
                 if not isinstance(response, str):
                     result_box["error"] = RuntimeError(
-                        "hermes AIAgent.chat() 返回了非字符串: "
+                        "hermes AIAgent.chat() returned a non-string value: "
                         f"{type(response).__name__}"
                     )
                     return
                 result_box["response"] = response
-            except Exception as exc:  # noqa: BLE001 — 转回主线程抛
-                result_box["error"] = exc
+            except BaseException as exc:  # noqa: BLE001
+                # AIAgent may raise SystemExit/KeyboardInterrupt from inside
+                # its own stack. If that escapes the worker thread, pytest and
+                # production logs see an unhandled thread exception while the
+                # HTTP caller gets an empty or misleading response. Convert it
+                # into a normal RuntimeError that the main thread can raise.
+                if isinstance(exc, Exception):
+                    result_box["error"] = exc
+                else:
+                    err = RuntimeError(
+                        "hermes worker exited with "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    err.__cause__ = exc
+                    result_box["error"] = err
             finally:
                 if agent is not None:
                     try:
@@ -1309,18 +1322,13 @@ class _HermesAskBackend(_AskBackend):
         if err is not None:
             # 透传 ValueError / RuntimeError 以保留诊断信息。
             raise err
-        # M-1 修复 (5.4b R1): 我们的 try/except 只接 Exception；
-        # 万一 worker 里冒出 BaseException 直系子类（SystemExit、
-        # KeyboardInterrupt、GeneratorExit），worker 线程会
-        # 静默死掉、result_box 既无 response 也无 error。
-        # 此时下一行的 .get("response", "") 会返回 ""，调用方就
-        # 看到 "成功返回了空字符串"，比 raise 还难排查。显式守卫。
+        # Defensive guard: BaseException subclasses should now be wrapped by
+        # the worker above. If a future path exits without setting either
+        # response or error, fail closed rather than returning an empty success.
         if "response" not in result_box:
             raise RuntimeError(
-                "hermes 工作线程异常退出：result_box 既无 response "
-                "也无 error。可能原因：AIAgent 内部抛了 BaseException "
-                "子类（SystemExit/KeyboardInterrupt 等）穿透了 worker "
-                "的 try/except。请检查 ~/.hermes/logs/。"
+                "hermes worker exited without response or error; "
+                "check the Hermes logs for the underlying cause."
             )
 
         return {
@@ -1523,6 +1531,84 @@ def _check_token_model_scope(
 # typo in operator input fails at the HTTP boundary with a clear
 # 422 instead of getting silently demoted to mock.
 KNOWN_BACKEND_KINDS = frozenset({"mock", "claude-code", "codex", "hermes"})
+
+
+
+def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
+    """Return non-secret local readiness signals for supported backends.
+
+    The web console uses this as a startup guide. It deliberately reports only
+    booleans and generic hints: no token values, no email addresses, no full
+    filesystem paths.
+    """
+    import importlib.util
+    import shutil
+
+    home = Path.home()
+    anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    anthropic_pkg = importlib.util.find_spec("anthropic") is not None
+    claude_cli = shutil.which("claude") is not None
+    codex_cli = shutil.which("codex") is not None
+    codex_profile = (home / ".codex").exists()
+    hermes_pkg = importlib.util.find_spec("run_agent") is not None
+    hermes_profile = (home / ".hermes").exists()
+
+    claude_ready = (anthropic_key and anthropic_pkg) or claude_cli
+    codex_ready = codex_cli and codex_profile
+    hermes_ready = hermes_pkg and hermes_profile
+
+    return {
+        "mock": {
+            "kind": "mock",
+            "label": "Mock",
+            "ready": True,
+            "available": True,
+            "detail": "Built-in smoke backend. No external credentials needed.",
+            "warning": "Use for routing tests only; it does not call a real model.",
+        },
+        "claude-code": {
+            "kind": "claude-code",
+            "label": "Claude Code",
+            "ready": claude_ready,
+            "available": claude_ready,
+            "detail": (
+                "Anthropic SDK credentials detected."
+                if anthropic_key and anthropic_pkg else
+                "Claude CLI detected."
+                if claude_cli else
+                "Install/log in to Claude Code, or set ANTHROPIC_API_KEY with the anthropic package."
+            ),
+            "warning": "CLI mode can be slower on Windows; SDK mode is preferred when configured.",
+        },
+        "codex": {
+            "kind": "codex",
+            "label": "Codex",
+            "ready": codex_ready,
+            "available": codex_cli,
+            "detail": (
+                "Codex CLI and local profile detected."
+                if codex_ready else
+                "Codex CLI detected, but no local profile was found; run codex login."
+                if codex_cli else
+                "Install Codex CLI and run codex login."
+            ),
+            "warning": "Prompts that require tool approval may time out in non-interactive A2A calls.",
+        },
+        "hermes": {
+            "kind": "hermes",
+            "label": "Hermes",
+            "ready": hermes_ready,
+            "available": hermes_pkg,
+            "detail": (
+                "hermes-agent package and local profile detected."
+                if hermes_ready else
+                "hermes-agent is importable, but no local Hermes profile was found."
+                if hermes_pkg else
+                "Install hermes-agent and configure its local profile."
+            ),
+            "warning": "Hermes runs in-process; slow providers can hold a worker until the timeout fires.",
+        },
+    }
 
 # Phase 3g/4 debt R1: per-connection socket idle timeout on the
 # A2A handler. Bounds slowloris-style attacks where a peer opens a
@@ -2368,6 +2454,16 @@ def main(argv: list[str] | None = None) -> int:
             "with the agent's OWN key. Empty disables claiming."
         ),
     )
+    parser.add_argument(
+        "--identity-file",
+        type=str,
+        default="",
+        help=(
+            "持久身份文件路径。存在 → 载入已存密钥(重启后同一 DID,信誉/关系"
+            "延续);不存在 → 生成并保存到此路径供下次复用。空 → 每次新生成"
+            "(临时身份,旧行为)。"
+        ),
+    )
     args = parser.parse_args(argv)
     # L-2 fix (2026-06-11): reject non-positive heartbeat — the
     # downstream max(0.1, heartbeat) would silently clamp to 100ms
@@ -2413,7 +2509,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        identity = AgentIdentity.generate(label=args.id)
+        idf = (args.identity_file or "").strip()
+        if idf and Path(idf).exists():
+            # 稳定身份:载入已存密钥 → 重启后仍是同一 DID。
+            identity = AgentIdentity.load(idf)
+        else:
+            identity = AgentIdentity.generate(label=args.id)
+            if idf:
+                # 首次:落盘(save 内部做 owner-only ACL 加固),供重启复用。
+                identity.save(idf)
         did = identity.as_did()
         pubkey_hex = identity.pubkey_hex
     except Exception as exc:  # noqa: BLE001

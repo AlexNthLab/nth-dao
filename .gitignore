@@ -109,3 +109,9 @@ credentials.json
 **/team_marketplace/
 console.token
 **/console.token
+
+# ── Agent 持久化(2026-06-20):每个持久 agent 的 Ed25519 密钥 + roster ──
+# identities/**/identity.json 含**私钥**,绝不入库(已被上面 **/identity.json
+# 广规则覆盖,这里再显式钉死作双保险)。roster.json 是运营者私有的 agent 状态。
+**/agents/identities/
+**/agents/roster.json

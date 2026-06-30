@@ -25,16 +25,20 @@ import {
 import { SignaturePanel } from "./SignaturePanel";
 import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
+import type { BackendStatus } from "../api";
 import type { AgentEntry, AgentSource } from "../types-v2";
 
 export interface AgentDirectoryViewProps {
   agents: AgentEntry[];
+  backendStatuses?: Record<string, BackendStatus>;
   /** Wired to /api/agents/add once the backend integration lands. */
   onAddByDid: (did: string, label: string) => Promise<void> | void;
   /** Wired to /api/agents/lan_discover. */
   onScanLan: () => Promise<void> | void;
   /** Issue cap_token to this agent — pivots to Delegate view. */
   onIssueCap: (did: string) => void;
+  onSpawnBackend?: (kind: string) => Promise<void> | void;
+  onStopAgent?: (agentId: string) => Promise<void> | void;
   /** Send a chat message to this agent — pivots to Chat view with
    *  the right conversation pre-selected (audit fix 2026-06-10,
    *  finding C5: "Send message" button was decorative). When
@@ -92,7 +96,8 @@ type Filter = "all" | AgentSource;
 // (was a local relTime() — moved to ../utils/time, audit M3)
 
 export function AgentDirectoryView({
-  agents, onAddByDid, onScanLan, onIssueCap, onSendMessage,
+  agents, backendStatuses = {}, onAddByDid, onScanLan, onIssueCap,
+  onSpawnBackend, onStopAgent, onSendMessage,
   onPingAgent, onA2AEcho, onAskAgent,
 }: AgentDirectoryViewProps) {
   const { t } = useLang();
@@ -102,6 +107,8 @@ export function AgentDirectoryView({
   const [newDid, setNewDid] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [scanning, setScanning] = useState(false);
+  const [spawningKind, setSpawningKind] = useState<string | null>(null);
+  const [stoppingAgentId, setStoppingAgentId] = useState<string | null>(null);
   const [selectedDid, setSelectedDid] = useState<string | null>(
     agents[0]?.did ?? null,
   );
@@ -292,6 +299,31 @@ export function AgentDirectoryView({
     return m;
   }, [agents]);
 
+  const backendOrder = ["mock", "claude-code", "codex", "hermes"];
+  const backendCards = backendOrder
+    .map((kind) => backendStatuses[kind])
+    .filter((b): b is BackendStatus => Boolean(b));
+
+  async function handleSpawn(kind: string) {
+    if (!onSpawnBackend) return;
+    setSpawningKind(kind);
+    try {
+      await onSpawnBackend(kind);
+    } finally {
+      setSpawningKind(null);
+    }
+  }
+
+  async function handleStop(agentId: string) {
+    if (!onStopAgent) return;
+    setStoppingAgentId(agentId);
+    try {
+      await onStopAgent(agentId);
+    } finally {
+      setStoppingAgentId(null);
+    }
+  }
+
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     if (!newDid.trim()) return;
@@ -409,6 +441,71 @@ export function AgentDirectoryView({
               />
             </div>
           </div>
+
+
+          {backendCards.length > 0 && (
+            <div
+              style={{
+                background: "var(--bg-panel)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--r-md)",
+                padding: 14,
+                marginBottom: 16,
+              }}
+            >
+              <div className="detail-section-label">Local backend startup</div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                  gap: 10,
+                  marginTop: 8,
+                }}
+              >
+                {backendCards.map((b) => {
+                  const running = agents.some(
+                    (a) => a.kind === b.kind && a.supervised && a.alive,
+                  );
+                  return (
+                    <div
+                      key={b.kind}
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: 6,
+                        padding: 10,
+                        background: "var(--bg-elevated)",
+                        minWidth: 0,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <strong style={{ fontSize: 13 }}>{b.label}</strong>
+                        <span className={`pill ${b.ready ? "ok" : "wait"}`} style={{ fontSize: 10 }}>
+                          {b.ready ? "ready" : "setup needed"}
+                        </span>
+                      </div>
+                      <p className="muted" style={{ fontSize: 11, margin: "8px 0", lineHeight: 1.35 }}>
+                        {b.detail}
+                      </p>
+                      {b.warning && (
+                        <p style={{ fontSize: 11, margin: "0 0 8px", color: "var(--warn, #d97706)", lineHeight: 1.35 }}>
+                          {b.warning}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        className={b.ready ? "btn btn-primary" : "btn btn-secondary"}
+                        disabled={!onSpawnBackend || !b.ready || spawningKind === b.kind}
+                        onClick={() => void handleSpawn(b.kind)}
+                        title={b.ready ? `Spawn ${b.label}` : b.detail}
+                      >
+                        {spawningKind === b.kind ? "Starting..." : running ? "Start another" : "Start"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {addOpen && (
             <div
@@ -736,6 +833,21 @@ export function AgentDirectoryView({
                       }
                     >
                       {t("A2A echo", "A2A echo")}
+                    </button>
+                  )}
+
+                  {onStopAgent && a.supervised && a.agent_id && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={stoppingAgentId === a.agent_id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleStop(a.agent_id as string);
+                      }}
+                      title="Stop this supervised local agent"
+                    >
+                      {stoppingAgentId === a.agent_id ? "Stopping..." : "Stop"}
                     </button>
                   )}
                 </div>

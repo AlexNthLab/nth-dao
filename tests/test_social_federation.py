@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from nth_dao.identity import AgentIdentity
 from nth_dao.social import (
+    BLOCK,
     FOLLOW,
     FRIEND_REQUEST,
     record_social,
@@ -51,6 +52,18 @@ def test_local_serves_only_own_outbound(tmp_path: Path) -> None:
     assert local_social_statements(spine, me.as_did(), since_seq=mine[0]["seq"]) == []
 
 
+def test_block_is_silent_not_served(tmp_path: Path) -> None:
+    """静默屏蔽:block/unblock 是本地决定,绝不进联邦流(对方拉不到、无从察觉)。"""
+    node, me, x = _id(), _id(), _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    record_social(spine, sign_social_statement(signer=me, statement_type=FOLLOW, target_did=x.as_did()))
+    record_social(spine, sign_social_statement(signer=me, statement_type=BLOCK, target_did=x.as_did()))
+    served = local_social_statements(spine, me.as_did())
+    types = [s["statement"]["type"] for s in served]
+    assert "block" not in types and "unblock" not in types   # 屏蔽不外发
+    assert "follow" in types                                  # 普通边照常外发
+
+
 # ── 纯逻辑:ingest 四道闸 ───────────────────────────────────────
 
 def test_ingest_only_addressed_to_self(tmp_path: Path) -> None:
@@ -77,6 +90,33 @@ def test_ingest_rejects_bad_signature(tmp_path: Path) -> None:
     forged = sign_social_statement(signer=a, statement_type=FOLLOW, target_did=me.as_did())
     forged["sig"] = "tampered"
     assert ingest_social_statements(spine, [forged], me.as_did()) == 0
+
+
+def test_ingest_rejects_blocked_actor(tmp_path: Path) -> None:
+    """#3:被我屏蔽的 DID,其联邦投递的语句一律不落地。"""
+    node, attacker = _id(), _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    self_did = node.as_did()
+    # 我(node)屏蔽 attacker
+    record_social(spine, sign_social_statement(
+        signer=node, statement_type=BLOCK, target_did=attacker.as_did()))
+    # attacker 通过联邦发来关注(target=我)
+    foll = sign_social_statement(
+        signer=attacker, statement_type=FOLLOW, target_did=self_did)
+    assert ingest_social_statements(spine, [foll], self_did) == 0
+
+
+def test_ingest_rate_limit_caps_per_cycle(tmp_path: Path) -> None:
+    """#3:单轮落盘封顶,余下留待下轮(给 sybil 突发封顶)。"""
+    node = _id()
+    spine = SignedEventLog(tmp_path / "s.jsonl", node)
+    self_did = node.as_did()
+    # 5 个不同 DID 各发一条关注(模拟 sybil)
+    stmts = [sign_social_statement(signer=_id(), statement_type=FOLLOW, target_did=self_did)
+             for _ in range(5)]
+    assert ingest_social_statements(spine, stmts, self_did, max_per_cycle=2) == 2
+    # 下一轮:已落的 2 条按 sig 去重,剩 3 条再收 2 条
+    assert ingest_social_statements(spine, stmts, self_did, max_per_cycle=2) == 2
 
 
 def test_ingest_rejects_actor_spoofing(tmp_path: Path) -> None:
@@ -138,3 +178,25 @@ def test_two_node_mutual_friend_end_to_end() -> None:
     assert got2 == 1
     me_a = A.get("/api/v2/social/me").json()
     assert b_did in me_a["friends"]            # A 侧:也成好友 ✓ 双向闭环
+
+
+def test_two_node_block_stops_federation() -> None:
+    """#3 端到端:B 屏蔽 A 后,A 经联邦发来的关注**不落** B 的 spine。"""
+    a_app = create_app(workspace=tempfile.mkdtemp(), require_console_auth=False)
+    b_app = create_app(workspace=tempfile.mkdtemp(), require_console_auth=False)
+    A, B = TestClient(a_app), TestClient(b_app)
+    a_did = a_app.state.nth.node_identity.as_did()
+    b_did = b_app.state.nth.node_identity.as_did()
+    b_spine = b_app.state.nth.spine
+    A_BASE = "http://a"
+    http_get = _routed_get({A_BASE: A, "http://b": B})
+
+    # B 屏蔽 A;A 关注 B
+    assert B.post("/api/v2/social/block", json={"target_did": a_did}).status_code == 200
+    assert A.post("/api/v2/social/follow", json={"target_did": b_did}).status_code == 200
+
+    # B 拉 A → A 的关注因屏蔽被拒,0 条落盘
+    assert federate_social_once(b_did, [A_BASE], b_spine, http_get) == 0
+    me_b = B.get("/api/v2/social/me").json()
+    assert a_did not in me_b["followers"]
+    assert a_did in me_b["blocked"]

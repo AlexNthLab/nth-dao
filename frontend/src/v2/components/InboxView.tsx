@@ -13,6 +13,7 @@
 import { useEffect, useState } from "react";
 import {
   approveCapRequest,
+  blockDid,
   denyCapRequest,
   fetchSocialMe,
   friendAccept,
@@ -72,7 +73,7 @@ export function InboxView(props: InboxViewProps) {
     ]).then(([c, d, s]) => {
       if (c.status === "fulfilled") setCaps(c.value);
       if (d.status === "fulfilled") setDisputes(d.value);
-      if (s.status === "fulfilled") setFriendReqs(s.value.pending_incoming);
+      if (s.status === "fulfilled") setFriendReqs(s.value.pending_incoming ?? []);
     });
     return () => ac.abort();
   }, [reload]);
@@ -111,12 +112,15 @@ export function InboxView(props: InboxViewProps) {
     }
   }
 
-  async function friendAct(did: string, kind: "accept" | "decline") {
+  async function friendAct(did: string, kind: "accept" | "decline" | "block") {
     setBusy(did);
     try {
       if (kind === "accept") {
         await friendAccept(did);
         toast.push(t("已成为好友", "Now friends"), "success");
+      } else if (kind === "block") {
+        await blockDid(did);
+        toast.push(t("已屏蔽", "Blocked"), "info");
       } else {
         await friendDecline(did);
         toast.push(t("已拒绝", "Declined"), "info");
@@ -258,6 +262,10 @@ export function InboxView(props: InboxViewProps) {
                 <button disabled={busy === sel.data.did} onClick={() => friendAct(sel.data.did, "decline")}
                   style={{ fontSize: 13, padding: "7px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${BAD}`, background: "transparent", color: BAD }}>
                   {t("拒绝", "Decline")}
+                </button>
+                <button disabled={busy === sel.data.did} onClick={() => friendAct(sel.data.did, "block")}
+                  style={{ fontSize: 13, padding: "7px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${MUTED}`, background: "transparent", color: MUTED }}>
+                  {t("屏蔽", "Block")}
                 </button>
               </div>
             </div>

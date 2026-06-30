@@ -191,7 +191,7 @@ def agent_card_from(
     endpoint_url: str = "",
     version: str = "1.0.0",
     metadata: Optional[Dict[str, Any]] = None,
-    protocol_version: str = "0.3.0",
+    protocol_version: str = "1.0.1",
 ) -> Dict[str, Any]:
     """Assemble an A2A AgentCard suitable for `/.well-known/agent.json`.
 
@@ -219,34 +219,37 @@ def agent_card_from(
     # undefined property. Keep the DID inside ``x-nth-dao.agent_did``
     # where consumers per the spec MUST tolerate unknown ``x-*`` keys.
     return {
-        "protocolVersion": protocol_version,
         "name": name,
         "description": description,
-        "url": endpoint_url,
-        "preferredTransport": "JSONRPC",
+        "supportedInterfaces": [
+            {
+                "url": endpoint_url.rstrip("/"),
+                "protocolBinding": "HTTP+JSON",
+                "protocolVersion": protocol_version,
+            }
+        ],
         "version": version,
         "capabilities": {
             "streaming": False,
             "pushNotifications": False,
-            "stateTransitionHistory": True,
             "extensions": [
                 {"uri": "https://github.com/AlexNthLab/nth-dao/a2a"},
             ],
+            "extendedAgentCard": False,
         },
         "defaultInputModes": ["application/json"],
         "defaultOutputModes": ["application/json"],
         "skills": skills,
         "securitySchemes": {},
-        "security": [],
+        "securityRequirements": [],
         "metadata": dict(metadata or {}),
         "x-nth-dao": {
             "agent_did": agent_did,
             "capabilities": list(capabilities or []),
             "version": version,
-            "wire_format": "nth-dao-a2a-agent-card-v1",
+            "wire_format": "nth-dao-a2a-agent-card-v1.0.1",
         },
     }
-
 
 # ─────────────────── Mission ↔ A2A Task ───────────────────
 

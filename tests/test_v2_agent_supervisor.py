@@ -3945,22 +3945,18 @@ def test_hermes_backend_rejects_non_string_chat_response(
     fake_module.AIAgent = _WeirdAgent  # type: ignore[attr-defined]
     monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
 
-    with pytest.raises(RuntimeError, match="返回了非字符串.*dict"):
+    with pytest.raises(RuntimeError, match="returned a non-string value: dict"):
         _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
 
 
-def test_hermes_backend_raises_when_worker_dies_silently(
+def test_hermes_backend_wraps_baseexception_without_thread_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M-1 fix (5.4b R1): if the worker dies via a BaseException
-    subclass (SystemExit / KeyboardInterrupt / GeneratorExit) the
-    ``except Exception`` clause doesn't catch it, ``result_box``
-    stays empty, and the pre-fix code would silently return
-    ``response=""``. The fix is a guard that raises a clear error
-    pointing at the worker's anomalous exit. Simulate the case by
-    letting ``chat()`` raise ``SystemExit`` — the worker thread
-    dies, main thread sees an empty result_box, and must raise
-    RuntimeError instead of returning an empty success. """
+    """SystemExit from Hermes must be raised on the main thread.
+
+    Catching it in the worker prevents pytest's unhandled-thread warning and
+    gives the HTTP caller a normal RuntimeError instead of an empty success.
+    """
     import sys as _sys
     import types as _types
     from nth_dao.web.dummy_agent import _HermesAskBackend
@@ -3970,8 +3966,6 @@ def test_hermes_backend_raises_when_worker_dies_silently(
             pass
 
         def chat(self, _m: str) -> str:
-            # BaseException subclass — falls through our ``except
-            # Exception`` net. Worker thread will die silently.
             raise SystemExit(0)
 
         def close(self) -> None:
@@ -3981,7 +3975,7 @@ def test_hermes_backend_raises_when_worker_dies_silently(
     fake_module.AIAgent = _SuicidalAgent  # type: ignore[attr-defined]
     monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
 
-    with pytest.raises(RuntimeError, match="既无 response 也无 error"):
+    with pytest.raises(RuntimeError, match="hermes worker exited with SystemExit"):
         _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
 
 

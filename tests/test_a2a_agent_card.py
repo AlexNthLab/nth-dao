@@ -88,11 +88,10 @@ def test_api_endpoints_still_blocked_without_token(client):
 
 
 _REQUIRED_TOP_LEVEL = {
-    "name", "description", "supported_interfaces", "version",
-    "capabilities", "default_input_modes", "default_output_modes",
+    "name", "description", "supportedInterfaces", "version",
+    "capabilities", "defaultInputModes", "defaultOutputModes",
     "skills",
 }
-
 
 def test_card_has_all_required_top_level_fields(client):
     body = client.get("/.well-known/agent.json").json()
@@ -102,15 +101,18 @@ def test_card_has_all_required_top_level_fields(client):
 
 def test_card_supported_interfaces_entries_are_well_formed(client):
     body = client.get("/.well-known/agent.json").json()
-    ifaces = body["supported_interfaces"]
+    ifaces = body["supportedInterfaces"]
     assert isinstance(ifaces, list) and ifaces, (
-        "supported_interfaces must be a non-empty array per A2A spec"
+        "supportedInterfaces must be a non-empty array per A2A spec"
     )
+    first = ifaces[0]
+    assert first.get("url"), "AgentInterface.url is REQUIRED"
+    assert first.get("protocolBinding") == NTH_PROTOCOL_BINDING
+    assert first.get("protocolVersion") == NTH_PROTOCOL_VERSION_TAG
     for entry in ifaces:
         assert entry.get("url"), "AgentInterface.url is REQUIRED"
-        assert entry.get("protocol_binding") == NTH_PROTOCOL_BINDING
-        assert entry.get("protocol_version") == NTH_PROTOCOL_VERSION_TAG
-
+        assert entry.get("protocolBinding") in {"HTTP+JSON", "JSONRPC"}
+        assert entry.get("protocolVersion") == NTH_PROTOCOL_VERSION_TAG
 
 def test_card_skills_entries_are_well_formed(client):
     body = client.get("/.well-known/agent.json").json()
@@ -135,7 +137,7 @@ def test_card_capabilities_is_an_object_not_array(client):
     )
     # Honest advertising — we have neither SSE nor push wired yet
     assert caps.get("streaming") is False
-    assert caps.get("push_notifications") is False
+    assert caps.get("pushNotifications") is False
 
 
 def test_card_version_is_emission_version(client):
@@ -354,8 +356,8 @@ def test_build_a2a_card_default_modes_are_text_plain():
         pubkey_hex="aa" * 32,
         base_url="http://localhost",
     )
-    assert card["default_input_modes"] == ["text/plain"]
-    assert card["default_output_modes"] == ["text/plain"]
+    assert card["defaultInputModes"] == ["text/plain", "application/json"]
+    assert card["defaultOutputModes"] == ["text/plain", "application/json"]
 
 
 # ===== B7 (review fix): real skill enumeration =====
@@ -662,21 +664,21 @@ def test_b6_jws_signature_is_deterministic_for_fixed_inputs():
     card_unsigned = {
         "name": "test-agent",
         "description": "deterministic-test",
-        "supported_interfaces": [
+        "supportedInterfaces": [
             {
                 "url": "http://x/api",
-                "protocol_binding": "REST",
-                "protocol_version": "nth-dao/0.9",
+                "protocolBinding": "HTTP+JSON",
+                "protocolVersion": "1.0.1",
             }
         ],
         "version": "0.9.0",
         "capabilities": {
             "streaming": False,
-            "push_notifications": False,
+            "pushNotifications": False,
             "extensions": [],
         },
-        "default_input_modes": ["text/plain"],
-        "default_output_modes": ["text/plain"],
+        "defaultInputModes": ["text/plain", "application/json"],
+        "defaultOutputModes": ["text/plain", "application/json"],
         "skills": [
             {
                 "id": "x",

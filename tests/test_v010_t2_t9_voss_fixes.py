@@ -503,7 +503,7 @@ def test_voss_V35_build_agent_card_rejects_bad_url(bad):
 
 def test_voss_V35_validate_rejects_mutated_bad_url():
     good = build_agent_card(name="X", description="", url="https://x.com/a")
-    good["url"] = "http://"
+    good["supportedInterfaces"][0]["url"] = "http://"
     ok, reason = validate_agent_card(good)
     assert ok is False and "host" in reason
 

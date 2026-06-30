@@ -74,7 +74,7 @@ A2A_WELL_KNOWN_PATH = "/.well-known/agent.json"
 
 # A2A protocol version we currently target. Aligned with v0.9.5's
 # translate.py so both card builders advertise the same wire format.
-A2A_PROTOCOL_VERSION = "0.3.0"
+A2A_PROTOCOL_VERSION = "1.0.1"
 
 # Skill ids must be URL-safe identifiers - other A2A agents may use them
 # in JSON-RPC parameters or URL paths.
@@ -135,7 +135,7 @@ def build_agent_card(
     security_schemes: Optional[Dict[str, Any]] = None,
     security: Optional[List[Dict[str, Any]]] = None,
     protocol_version: str = A2A_PROTOCOL_VERSION,
-    preferred_transport: str = "JSONRPC",
+    preferred_transport: str = "HTTP+JSON",
     nth_dao_extras: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build an A2A Agent Card JSON dict.
@@ -175,24 +175,28 @@ def build_agent_card(
     )
 
     card: Dict[str, Any] = {
-        "protocolVersion": protocol_version,
         "name": name,
         "description": description,
-        "url": url,
+        "supportedInterfaces": [
+            {
+                "url": url.rstrip("/"),
+                "protocolBinding": preferred_transport,
+                "protocolVersion": protocol_version,
+            }
+        ],
         "version": version,
-        "preferredTransport": preferred_transport,
         "capabilities": {
             "streaming": bool(streaming),
             "pushNotifications": bool(push_notifications),
-            "stateTransitionHistory": bool(state_transition_history),
+            "extensions": [],
+            "extendedAgentCard": False,
         },
         "defaultInputModes": list(default_input_modes or ["application/json"]),
         "defaultOutputModes": list(default_output_modes or ["application/json"]),
         "skills": merged_skills,
         "securitySchemes": dict(security_schemes or {}),
-        "security": list(security or []),
+        "securityRequirements": list(security or []),
     }
-
     if provider_org or provider_url:
         card["provider"] = {}
         if provider_org:
@@ -389,17 +393,16 @@ def build_agent_card_from_session(
 
 
 REQUIRED_TOP_LEVEL_FIELDS = (
-    "protocolVersion", "name", "description", "url", "version",
+    "name", "description", "supportedInterfaces", "version",
     "capabilities", "defaultInputModes", "defaultOutputModes", "skills",
 )
 REQUIRED_CAPABILITIES_FIELDS = (
-    "streaming", "pushNotifications", "stateTransitionHistory",
+    "streaming", "pushNotifications",
 )
-
 # Voss V-51: ingested card field types. The pre-fix validator only
 # checked KEY presence; ``{"name": null, "url": "https://...", ...}``
 # passed. Aligning with build_agent_card's type expectations.
-_REQUIRED_STRING_FIELDS = ("protocolVersion", "name", "url", "version")
+_REQUIRED_STRING_FIELDS = ("name", "version")
 _REQUIRED_STRING_FIELDS_ALLOW_EMPTY = ("description",)
 
 
@@ -427,11 +430,20 @@ def validate_agent_card(card: Any) -> Tuple[bool, str]:
         if not isinstance(value, str):
             return False, f"{field} must be a string, got {value!r}"
 
-    # V-35: same urlparse-based check as build_agent_card.
-    try:
-        _validate_endpoint_url(card["url"], "url")
-    except ValueError as exc:
-        return False, str(exc)
+    ifaces = card.get("supportedInterfaces")
+    if not isinstance(ifaces, list) or not ifaces:
+        return False, "supportedInterfaces must be a non-empty list"
+    for i, iface in enumerate(ifaces):
+        if not isinstance(iface, dict):
+            return False, f"supportedInterfaces[{i}] must be an object"
+        try:
+            _validate_endpoint_url(iface.get("url"), f"supportedInterfaces[{i}].url")
+        except ValueError as exc:
+            return False, str(exc)
+        if not isinstance(iface.get("protocolBinding"), str) or not iface.get("protocolBinding"):
+            return False, f"supportedInterfaces[{i}].protocolBinding must be a non-empty string"
+        if not isinstance(iface.get("protocolVersion"), str) or not iface.get("protocolVersion"):
+            return False, f"supportedInterfaces[{i}].protocolVersion must be a non-empty string"
 
     caps = card.get("capabilities")
     if not isinstance(caps, dict):

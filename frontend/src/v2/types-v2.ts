@@ -278,8 +278,10 @@ export interface AgentEntry {
    *  is_alive check on each /api/v2/agents response. */
   alive?: boolean;
   /** Backend kind label the operator chose at spawn time
-   *  ("mock", "claude-code", "hermes", ...). */
+   *  ("mock", "claude-code", "codex", "hermes", ...). */
   kind?: string;
+  /** Supervisor-local id used for stop/restart actions. */
+  agent_id?: string;
   /** Ephemeral localhost port where the child serves its A2A
    *  HTTP surface (GET /ping, POST /a2a/<method>). Undefined when
    *  the child failed to bind (degraded state) or for non-local

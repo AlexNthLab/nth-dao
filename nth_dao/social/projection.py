@@ -22,11 +22,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Set
 
 from nth_dao.social.statement import (
+    BLOCK,
     FOLLOW,
     FRIEND_ACCEPT,
     FRIEND_DECLINE,
     FRIEND_REMOVE,
     FRIEND_REQUEST,
+    UNBLOCK,
     UNFOLLOW,
     verify_social_statement,
 )
@@ -39,10 +41,13 @@ EVENT_FRIEND_REQUEST = "social.friend_request"
 EVENT_FRIEND_ACCEPT = "social.friend_accept"
 EVENT_FRIEND_DECLINE = "social.friend_decline"
 EVENT_FRIEND_REMOVE = "social.friend_remove"
+EVENT_BLOCK = "social.block"
+EVENT_UNBLOCK = "social.unblock"
 _SOCIAL_EVENTS = (
     EVENT_FOLLOW, EVENT_UNFOLLOW,
     EVENT_FRIEND_REQUEST, EVENT_FRIEND_ACCEPT,
     EVENT_FRIEND_DECLINE, EVENT_FRIEND_REMOVE,
+    EVENT_BLOCK, EVENT_UNBLOCK,
 )
 
 
@@ -55,6 +60,7 @@ class SocialProjection(Projection):
         self._friends: Dict[str, Set[str]] = {}      # did -> 好友
         self._pending_out: Dict[str, Set[str]] = {}  # requester -> 已请求的人
         self._pending_in: Dict[str, Set[str]] = {}   # requested -> 请求者(待我确认)
+        self._blocked: Dict[str, Set[str]] = {}      # blocker -> 被屏蔽的人
 
     def reset(self) -> None:
         self._following.clear()
@@ -62,12 +68,28 @@ class SocialProjection(Projection):
         self._friends.clear()
         self._pending_out.clear()
         self._pending_in.clear()
+        self._blocked.clear()
 
     # ── 内部小工具 ──────────────────────────────────────────────
 
     def _clear_pending(self, requester: str, requested: str) -> None:
         self._pending_out.get(requester, set()).discard(requested)
         self._pending_in.get(requested, set()).discard(requester)
+
+    def _is_blocked(self, a: str, b: str) -> bool:
+        """a、b 之间存在任一方向的屏蔽(屏蔽对称生效:任一方屏蔽即切断)。"""
+        return b in self._blocked.get(a, set()) or a in self._blocked.get(b, set())
+
+    def _purge_pair(self, a: str, b: str) -> None:
+        """清除 a、b 之间的所有关系边(关注/粉丝/好友/双向未决请求)。"""
+        self._following.get(a, set()).discard(b)
+        self._followers.get(b, set()).discard(a)
+        self._following.get(b, set()).discard(a)
+        self._followers.get(a, set()).discard(b)
+        self._friends.get(a, set()).discard(b)
+        self._friends.get(b, set()).discard(a)
+        self._clear_pending(a, b)
+        self._clear_pending(b, a)
 
     def _make_friends(self, a: str, b: str) -> None:
         self._friends.setdefault(a, set()).add(b)
@@ -89,6 +111,18 @@ class SocialProjection(Projection):
         a = stmt["actor_did"]    # 发起方(签名者)
         b = stmt["target_did"]   # 关系对象
         if a == b:
+            return
+
+        if t == BLOCK:
+            self._blocked.setdefault(a, set()).add(b)
+            self._purge_pair(a, b)   # 屏蔽即清除既有所有边(回溯生效)
+            return
+        if t == UNBLOCK:
+            self._blocked.get(a, set()).discard(b)
+            return   # 解除屏蔽不恢复旧边,需重新关注/加好友
+
+        # 关注/好友类:任一方屏蔽对方 → 跳过(防被屏蔽者再爬回图里)。
+        if self._is_blocked(a, b):
             return
 
         if t == FOLLOW:
@@ -148,6 +182,10 @@ class SocialProjection(Projection):
         """did 发出、尚未被确认的好友请求。"""
         return sorted(self._pending_out.get(did, set()))
 
+    def blocked(self, did: str) -> List[str]:
+        """did 屏蔽的人。"""
+        return sorted(self._blocked.get(did, set()))
+
     def relationship(self, me: str, other: str) -> Dict[str, bool]:
         """me 视角下与 other 的关系快照(给名册/资料页一眼看清)。"""
         return {
@@ -156,4 +194,6 @@ class SocialProjection(Projection):
             "friend": other in self._friends.get(me, set()),
             "request_outgoing": other in self._pending_out.get(me, set()),
             "request_incoming": other in self._pending_in.get(me, set()),
+            "blocked": other in self._blocked.get(me, set()),
+            "blocked_by": me in self._blocked.get(other, set()),
         }

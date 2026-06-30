@@ -25,7 +25,7 @@ time on 2026-06-08). Quoted required fields:
 
   string name                          [REQUIRED]
   string description                   [REQUIRED]
-  repeated AgentInterface supported_interfaces [REQUIRED]
+  repeated AgentInterface supportedInterfaces [REQUIRED]
   string version                       [REQUIRED]
   AgentCapabilities capabilities       [REQUIRED]
   repeated string default_input_modes  [REQUIRED]
@@ -120,11 +120,18 @@ except ImportError:  # pragma: no cover — Python ≥3.8 always has it
 # RFC 8037 algorithm identifier for Ed25519 in JWS.
 JWS_ALG_EDDSA = "EdDSA"
 
-# Protocol binding identifier for our REST surface. The A2A spec
-# uses free-form strings here; we declare ``REST`` as the binding
-# and namespace the protocol_version under the nth-dao family.
-NTH_PROTOCOL_BINDING = "REST"
-NTH_PROTOCOL_VERSION_TAG = "nth-dao/0.9"
+# A2A v1.0.1 HTTP binding identifiers. The official AgentInterface
+# protocol_binding values are open strings; the core set includes
+# JSONRPC, GRPC and HTTP+JSON. NTH DAO now advertises HTTP+JSON first
+# and keeps the legacy JSONRPC endpoint as a secondary interface.
+A2A_SPEC_VERSION = "1.0.1"
+A2A_INTERFACE_PROTOCOL_VERSION = "1.0.1"
+A2A_HTTP_JSON_BINDING = "HTTP+JSON"
+A2A_JSONRPC_BINDING = "JSONRPC"
+
+# Backward-compatible export names used by older tests/importers.
+NTH_PROTOCOL_BINDING = A2A_HTTP_JSON_BINDING
+NTH_PROTOCOL_VERSION_TAG = A2A_INTERFACE_PROTOCOL_VERSION
 
 
 # ─── base64url helpers: CR-1 fix (2026-06-08) ─────────────────────────
@@ -337,24 +344,29 @@ def known_skills(state: Any, *, base_url: str = "") -> list:
             ],
         ))
 
-    # ── nth-dao.a2a-protocol ── the A2A RPC entry itself
+    # ── nth-dao.a2a-protocol ── the A2A v1.0.1 entry points.
     # Recursive (the A2A card describing the A2A endpoint) but
     # accurate: explicitly listing it lets a consumer pre-flight
-    # message/send without having to infer it from the
-    # supported_interfaces.
+    # message:send / tasks.get without having to infer them from
+    # supportedInterfaces.
     skills.append(_build_skill(
         id=SKILL_ID_A2A_PROTOCOL,
-        name="A2A Protocol — message/send and tasks/get",
+        name="A2A Protocol — HTTP+JSON and legacy JSON-RPC",
         description=(
-            "JSON-RPC 2.0 endpoint accepting A2A message/send, "
-            "tasks/get and tasks/cancel. Every accepted message "
-            "emits a signed motebit-compatible execution receipt "
-            "for verifiable work proof."
+            "A2A v1.0.1 HTTP+JSON endpoints accepting /message:send, "
+            "GET /tasks/{id}, GET /tasks and /tasks/{id}:cancel. "
+            "The legacy /api/a2a/rpc JSON-RPC endpoint remains available "
+            "for older clients. Every accepted message emits a signed "
+            "motebit-compatible execution receipt for verifiable work proof."
         ),
-        tags=["nth-dao", "a2a", "json-rpc", "tasks"],
-        examples=[_ex("/api/a2a/rpc")],
+        tags=["nth-dao", "a2a", "http-json", "json-rpc", "tasks"],
+        examples=[
+            _ex("/message:send"),
+            f"GET {base_url}/tasks/{{id}}" if base_url else "GET /tasks/{id}",
+            _ex("/tasks/{id}:cancel"),
+            _ex("/api/a2a/rpc"),
+        ],
     ))
-
     return skills
 
 
@@ -383,7 +395,7 @@ def build_a2a_card(
         pubkey_hex: 64-hex Ed25519 pubkey. Surfaced under
             ``provider.url`` query so a consumer can cross-check.
         base_url: the public-facing root URL of this node — used to
-            build the ``supported_interfaces[].url``. Caller should
+            build the ``supportedInterfaces[].url``. Caller should
             pass the request base (``str(request.base_url)`` minus
             trailing slash).
         description: optional human description.
@@ -403,31 +415,36 @@ def build_a2a_card(
         # is a defensive assertion.
         raise ValueError("build_a2a_card requires a non-empty DID")
 
+    base_url = base_url.rstrip("/")
     card: Dict[str, Any] = {
-        # A2A required fields ─────────────────────────────────────
+        # A2A v1.0.1 required fields. JSON uses protobuf JSON lowerCamelCase
+        # names, not the snake_case identifiers from a2a.proto.
         "name": agent_id,
         "description": (
             description
             or f"NTH DAO node (agent_id={agent_id})"
         ),
-        "supported_interfaces": [
+        "supportedInterfaces": [
             {
-                "url": f"{base_url}/api",
-                "protocol_binding": NTH_PROTOCOL_BINDING,
-                "protocol_version": NTH_PROTOCOL_VERSION_TAG,
-            }
+                "url": base_url,
+                "protocolBinding": A2A_HTTP_JSON_BINDING,
+                "protocolVersion": A2A_INTERFACE_PROTOCOL_VERSION,
+            },
+            {
+                "url": f"{base_url}/api/a2a/rpc",
+                "protocolBinding": A2A_JSONRPC_BINDING,
+                "protocolVersion": A2A_INTERFACE_PROTOCOL_VERSION,
+            },
         ],
         "version": NTH_A2A_EMISSION_VERSION,
         "capabilities": {
-            # SSE is not wired yet; flip when implemented. Honest
-            # advertisement avoids a consumer building a streaming
-            # client against an endpoint that buffers.
             "streaming": False,
-            "push_notifications": False,
+            "pushNotifications": False,
             "extensions": [],
+            "extendedAgentCard": False,
         },
-        "default_input_modes": ["text/plain"],
-        "default_output_modes": ["text/plain"],
+        "defaultInputModes": ["text/plain", "application/json"],
+        "defaultOutputModes": ["text/plain", "application/json"],
         # B7 (2026-06-08): when ``skills`` is supplied (by the
         # endpoint, via ``known_skills(state)``), advertise the real
         # surface. When omitted (pure-function tests or callers that
@@ -456,7 +473,6 @@ def build_a2a_card(
             ),
         },
     }
-
     # B7 (2026-06-08): when ``skills`` is supplied by the endpoint
     # (via ``known_skills(state)``), each skill already carries its
     # own ``examples``. The legacy ``home_channel_id`` enrichment is

@@ -29,9 +29,12 @@ FRIEND_REQUEST = "friend_request"
 FRIEND_ACCEPT = "friend_accept"
 FRIEND_DECLINE = "friend_decline"
 FRIEND_REMOVE = "friend_remove"
+BLOCK = "block"
+UNBLOCK = "unblock"
 _TYPES = (
     FOLLOW, UNFOLLOW,
     FRIEND_REQUEST, FRIEND_ACCEPT, FRIEND_DECLINE, FRIEND_REMOVE,
+    BLOCK, UNBLOCK,
 )
 
 

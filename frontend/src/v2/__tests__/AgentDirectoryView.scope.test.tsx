@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Phase 3g/4 debt R1 — first vitest in the v2 tree.
  *
  * Smoke test for Phase G's per-agent scope_model_allowlist badge:
@@ -14,8 +14,8 @@
  *     refactors should be free to change without breaking tests).
  */
 
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { AgentDirectoryView } from "../components/AgentDirectoryView";
 import { LangProvider } from "../i18n";
 import type { AgentEntry } from "../types-v2";
@@ -111,4 +111,47 @@ describe("AgentDirectoryView — Phase G scope badge", () => {
     expect(title).toContain("deepseek-v4-pro");
     expect(title).toContain("gpt-5");
   });
+});
+
+it("renders backend startup guide and gates unavailable backends", () => {
+  const onSpawnBackend = vi.fn();
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[]}
+        {...noopProps}
+        onSpawnBackend={onSpawnBackend}
+        backendStatuses={{
+          mock: {
+            kind: "mock",
+            label: "Mock",
+            ready: true,
+            available: true,
+            detail: "Built-in smoke backend.",
+          },
+          hermes: {
+            kind: "hermes",
+            label: "Hermes",
+            ready: false,
+            available: false,
+            detail: "Install hermes-agent and configure its local profile.",
+            warning: "Hermes runs in-process.",
+          },
+        }}
+      />
+    </LangProvider>,
+  );
+
+  expect(screen.getByText("Local backend startup")).toBeTruthy();
+  expect(screen.getByText("Mock")).toBeTruthy();
+  expect(screen.getByText("Hermes")).toBeTruthy();
+  expect(screen.getByText("setup needed")).toBeTruthy();
+  expect(screen.getByText("Hermes runs in-process.")).toBeTruthy();
+
+  const startButtons = screen.getAllByText("Start");
+  fireEvent.click(startButtons[0]);
+  expect(onSpawnBackend).toHaveBeenCalledWith("mock");
+
+  const disabledHermes = startButtons.find((b) => b.hasAttribute("disabled"));
+  expect(disabledHermes).toBeTruthy();
 });

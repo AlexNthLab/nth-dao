@@ -6,6 +6,7 @@ membership and group APIs without bypassing their permission checks.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import hashlib
 import logging
 import os
@@ -34,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from nth_dao.a2a_card import (
+    A2A_SPEC_VERSION as _A2A_SPEC_VERSION,
     build_a2a_card as _build_a2a_card,
     known_skills as _known_a2a_skills,
     sign_a2a_card_jws as _sign_a2a_card_jws,
@@ -613,20 +615,13 @@ def create_app(
     state = WebState(root)
     _bootstrap(state)
 
-    app = FastAPI(
-        title="NTH DAO Console",
-        description="Local-first web console for NTH DAO membership, groups, tasks, and audit.",
-        version="0.9.0",
-    )
-
     # LAN DID publish (2026-06-07): withdraw the mDNS advertisement
-    # when the process exits so stale records don't outlive us. atexit
-    # covers normal shutdown; FastAPI's ``shutdown`` event covers
-    # uvicorn reloads. Both call the same idempotent helper so a
-    # double-fire is harmless.
+    # when the process exits so stale records do not outlive us. atexit
+    # covers normal interpreter shutdown; FastAPI lifespan covers uvicorn
+    # shutdown/reload. Both call the same idempotent helper.
     import atexit as _atexit
 
-    def _stop_responder():
+    def _stop_responder() -> None:
         responder = getattr(state, "mdns_responder", None)
         if responder is None:
             return
@@ -636,17 +631,37 @@ def create_app(
             logger.debug("mDNS responder stop failed: %s", exc)
         state.mdns_responder = None
 
-    _atexit.register(_stop_responder)
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            _stop_responder()
 
-    @app.on_event("shutdown")
-    def _on_shutdown_stop_responder() -> None:
-        _stop_responder()
+    app = FastAPI(
+        title="NTH DAO Console",
+        description="Local-first web console for NTH DAO membership, groups, tasks, and audit.",
+        version="0.9.0",
+        lifespan=_lifespan,
+    )
+
+    _atexit.register(_stop_responder)
     app.state.nth = state
     app.state.nth_console_token = _load_or_create_console_token()
     app.state.nth_require_console_auth = require_console_auth
     # 公网部署可关掉"页面内嵌 token"(NTH_CONSOLE_TOKEN_IN_PAGE=0)。
     app.state.nth_embed_console_token = _embed_console_token_in_page()
 
+    def _is_a2a_rest_endpoint(path: str) -> bool:
+        """A2A v1.0.1 HTTP+JSON root routes that must share /api auth."""
+        if path in (
+            "/message:send",
+            "/message:stream",
+            "/tasks",
+            "/extendedAgentCard",
+        ):
+            return True
+        return path.startswith("/tasks/")
     @app.middleware("http")
     async def _console_auth_middleware(request: Request, call_next):
         # Public identity card (2026-06-08): the ``.well-known`` family
@@ -662,6 +677,7 @@ def create_app(
         # consumer that knows the pubkey can cross-verify the two.
         if request.url.path in (
             "/.well-known/nth-dao/identity.json",
+            "/.well-known/agent-card.json",
             "/.well-known/agent.json",
         ):
             request.state.nth_principal = {"type": "anonymous"}
@@ -713,7 +729,10 @@ def create_app(
         if not require_console_auth:
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
-        if not request.url.path.startswith("/api/"):
+        if (
+            not request.url.path.startswith("/api/")
+            and not _is_a2a_rest_endpoint(request.url.path)
+        ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
 
@@ -868,6 +887,7 @@ def create_app(
     # The signing keypair is the same workspace Ed25519 identity that
     # signs /.well-known/nth-dao/identity.json — a consumer who
     # already has our pubkey can verify EITHER card.
+    @app.get("/.well-known/agent-card.json")
     @app.get("/.well-known/agent.json")
     def a2a_public_agent_card(request: Request) -> Response:
         if state.node_identity is None:
@@ -952,6 +972,7 @@ def create_app(
                 headers={
                     "ETag": etag,
                     "Cache-Control": "public, max-age=300",
+                    "A2A-Version": _A2A_SPEC_VERSION,
                 },
             )
 
@@ -961,6 +982,7 @@ def create_app(
             headers={
                 "ETag": etag,
                 "Cache-Control": "public, max-age=300",
+                    "A2A-Version": _A2A_SPEC_VERSION,
             },
         )
 
@@ -1013,6 +1035,240 @@ def create_app(
         )
         return handler.handle(payload)
 
+    # A2A v1.0.1 HTTP+JSON binding. These endpoints are root-level by
+    # spec, so the middleware above explicitly routes them through the
+    # same principal resolution as /api/a2a/rpc when console auth is on.
+    _A2A_REST_MEDIA_TYPE = "application/a2a+json"
+
+    def _a2a_rest_headers() -> dict[str, str]:
+        return {"A2A-Version": _A2A_SPEC_VERSION}
+
+    def _a2a_rest_response(
+        payload: Any,
+        *,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        return JSONResponse(
+            payload,
+            status_code=status_code,
+            media_type=_A2A_REST_MEDIA_TYPE,
+            headers=_a2a_rest_headers(),
+        )
+
+    def _a2a_rest_error(
+        code: int,
+        message: str,
+        *,
+        status_code: int,
+        data: Any = None,
+    ) -> JSONResponse:
+        err: dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            err["data"] = data
+        return _a2a_rest_response({"error": err}, status_code=status_code)
+
+    def _a2a_reject_incompatible_version(request: Request) -> Optional[JSONResponse]:
+        requested = (request.headers.get("A2A-Version") or "").strip()
+        if not requested:
+            return None
+        if requested.split(".", 1)[0] != _A2A_SPEC_VERSION.split(".", 1)[0]:
+            return _a2a_rest_error(
+                -32600,
+                "unsupported A2A major version",
+                status_code=400,
+                data={"requested": requested, "supported": _A2A_SPEC_VERSION},
+            )
+        return None
+
+    async def _a2a_read_json_object(request: Request) -> dict[str, Any] | JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return _a2a_rest_error(
+                -32700,
+                "parse error: body is not valid JSON",
+                status_code=400,
+            )
+        if not isinstance(payload, dict):
+            return _a2a_rest_error(
+                -32600,
+                "invalid request: body must be a JSON object",
+                status_code=400,
+            )
+        return payload
+
+    def _a2a_handler_for_request(request: Request) -> A2ARPCHandler:
+        return A2ARPCHandler(
+            task_store=state.a2a_tasks,
+            receipt_store=state.receipts,
+            identity=state.node_identity,
+            principal=get_request_principal(request),
+            mission_store=state.missions,
+        )
+
+    def _a2a_status_for_rpc_error(code: Any) -> int:
+        if code == -32001:  # TaskNotFoundError
+            return 404
+        if code == -32003:  # cap-token forbidden
+            return 403
+        if code in (-32700, -32600, -32602):
+            return 400
+        if code == -32601:
+            return 404
+        return 500
+
+    def _a2a_rest_from_rpc(rpc_body: dict[str, Any], *, send_response: bool = False) -> JSONResponse:
+        if "error" in rpc_body:
+            err = rpc_body.get("error") or {}
+            return _a2a_rest_error(
+                int(err.get("code", -32603)),
+                str(err.get("message", "A2A request failed")),
+                status_code=_a2a_status_for_rpc_error(err.get("code")),
+                data=err.get("data"),
+            )
+        result = rpc_body.get("result")
+        if send_response:
+            return _a2a_rest_response({"task": result})
+        return _a2a_rest_response(result)
+
+    def _a2a_int_query(
+        request: Request,
+        name: str,
+        *,
+        default: Optional[int] = None,
+        minimum: int = 0,
+        maximum: int = 100,
+    ) -> Optional[int]:
+        raw = request.query_params.get(name)
+        if raw in (None, ""):
+            return default
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{name} must be an integer") from exc
+        if value < minimum or value > maximum:
+            raise HTTPException(status_code=400, detail=f"{name} must be between {minimum} and {maximum}")
+        return value
+
+    def _a2a_shape_task_for_rest(
+        task: dict[str, Any],
+        *,
+        history_length: Optional[int] = None,
+        include_artifacts: bool = True,
+    ) -> dict[str, Any]:
+        shaped = json.loads(json.dumps(task, ensure_ascii=False))
+        if history_length is not None:
+            shaped["history"] = list(shaped.get("history") or [])[-history_length:] if history_length else []
+        if not include_artifacts:
+            shaped["artifacts"] = []
+        return shaped
+
+    @app.post("/message:send")
+    async def a2a_message_send(request: Request) -> JSONResponse:
+        version_error = _a2a_reject_incompatible_version(request)
+        if version_error is not None:
+            return version_error
+        payload = await _a2a_read_json_object(request)
+        if isinstance(payload, JSONResponse):
+            return payload
+        rpc_body = _a2a_handler_for_request(request).handle({
+            "jsonrpc": "2.0",
+            "id": "rest-message-send",
+            "method": "message/send",
+            "params": payload,
+        })
+        return _a2a_rest_from_rpc(rpc_body, send_response=True)
+
+    @app.post("/message:stream")
+    async def a2a_message_stream(request: Request) -> JSONResponse:
+        version_error = _a2a_reject_incompatible_version(request)
+        if version_error is not None:
+            return version_error
+        return _a2a_rest_error(
+            -32004,
+            "UnsupportedOperationError: streaming is not enabled on this node",
+            status_code=501,
+            data={"capabilities.streaming": False},
+        )
+
+    @app.get("/tasks")
+    def a2a_tasks_list(request: Request) -> JSONResponse:
+        version_error = _a2a_reject_incompatible_version(request)
+        if version_error is not None:
+            return version_error
+        page_size = _a2a_int_query(request, "pageSize", default=50, minimum=1, maximum=100) or 50
+        page_token = _a2a_int_query(request, "pageToken", default=0, minimum=0, maximum=10_000_000) or 0
+        history_length = _a2a_int_query(request, "historyLength", default=None, minimum=0, maximum=100)
+        include_artifacts = (request.query_params.get("includeArtifacts") or "true").lower() != "false"
+        context_id = request.query_params.get("contextId") or ""
+        status_filter = request.query_params.get("status") or ""
+
+        tasks: list[dict[str, Any]] = []
+        for task_id in state.a2a_tasks.all_ids():
+            task = state.a2a_tasks.get(task_id)
+            if not isinstance(task, dict):
+                continue
+            if context_id and task.get("context_id") != context_id:
+                continue
+            if status_filter and (task.get("status") or {}).get("state") != status_filter:
+                continue
+            tasks.append(_a2a_shape_task_for_rest(
+                task,
+                history_length=history_length,
+                include_artifacts=include_artifacts,
+            ))
+        total_size = len(tasks)
+        page = tasks[page_token:page_token + page_size]
+        next_offset = page_token + len(page)
+        return _a2a_rest_response({
+            "tasks": page,
+            "nextPageToken": str(next_offset) if next_offset < total_size else "",
+            "pageSize": page_size,
+            "totalSize": total_size,
+        })
+
+    @app.post("/tasks/{task_id}:cancel")
+    async def a2a_task_cancel(request: Request, task_id: str) -> JSONResponse:
+        version_error = _a2a_reject_incompatible_version(request)
+        if version_error is not None:
+            return version_error
+        payload = await _a2a_read_json_object(request)
+        if isinstance(payload, JSONResponse):
+            return payload
+        params = dict(payload)
+        params["id"] = task_id
+        rpc_body = _a2a_handler_for_request(request).handle({
+            "jsonrpc": "2.0",
+            "id": "rest-task-cancel",
+            "method": "tasks/cancel",
+            "params": params,
+        })
+        return _a2a_rest_from_rpc(rpc_body)
+
+    @app.get("/tasks/{task_id:path}")
+    def a2a_task_get(request: Request, task_id: str) -> JSONResponse:
+        version_error = _a2a_reject_incompatible_version(request)
+        if version_error is not None:
+            return version_error
+        history_length = _a2a_int_query(request, "historyLength", default=None, minimum=0, maximum=100)
+        rpc_body = _a2a_handler_for_request(request).handle({
+            "jsonrpc": "2.0",
+            "id": "rest-task-get",
+            "method": "tasks/get",
+            "params": {"id": task_id},
+        })
+        response = _a2a_rest_from_rpc(rpc_body)
+        if response.status_code != 200 or history_length is None:
+            return response
+        body = json.loads(response.body.decode("utf-8"))
+        return _a2a_rest_response(_a2a_shape_task_for_rest(body, history_length=history_length))
+
+    @app.get("/extendedAgentCard")
+    def a2a_extended_agent_card(request: Request) -> Response:
+        version_error = _a2a_reject_incompatible_version(request)
+        if version_error is not None:
+            return version_error
+        return a2a_public_agent_card(request)
     # L1-3 (2026-06-08): capability-token endpoints.
     #
     # - POST /api/cap_tokens/issue   : admin-only, signs a token

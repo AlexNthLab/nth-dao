@@ -1100,6 +1100,7 @@ class CapTokenSummaryM(_Model):
 
 
 class AgentEntryM(_Model):
+    agent_id: Optional[str] = None
     did: str
     code: str
     label: str
@@ -1529,7 +1530,88 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                     "— continuing without recovered receipts",
                     exc,
                 )
+            # Persistent restore: respawn durable local agents from the
+            # private roster. A per-row failure is logged below and must not
+            # prevent the supervisor from being created.
+            try:
+                _restore_persistent_agents(request, sup)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: persistent-agent restore failed: %s", exc)
     return sup
+
+
+def _make_cap_issuer(node_identity: Any, cap_tokens_store: Any):
+    """构造 spawn/恢复共用的 cap_token 签发闭包(node 签发、落审计store)。"""
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN, KNOWN_CAPABILITIES,
+        sign_cap_token,
+    )
+
+    def _issue(subject_did: str, requested_caps: List[str]) -> Dict[str, Any]:
+        caps: List[str] = [CAP_NTH_RECEIPT_SIGN, CAP_A2A_MESSAGE_SEND]
+        for c in requested_caps:
+            if c in KNOWN_CAPABILITIES and c not in caps:
+                caps.append(c)
+        token = sign_cap_token(
+            issuer=node_identity, subject_did=subject_did, capabilities=caps)
+        cap_tokens_store.record(token)
+        return token
+
+    return _issue
+
+
+def _restore_persistent_agents(request: Request, sup: Any) -> None:
+    """Respawn durable local agents from ``<workspace>/agents/roster.json``.
+
+    The roster is operator-editable runtime state, so every ``identity_file``
+    read from it is validated against ``AgentRoster`` before the supervisor is
+    allowed to load a key from disk.
+    """
+    ws = _state_workspace(request)
+    node_identity = _state_node_identity(request)
+    cap_tokens_store = _state_cap_tokens_store(request)
+    if (
+        ws is None or node_identity is None
+        or not getattr(node_identity, "can_sign", False)
+        or cap_tokens_store is None
+    ):
+        return
+    from .agent_roster import AgentRoster
+    roster = AgentRoster(ws)
+    entries = roster.all()
+    if not entries:
+        return
+    issuer = _make_cap_issuer(node_identity, cap_tokens_store)
+    restored = 0
+    for e in entries:
+        idf = e.get("identity_file")
+        if not isinstance(idf, str) or not idf:
+            continue
+        if not roster.is_owned_identity_file(idf):
+            logger.warning(
+                "v2_api: ignoring unsafe persistent-agent identity_file "
+                "for did=%s",
+                str(e.get("did", "?"))[:24],
+            )
+            continue
+        if not Path(idf).is_file():
+            continue
+        try:
+            sup.spawn(
+                kind=str(e.get("kind", "mock")),
+                label=str(e.get("label", "")),
+                capabilities=list(e.get("capabilities") or []),
+                cap_token_issuer=issuer,
+                identity_file=idf,
+            )
+            restored += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "v2_api: restore agent failed (did=%s): %s",
+                str(e.get("did", "?"))[:24], exc)
+    if restored:
+        logger.info("v2_api: restored %d persistent agent(s) from roster", restored)
 
 
 class SpawnAgentBody(_Model):
@@ -1598,6 +1680,16 @@ class SpawnAgentBody(_Model):
             "Operators issue different lists to different peers to "
             "give per-peer cost ceilings instead of one operator-wide "
             "policy."
+        ),
+    )
+    persist: bool = Field(
+        default=True,
+        description=(
+            "Persist the local agent in <workspace>/agents/roster.json and "
+            "store its private identity under agents/identities. On hub "
+            "restart the agent is respawned with the same DID. Stop removes "
+            "the roster row so it will not be restored. false keeps the "
+            "legacy ephemeral behavior."
         ),
     )
 
@@ -3242,6 +3334,19 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.social import FRIEND_REMOVE
         return _record_social_action(request, FRIEND_REMOVE, body.target_did)
 
+    @app.post("/api/v2/social/block")
+    def v2_social_block(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
+        """屏蔽 target_did(#3,**静默**):清除既有所有边 + 之后拒收其任何社交语句。
+        屏蔽决定纯本地、**不外发**,被屏蔽方无从察觉(隐形拉黑)。token-gated。"""
+        from nth_dao.social import BLOCK
+        return _record_social_action(request, BLOCK, body.target_did)
+
+    @app.post("/api/v2/social/unblock")
+    def v2_social_unblock(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
+        """解除屏蔽 target_did(不恢复旧关系,需重新关注/加好友)。静默、token-gated。"""
+        from nth_dao.social import UNBLOCK
+        return _record_social_action(request, UNBLOCK, body.target_did)
+
     @app.get("/api/v2/social/me")
     def v2_social_me(request: Request) -> Dict[str, Any]:
         """本节点社交名册:关注/粉丝/好友 + 待我确认的好友请求(进收件箱)。匿名读。"""
@@ -3252,7 +3357,7 @@ def register_v2_routes(app: FastAPI) -> None:
         if proj is None or not me:
             return {
                 "did": me, "following": [], "followers": [], "friends": [],
-                "pending_incoming": [], "pending_outgoing": [],
+                "pending_incoming": [], "pending_outgoing": [], "blocked": [],
             }
         return {
             "did": me,
@@ -3261,6 +3366,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "friends": proj.friends(me),
             "pending_incoming": proj.pending_incoming(me),
             "pending_outgoing": proj.pending_outgoing(me),
+            "blocked": proj.blocked(me),
         }
 
     @app.get("/api/v2/social/{did}")
@@ -3668,6 +3774,12 @@ def register_v2_routes(app: FastAPI) -> None:
         merged = supervised + [a for a in base if a.get("did") not in seen_dids]
         return merged
 
+    @app.get("/api/v2/agents/backends/status")
+    def v2_agent_backend_status() -> Dict[str, Any]:
+        """Return local backend readiness without exposing secrets or paths."""
+        from nth_dao.web.dummy_agent import backend_runtime_status
+        return {"backends": backend_runtime_status()}
+
     @app.post(
         "/api/v2/agents/spawn",
         status_code=201,
@@ -3777,12 +3889,25 @@ def register_v2_routes(app: FastAPI) -> None:
                 raise
             return token
 
+        # Persistent by default: allocate an owned identity path and pass it
+        # to the child. First run creates the key; later restarts load the
+        # same key and therefore keep the same DID. Non-persistent agents keep
+        # the legacy ephemeral identity behavior.
+        identity_file: Optional[str] = None
+        roster = None
+        if body.persist:
+            ws = _state_workspace(request)
+            if ws is not None:
+                from .agent_roster import AgentRoster
+                roster = AgentRoster(ws)
+                identity_file = roster.allocate_identity_file()
         try:
             record = sup.spawn(
                 kind=body.kind,
                 label=body.label,
                 capabilities=body.capabilities,
                 cap_token_issuer=_issue_cap_token,
+                identity_file=identity_file,
             )
         except AgentCapacityExceeded as exc:
             # 2026-06-14 审查补:达到运行态 agent 上限。这是"暂时容量不足"
@@ -3816,6 +3941,17 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=500,
                 detail=f"spawn failed: {exc}",
             )
+        # Register after successful spawn. If roster persistence fails, the
+        # current agent remains running; only restart restore is degraded.
+        if roster is not None and identity_file:
+            try:
+                roster.add(
+                    identity_file=identity_file, kind=record.kind,
+                    label=record.label, capabilities=body.capabilities,
+                    did=record.did)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: agent spawned but roster persist failed: %s", exc)
         return {
             "agent_id": record.agent_id,
             "did": record.did,
@@ -3832,20 +3968,40 @@ def register_v2_routes(app: FastAPI) -> None:
         agent_id: str,
         request: Request,
     ) -> Dict[str, Any]:
-        """Phase 3a: stop a supervised agent. Idempotent — repeated
-        stops return 404 to avoid masking client retry logic. """
+        """Stop a supervised agent.
+
+        Persistent agents are also removed from the private roster. Their
+        identity directory is deleted only when AgentRoster proves the path is
+        inside this workspace's owned ``agents/identities`` tree.
+        """
         sup = _state_supervisor(request)
         if sup is None:
             raise HTTPException(
                 status_code=503,
                 detail="agent supervisor unavailable",
             )
+        # Capture the DID before stop() removes the supervisor record.
+        rec = sup.get(agent_id)
+        did = getattr(rec, "did", "") if rec is not None else ""
         ok = sup.stop(agent_id)
         if not ok:
             raise HTTPException(
                 status_code=404,
                 detail=f"agent {agent_id!r} not under supervision",
             )
+        if did:
+            try:
+                ws = _state_workspace(request)
+                if ws is not None:
+                    from .agent_roster import AgentRoster
+                    roster = AgentRoster(ws)
+                    removed = roster.remove_by_did(did)
+                    idf = removed.get("identity_file") if removed else None
+                    if isinstance(idf, str):
+                        roster.cleanup_identity_dir(idf)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: agent stopped but roster cleanup failed: %s", exc)
         return {"agent_id": agent_id, "stopped": True}
 
     @app.get("/api/v2/agents/{did}/ping")

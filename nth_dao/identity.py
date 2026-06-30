@@ -364,27 +364,25 @@ def load_or_generate(
 
 
 def _restrict_to_owner(path: Path) -> None:
-    """尽力把文件权限收紧到只有 owner 可读。
+    """Best-effort hardening so only the owner can read the key file.
 
-    POSIX: chmod 0o600
-    Windows: 用 icacls 把 ACL 缩到当前用户；失败必须 warn —— 不能像之前那样
-             `except: pass` 把私钥裸奔藏起来。
+    Log failures without printing full local filesystem paths. Operators can
+    inspect the private identity path from their own workspace when needed.
     """
     if sys.platform == "win32":
         ok = _restrict_windows_acl(path)
         if not ok:
             logger.warning(
-                "could not restrict ACL on private key file %s — "
-                "file may be readable by other local users. "
-                "Inspect permissions with: icacls %s",
-                path, path,
+                "could not restrict ACL on private key file identity.json; "
+                "it may be readable by other local users. Inspect the file "
+                "permissions from your local workspace before publishing logs."
             )
         return
 
     try:
         os.chmod(path, 0o600)
     except OSError as e:
-        logger.warning("could not chmod 0600 on %s: %s", path, e)
+        logger.warning("could not chmod 0600 on private key file identity.json: %s", e)
 
 
 def _restrict_windows_acl(path: Path) -> bool:

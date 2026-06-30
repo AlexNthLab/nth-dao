@@ -131,6 +131,7 @@ class AgentRecord:
         record's internal state. Other fields are immutable (str/
         int/bool/None) so no further copy needed. """
         return {
+            "agent_id": self.agent_id,
             "did": self.did,
             "code": self.agent_id[:9],
             "label": self.label,
@@ -181,6 +182,7 @@ class AgentRunner(Protocol):
         kind: str,
         *,
         cap_token_file_path: Optional[str] = None,
+        identity_file: Optional[str] = None,
     ) -> Tuple[Optional[int], str]:
         """Start the agent process and wait for its DID handshake.
 
@@ -280,6 +282,7 @@ class InMemoryRunner:
         kind: str,
         *,
         cap_token_file_path: Optional[str] = None,  # noqa: ARG002 — ignored
+        identity_file: Optional[str] = None,  # noqa: ARG002 — ignored (no child)
     ) -> Tuple[Optional[int], str]:
         # Phase 3c: ``cap_token_file_path`` is accepted for protocol
         # parity but ignored — InMemoryRunner has no child to read
@@ -362,6 +365,7 @@ class SubprocessRunner:
         kind: str,
         *,
         cap_token_file_path: Optional[str] = None,
+        identity_file: Optional[str] = None,
     ) -> Tuple[Optional[int], str]:
         # Spawn `python -m nth_dao.web.dummy_agent --id … --kind …`.
         # Using sys.executable keeps the child on the same interpreter
@@ -377,6 +381,9 @@ class SubprocessRunner:
             # AFTER the supervisor receives the DID handshake and
             # invokes the cap_token_issuer.
             cmd.extend(["--cap-token-file", cap_token_file_path])
+        if identity_file:
+            # 持久身份:子进程载入已存密钥 → 重启后同一 DID(持久化恢复用)。
+            cmd.extend(["--identity-file", identity_file])
         if self._workspace is not None:
             # 切片B:共享 workspace,让子 agent 的 claim 方法够到市场文件。
             cmd.extend(["--workspace", str(self._workspace)])
@@ -728,8 +735,12 @@ class AgentSupervisor:
         label: str,
         capabilities: Optional[List[str]] = None,
         cap_token_issuer: Optional[CapTokenIssuer] = None,
+        identity_file: Optional[str] = None,
     ) -> AgentRecord:
         """Spawn a new supervised agent.
+
+        ``identity_file``(持久化):非空时透传给子进程 ``--identity-file`` —— 存在则
+        载入(重启后同一 DID),否则生成并保存到此路径供下次复用。空 = 临时身份。
 
         Phase 3b: ``start()`` blocks until the child has reported its
         W3C did:key, so by the time this method returns the AgentRecord
@@ -801,6 +812,7 @@ class AgentSupervisor:
         pid, did = self._runner.start(
             agent_id, kind,
             cap_token_file_path=cap_token_file_path,
+            identity_file=identity_file,
         )
         # Phase 3d: pull post-handshake metadata BEFORE checking
         # success — the runner's handshake_data is populated atomically

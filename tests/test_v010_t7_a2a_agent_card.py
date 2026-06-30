@@ -38,23 +38,21 @@ def test_T7_01_minimal_card_has_required_fields():
         name="Test Agent", description="Reviews PRs",
         url="https://example.com/a2a",
     )
-    # All A2A-required top-level fields present
+    # All A2A v1.0.1 required top-level fields present
     for field in (
-        "protocolVersion", "name", "description", "url", "version",
-        "preferredTransport", "capabilities",
-        "defaultInputModes", "defaultOutputModes", "skills",
-        "securitySchemes", "security",
+        "name", "description", "supportedInterfaces", "version",
+        "capabilities", "defaultInputModes", "defaultOutputModes", "skills",
+        "securitySchemes", "securityRequirements",
     ):
         assert field in card, f"missing {field!r}"
     # Spec-conforming values
     assert card["name"] == "Test Agent"
-    assert card["url"] == "https://example.com/a2a"
-    assert card["protocolVersion"] == A2A_PROTOCOL_VERSION
-    assert card["preferredTransport"] == "JSONRPC"
+    assert card["supportedInterfaces"][0]["url"] == "https://example.com/a2a"
+    assert card["supportedInterfaces"][0]["protocolVersion"] == A2A_PROTOCOL_VERSION
+    assert card["supportedInterfaces"][0]["protocolBinding"] == "HTTP+JSON"
     assert card["defaultInputModes"] == ["application/json"]
     # Skills array exists but is empty by default
     assert card["skills"] == []
-
 
 # ===== T7-#2: capabilities-list -> minimal skill stubs =====
 
@@ -104,12 +102,11 @@ def test_T7_03_detailed_skill_wins_on_id_collision():
 
 
 def test_T7_04_capability_flags_default_and_override():
-    """capabilities.streaming / pushNotifications / stateTransitionHistory
-    are bool flags that an A2A consumer reads to decide how to call us."""
+    """capabilities.streaming / pushNotifications are bool flags that an A2A consumer reads to decide how to call us."""
     default = build_agent_card(name="X", description="", url="https://x/a2a")
     assert default["capabilities"]["streaming"] is False
     assert default["capabilities"]["pushNotifications"] is False
-    assert default["capabilities"]["stateTransitionHistory"] is True
+    assert default["capabilities"]["extendedAgentCard"] is False
 
     overridden = build_agent_card(
         name="X", description="", url="https://x/a2a",
@@ -117,8 +114,7 @@ def test_T7_04_capability_flags_default_and_override():
     )
     assert overridden["capabilities"]["streaming"] is True
     assert overridden["capabilities"]["pushNotifications"] is True
-    assert overridden["capabilities"]["stateTransitionHistory"] is False
-
+    assert overridden["capabilities"]["extendedAgentCard"] is False
 
 # ===== T7-#5: provider block optional =====
 
@@ -262,11 +258,10 @@ def test_T7_09_validate_catches_missing_fields():
 
     # Strip a required field; must fail
     broken = dict(good)
-    del broken["protocolVersion"]
+    del broken["supportedInterfaces"]
     ok, reason = validate_agent_card(broken)
     assert not ok
-    assert "protocolVersion" in reason
-
+    assert "supportedInterfaces" in reason
 
 def test_T7_09b_validate_catches_invalid_capability_types():
     bad = build_agent_card(name="X", description="", url="https://x/a2a")

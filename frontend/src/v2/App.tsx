@@ -24,11 +24,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, activateMission, askAgentStream, createMission, fetchAgents, fetchCapTokens,
+  a2aEchoApi, activateMission, askAgentStream, createMission, fetchAgents, fetchBackendStatus, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
-  resolveDecisionApi, summarizeAgent,
+  resolveDecisionApi, spawnAgent, stopAgent, summarizeAgent,
 } from "./api";
+import type { BackendStatus } from "./api";
 import { loadChat, saveChat } from "./chatStore";
 import { loadSummaries, appendSummary } from "./summaryStore";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
@@ -189,6 +190,8 @@ function AppInner() {
    * mock before because the boot effect only toasted on success
    * without applying. */
   const [agents, setAgents] = useState<AgentEntry[]>(mockAgents);
+  const [backendStatuses, setBackendStatuses] =
+    useState<Record<string, BackendStatus>>({});
   // Missions + processes lifted to state to support the "+ New
   // mission" / "+ New process" entry points (user audit 2026-06-10).
   // Local-only mutation in v1 — pointing at the matching backend
@@ -243,6 +246,7 @@ function AppInner() {
         fetchMissions(ctrl.signal),
         fetchProcesses(ctrl.signal),
         fetchAgents(ctrl.signal),
+        fetchBackendStatus(ctrl.signal),
         fetchConversations(ctrl.signal),
         fetchCapTokens(ctrl.signal),
         fetchReceipts(ctrl.signal),
@@ -254,13 +258,14 @@ function AppInner() {
       ]);
       if (cancelled) return;
       const [
-        decRes, misRes, procRes, agRes, convRes, capRes, recRes,
+        decRes, misRes, procRes, agRes, backendRes, convRes, capRes, recRes,
         capReqRes, dispRes, socialRes,
       ] = settled;
       if (decRes.status === "fulfilled")  setDecisions(decRes.value);
       if (misRes.status === "fulfilled")  setMissions(misRes.value);
       if (procRes.status === "fulfilled") setProcesses(procRes.value);
       if (agRes.status === "fulfilled")   setAgents(agRes.value);
+      if (backendRes.status === "fulfilled") setBackendStatuses(backendRes.value.backends);
       if (convRes.status === "fulfilled") setConversations(convRes.value);
       if (capRes.status === "fulfilled")  setCapTokens(capRes.value);
       if (recRes.status === "fulfilled")  setReceipts(recRes.value);
@@ -813,6 +818,40 @@ function AppInner() {
 
   /* ── agent directory handlers (audit fix M14/M15 2026-06-10):
    *    silent console.log replaced with user-visible toasts. ─── */
+  async function handleSpawnBackend(kind: string) {
+    try {
+      const res = await spawnAgent({
+        kind,
+        label: `${kind} helper`,
+        capabilities: ["a2a:message_send"],
+        persist: true,
+      });
+      setAgents((prev) => [
+        res.agent,
+        ...prev.filter((a) => a.did !== res.agent.did),
+      ]);
+      toast.push(`Started ${res.label || kind}.`, "success");
+    } catch (e) {
+      toast.push(
+        `Could not start ${kind}: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
+  }
+
+  async function handleStopAgent(agentId: string) {
+    try {
+      await stopAgent(agentId);
+      setAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
+      toast.push("Agent stopped.", "success");
+    } catch (e) {
+      toast.push(
+        `Could not stop agent: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
+  }
+
   function handleAddAgent(did: string, label: string) {
     // TODO: POST /api/agents/add with {target_did, label}
     toast.push(
@@ -979,7 +1018,10 @@ function AppInner() {
     view = (
       <AgentDirectoryView
         agents={agents}
+        backendStatuses={backendStatuses}
         onAddByDid={handleAddAgent}
+        onSpawnBackend={handleSpawnBackend}
+        onStopAgent={handleStopAgent}
         onScanLan={handleScanLan}
         onIssueCap={handleIssueCap}
         onSendMessage={handleSendToAgent}

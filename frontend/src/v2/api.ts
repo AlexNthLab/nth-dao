@@ -349,6 +349,46 @@ export interface AskAgentResult {
   model?: string;
 }
 
+export interface BackendStatus {
+  kind: string;
+  label: string;
+  ready: boolean;
+  available: boolean;
+  detail: string;
+  warning?: string;
+}
+
+export interface BackendStatusResponse {
+  backends: Record<string, BackendStatus>;
+}
+
+export interface SpawnAgentRequest {
+  kind: string;
+  label?: string;
+  capabilities?: string[];
+  persist?: boolean;
+}
+
+export interface SpawnAgentResponse {
+  agent_id: string;
+  did: string;
+  kind: string;
+  label: string;
+  pid?: number | null;
+  cap_token_id?: string;
+  a2a_port?: number;
+  agent: AgentEntry;
+}
+
+export const fetchBackendStatus = (signal?: AbortSignal) =>
+  getJson<BackendStatusResponse>("/agents/backends/status", signal);
+
+export const spawnAgent = (body: SpawnAgentRequest) =>
+  postJson<SpawnAgentResponse>("/agents/spawn", body);
+
+export const stopAgent = (agentId: string) =>
+  postJson<{ agent_id: string; stopped: boolean }>(`/agents/${encodeURIComponent(agentId)}/stop`);
+
 /** UI 集成（2026-06-13）：驱动一个 spawn 出来的 agent 跑一个任务，**流式**
  *  接收输出。打的是 hub 端点 ``POST /api/v2/agents/{did}/ask-stream`` ——
  *  hub 替操作员注入该 agent 的 cap_token（浏览器没有签名私钥，详见
@@ -718,6 +758,7 @@ export interface SocialRoster {
   friends: string[];
   pending_incoming: string[];
   pending_outgoing: string[];
+  blocked: string[];
 }
 
 export interface SocialRelationship {
@@ -726,6 +767,8 @@ export interface SocialRelationship {
   friend?: boolean;
   request_outgoing?: boolean;
   request_incoming?: boolean;
+  blocked?: boolean;
+  blocked_by?: boolean;
 }
 
 export interface SocialProfile {
@@ -768,6 +811,12 @@ export const friendDecline = (targetDid: string) =>
 /** 解除好友 / 撤回未决请求。 */
 export const friendRemove = (targetDid: string) =>
   postJson<SocialAck>("/social/friend/remove", { target_did: targetDid });
+/** 屏蔽某 DID(#3):清除既有关系 + 之后拒收其社交语句。 */
+export const blockDid = (targetDid: string) =>
+  postJson<SocialAck>("/social/block", { target_did: targetDid });
+/** 解除屏蔽(不恢复旧关系)。 */
+export const unblockDid = (targetDid: string) =>
+  postJson<SocialAck>("/social/unblock", { target_did: targetDid });
 
 /* ── 频道(收编自 8765 群聊,P3)──────────────────────────────── */
 export const listChannels = (s?: AbortSignal) =>

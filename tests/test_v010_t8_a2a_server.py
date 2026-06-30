@@ -127,9 +127,10 @@ def test_T8_01_well_known_serves_agent_card(client, agent_card):
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == agent_card["name"]
-    assert body["url"] == agent_card["url"]
-    # All A2A-required fields present
-    for field in ("protocolVersion", "capabilities", "skills"):
+    assert body["supportedInterfaces"][0]["url"] == agent_card["supportedInterfaces"][0]["url"]
+    assert body["supportedInterfaces"][0]["protocolBinding"] == "HTTP+JSON"
+    # All core A2A v1.0.1 required fields present.
+    for field in ("supportedInterfaces", "capabilities", "skills"):
         assert field in body
 
 

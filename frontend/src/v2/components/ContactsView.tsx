@@ -8,12 +8,14 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  blockDid,
   fetchSocialMe,
   followDid,
   friendAccept,
   friendDecline,
   friendRemove,
   friendRequest,
+  unblockDid,
   unfollowDid,
   type SocialRoster,
 } from "../api";
@@ -25,10 +27,11 @@ const CARD = "1px solid var(--color-border-tertiary, rgba(0,0,0,0.08))";
 const OK = "var(--color-text-success, #1d9e75)";
 const BAD = "var(--color-text-danger, #e24b4a)";
 const INFO = "var(--color-text-info, #378add)";
+const WARN = "var(--color-text-warning, #ba7517)";
 
 const EMPTY: SocialRoster = {
   did: "", following: [], followers: [], friends: [],
-  pending_incoming: [], pending_outgoing: [],
+  pending_incoming: [], pending_outgoing: [], blocked: [],
 };
 
 function didShort(did: string): string {
@@ -45,7 +48,11 @@ export function ContactsView() {
 
   useEffect(() => {
     const ac = new AbortController();
-    fetchSocialMe(ac.signal).then(setRoster).catch(() => setRoster(EMPTY));
+    // EMPTY 兜底:后端版本旧、缺某字段(如 blocked)时,数组恒为 [],绝不让
+    // ``undefined.length`` 崩掉整个面板(防前端比后端新的版本漂移)。
+    fetchSocialMe(ac.signal)
+      .then((r) => setRoster({ ...EMPTY, ...r }))
+      .catch(() => setRoster(EMPTY));
     return () => ac.abort();
   }, [reload]);
 
@@ -102,6 +109,11 @@ export function ContactsView() {
         opacity: busy === key ? 0.5 : 1,
       }}>{text}</button>
     );
+  }
+
+  function blockBtn(d: string) {
+    return btn(t("屏蔽", "Block"), WARN, `bl:${d}`,
+      () => void act(`bl:${d}`, t("已屏蔽", "Blocked"), () => blockDid(d)));
   }
 
   function section(title: string, hint: string, dids: string[], render: (d: string) => React.ReactNode) {
@@ -162,8 +174,11 @@ export function ContactsView() {
             t("好友", "Friends"),
             t("还没有好友。发出请求并等对方确认。", "No friends yet. Send a request and wait for them to accept."),
             roster.friends,
-            (d) => row(d, btn(t("解除", "Remove"), BAD, `rm:${d}`,
-              () => void act(`rm:${d}`, t("已解除好友", "Unfriended"), () => friendRemove(d)))),
+            (d) => row(d, <>
+              {btn(t("解除", "Remove"), BAD, `rm:${d}`,
+                () => void act(`rm:${d}`, t("已解除好友", "Unfriended"), () => friendRemove(d)))}
+              {blockBtn(d)}
+            </>),
           )}
 
           {section(
@@ -175,6 +190,7 @@ export function ContactsView() {
                 () => void act(`ac:${d}`, t("已成为好友", "Now friends"), () => friendAccept(d)))}
               {btn(t("拒绝", "Decline"), BAD, `de:${d}`,
                 () => void act(`de:${d}`, t("已拒绝", "Declined"), () => friendDecline(d)))}
+              {blockBtn(d)}
             </>),
           )}
 
@@ -190,18 +206,32 @@ export function ContactsView() {
             t("关注中", "Following"),
             t("还没关注任何人。粘 DID 关注强者。", "Not following anyone yet. Paste a DID to follow."),
             roster.following,
-            (d) => row(d, btn(t("取消关注", "Unfollow"), MUTED, `uf:${d}`,
-              () => void act(`uf:${d}`, t("已取消关注", "Unfollowed"), () => unfollowDid(d)))),
+            (d) => row(d, <>
+              {btn(t("取消关注", "Unfollow"), MUTED, `uf:${d}`,
+                () => void act(`uf:${d}`, t("已取消关注", "Unfollowed"), () => unfollowDid(d)))}
+              {blockBtn(d)}
+            </>),
           )}
 
           {section(
             t("粉丝", "Followers"),
             t("还没有粉丝。", "No followers yet."),
             roster.followers,
-            (d) => row(d, roster.friends.includes(d)
-              ? <span style={{ fontSize: 12, color: OK }}>{t("已是好友", "friend")}</span>
-              : btn(t("加好友", "Add friend"), OK, `fr:${d}`,
-                () => void act(`fr:${d}`, t("已发出好友请求", "Friend request sent"), () => friendRequest(d)))),
+            (d) => row(d, <>
+              {roster.friends.includes(d)
+                ? <span style={{ fontSize: 12, color: OK }}>{t("已是好友", "friend")}</span>
+                : btn(t("加好友", "Add friend"), OK, `fr:${d}`,
+                  () => void act(`fr:${d}`, t("已发出好友请求", "Friend request sent"), () => friendRequest(d)))}
+              {blockBtn(d)}
+            </>),
+          )}
+
+          {section(
+            t("已屏蔽", "Blocked"),
+            t("没有屏蔽任何人。", "No one blocked."),
+            roster.blocked,
+            (d) => row(d, btn(t("解除屏蔽", "Unblock"), INFO, `ub:${d}`,
+              () => void act(`ub:${d}`, t("已解除屏蔽", "Unblocked"), () => unblockDid(d)))),
           )}
         </div>
       </section>

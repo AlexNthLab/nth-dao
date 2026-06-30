@@ -1,8 +1,8 @@
 """Architect audit M-3 (2026-06-07): agent_card_from removes non-spec
 top-level ``id`` field.
 
-The A2A v0.3.0 Agent Card schema identifies an agent by its ``url``
-field. There is no canonical top-level ``id`` field. The sibling
+The A2A v1.0.1 Agent Card schema identifies reachable endpoints through
+``supportedInterfaces[].url``. There is no canonical top-level ``id`` field. The sibling
 ``build_agent_card`` builder (which is the test-covered canonical
 path) agrees - it never adds ``id``.
 
@@ -44,8 +44,8 @@ def _build():
 
 
 def test_M3_card_has_no_top_level_id_field():
-    """The A2A Agent Card spec uses ``url`` as identity; ``id`` is
-    not defined at the top level. Adding it pollutes the document."""
+    """The A2A Agent Card spec has no top-level ``id`` identity.
+    Adding one pollutes the document."""
     card = _build()
     assert "id" not in card, (
         f"agent_card_from emitted spec-undefined top-level 'id': "
@@ -53,12 +53,13 @@ def test_M3_card_has_no_top_level_id_field():
     )
 
 
-def test_M3_card_uses_url_as_canonical_identity():
-    """``url`` is the A2A Agent Card identity. Make this explicit so a
-    future "let's add id back" temptation reads this test first."""
+def test_M3_card_uses_supported_interface_url_as_canonical_endpoint():
+    """A2A v1.0.1 carries endpoint identity in supportedInterfaces.
+    Make this explicit so top-level url/id regressions are caught."""
     card = _build()
-    assert "url" in card
-    assert card["url"] == "https://example.com/a2a"
+    assert "url" not in card
+    assert card["supportedInterfaces"][0]["url"] == "https://example.com/a2a"
+    assert card["supportedInterfaces"][0]["protocolBinding"] == "HTTP+JSON"
 
 
 # ===== M-3 corollary: DID still discoverable =====
@@ -82,19 +83,17 @@ def test_M3_card_field_set_matches_canonical_schema():
     but this also detects any other accidental top-level pollution."""
     card = _build()
     expected_keys = {
-        # A2A v0.3.0 canonical fields
-        "protocolVersion",
+        # A2A v1.0.1 canonical fields
         "name",
         "description",
-        "url",
-        "preferredTransport",
+        "supportedInterfaces",
         "version",
         "capabilities",
         "defaultInputModes",
         "defaultOutputModes",
         "skills",
         "securitySchemes",
-        "security",
+        "securityRequirements",
         # Vendor extensions (allowed by spec)
         "metadata",
         "x-nth-dao",
