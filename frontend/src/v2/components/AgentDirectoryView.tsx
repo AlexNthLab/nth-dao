@@ -155,6 +155,27 @@ export function AgentDirectoryView({
     };
   }, []);
 
+  function describeWorkStatus(status: string) {
+    if (status === "authorizing") {
+      return t("正在授权 agent…", "Authorizing agent…");
+    }
+    if (status === "waiting") {
+      return t("等待 agent 接入…", "Waiting for agent…");
+    }
+    if (status === "streaming") {
+      return t("正在流式输出…", "Streaming response…");
+    }
+    if (status === "done") return "";
+    if (status.startsWith("warming:")) {
+      const attempt = status.slice("warming:".length);
+      return t(
+        `Hermes 正在冷启动/加载凭证（第 ${attempt} 次尝试）…`,
+        `Hermes is warming up (attempt ${attempt})…`,
+      );
+    }
+    return status;
+  }
+
   async function runAgentWork(did: string) {
     if (!onAskAgent || !workPrompt.trim()) return;
     workAbort.current?.abort();
@@ -170,7 +191,7 @@ export function AgentDirectoryView({
         workPrompt.trim(),
         (delta) => setWorkOutput((cur) => cur + delta),
         ctrl.signal,
-        (status) => setWorkMeta(status),
+        (status) => setWorkMeta(describeWorkStatus(status)),
       );
       if (res.text && res.text.length > 0) setWorkOutput(res.text);
       setWorkMeta(
@@ -993,7 +1014,7 @@ export function AgentDirectoryView({
                         fontFamily: "var(--t-mono)",
                       }}
                     >
-                      {workOutput || (workStatus === "running" ? "…" : "")}
+                      {workOutput || (workStatus === "running" ? (workMeta || "…") : "")}
                     </pre>
                   )}
                   {workStatus === "error" && (

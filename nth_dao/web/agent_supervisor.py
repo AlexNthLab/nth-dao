@@ -1288,6 +1288,28 @@ class AgentSupervisor:
                     recovery_path,
                 )
                 continue
+            cap_token_path = agent_dir / "cap_token.json"
+            if cap_token_path.exists():
+                try:
+                    cap_token = json.loads(cap_token_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "agent_supervisor: recovery sweep could not "
+                        "parse %s: %s — leaving receipt in place",
+                        cap_token_path, exc,
+                    )
+                    continue
+                expected_did = str(cap_token.get("subject_did", "") or "")
+                signer_did = str(receipt.get("signer_did", "") or "")
+                if expected_did and signer_did != expected_did:
+                    logger.warning(
+                        "agent_supervisor: recovery receipt signer_did "
+                        "does not match cap_token subject for %s "
+                        "(receipt_id=%s) — leaving file",
+                        agent_dir.name, receipt.get("receipt_id", "?"),
+                    )
+                    continue
+
             try:
                 # agent_dir.name IS the agent_id the supervisor
                 # used to create the dir, so forward that as the

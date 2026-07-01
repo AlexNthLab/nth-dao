@@ -67,3 +67,96 @@ def test_identity_does_not_bypass_approval_policy(tmp_path):
         assert "approval_required" in str(exc)
     else:
         raise AssertionError("unapproved identity attach should be blocked")
+
+def test_windows_acl_warning_reports_safe_reason_without_local_path(
+    tmp_path, monkeypatch, caplog,
+):
+    import logging
+    import nth_dao.identity as identity_mod
+
+    identity_path = tmp_path / "private-dir" / "identity.json"
+    identity_path.parent.mkdir()
+    identity_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(identity_mod.sys, "platform", "win32")
+    monkeypatch.setattr(
+        identity_mod,
+        "_restrict_windows_acl",
+        lambda _path: (False, "icacls-grant-exit-5"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="nth_dao.identity"):
+        identity_mod._restrict_to_owner(identity_path)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("identity.json" in m for m in messages)
+    assert any("reason=icacls-grant-exit-5" in m for m in messages)
+    assert all(str(tmp_path) not in m for m in messages)
+    assert all("private-dir" not in m for m in messages)
+
+
+def test_windows_acl_uses_binary_icacls_and_reports_stage(
+    tmp_path, monkeypatch,
+):
+    import subprocess
+    import nth_dao.identity as identity_mod
+
+    identity_path = tmp_path / "identity.json"
+    identity_path.write_text("{}", encoding="utf-8")
+    calls = []
+
+    class Result:
+        def __init__(self, returncode=7, stdout=b""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "whoami":
+            return Result(0, b'"PC\\Alice","S-1-5-21-1"\r\n')
+        return Result(7)
+
+    monkeypatch.setenv("USERNAME", "Alice")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ok, reason = identity_mod._restrict_windows_acl(identity_path)
+
+    assert ok is False
+    assert reason.startswith("icacls-grant-exit-")
+    assert "7" in reason
+    assert calls
+    for _argv, kwargs in calls:
+        assert kwargs["stderr"] is subprocess.DEVNULL
+        assert "text" not in kwargs
+        assert "capture_output" not in kwargs
+
+
+def test_windows_acl_prefers_current_user_sid(tmp_path, monkeypatch):
+    import subprocess
+    import nth_dao.identity as identity_mod
+
+    identity_path = tmp_path / "identity.json"
+    identity_path.write_text("{}", encoding="utf-8")
+    calls = []
+
+    class Result:
+        def __init__(self, returncode=0, stdout=b""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "whoami":
+            return Result(0, b'"PC\\Alice","S-1-5-21-999"\r\n')
+        return Result(0)
+
+    monkeypatch.setenv("USERNAME", "Alice")
+    monkeypatch.setenv("USERDOMAIN", "PC")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ok, reason = identity_mod._restrict_windows_acl(identity_path)
+
+    assert ok is True
+    assert reason == "ok"
+    icacls_calls = [c for c in calls if c[0][0] == "icacls"]
+    assert icacls_calls[0][0][2] == "/grant:r"
+    assert icacls_calls[0][0][3] == "*S-1-5-21-999:(F)"

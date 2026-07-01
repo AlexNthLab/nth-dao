@@ -391,8 +391,86 @@ def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
         body = ok.json()
         assert body["result"]["backend"] == "mock"
         assert "hello UI" in body["result"]["response"]
+        receipt = body["result"].get("receipt")
+        assert isinstance(receipt, dict), "successful /ask response must include a signed receipt"
+        receipt_id = receipt.get("receipt_id")
+        assert isinstance(receipt_id, str) and receipt_id
+        persisted = tmp_path / "team_receipts" / f"{receipt_id}.json"
+        assert persisted.exists(), "hub /ask must persist the response receipt deterministically"
+        persisted_body = json.loads(persisted.read_text(encoding="utf-8"))
+        assert persisted_body["receipt_id"] == receipt_id
     finally:
         c.post(f"/api/v2/agents/{agent_id}/stop")
+
+
+
+def test_response_receipt_must_match_invoked_agent_did(tmp_path: Path) -> None:
+    """Adversarial audit guard: a successful agent response may carry
+    a receipt, but the hub must not persist it unless signer_did is
+    the DID that was actually invoked.
+    """
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.v2_api import _persist_agent_response_receipt
+
+    signer = AgentIdentity.generate()
+    other = AgentIdentity.generate()
+    receipt = sign_receipt([
+        TimelineEntry(timestamp=now_ms(), type="nth.test", payload={"ok": True}),
+    ], signer)
+
+    class Store:
+        saved = False
+        def save(self, _receipt: dict) -> Path:
+            self.saved = True
+            return tmp_path / "should-not-exist.json"
+
+    store = Store()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(nth=SimpleNamespace(receipts=store))),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_agent_response_receipt(
+            request, "agent-1", other.as_did(), {"result": {"receipt": receipt}},
+        )
+    assert exc_info.value.status_code == 502
+    assert store.saved is False
+
+
+def test_response_receipt_must_verify_before_save(tmp_path: Path) -> None:
+    """A dict-shaped receipt is not evidence. The hub must verify
+    content_hash + Ed25519 signature before writing team_receipts.
+    """
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
+    from nth_dao.identity import AgentIdentity
+    from nth_dao.web.v2_api import _persist_agent_response_receipt
+
+    signer = AgentIdentity.generate()
+    receipt = sign_receipt([
+        TimelineEntry(timestamp=now_ms(), type="nth.test", payload={"ok": True}),
+    ], signer)
+    receipt["timeline"][0]["payload"]["ok"] = False
+
+    class Store:
+        saved = False
+        def save(self, _receipt: dict) -> Path:
+            self.saved = True
+            return tmp_path / "should-not-exist.json"
+
+    store = Store()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(nth=SimpleNamespace(receipts=store))),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_agent_response_receipt(
+            request, "agent-1", signer.as_did(), {"result": {"receipt": receipt}},
+        )
+    assert exc_info.value.status_code == 502
+    assert store.saved is False
 
 
 def test_supervised_agents_appear_in_get(hub_client: TestClient) -> None:
@@ -1126,34 +1204,54 @@ def test_build_a2a_ask_receipt_returns_sign_failed_reason() -> None:
     )
 
 
-def test_build_a2a_ask_receipt_attaches_authorizing_cap_token() -> None:
-    """Phase D: the token that authorized this ask rides on the
-    receipt envelope. A verifier walking the cap chain back to the
-    issuer's root authority needs this to confirm the signer was
-    delegated authority for this exact call. """
+def test_build_a2a_ask_receipt_separates_request_and_signing_tokens() -> None:
+    """A peer's request token and the agent's receipt-signing token are
+    different authorities. The request token should be reflected inside
+    the timeline for audit correlation, while the envelope must carry a
+    token whose subject is the receipt signer so verify_receipt can walk
+    the signer capability chain.
+    """
     pytest.importorskip("nacl")
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND,
+        CAP_NTH_RECEIPT_SIGN,
+        sign_cap_token,
+    )
+    from nth_dao.execution_receipt import verify_receipt
     from nth_dao.identity import AgentIdentity
     from nth_dao.web.dummy_agent import _build_a2a_ask_receipt
 
-    signer = AgentIdentity.generate(label="phase-d-cap-test")
-    token = {
-        "subject_did": "did:key:z6MkPeer",
-        "token_id": "tok-cap-X",
-        "capabilities": ["a2a:message_send", "nth:receipt_sign"],
-    }
-    receipt, _reason = _build_a2a_ask_receipt(
+    issuer = AgentIdentity.generate(label="phase-d-cap-issuer")
+    signer = AgentIdentity.generate(label="phase-d-cap-agent")
+    peer = AgentIdentity.generate(label="phase-d-cap-peer")
+    request_token = sign_cap_token(
+        issuer=issuer,
+        subject_did=peer.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+        token_id="tok-request-X",
+    )
+    signing_token = sign_cap_token(
+        issuer=issuer,
+        subject_did=signer.as_did(),
+        capabilities=[CAP_NTH_RECEIPT_SIGN],
+        token_id="tok-sign-X",
+    )
+
+    receipt, reason = _build_a2a_ask_receipt(
         identity=signer, method="ask", backend_name="mock",
-        token=token, agent_did=signer.as_did(),
-        params={}, result={"response": "ok"},
+        token=request_token, signing_cap_token=signing_token,
+        agent_did=signer.as_did(),
+        params={"prompt": "hello"}, result={"response": "ok"},
         started_at_ms=0, ended_at_ms=1,
     )
+    assert reason == ""
     assert receipt is not None
-    # The envelope carries a verbatim copy of the cap_token.
-    assert receipt["authorizing_cap_token"]["token_id"] == "tok-cap-X"
-    assert (
-        receipt["authorizing_cap_token"]["capabilities"]
-        == ["a2a:message_send", "nth:receipt_sign"]
-    )
+    payload = receipt["timeline"][0]["payload"]
+    assert payload["caller_did"] == peer.as_did()
+    assert payload["cap_token_id"] == "tok-request-X"
+    assert receipt["authorizing_cap_token"]["token_id"] == "tok-sign-X"
+    assert receipt["authorizing_cap_token"]["subject_did"] == signer.as_did()
+    assert verify_receipt(receipt)
 
 
 def test_v2_receipt_persistor_drops_when_receipts_store_missing(
@@ -2217,6 +2315,45 @@ def test_recover_orphaned_receipts_persists_and_unlinks(
     assert agent_ids == ["crashed-001", "crashed-002"]
     # Files unlinked → second sweep is a no-op.
     assert sup.recover_orphaned_receipts() == 0
+
+
+
+def test_recover_orphaned_receipts_rejects_cap_subject_mismatch(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If cap_token.json is present, last_receipt.json must belong
+    to the same subject_did. Otherwise a stale/malicious recovery file
+    can smuggle a valid receipt from some other identity into this
+    agent directory.
+    """
+    import logging
+    cap_token_dir = tmp_path / "agents"
+    agent_dir = cap_token_dir / "agent-a"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "cap_token.json").write_text(
+        json.dumps({"subject_did": "did:key:z6MkExpected"}),
+        encoding="utf-8",
+    )
+    (agent_dir / "last_receipt.json").write_text(
+        json.dumps({
+            "receipt_id": "r-agent-a",
+            "signer_did": "did:key:z6MkOther",
+            "content_hash": "abc",
+        }),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, dict]] = []
+    sup = AgentSupervisor(
+        InMemoryRunner(),
+        cap_token_dir=cap_token_dir,
+        receipt_persistor=lambda aid, receipt: calls.append((aid, receipt)),
+    )
+    with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
+        assert sup.recover_orphaned_receipts() == 0
+    assert calls == []
+    assert (agent_dir / "last_receipt.json").exists()
+    assert any("does not match cap_token subject" in r.getMessage() for r in caplog.records)
 
 
 def test_recover_orphaned_receipts_skips_malformed(
@@ -3451,7 +3588,7 @@ def test_codex_backend_arch_aware_arm64_path(
     arm_exe = arm_bin / "codex.exe"
     arm_exe.write_text("# vendored", encoding="utf-8")
 
-    monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+    monkeypatch.setattr(shutil, "which", lambda name: str(ps1) if name == "codex" else None)
     monkeypatch.setattr(platform, "machine", lambda: "ARM64")
 
     resolved = _CodexCliAskBackend()._resolve_binary()
@@ -3470,7 +3607,7 @@ def test_codex_backend_arch_aware_unsupported(
 
     ps1 = tmp_path / "codex.ps1"
     ps1.write_text("# shim", encoding="utf-8")
-    monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+    monkeypatch.setattr(shutil, "which", lambda name: str(ps1) if name == "codex" else None)
     monkeypatch.setattr(platform, "machine", lambda: "x86")
 
     with pytest.raises(RuntimeError, match="unsupported Windows machine arch"):
@@ -3615,7 +3752,7 @@ def test_codex_backend_walks_to_vendored_exe_for_cmd_shim(
     exe = vendored / "codex.exe"
     exe.write_text("# vendored", encoding="utf-8")
 
-    monkeypatch.setattr(shutil, "which", lambda _n: str(cmd))
+    monkeypatch.setattr(shutil, "which", lambda name: str(cmd) if name == "codex" else None)
     monkeypatch.setattr(platform, "machine", lambda: "AMD64")
 
     resolved = _CodexCliAskBackend()._resolve_binary()
@@ -3623,6 +3760,139 @@ def test_codex_backend_walks_to_vendored_exe_for_cmd_shim(
         f"expected vendored .exe; got {resolved!r} (still routing "
         "through the cmd shim?)"
     )
+
+
+
+
+def test_codex_backend_prefers_native_exe_over_node_shim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """If both an npm shim and native codex.exe exist on PATH, use
+    the native executable. This avoids Windows node.exe resolution
+    failures in non-interactive A2A children.
+    """
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    npm = tmp_path / "npm-global"
+    native_dir = tmp_path / "native"
+    npm.mkdir()
+    native_dir.mkdir()
+    cmd = npm / "codex.cmd"
+    native = native_dir / "codex.exe"
+    cmd.write_text("@node codex.js", encoding="utf-8")
+    native.write_text("native", encoding="utf-8")
+
+    def fake_which(name: str) -> str | None:
+        if name == "codex":
+            return str(cmd)
+        if name == "codex.exe":
+            return str(native)
+        return None
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    assert _CodexCliAskBackend()._resolve_binary() == str(native)
+
+
+def test_codex_backend_accepts_nth_dao_node_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """NTH_DAO_NODE may point either to node.exe or to its bin dir.
+    Directory form is friendlier for desktop/runtime setup scripts.
+    """
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    node_dir = tmp_path / "node-bin"
+    node_dir.mkdir()
+    node = node_dir / ("node.exe" if sys.platform.startswith("win") else "node")
+    node.write_text("node", encoding="utf-8")
+    monkeypatch.setenv("NTH_DAO_NODE", str(node_dir))
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    assert _CodexCliAskBackend._node_bin_dir() == str(node_dir)
+
+
+def test_codex_backend_walks_to_nested_npm_vendored_exe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: recent npm @openai/codex installs put the
+    native package under @openai/codex/node_modules/@openai/. The
+    resolver must prefer that vendored exe over the node-based shim.
+    """
+    import platform
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    npm = tmp_path / "npm-global"
+    cmd = npm / "codex.cmd"
+    npm.mkdir()
+    cmd.write_text("@node codex.js", encoding="utf-8")
+    nested = (
+        npm / "node_modules" / "@openai" / "codex"
+        / "node_modules" / "@openai" / "codex-win32-x64"
+        / "vendor" / "x86_64-pc-windows-msvc" / "bin"
+    )
+    nested.mkdir(parents=True)
+    exe = nested / "codex.exe"
+    exe.write_text("# vendored", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda name: str(cmd) if name == "codex" else None)
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+
+    assert _CodexCliAskBackend()._resolve_binary() == str(exe)
+
+
+def test_codex_backend_shim_gets_bundled_node_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression for Windows node-not-found failures: when no
+    vendored codex.exe exists, the JS shim is still usable if NTH DAO
+    can prepend a known Node runtime to the child PATH.
+    """
+    import platform
+    import shutil
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    npm = tmp_path / "npm-global"
+    cmd = npm / "codex.cmd"
+    npm.mkdir()
+    cmd.write_text("@node codex.js", encoding="utf-8")
+    node_dir = tmp_path / "node-bin"
+    node_dir.mkdir()
+    node = node_dir / ("node.exe" if sys.platform.startswith("win") else "node")
+    node.write_text("# node", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda name: str(cmd) if name == "codex" else None)
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    monkeypatch.setenv("NTH_DAO_NODE", str(node))
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **kw: object) -> _FakeCompleted:
+        captured["argv"] = argv
+        captured["env"] = kw.get("env")
+        return _FakeCompleted()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    result = _CodexCliAskBackend().ask({"prompt": "hi"}, timeout_s=30.0)
+
+    assert result["response"] == "ok"
+    assert (captured["argv"])[0] == str(cmd)  # type: ignore[index]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    first_path = str(env["PATH"]).split(os.pathsep)[0]
+    assert os.path.normcase(first_path) == os.path.normcase(str(node_dir))
 
 
 @pytest.mark.parametrize("stderr_msg", [
@@ -3709,6 +3979,150 @@ def test_hermes_backend_raises_when_package_unavailable(
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(RuntimeError, match="pip install -e"):
         _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
+
+
+def test_hermes_backend_surfaces_internal_import_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A missing dependency inside run_agent is not the same as
+    run_agent being uninstalled. Preserve the real dependency name so
+    operators can fix the Hermes environment instead of reinstalling
+    the wrong package.
+    """
+    import sys as _sys
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    hermes_root = tmp_path / "hermes-broken"
+    hermes_root.mkdir()
+    (hermes_root / "run_agent.py").write_text(
+        "from definitely_missing_hermes_dep import nope\n"
+        "class AIAgent:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    sentinel = object()
+    old_run_agent = _sys.modules.get("run_agent", sentinel)
+    monkeypatch.setattr(_sys, "path", [str(hermes_root), *_sys.path])
+    _sys.modules.pop("run_agent", None)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=5.0)
+        msg = str(raised.value)
+        assert "hermes-agent import failed while loading run_agent" in msg
+        assert "definitely_missing_hermes_dep" in msg
+        assert "pip install -e" not in msg
+    finally:
+        if old_run_agent is sentinel:
+            _sys.modules.pop("run_agent", None)
+        else:
+            _sys.modules["run_agent"] = old_run_agent
+
+
+def test_hermes_backend_prefers_run_agent_root_for_sibling_imports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hermes editable installs can put bundled tool paths before
+    the actual repository root. The adapter must still let
+    run_agent.py resolve sibling imports such as utils.py from the
+    run_agent root, not from an unrelated earlier sys.path entry.
+    """
+    import sys as _sys
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    hermes_root = tmp_path / "hermes"
+    polluted_root = tmp_path / "polluted"
+    hermes_root.mkdir()
+    polluted_root.mkdir()
+    (hermes_root / "utils.py").write_text(
+        "MARKER = 'good'\n", encoding="utf-8",
+    )
+    (hermes_root / "run_agent.py").write_text(
+        "from utils import MARKER\n"
+        "class AIAgent:\n"
+        "    def __init__(self, **kwargs):\n"
+        "        self.kwargs = kwargs\n"
+        "    def chat(self, message):\n"
+        "        return MARKER + ':' + message\n"
+        "    def close(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    (polluted_root / "utils.py").write_text(
+        "MARKER = 'bad'\n", encoding="utf-8",
+    )
+
+    sentinel = object()
+    old_run_agent = _sys.modules.get("run_agent", sentinel)
+    old_utils = _sys.modules.get("utils", sentinel)
+    monkeypatch.setattr(
+        _sys, "path",
+        [str(polluted_root), str(hermes_root), *_sys.path],
+    )
+    _sys.modules.pop("run_agent", None)
+    _sys.modules.pop("utils", None)
+    try:
+        import importlib as _importlib
+        bad_utils = _importlib.import_module("utils")
+        assert bad_utils.MARKER == "bad"
+
+        out = _HermesAskBackend().ask({"prompt": "hello"}, timeout_s=5.0)
+        assert out["response"] == "good:hello"
+        assert Path(_sys.modules["utils"].__file__).parent == hermes_root
+    finally:
+        if old_run_agent is sentinel:
+            _sys.modules.pop("run_agent", None)
+        else:
+            _sys.modules["run_agent"] = old_run_agent
+        if old_utils is sentinel:
+            _sys.modules.pop("utils", None)
+        else:
+            _sys.modules["utils"] = old_utils
+
+
+def test_hermes_import_path_prepare_is_thread_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent ask calls should not duplicate or race the process-wide
+    sys.path mutation used to prefer the Hermes repository root.
+    """
+    import concurrent.futures
+    import sys as _sys
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    hermes_root = tmp_path / "hermes-threaded"
+    hermes_root.mkdir()
+    (hermes_root / "run_agent.py").write_text(
+        "class AIAgent:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    sentinel = object()
+    old_run_agent = _sys.modules.get("run_agent", sentinel)
+    monkeypatch.setattr(
+        _sys, "path",
+        [str(hermes_root), str(hermes_root), *_sys.path],
+    )
+    _sys.modules.pop("run_agent", None)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _i: _HermesAskBackend._prepare_import_path(), range(16)))
+        hermes_norm = os.path.normcase(os.path.abspath(str(hermes_root)))
+        matching = [
+            p for p in _sys.path
+            if os.path.normcase(os.path.abspath(p)) == hermes_norm
+        ]
+        assert _sys.path[0] == str(hermes_root)
+        assert len(matching) == 1
+    finally:
+        if old_run_agent is sentinel:
+            _sys.modules.pop("run_agent", None)
+        else:
+            _sys.modules["run_agent"] = old_run_agent
 
 
 def test_hermes_backend_returns_response_via_fake_agent(
@@ -4904,6 +5318,71 @@ def test_subprocess_real_a2a_ask_mock_backend(
         assert result["caller_did"] == peer.as_did()
     finally:
         runner.stop(agent_id)
+
+
+def test_channel_dispatch_retries_not_yet_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Channel fan-out should tolerate a freshly spawned child that has
+    not loaded its cap_token yet. The first 401 not-yet-authorized is a
+    warmup state; a later 200 should still post the agent reply.
+    """
+    import io
+    import urllib.error
+    import urllib.request
+    import nth_dao.web.v2_api as _v2
+
+    class Groups:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
+            self.messages.append((channel_id, sender_id, body))
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps({
+                "result": {"response": "agent reply after warmup"},
+            }).encode("utf-8")
+
+    calls = 0
+
+    def fake_urlopen(_req, timeout):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError(
+                url="http://127.0.0.1:9999/a2a/ask",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":{"code":"not-yet-authorized"}}'),
+            )
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_v2, "_CHANNEL_DISPATCH_RETRIES", 2)
+    monkeypatch.setattr(_v2, "_CHANNEL_DISPATCH_RETRY_SLEEP_S", 0.0)
+
+    groups = Groups()
+    assert _v2._CHANNEL_DISPATCH_SEM.acquire(blocking=False)
+    _v2._channel_ask_and_reply(
+        groups, {"token_id": "tok", "subject_did": "did:key:z6MkAgent"},
+        "did:key:z6MkAgent", 9999, "general", "hello",
+    )
+
+    assert calls == 2
+    assert groups.messages == [(
+        "general", "did:key:z6MkAgent", "agent reply after warmup",
+    )]
 
 
 # ─────────────────────────────────────────────────────────────

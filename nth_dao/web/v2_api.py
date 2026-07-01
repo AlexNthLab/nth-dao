@@ -1309,6 +1309,108 @@ def _state_receipts_store(request: Request) -> Optional[Any]:
         return None
 
 
+
+def _expected_pubkey_from_did(expected_did: str) -> str:
+    if not expected_did:
+        return ""
+    try:
+        from nth_dao.did_key import decode_ed25519_did_key_hex
+        return decode_ed25519_did_key_hex(expected_did)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"expected agent DID is not a valid did:key: {expected_did!r}") from exc
+
+
+def _verify_agent_receipt(
+    *,
+    agent_id: str,
+    expected_did: str,
+    receipt: Dict[str, Any],
+) -> None:
+    """Fail closed unless ``receipt`` verifies and belongs to the agent.
+
+    A local child process is not a trusted persistence authority. It
+    may be buggy, compromised, or merely running an older protocol.
+    Before a hub writes agent-supplied evidence into ``team_receipts``
+    the receipt must self-verify, and when the routing layer knows the
+    target DID it must match ``signer_did`` exactly.
+    """
+    from nth_dao.execution_receipt import verify_receipt
+
+    signer_did = str(receipt.get("signer_did", "") or "")
+    if expected_did and signer_did != expected_did:
+        raise ValueError(
+            f"receipt signer_did does not match agent {agent_id}: "
+            f"{signer_did!r} != {expected_did!r}"
+        )
+    expected_pubkey = _expected_pubkey_from_did(expected_did)
+    if not verify_receipt(receipt, expected_pubkey_hex=expected_pubkey):
+        raise ValueError(
+            f"agent response receipt failed signature/content verification "
+            f"for agent {agent_id}"
+        )
+
+
+def _persist_agent_response_receipt(
+    request: Request,
+    agent_id: str,
+    expected_did: str,
+    content: Any,
+) -> None:
+    """Persist a signed receipt carried in a successful agent response.
+
+    Child stdout events are still useful, but they are not a reliable
+    persistence boundary for every backend. If the hub returns a 200
+    response containing result.receipt, the audit evidence must already
+    be verified and on disk before the HTTP response is handed back to
+    the UI.
+    """
+    if not isinstance(content, dict):
+        return
+    result = content.get("result")
+    if not isinstance(result, dict):
+        return
+    receipt = result.get("receipt")
+    if receipt is None:
+        return
+    if not isinstance(receipt, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="agent response receipt is malformed",
+        )
+    try:
+        _verify_agent_receipt(
+            agent_id=agent_id, expected_did=expected_did, receipt=receipt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    receipts = _state_receipts_store(request)
+    if receipts is None:
+        raise HTTPException(
+            status_code=500,
+            detail="receipt store unavailable; cannot persist agent response receipt",
+        )
+    receipt_id = str(receipt.get("receipt_id", "") or "?")
+    try:
+        path = receipts.save(receipt)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.exception(
+            "v2_api: failed to persist response receipt for agent %s "
+            "(id=%s)",
+            agent_id,
+            receipt_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"agent response receipt could not be persisted: {exc}",
+        ) from exc
+    logger.info(
+        "v2_api: persisted response receipt for agent %s (id=%s, path=%s)",
+        agent_id,
+        receipt_id,
+        path,
+    )
+
+
 # NOTE: prev_content_hash lookup goes through the canonical
 # ``ReceiptStore.head_content_hash(signer_did)`` method
 # (execution_receipt.py:844) which has documented tie-breaking
@@ -1423,7 +1525,27 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                         agent_id,
                     )
                     return
+                expected_did = ""
+                try:
+                    sup_for_lookup = getattr(state, "v2_supervisor", None)
+                    rec = (
+                        sup_for_lookup.get(agent_id)
+                        if sup_for_lookup is not None else None
+                    )
+                    expected_did = str(getattr(rec, "did", "") or "")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "v2_api: could not look up DID for receipt "
+                        "from agent %s: %s",
+                        agent_id, exc,
+                    )
+                _verify_agent_receipt(
+                    agent_id=agent_id,
+                    expected_did=expected_did,
+                    receipt=receipt,
+                )
                 receipts.save(receipt)
+
 
             # Phase 3d: decision_raiser closure — inserts the
             # child-proposed decision into the in-process
@@ -2114,6 +2236,8 @@ class SocialTargetBody(BaseModel):
 # 发现的隐患①)。在飞达上限时新派发被丢弃并告警,而非无限堆线程。
 _CHANNEL_DISPATCH_MAX = 16
 _CHANNEL_DISPATCH_SEM = threading.BoundedSemaphore(_CHANNEL_DISPATCH_MAX)
+_CHANNEL_DISPATCH_RETRIES = 8
+_CHANNEL_DISPATCH_RETRY_SLEEP_S = 0.25
 
 
 def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt):
@@ -2139,10 +2263,30 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
             "Authorization": f"CapToken {encode_authorization_header(auth_token)}",
         }
         timeout = _A2A_METHOD_TIMEOUTS.get("ask", _A2A_DEFAULT_TIMEOUT_S)
-        req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            raw = resp.read()
-        content = _decode_or_passthrough(raw)
+        content: Any = {}
+        for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                    raw = resp.read()
+                content = _decode_or_passthrough(raw)
+                break
+            except urllib.error.HTTPError as exc:
+                raw = exc.read() if exc.fp else b""
+                content = _decode_or_passthrough(raw)
+                blob = (
+                    json.dumps(content, ensure_ascii=False)
+                    if isinstance(content, dict) else str(content)
+                )
+                if (
+                    exc.code == 401
+                    and "not-yet-authorized" in blob
+                    and attempt < _CHANNEL_DISPATCH_RETRIES
+                ):
+                    time.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
+                    continue
+                raise
         reply = ""
         if isinstance(content, dict):
             result = content.get("result")
@@ -4231,10 +4375,10 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail=f"A2A proxy timed out / failed at {url}: {exc}",
             )
 
-        return JSONResponse(
-            status_code=resp_status,
-            content=_decode_or_passthrough(resp_body),
-        )
+        content = _decode_or_passthrough(resp_body)
+        if resp_status == 200:
+            _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
+        return JSONResponse(status_code=resp_status, content=content)
 
     async def _agent_ask(did: str, method: str, request: Request) -> Any:
         """UI 集成（2026-06-13）：hub 侧"代操作员驱动任务"端点。

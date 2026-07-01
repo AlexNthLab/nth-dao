@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import importlib.util
 import json
 import os
 import signal
@@ -124,7 +125,7 @@ def _print_error(**fields: object) -> None:
     )
 
 
-# ─── Phase 3e: cap_token holder + method → required-cap map ─────
+# Phase 3e: cap_token holder + method-to-required-cap map
 
 
 class _CapTokenHolder:
@@ -143,6 +144,11 @@ class _CapTokenHolder:
     def set(self, token: Dict[str, Any]) -> None:
         with self._lock:
             self._token = dict(token)
+
+    def get(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return dict(self._token) if self._token is not None else None
+
 
     def get_issuer_did(self) -> Optional[str]:
         with self._lock:
@@ -919,14 +925,98 @@ class _CodexCliAskBackend(_AskBackend):
     DEFAULT_TIMEOUT_S = 90.0  # Codex is slower than Claude SDK
     DEFAULT_MAX_TOKENS = 0    # codex doesn't take max_tokens on CLI
 
-    def _resolve_binary(self) -> str:
-        """Resolve the codex binary path each call.
+    @staticmethod
+    def _looks_like_node_shim(path: str) -> bool:
+        """Return True for npm shims that need Node to start Codex.
 
-        CO-8 (review round Phase 5.4 R1): no caching — matches the
-        Claude CLI backend's pattern. ``shutil.which`` is cheap (a
-        dict lookup against a cached PATHEXT walk inside Python's
-        implementation) so re-resolving per spawn avoids a stale
-        cache after ``npm update``. """
+        Windows npm installs may expose ``codex.cmd`` and also a
+        no-extension ``codex`` shell shim. The old resolver handled
+        only .cmd/.ps1/.bat, so the no-extension shim could be
+        treated as a native executable and fail later with "node is
+        not recognized". Detect both shapes here.
+        """
+        lower = path.lower()
+        if lower.endswith((".ps1", ".cmd", ".bat")):
+            return True
+        if not sys.platform.startswith("win"):
+            return False
+        p = Path(path)
+        if p.suffix:
+            return False
+        if any(p.with_suffix(ext).exists() for ext in (".cmd", ".ps1", ".bat")):
+            return True
+        try:
+            head = p.read_text(encoding="utf-8", errors="ignore")[:600].lower()
+        except OSError:
+            return False
+        return "node_modules" in head and "@openai" in head and "codex" in head
+
+    @staticmethod
+    def _node_bin_dir() -> Optional[str]:
+        """Return a directory containing node.exe/node, if known.
+
+        NTH DAO desktop sessions often have a bundled Node runtime
+        even when the user-level PATH does not. We use it only for
+        Codex npm shims; native vendored codex.exe needs no Node.
+        """
+        import shutil
+
+        candidates: list[Path] = []
+        explicit = os.environ.get("NTH_DAO_NODE", "").strip()
+        if explicit:
+            explicit_path = Path(explicit)
+            if explicit_path.is_dir():
+                candidates.append(
+                    explicit_path / ("node.exe" if sys.platform.startswith("win") else "node"),
+                )
+            else:
+                candidates.append(explicit_path)
+        candidates.append(
+            Path.home() / ".cache" / "codex-runtimes"
+            / "codex-primary-runtime" / "dependencies"
+            / "node" / "bin" / ("node.exe" if sys.platform.startswith("win") else "node")
+        )
+        for node in candidates:
+            if node.is_file():
+                return str(node.parent)
+        resolved = shutil.which("node")
+        if resolved:
+            return str(Path(resolved).parent)
+        return None
+
+    @classmethod
+    def _subprocess_env(cls) -> Dict[str, str]:
+        env = os.environ.copy()
+        node_dir = cls._node_bin_dir()
+        if node_dir:
+            parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+            if not any(os.path.normcase(p) == os.path.normcase(node_dir) for p in parts):
+                env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
+        return env
+
+    @staticmethod
+    def _codex_vendor_candidates(
+        shim_dir: str, arch_suffix: str, rust_triple: str,
+    ) -> list[Path]:
+        root = Path(shim_dir)
+        return [
+            root / "node_modules" / "@openai"
+            / f"codex-win32-{arch_suffix}" / "vendor"
+            / rust_triple / "bin" / "codex.exe",
+            root / "node_modules" / "@openai" / "codex"
+            / "node_modules" / "@openai"
+            / f"codex-win32-{arch_suffix}" / "vendor"
+            / rust_triple / "bin" / "codex.exe",
+        ]
+
+    def _resolve_binary(self) -> str:
+        """Resolve a Codex executable that can actually run.
+
+        Prefer the native vendored ``codex.exe`` when npm installed
+        it. If only the JS shim exists, require/provide a Node
+        runtime before declaring the backend usable.
+        """
+        import platform
         import shutil
 
         shim = shutil.which("codex")
@@ -935,31 +1025,27 @@ class _CodexCliAskBackend(_AskBackend):
                 "codex CLI not on PATH — install with "
                 "'npm i -g @openai/codex' or switch agent to kind=mock"
             )
-        # F-1 fix (deep self-audit Phase 5.4 R2): npm-global ships
-        # ``codex.cmd`` + ``codex.ps1`` + (sometimes) ``codex.bat``.
-        # Windows ``PATHEXT`` typically lists ``.CMD`` before
-        # ``.PS1``, so ``shutil.which("codex")`` on most boxes
-        # returns the ``.cmd`` shim — and my CO-2 R1 only branched
-        # on ``.ps1``, silently letting ``.cmd`` through to
-        # subprocess.run. That works but adds a cmd.exe → node →
-        # codex.exe process layer per call AND loses our
-        # arch-aware vendored-binary fallback. Walk to the
-        # vendored .exe for ALL shim extensions.
-        shim_lower = shim.lower()
-        if not any(shim_lower.endswith(ext) for ext in (".ps1", ".cmd", ".bat")):
+        # Prefer a native executable that is already on PATH over npm
+        # shims. On Windows, where.exe/PATHEXT may find codex.cmd
+        # first even when Codex Desktop exposes a working codex.exe
+        # later in PATH. The native binary avoids the whole node.exe
+        # dependency class.
+        if sys.platform.startswith("win"):
+            native = shutil.which("codex.exe")
+            if native and Path(native).is_file():
+                return native
+
+        if not self._looks_like_node_shim(shim):
             return shim
-        # CO-2 fix (review round Phase 5.4 R1): arch-aware glob.
-        # npm publishes the vendored binary under
-        # ``codex-<os>-<arch>``. On Windows that's
-        # ``codex-win32-x64`` for amd64 + ``codex-win32-arm64`` for
-        # ARM64. Hard-coding ``-x64`` was correct for the dev box
-        # but broke for any ARM64 user. Use platform.machine() to
-        # pick the right suffix; vendor/<rust-triple>/bin glob
-        # uses the matching rust triple stem to avoid
-        # cross-architecture picking on a multi-arch install.
-        import glob
-        import os as _os
-        import platform
+
+        if not sys.platform.startswith("win"):
+            if self._node_bin_dir() is None:
+                raise RuntimeError(
+                    "codex CLI shim was found, but Node.js is not available. "
+                    "Install Node.js or place node on PATH."
+                )
+            return shim
+
         mach = platform.machine().lower()
         if mach in ("amd64", "x86_64", "x64"):
             arch_suffix = "x64"
@@ -968,27 +1054,27 @@ class _CodexCliAskBackend(_AskBackend):
             arch_suffix = "arm64"
             rust_triple = "aarch64-pc-windows-msvc"
         else:
-            # 32-bit Windows isn't supported by the codex npm pkg;
-            # surface a clear error instead of silently picking the
-            # first glob hit.
             raise RuntimeError(
                 f"codex CLI: unsupported Windows machine arch "
                 f"{platform.machine()!r}. The npm package vendors "
                 "x64 + arm64 only."
             )
-        shim_dir = _os.path.dirname(shim)
-        candidate = _os.path.join(
-            shim_dir, "node_modules", "@openai",
-            f"codex-win32-{arch_suffix}", "vendor", rust_triple,
-            "bin", "codex.exe",
-        )
-        if _os.path.isfile(candidate):
-            return candidate
-        # 6a-live fix: pure Node.js packages (like early codex-cli
-        # v0.x) ship NO vendored .exe — the shim invokes ``node
-        # codex.js`` directly. Fall back to the shim rather than
-        # raising; subprocess.run handles .cmd/.bat/.ps1 natively.
+
+        shim_dir = str(Path(shim).parent)
+        for candidate in self._codex_vendor_candidates(
+            shim_dir, arch_suffix, rust_triple,
+        ):
+            if candidate.is_file():
+                return str(candidate)
+
+        if self._node_bin_dir() is None:
+            raise RuntimeError(
+                "codex CLI shim was found, but Node.js is not available. "
+                "Install Node.js, place node on PATH, or run inside a "
+                "Codex desktop/runtime session with bundled Node."
+            )
         return shim
+
 
     def ask(
         self, params: Dict[str, Any], timeout_s: float,
@@ -1073,6 +1159,7 @@ class _CodexCliAskBackend(_AskBackend):
                 timeout=timeout_s,
                 check=False,
                 creationflags=creation_flags,
+                env=self._subprocess_env(),
             )
         except _sp.TimeoutExpired as exc:
             # F-2 + F-3 fixes (deep self-audit Phase 5.4 R2): the
@@ -1220,6 +1307,91 @@ class _HermesAskBackend(_AskBackend):
     # prompt 上限和其他 backend 对齐，防止恶意 peer 耗 LLM 上下文。
     MAX_PROMPT_CHARS = 32 * 1024
 
+    _IMPORT_LOCK = threading.RLock()
+
+    @staticmethod
+    def _is_run_agent_missing(exc: ImportError) -> bool:
+        name = getattr(exc, "name", None)
+        return name == "run_agent" or "No module named 'run_agent'" in str(exc)
+
+    @staticmethod
+    def _module_under_root(module: Any, root: Path) -> bool:
+        origin = getattr(module, "__file__", None)
+        if not origin:
+            return True
+        try:
+            path = Path(str(origin)).resolve()
+            return path == root or root in path.parents
+        except (OSError, RuntimeError, ValueError):
+            return True
+
+    @classmethod
+    def _prepare_import_path(cls) -> None:
+        """Prefer the installed Hermes root when importing ``run_agent``.
+
+        Editable Hermes installs may expose ``run_agent`` through an import
+        hook while also putting nested tool directories on ``sys.path``. One
+        observed layout placed ``osint-tools/maigret`` before the Hermes root,
+        causing ``from utils import ...`` inside Hermes to resolve the wrong
+        package. Finding ``run_agent`` first and moving its parent directory to
+        the front keeps Hermes' own sibling modules ahead of bundled tools.
+
+        The mutation is process-global, so guard it. Also evict a preloaded
+        non-Hermes ``utils`` module: Python would otherwise reuse the poisoned
+        module even after ``sys.path`` is fixed.
+        """
+        with cls._IMPORT_LOCK:
+            if "run_agent" in sys.modules:
+                return
+            try:
+                spec = importlib.util.find_spec("run_agent")
+            except (ImportError, ValueError) as exc:
+                raise ImportError(
+                    f"could not inspect hermes-agent run_agent: {exc}",
+                ) from exc
+            if spec is None:
+                raise ModuleNotFoundError(
+                    "No module named 'run_agent'", name="run_agent",
+                )
+            origin = getattr(spec, "origin", None)
+            if not origin or origin in {"built-in", "frozen"}:
+                return
+            root_path = Path(origin).resolve().parent
+            root = str(root_path)
+            root_norm = os.path.normcase(os.path.abspath(root))
+
+            def _is_same_path(value: str) -> bool:
+                try:
+                    return os.path.normcase(os.path.abspath(value)) == root_norm
+                except (OSError, TypeError, ValueError):
+                    return False
+
+            sys.path[:] = [
+                value for value in sys.path
+                if not value or not _is_same_path(value)
+            ]
+            sys.path.insert(0, root)
+
+            utils_mod = sys.modules.get("utils")
+            if utils_mod is not None and not cls._module_under_root(
+                utils_mod, root_path,
+            ):
+                sys.modules.pop("utils", None)
+
+    @classmethod
+    def _raise_import_error(cls, exc: ImportError) -> None:
+        if cls._is_run_agent_missing(exc):
+            raise RuntimeError(
+                "hermes-agent 未安装；请到 hermes-agent 仓库根"
+                "目录执行 'pip install -e .'（仓库参考 "
+                "https://github.com/NousResearch/hermes-agent）"
+            ) from exc
+        dep = getattr(exc, "name", "") or "unknown"
+        raise RuntimeError(
+            "hermes-agent import failed while loading run_agent "
+            f"(dependency={dep}): {type(exc).__name__}: {exc}"
+        ) from exc
+
     def ask(
         self, params: Dict[str, Any], timeout_s: float,
     ) -> Dict[str, Any]:
@@ -1247,15 +1419,10 @@ class _HermesAskBackend(_AskBackend):
             model = self.DEFAULT_MODEL
 
         try:
+            self._prepare_import_path()
             from run_agent import AIAgent  # type: ignore[import-not-found]
         except ImportError as exc:
-            # H-1 修复 (5.4b R1): 错误消息别钉死路径，给出
-            # 通用的安装提示，与 codex backend 风格一致。
-            raise RuntimeError(
-                "hermes-agent 未安装；请到 hermes-agent 仓库根"
-                "目录执行 'pip install -e .'（仓库参考 "
-                "https://github.com/NousResearch/hermes-agent）"
-            ) from exc
+            self._raise_import_error(exc)
 
         # 跑在 daemon 线程里以便我们自己卡 timeout
         # （AIAgent.chat 没有 timeout 入参）。
@@ -1373,33 +1540,34 @@ def _build_a2a_ask_receipt(
     result: Dict[str, Any],
     started_at_ms: int,
     ended_at_ms: int,
+    signing_cap_token: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Phase D: sign a per-ask audit receipt for ``/a2a/ask`` and
     ``/a2a/ask-stream``. Returns ``(receipt, reason)``:
-      • ``(receipt, "")`` — signed successfully.
-      • ``(None, reason)`` — best-effort failed; caller logs the
+      * ``(receipt, "")`` - signed successfully.
+      * ``(None, reason)`` - best-effort failed; caller logs the
         reason (D-3 R1 fix: callers used to silently drop None
         without an operator-visible signal — operators would see
         their hub run for hours without receipts and not know
         receipt signing was the missing piece).
 
     ``reason`` values:
-      • ``"crypto-unavailable"`` — ``nth_dao.execution_receipt`` /
+      * ``"crypto-unavailable"`` - ``nth_dao.execution_receipt`` /
         PyNaCl can't be imported. Operator should ``pip install
         pynacl``.
-      • ``"sign-failed:<ExcName>"`` — sign_receipt raised. Usually
+      * ``"sign-failed:<ExcName>"`` - sign_receipt raised. Usually
         an identity-without-private-key configuration error.
 
     Timeline shape (single entry):
         type=``nth.a2a_ask_executed``
         payload pins:
-          • method (``ask`` / ``ask-stream``)
-          • caller_did + agent_did
-          • backend name + ``requested_model`` (what caller asked
+          * method (``ask`` / ``ask-stream``)
+          * caller_did + agent_did
+          * backend name + ``requested_model`` (what caller asked
             for) + ``resolved_model`` (what backend actually used)
-          • input/output tokens (best-effort from backend result;
+          * input/output tokens (best-effort from backend result;
             backends that don't report them carry 0)
-          • timing: started_at_ms + ended_at_ms + elapsed_ms
+          * timing: started_at_ms + ended_at_ms + elapsed_ms
 
             D-4 R1 caveat: elapsed_ms is wall-clock from BEFORE
             ``backend.ask()`` to AFTER it returns, so it includes
@@ -1408,7 +1576,7 @@ def _build_a2a_ask_receipt(
             LLM call. Typically <1ms vs 1000s+ms LLM latency, but
             operators reconciling against provider invoices should
             expect a small offset.
-          • cap_token_id (correlates this ask with the authorizing
+          * cap_token_id (correlates this ask with the authorizing
             token in the audit store, for revocation tracing)
 
     D-2 R1 note on streaming polyfill: backends that don't override
@@ -1420,9 +1588,11 @@ def _build_a2a_ask_receipt(
     concept — not a bug, just worth flagging so operators reading
     mock-backed audit logs know why ``resolved_model`` is empty.
 
-    Authorizing cap_token is attached on the envelope so the
-    verifier can walk back to the issuer's root authority — same
-    pattern as the existing ``nth.agent_attestation`` receipt.
+    ``signing_cap_token`` is attached on the envelope so the
+    verifier can confirm the signing agent had ``nth:receipt_sign``
+    authority. It is deliberately separate from the request token:
+    a peer token may authorize the call without authorizing this agent
+    to sign receipts.
 
     Pure function — extracted from the handler so it's unit-testable
     without bringing up an HTTP socket.
@@ -1441,11 +1611,11 @@ def _build_a2a_ask_receipt(
     # ``str(x or "")`` / ``int(x or 0)`` pattern that silently coerces
     # a 0 / False / type-mismatched backend return into a "" / 0
     # receipt field.
-    # 2026-06-13: 把 receipt 绑死到**本次请求与回应**(request/response
-    # 哈希)。之前 payload 只记 method/caller/timing —— 不绑内容,于是一张
-    # 有效签名的 receipt 可被**重放**到任意请求,或配一段伪造文本(签名
-    # 仍真)。消费方(A2ACoordinator)据这两个哈希核对"这张 receipt 确为
-    # 我发的 prompt + 我收到的 response 而签",replay / 文本伪造即失效。
+    # Bind the receipt to this exact request/response pair. Older
+    # receipts only pinned method/caller/timing, which allowed a valid
+    # signature to be replayed alongside an unrelated prompt or answer.
+    # Consumers compare these hashes against the prompt they sent and
+    # the response they received.
     import hashlib as _hashlib
     _prompt_s = _safe_str(params.get("prompt"))
     _response_s = _safe_str(result.get("response"))
@@ -1477,7 +1647,7 @@ def _build_a2a_ask_receipt(
         receipt = sign_receipt(
             timeline, identity,
             goal_id=f"a2a:{method}",
-            authorizing_cap_token=token,
+            authorizing_cap_token=signing_cap_token,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort
         return None, f"sign-failed:{type(exc).__name__}"
@@ -1548,7 +1718,13 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     anthropic_pkg = importlib.util.find_spec("anthropic") is not None
     claude_cli = shutil.which("claude") is not None
-    codex_cli = shutil.which("codex") is not None
+    codex_error = ""
+    try:
+        _CodexCliAskBackend()._resolve_binary()
+        codex_cli = True
+    except RuntimeError as exc:
+        codex_cli = False
+        codex_error = str(exc)
     codex_profile = (home / ".codex").exists()
     hermes_pkg = importlib.util.find_spec("run_agent") is not None
     hermes_profile = (home / ".hermes").exists()
@@ -1590,6 +1766,8 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 if codex_ready else
                 "Codex CLI detected, but no local profile was found; run codex login."
                 if codex_cli else
+                codex_error
+                if codex_error else
                 "Install Codex CLI and run codex login."
             ),
             "warning": "Prompts that require tool approval may time out in non-interactive A2A calls.",
@@ -1890,6 +2068,7 @@ def _start_a2a_server(
                         method=method,
                         backend_name=ask_backend.name,
                         token=token,
+                        signing_cap_token=cap_token_holder.get(),
                         agent_did=state_snapshot["did"],
                         params=params,
                         result=result,
@@ -2270,6 +2449,7 @@ def _start_a2a_server(
                     method="ask-stream",
                     backend_name=backend.name,
                     token=token,
+                    signing_cap_token=cap_token_holder.get(),
                     agent_did=state_snapshot["did"],
                     params=params,
                     result=last_done_meta,

@@ -406,7 +406,9 @@ export async function askAgentStream(
   onStatus?: (status: string) => void,
   idleTimeoutMs = 120_000,
 ): Promise<AskAgentResult> {
-  onStatus?.("dispatching");
+  const maxWarmupAttempts = 6;
+  const warmupDelayMs = 750;
+  onStatus?.("authorizing");
   // 传输层兜底:在调用方 signal 之外再加"空闲超时"。收到响应头、以及每
   // 个数据块都重置计时;idleTimeoutMs 内毫无动静则 abort——否则后端永久
   // 挂起时 UI 的"思考中"三点会一直转(handleChatSend 捕获后清 typing+报错)。
@@ -431,82 +433,112 @@ export async function askAgentStream(
     signal?.removeEventListener("abort", onExternalAbort);
   };
 
+  class AskStreamEventError extends Error {
+    code: string;
+    constructor(code: string, message: string) {
+      super(`agent error: ${code} — ${message}`);
+      this.code = code;
+    }
+  }
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const isWarmupError = (err: unknown) => {
+    if (!(err instanceof AskStreamEventError)) return false;
+    return err.code === "upstream-401"
+      || err.code === "upstream-502"
+      || err.code === "proxy-failed";
+  };
+
   arm();
   try {
-    const res = await fetch(
-      `${BASE}/agents/${encodeURIComponent(did)}/ask-stream`,
-      {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeader() },
-        body: JSON.stringify({ prompt }),
-        signal: ctl.signal,
-      },
-    );
-    arm(); // 收到响应头 → 重置空闲计时
-    if (!res.ok || !res.body) {
-      // 非流式错误（404/409/502…）—— 读 JSON 错误体给出可读消息。
-      let detail = `HTTP ${res.status}`;
+    for (let attempt = 1; attempt <= maxWarmupAttempts; attempt += 1) {
+      onStatus?.(attempt === 1 ? "authorizing" : `warming:${attempt}`);
+      let text = "";
+      let backend: string | undefined;
+      let model: string | undefined;
       try {
-        const j = (await res.json()) as Record<string, unknown>;
-        detail = JSON.stringify(j).slice(0, 300);
-      } catch { /* keep HTTP status */ }
-      throw new Error(`ask-stream failed: ${detail}`);
-    }
-
-    onStatus?.("streaming");
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    let text = "";
-    let backend: string | undefined;
-    let model: string | undefined;
-
-    const handleEvent = (raw: string) => {
-      // 一个 SSE 事件可能有多行；只取 ``data:`` 行。
-      const dataLines = raw
-        .split("\n")
-        .filter((l) => l.startsWith("data:"))
-        .map((l) => l.slice(5).trim());
-      if (dataLines.length === 0) return;
-      const payloadStr = dataLines.join("\n");
-      let ev: Record<string, unknown>;
-      try {
-        ev = JSON.parse(payloadStr) as Record<string, unknown>;
-      } catch {
-        return; // 半截/非 JSON 事件，忽略
-      }
-      if (typeof ev.delta === "string") {
-        text += ev.delta;
-        onDelta(ev.delta);
-      } else if (ev.error) {
-        const e = ev.error as Record<string, unknown>;
-        throw new Error(
-          `agent error: ${String(e.code ?? "?")} — ${String(e.message ?? "")}`,
+        const res = await fetch(
+          `${BASE}/agents/${encodeURIComponent(did)}/ask-stream`,
+          {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeader() },
+            body: JSON.stringify({ prompt }),
+            signal: ctl.signal,
+          },
         );
-      } else if (ev.done) {
-        if (typeof ev.backend === "string") backend = ev.backend;
-        if (typeof ev.model === "string") model = ev.model;
-      }
-    };
+        arm(); // 收到响应头 → 重置空闲计时
+        if (!res.ok || !res.body) {
+          // 非流式错误（404/409/502…）—— 读 JSON 错误体给出可读消息。
+          let detail = `HTTP ${res.status}`;
+          try {
+            const j = (await res.json()) as Record<string, unknown>;
+            detail = JSON.stringify(j).slice(0, 300);
+          } catch { /* keep HTTP status */ }
+          throw new Error(`ask-stream failed: ${detail}`);
+        }
 
-    for (;;) {
-      const { value, done } = await reader.read();
-      arm(); // 有活动（含 done）→ 重置空闲计时
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      // SSE 事件以空行（\n\n）分隔。
-      let idx: number;
-      while ((idx = buf.indexOf("\n\n")) !== -1) {
-        const evt = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        handleEvent(evt);
+        onStatus?.(attempt === 1 ? "waiting" : `warming:${attempt}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+
+        const handleEvent = (raw: string) => {
+          // 一个 SSE 事件可能有多行；只取 ``data:`` 行。
+          const dataLines = raw
+            .split("\n")
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).trim());
+          if (dataLines.length === 0) return;
+          const payloadStr = dataLines.join("\n");
+          let ev: Record<string, unknown>;
+          try {
+            ev = JSON.parse(payloadStr) as Record<string, unknown>;
+          } catch {
+            return; // 半截/非 JSON 事件，忽略
+          }
+          if (typeof ev.delta === "string") {
+            if (!text) onStatus?.("streaming");
+            text += ev.delta;
+            onDelta(ev.delta);
+          } else if (ev.error) {
+            const e = ev.error as Record<string, unknown>;
+            throw new AskStreamEventError(
+              String(e.code ?? "?"), String(e.message ?? ""),
+            );
+          } else if (ev.done) {
+            if (typeof ev.backend === "string") backend = ev.backend;
+            if (typeof ev.model === "string") model = ev.model;
+          }
+        };
+
+        for (;;) {
+          const { value, done } = await reader.read();
+          arm(); // 有活动（含 done）→ 重置空闲计时
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          // SSE 事件以空行（\n\n）分隔。
+          let idx: number;
+          while ((idx = buf.indexOf("\n\n")) !== -1) {
+            const evt = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            handleEvent(evt);
+          }
+        }
+        if (buf.trim()) handleEvent(buf); // 收尾残留
+
+        onStatus?.("done");
+        return { text, backend, model };
+      } catch (err) {
+        if (!text && isWarmupError(err) && attempt < maxWarmupAttempts) {
+          onStatus?.(`warming:${attempt + 1}`);
+          await sleep(warmupDelayMs);
+          continue;
+        }
+        throw err;
       }
     }
-    if (buf.trim()) handleEvent(buf); // 收尾残留
-
-    onStatus?.("done");
-    return { text, backend, model };
+    throw new Error("ask-stream failed: warmup retries exhausted");
   } catch (e) {
     if (timedOut) {
       throw new Error(

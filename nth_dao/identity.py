@@ -370,61 +370,117 @@ def _restrict_to_owner(path: Path) -> None:
     inspect the private identity path from their own workspace when needed.
     """
     if sys.platform == "win32":
-        ok = _restrict_windows_acl(path)
+        ok, reason = _restrict_windows_acl(path)
         if not ok:
             logger.warning(
-                "could not restrict ACL on private key file identity.json; "
-                "it may be readable by other local users. Inspect the file "
-                "permissions from your local workspace before publishing logs."
+                "could not restrict ACL on private key file %s "
+                "(reason=%s); it may be readable by other local users. "
+                "Inspect the file permissions from your local workspace "
+                "before publishing logs.",
+                path.name or DEFAULT_IDENTITY_FILE,
+                reason,
             )
         return
 
     try:
         os.chmod(path, 0o600)
     except OSError as e:
-        logger.warning("could not chmod 0600 on private key file identity.json: %s", e)
+        logger.warning(
+            "could not chmod 0600 on private key file %s: %s",
+            path.name or DEFAULT_IDENTITY_FILE,
+            type(e).__name__,
+        )
 
 
-def _restrict_windows_acl(path: Path) -> bool:
-    """Windows: 用 icacls 把私钥 ACL 限制到当前用户。
+def _windows_acl_principals() -> list[str]:
+    """Return Windows account names suitable for icacls.
 
-    正确顺序：
-        1) /grant <USER>:(F)     # 先给自己显式 full
-        2) /inheritance:r         # 再剥离继承的 ACE
-        3) 自检：还能读吗？如果不能 → /inheritance:e 还原（保命）+ 返回 False
+    Prefer the current user's SID because localized/domain account names are
+    the part most likely to break ``icacls /grant USERNAME`` on real Windows
+    desktops. icacls accepts a SID when prefixed with ``*``.
     """
     import getpass
+    import re
     import subprocess
 
-    user = os.environ.get("USERNAME") or getpass.getuser()
-    if not user:
-        return False
+    principals: list[str] = []
     try:
-        # 1) 先 grant 自己
-        r1 = subprocess.run(
-            ["icacls", str(path), "/grant", f"{user}:(F)"],
-            capture_output=True, text=True, timeout=10,
+        out = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
         )
-        if r1.returncode != 0:
-            return False
-        # 2) 再 strip 继承
+        if out.returncode == 0:
+            match = re.search(rb"S-\d-\d+(?:-\d+)+", out.stdout or b"")
+            if match:
+                principals.append("*" + match.group(0).decode("ascii"))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    username = os.environ.get("USERNAME") or getpass.getuser()
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    if username:
+        if domain:
+            principals.append(f"{domain}\\{username}")
+        principals.append(username)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in principals:
+        key = value.lower()
+        if value and key not in seen:
+            seen.add(key)
+            deduped.append(value)
+    return deduped
+
+
+def _restrict_windows_acl(path: Path) -> tuple[bool, str]:
+    """Windows: restrict private-key ACLs to the current user.
+
+    The sequence is intentionally conservative:
+      1. grant the current user explicit full control;
+      2. remove inherited ACEs;
+      3. self-check that the process can still read the file;
+      4. if the self-check fails, restore inheritance before failing.
+
+    Return a structured, path-free reason so logs are actionable without
+    leaking local directory names.
+    """
+    import subprocess
+
+    principals = _windows_acl_principals()
+    if not principals:
+        return False, "current-user-unavailable"
+    try:
+        grant_failures: list[str] = []
+        for principal in principals:
+            r1 = subprocess.run(
+                ["icacls", str(path), "/grant:r", f"{principal}:(F)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            )
+            if r1.returncode == 0:
+                break
+            grant_failures.append(str(r1.returncode))
+        else:
+            return False, "icacls-grant-exit-" + ",".join(grant_failures)
         r2 = subprocess.run(
             ["icacls", str(path), "/inheritance:r"],
-            capture_output=True, text=True, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
         )
         if r2.returncode != 0:
-            return False
-        # 3) 自检读取 —— 若失败立刻还原继承
+            return False, f"icacls-inheritance-exit-{r2.returncode}"
         try:
             with open(path, "rb") as fh:
                 fh.read(1)
         except OSError:
-            # 还原 inheritance，至少文件还能用
             subprocess.run(
                 ["icacls", str(path), "/inheritance:e"],
-                capture_output=True, text=True, timeout=10,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
             )
-            return False
-        return True
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+            return False, "self-check-read-failed"
+        return True, "ok"
+    except subprocess.TimeoutExpired:
+        return False, "icacls-timeout"
+    except FileNotFoundError:
+        return False, "icacls-not-found"
+    except OSError as exc:
+        return False, f"os-error-{type(exc).__name__}"

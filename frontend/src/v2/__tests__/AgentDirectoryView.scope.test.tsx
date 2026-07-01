@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Phase 3g/4 debt R1 — first vitest in the v2 tree.
  *
  * Smoke test for Phase G's per-agent scope_model_allowlist badge:
@@ -14,7 +14,7 @@
  *     refactors should be free to change without breaking tests).
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentDirectoryView } from "../components/AgentDirectoryView";
 import { LangProvider } from "../i18n";
@@ -154,4 +154,52 @@ it("renders backend startup guide and gates unavailable backends", () => {
 
   const disabledHermes = startButtons.find((b) => b.hasAttribute("disabled"));
   expect(disabledHermes).toBeTruthy();
+});
+
+it("surfaces Hermes warmup status while an agent task is starting", async () => {
+  let finishAsk!: (value: { text: string; backend: string; model: string }) => void;
+  const onAskAgent = vi.fn((
+    _did: string,
+    _prompt: string,
+    _onDelta: (delta: string) => void,
+    _signal?: AbortSignal,
+    onStatus?: (status: string) => void,
+  ) => {
+    onStatus?.("warming:2");
+    return new Promise<{ text: string; backend: string; model: string }>((resolve) => {
+      finishAsk = resolve;
+    });
+  });
+
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkHermesWarmup", { kind: "hermes", label: "Hermes" })]}
+        {...noopProps}
+        onAskAgent={onAskAgent}
+      />
+    </LangProvider>,
+  );
+
+  fireEvent.change(screen.getByPlaceholderText(/派一个任务|Assign a task/), {
+    target: { value: "say hello" },
+  });
+  const runButton = screen.getByRole("button", { name: /运行|Run/ });
+  await waitFor(() => {
+    expect(runButton.hasAttribute("disabled")).toBe(false);
+  });
+  fireEvent.click(runButton);
+
+  await waitFor(() => {
+    expect(onAskAgent).toHaveBeenCalled();
+  });
+  await waitFor(() => {
+    expect(screen.getAllByText(/Hermes 正在冷启动|Hermes is warming up/).length).toBeGreaterThan(0);
+  });
+  await act(async () => {
+    finishAsk({ text: "Hermes online.", backend: "hermes", model: "deepseek-v4-pro" });
+  });
+  await waitFor(() => {
+    expect(screen.getByText("Hermes online.")).toBeTruthy();
+  });
 });
