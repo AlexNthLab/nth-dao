@@ -1,5 +1,5 @@
 """
-v2 console read endpoints — Phase 1 of the local-hub design.
+v2 console endpoints — local-hub read/write API surface.
 
 The v2 frontend (``frontend/src/v2/``) currently sources every view
 from ``mock.ts``. This module is the wire that flips that single
@@ -31,6 +31,7 @@ Design contract (matches ``frontend/src/v2/types-v2.ts`` exactly):
     GET /api/v2/decisions       → Decision[]
     GET /api/v2/missions        → MissionSummary[]
     GET /api/v2/processes       → ProcessCard[]
+    POST /api/v2/processes      → ProcessCard
     GET /api/v2/receipts        → ReceiptSummary[]
     GET /api/v2/rules           → Rule[]
     GET /api/v2/agents          → AgentEntry[]
@@ -57,7 +58,7 @@ the same UI they saw under HMR-only. Once Blackboard / receipts /
 agents have real entries the live data takes priority.
 
 Phase boundaries (per the local-hub plan, 2026-06-10):
-  Phase 1 (this file)      — READ-only API surface
+  Phase 1 (this file)      — v2 API surface: live reads plus scoped writes
   Phase 2                  — POST / WS for decisions, missions,
                              cap_tokens, receipt signing
   Phase 3                  — supervised agent runtime: multiple
@@ -679,6 +680,13 @@ _STAGE_FROM_BLACKBOARD = {
     "canceled":  "done",  # American spelling — same intent
     "failed":    "done",  # also terminal
 }
+_PROCESS_STAGE_TO_BLACKBOARD = {
+    "received":          "todo",
+    "in_progress":       "doing",
+    "awaiting_external": "waiting",
+    "blocked":           "blocked",
+    "done":              "done",
+}
 
 
 def _blackboard_subtitle(content: str) -> str:
@@ -735,7 +743,7 @@ def _read_processes_from_blackboard(
 _BB_TO_PROCESS: Dict[str, Any] = {
     "id":            lambda e, m: e.id,
     "title":         lambda e, m: e.topic,           # BB.topic → UI.title
-    "current_agent": lambda e, m: e.author,           # BB.author → UI.current_agent
+    "current_agent": lambda e, m: m.get("current_agent") or e.author,
     "updated_at":    lambda e, m: e.updated_at,
     "subtitle":      lambda e, m: _blackboard_subtitle(e.content or ""),
     "workflow":      lambda e, m: str(m.get("workflow", "general")),
@@ -1073,6 +1081,45 @@ class ProcessCardM(_Model):
     cap_token_id: Optional[str] = None
     amount: Optional[str] = None
 
+
+class CreateProcessBody(_Model):
+    """POST /api/v2/processes: create a real Blackboard-backed process."""
+    model_config = {"extra": "forbid"}
+
+    title: str = Field(min_length=1, max_length=200)
+    workflow: str = Field(default="general", max_length=80)
+    subtitle: str = Field(default="", max_length=1000)
+    current_agent: str = Field(default="admin", max_length=160)
+    stage: str = Field(default="received")
+    next_agent: Optional[str] = Field(default=None, max_length=160)
+    cap_token_id: Optional[str] = Field(default=None, max_length=160)
+    amount: Optional[str] = Field(default=None, max_length=80)
+    auto: bool = False
+
+    @field_validator(
+        "title", "workflow", "subtitle", "current_agent", "stage",
+        "next_agent", "cap_token_id", "amount", mode="before",
+    )
+    @classmethod
+    def _trim_strings(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("workflow")
+    @classmethod
+    def _workflow_not_empty(cls, value: str) -> str:
+        return value or "general"
+
+    @field_validator("current_agent")
+    @classmethod
+    def _agent_not_empty(cls, value: str) -> str:
+        return value or "admin"
+
+    @field_validator("stage")
+    @classmethod
+    def _known_stage(cls, value: str) -> str:
+        if value not in _PROCESS_STAGE_TO_BLACKBOARD:
+            raise ValueError(f"unknown process stage: {value}")
+        return value
 
 class ReceiptSummaryM(_Model):
     id: str
@@ -2720,6 +2767,49 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
         live = _read_processes_from_blackboard(_state_blackboard(request))
         return live if live else _seed_processes()
+
+
+    @app.post("/api/v2/processes", response_model=ProcessCardM)
+    def v2_process_create(
+        body: CreateProcessBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Create a Blackboard-backed process card.
+
+        The v2 UI treats Blackboard as the human-visible work state
+        board. This endpoint makes the ``+ New process`` button real:
+        the card persists through refresh and is visible to agents via
+        the existing Blackboard provider instead of living only in
+        React state.
+        """
+        blackboard = _state_blackboard(request)
+        if blackboard is None:
+            raise HTTPException(status_code=503, detail="blackboard unavailable")
+        metadata: Dict[str, Any] = {
+            "workflow": body.workflow,
+            "auto": body.auto,
+            "current_agent": body.current_agent,
+            "created_by": "admin",
+        }
+        for key in ("next_agent", "cap_token_id", "amount"):
+            value = getattr(body, key)
+            if value:
+                metadata[key] = value
+        try:
+            entry = blackboard.post(
+                topic=body.title,
+                author="admin",
+                scope="shared",
+                status=_PROCESS_STAGE_TO_BLACKBOARD[body.stage],
+                content=body.subtitle,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("v2_process_create: blackboard write failed: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=f"process create failed: {exc}",
+            ) from exc
+        return _blackboard_entry_to_process_card(entry)
 
     @app.get("/api/v2/receipts", response_model=List[ReceiptSummaryM])
     def v2_receipts(request: Request) -> List[Dict[str, Any]]:

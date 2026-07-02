@@ -46,10 +46,11 @@ export interface BlackboardViewProps {
   /** Optional: when wired, the Blackboard head shows a "New process"
    *  button that opens an inline form. v1 captures locally; backend
    *  integration drops the result into /api/processes. */
-  onCreate?: (draft: NewProcessDraft) => void;
+  onCreate?: (draft: NewProcessDraft) => boolean | void | Promise<boolean | void>;
   /** Workflow choices to seed the create-form dropdown. If omitted
    *  the form derives them from existing processes. */
   workflowOptions?: string[];
+  onNavigate?: (target: "missions" | "tasks" | "channels" | "audit") => void;
 }
 
 /** Minimal shape the create-process form emits. The receiver
@@ -69,11 +70,18 @@ const COLUMNS: { id: ProcessStage; label: string; pill: "ok" | "wait" | "bad" | 
   { id: "blocked",            label: "Blocked",  pill: "bad"  },
   { id: "done",               label: "Done",     pill: "dim"  },
 ];
+const FLOW_STEPS = [
+  { name: "Blackboard", zh: "状态", en: "state" },
+  { name: "Missions", zh: "执行", en: "execute" },
+  { name: "Tasks", zh: "发布/承接", en: "publish / claim" },
+  { name: "Channels", zh: "沟通", en: "discuss" },
+  { name: "Audit", zh: "凭证", en: "receipts" },
+];
 
 // (was a local relativeTime() — moved to ../utils/time, audit M3)
 
 export function BlackboardView({
-  processes, onCreate, workflowOptions,
+  processes, onCreate, workflowOptions, onNavigate,
 }: BlackboardViewProps) {
   const { t } = useLang();
   const workflows = useMemo(
@@ -171,7 +179,10 @@ export function BlackboardView({
                 : activeWorkflow[0].toUpperCase() + activeWorkflow.slice(1)}
             </h1>
             <p className="main-subtitle">
-              {t("每个 agent 此刻在做什么。", "What every agent is doing right now.")}{" "}
+              {t(
+                "这里是工作状态板。执行进展看 Missions,外部发布/承接看 Tasks,沟通放在 Channels。",
+                "This is the work state board. Execution lives in Missions, outside work in Tasks, discussion in Channels.",
+              )}{" "}
               <span style={{ color: "var(--accent)" }}>
                 {t(
                   `${autoPct}% 的活跃流程在自动驾驶(规则授权)。`,
@@ -179,6 +190,17 @@ export function BlackboardView({
                 )}
               </span>
             </p>
+            <div className="flow-strip" aria-label="NTH DAO workflow">
+              {FLOW_STEPS.map((step, idx) => (
+                <div className="flow-step" key={step.name}>
+                  <span className={`flow-step-index ${idx === 0 ? "active" : ""}`}>
+                    {idx + 1}
+                  </span>
+                  <span className="flow-step-name">{step.name}</span>
+                  <span className="flow-step-hint">{t(step.zh, step.en)}</span>
+                </div>
+              ))}
+            </div>
           </div>
           {onCreate && (
             <button
@@ -205,9 +227,9 @@ export function BlackboardView({
                   : workflows
               }
               onCancel={() => setCreateOpen(false)}
-              onSubmit={(draft) => {
-                onCreate(draft);
-                setCreateOpen(false);
+              onSubmit={async (draft) => {
+                const result = await onCreate(draft);
+                if (result !== false) setCreateOpen(false);
               }}
             />
           )}
@@ -405,6 +427,32 @@ export function BlackboardView({
                   </span>
                 </div>
               </div>
+
+              {onNavigate && (
+                <div className="detail-section">
+                  <div className="detail-section-label">{t("下一步", "Next steps")}</div>
+                  <div className="quick-actions">
+                    <button className="btn btn-secondary" onClick={() => onNavigate("missions")}>
+                      Missions
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => onNavigate("tasks")}>
+                      Tasks
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => onNavigate("channels")}>
+                      Channels
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => onNavigate("audit")}>
+                      Audit
+                    </button>
+                  </div>
+                  <p className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+                    {t(
+                      "需要拆执行去 Missions;需要外部协作去 Tasks;需要讨论去 Channels;需要查凭证去 Audit。",
+                      "Use Missions to execute, Tasks for outside work, Channels to discuss, Audit for receipts.",
+                    )}
+                  </p>
+                </div>
+              )}
               <SignaturePanel
                 value={selected}
                 title={t("流程快照", "Process snapshot")}
@@ -433,7 +481,7 @@ export function BlackboardView({
 interface NewProcessFormProps {
   workflowOptions: string[];
   onCancel: () => void;
-  onSubmit: (draft: NewProcessDraft) => void;
+  onSubmit: (draft: NewProcessDraft) => boolean | void | Promise<boolean | void>;
 }
 
 function NewProcessForm({
@@ -445,6 +493,7 @@ function NewProcessForm({
   const [customWorkflow, setCustomWorkflow] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [agent, setAgent] = useState("self-prompt");
+  const [submitting, setSubmitting] = useState(false);
 
   /* Symmetric to NewMissionForm (audit pass#3 finding I2 bonus,
    * 2026-06-10): if workflowOptions changes identity while the
@@ -470,18 +519,21 @@ function NewProcessForm({
     title.trim().length > 0 &&
     effectiveWorkflow.length > 0 &&
     agent.trim().length > 0;
-
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
-    onSubmit({
-      title: title.trim(),
-      workflow: effectiveWorkflow,
-      subtitle: subtitle.trim() || undefined,
-      current_agent: agent.trim(),
-    });
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({
+        title: title.trim(),
+        workflow: effectiveWorkflow,
+        subtitle: subtitle.trim() || undefined,
+        current_agent: agent.trim(),
+      });
+    } finally {
+      setSubmitting(false);
+    }
   }
-
   return (
     <form
       onSubmit={handleSubmit}
@@ -652,9 +704,9 @@ function NewProcessForm({
         <button
           type="submit"
           className="btn btn-primary"
-          disabled={!canSubmit}
+          disabled={!canSubmit || submitting}
         >
-          {t("创建流程", "Create process")}
+          {submitting ? t("创建中...", "Creating...") : t("创建流程", "Create process")}
         </button>
       </div>
     </form>

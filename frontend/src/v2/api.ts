@@ -189,6 +189,20 @@ export async function createMission(input: {
 }
 export const fetchProcesses     = (s?: AbortSignal) =>
   getJson<ProcessCard[]>("/processes", s);
+export async function createProcess(input: {
+  title: string;
+  workflow: string;
+  subtitle?: string;
+  current_agent: string;
+}): Promise<ProcessCard> {
+  return postJson<ProcessCard>("/processes", {
+    title: input.title,
+    workflow: input.workflow,
+    subtitle: input.subtitle ?? "",
+    current_agent: input.current_agent,
+    stage: "received",
+  });
+}
 export const fetchReceipts      = (s?: AbortSignal) =>
   getJson<ReceiptSummary[]>("/receipts", s);
 export const fetchRules         = (s?: AbortSignal) =>

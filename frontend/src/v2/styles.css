@@ -1147,3 +1147,65 @@ select option {
   .chat-row.is-last { animation: none; }
   .typing-dots span { animation: none; }
 }
+
+/* Compact workflow strip on Blackboard: keeps existing product names, but
+ * presents their order as a calm navigation cue for human operators. */
+.flow-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.flow-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+.flow-step-index {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  font-family: var(--t-mono);
+  font-size: 10px;
+  background: var(--bg-elevated);
+  color: var(--fg-tertiary);
+}
+
+.flow-step-index.active {
+  background: var(--accent);
+  color: var(--bg-root);
+}
+
+.flow-step-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.flow-step-hint {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+}
+
+.quick-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.quick-actions .btn {
+  justify-content: center;
+  min-width: 0;
+}

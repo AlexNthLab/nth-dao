@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, activateMission, askAgentStream, createMission, fetchAgents, fetchBackendStatus, fetchCapTokens,
+  a2aEchoApi, activateMission, askAgentStream, createMission, createProcess, fetchAgents, fetchBackendStatus, fetchCapTokens,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
   resolveDecisionApi, spawnAgent, stopAgent, summarizeAgent,
@@ -119,10 +119,8 @@ function loadActiveNav(): NavId {
   return DEFAULT_NAV;
 }
 
-/** 默认落地(2026 重排):从 Blackboard(实时监控,已降级)改为 Decisions ——
- * AI-first 下人的首屏应是"需要你拍板的事",而非持续监工。空也无妨(= 没有
- * 待办,本身就是好消息)。 */
-const DEFAULT_NAV: NavId = "inbox";
+/** 默认落地:Blackboard。UI 给人看,首屏先呈现当前工作状态,再让用户进入 Missions / Tasks / Channels。 */
+const DEFAULT_NAV: NavId = "blackboard";
 
 function AppInner() {
   /* Default landing = Blackboard (2026-06-14 重定:A2A 任务优先).
@@ -946,23 +944,30 @@ function AppInner() {
       );
     }
   }
-
-  /** New process — drops in "received". Matches the Kanban Intake
-   *  column and the autopilot dashboard's "what just arrived"
-   *  visual cue. */
-  function handleCreateProcess(draft: NewProcessDraft) {
-    const p: ProcessCard = {
-      id: `p-local-${Date.now()}`,
-      title: draft.title,
-      subtitle: draft.subtitle ?? "",
-      workflow: draft.workflow,
-      stage: "received",
-      current_agent: draft.current_agent,
-      auto: false,
-      updated_at: new Date().toISOString(),
-    };
-    setProcesses((prev) => [p, ...prev]);
-    // TODO: POST /api/processes
+  /** New process — persists to the live Blackboard. The returned
+   *  ProcessCard has the real Blackboard id and timestamp, so refresh
+   *  and agent context see the same work item. */
+  async function handleCreateProcess(draft: NewProcessDraft): Promise<boolean> {
+    try {
+      const created = await createProcess({
+        title: draft.title,
+        workflow: draft.workflow,
+        subtitle: draft.subtitle,
+        current_agent: draft.current_agent,
+      });
+      setProcesses((prev) => [
+        created,
+        ...prev.filter((p) => p.id !== created.id),
+      ]);
+      toast.push(t("流程已写入 Blackboard", "Process saved to Blackboard"), "success");
+      return true;
+    } catch (e) {
+      toast.push(
+        `${t("创建流程失败", "Failed to create process")}:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+      return false;
+    }
   }
 
   /* ── current view ── */
@@ -972,6 +977,7 @@ function AppInner() {
       <BlackboardView
         processes={processes}
         onCreate={handleCreateProcess}
+        onNavigate={(target) => setActive(target)}
         // Stable seed so the form still offers choices even after
         // every process is filtered out. The derived fallback
         // inside BlackboardView covers the case where new workflows

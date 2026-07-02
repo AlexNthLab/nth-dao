@@ -1,20 +1,11 @@
 /**
  * Left vertical primary navigation, 56px wide.
  *
- * 排序原则(2026 重排,第一性):UI 是给**人**的(agent 走 API/MCP,本就无 UI)。
- * 故按**人的注意力**排,而非按"是不是 AI":
- *   主导航(常驻)= 人需要"拍板 / 主动做 / 经常查"的面:
- *     Decisions  — 审批闸口(Push:需要你拍板),带未读角标
- *     Delegate   — 授权收件箱(Push:批准 agent 求权)
- *     Tasks      — 任务市场(主动:发布 / 承接)
- *     Agents     — 协作对象目录
- *     Audit      — 证据链 / 争议(按需核验)
- *     Governance — 立宪 / 治理(罕配)
- *   「更多」抽屉(按需展开)= Ambient 监控 + 低频沟通 + 待并入面:
- *     Blackboard(实时监控,降级)/ Missions / Rules / Reputation / Channels / Chat
- *
- * 降级 ≠ 删除:监控 / 审计是"trust=可见+可控"的命根,收进按需、出事可调出。
- * 当前活动项若在抽屉里,抽屉自动展开,避免选中项不可见。
+ * UI is for humans; agents use API surfaces. Keep the existing public
+ * names, but order the main rail by the human workflow:
+ *   Blackboard -> Missions -> Tasks -> Channels -> Agents -> Inbox
+ * The "More" drawer keeps audit/governance surfaces close without making
+ * the first screen feel like a protocol control panel.
  */
 
 import { useState } from "react";
@@ -31,20 +22,20 @@ type Item = {
 };
 
 const PRIMARY: Item[] = [
-  { id: "inbox",      icon: IconInbox,     label: "Inbox" },
+  { id: "blackboard", icon: IconLayout,    label: "Blackboard" },
+  { id: "missions",   icon: IconTarget,    label: "Missions" },
   { id: "tasks",      icon: IconBriefcase, label: "Tasks" },
+  { id: "channels",   icon: IconHash,      label: "Channels" },
   { id: "agents",     icon: IconUsers,     label: "Agents" },
-  { id: "audit",      icon: IconScroll,    label: "Audit" },
-  { id: "governance", icon: IconScale,     label: "Governance" },
+  { id: "inbox",      icon: IconInbox,     label: "Inbox" },
 ];
 
 const MORE: Item[] = [
-  { id: "blackboard", icon: IconLayout,    label: "Blackboard" },
-  { id: "missions",   icon: IconTarget,    label: "Missions" },
+  { id: "audit",      icon: IconScroll,    label: "Audit" },
   { id: "rules",      icon: IconSliders,   label: "Rules" },
+  { id: "governance", icon: IconScale,     label: "Governance" },
   { id: "reputation", icon: IconStar,      label: "Reputation" },
   { id: "contacts",   icon: IconUserPlus,  label: "Contacts" },
-  { id: "channels",   icon: IconHash,      label: "Channels" },
   { id: "chat",       icon: IconChat,      label: "Chat" },
 ];
 
@@ -56,7 +47,6 @@ export interface IconNavProps {
 
 export function IconNav({ active, decisionCount, onNav }: IconNavProps) {
   const [showMore, setShowMore] = useState(false);
-  // 当前活动项在抽屉里 → 自动展开,避免选中项不可见(命令面板可直达抽屉项)。
   const moreActive = MORE.some((m) => m.id === active);
   const expanded = showMore || moreActive;
 
