@@ -1,11 +1,58 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LangProvider } from "../i18n";
 import { MissionList } from "../components/MissionList";
 import type { MissionSummary } from "../types-v2";
 
-afterEach(cleanup);
+vi.mock("../api", () => ({
+  fetchMissionHandoffs: vi.fn(),
+}));
+
+import { fetchMissionHandoffs } from "../api";
+
+const capsuleHash =
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+beforeEach(() => {
+  localStorage.setItem("nth.v2.lang", "en");
+  vi.mocked(fetchMissionHandoffs).mockResolvedValue([
+    {
+      capsule_hash: capsuleHash,
+      mission_id: "m-vis-1",
+      step_id: "s1",
+      finding: "suspected root cause",
+      root_cause_hypothesis: "wrong branch",
+      verification_status: "unverified",
+      author_did: "did:key:zHermesLocal",
+      status: "contested",
+      evidence_count: 2,
+      test_count: 1,
+      risk_count: 1,
+      refutation_count: 1,
+      superseded_by: "",
+      evidence_verification: [
+        {
+          status: "verified",
+          path: "nth_dao/web/v2_api.py",
+          commit: "0123456789abcdef0123456789abcdef01234567",
+          content_hash:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          reason: "content hash matches",
+        },
+      ],
+      next_actions: ["ask a second agent to verify pinned evidence"],
+      risks: ["capsule hypothesis may still be wrong"],
+      refutations: [{ author_did: "did:key:zReviewer", authorized: false }],
+    },
+  ]);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  localStorage.clear();
+});
 
 const mission: MissionSummary = {
   id: "m-vis-1",
@@ -59,14 +106,14 @@ const mission: MissionSummary = {
       agent_did: "did:key:zCodexLocal",
     },
     {
-      id: "handoff:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      id: `handoff:${capsuleHash}`,
       kind: "handoff",
       label: "Handoff contested: suspected root cause",
       detail: "hypothesis: wrong branch; claimed evidence: 2 pointer(s)",
       at: "2026-07-02T08:07:00Z",
       status: "contested",
       agent_did: "did:key:zHermesLocal",
-      capsule_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      capsule_hash: capsuleHash,
       refutation_count: 1,
       authorized_refutation_count: 0,
       evidence_count: 2,
@@ -77,30 +124,34 @@ const mission: MissionSummary = {
 };
 
 describe("MissionList", () => {
-  it("shows step-level execution flow in the detail rail", () => {
+  it("shows step-level execution flow and signed handoff details", async () => {
     render(
       <LangProvider>
         <MissionList missions={[mission]} />
       </LangProvider>,
     );
 
-    expect(screen.getByText("执行状态")).toBeTruthy();
+    expect(screen.getByText("Execution state")).toBeTruthy();
     expect(screen.getByText("Step current active: reproduce the crash")).toBeTruthy();
     expect(screen.getAllByText("Handoff contested: suspected root cause")).toHaveLength(2);
     expect(screen.getByText("capsule sha256:aaaaaaaaaaaa")).toBeTruthy();
     expect(screen.getByText("1 refutation(s)")).toBeTruthy();
     expect(screen.getByText("receipt receipt-created-")).toBeTruthy();
     expect(screen.getByText("Handoff workbench")).toBeTruthy();
-    expect(screen.getByText(/Evidence: 2 pointer\(s\) · unverified/)).toBeTruthy();
-    expect(screen.getByText(/Refutations: 1 · authorized 0/)).toBeTruthy();
+    expect(screen.getByText(/Evidence: 2 pointer\(s\) - unverified/)).toBeTruthy();
+    expect(screen.getByText(/Refutations: 1 - authorized 0/)).toBeTruthy();
     expect(screen.getByText(/Next: ask a second agent/)).toBeTruthy();
+    expect(await screen.findByText("Evidence verification")).toBeTruthy();
+    expect(screen.getByText(/nth_dao\/web\/v2_api.py @ 0123456789/)).toBeTruthy();
+    expect(screen.getByText(/content hash matches/)).toBeTruthy();
+    expect(screen.getByText(/capsule hypothesis may still be wrong/)).toBeTruthy();
 
     const stepsSection = screen.getByText("Steps").closest(".detail-section");
     expect(stepsSection).toBeTruthy();
     const scoped = within(stepsSection as HTMLElement);
     expect(scoped.getByText("1. reproduce the crash")).toBeTruthy();
-    expect(scoped.getByText(/能力: debug/)).toBeTruthy();
-    expect(scoped.getByText(/执行者:/)).toBeTruthy();
+    expect(scoped.getByText(/Capabilities: debug/)).toBeTruthy();
+    expect(scoped.getByText(/Agent:/)).toBeTruthy();
   });
 
   it("caps large execution snapshots so the detail rail stays responsive", () => {
@@ -130,9 +181,9 @@ describe("MissionList", () => {
 
     expect(screen.queryByText("state 1")).toBeNull();
     expect(screen.getByText("state 25")).toBeTruthy();
-    expect(screen.getByText(/还有 5 条较早状态未展开/)).toBeTruthy();
+    expect(screen.getByText(/5 earlier state item\(s\) hidden/)).toBeTruthy();
     expect(screen.getByText("70. step 70")).toBeTruthy();
     expect(screen.queryByText("64. step 64")).toBeNull();
-    expect(screen.getByText(/还有 6 个步骤未展开/)).toBeTruthy();
+    expect(screen.getByText(/6 more step\(s\) hidden/)).toBeTruthy();
   });
 });

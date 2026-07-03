@@ -31,6 +31,7 @@ import type {
   Conversation,
   ConversationSummary,
   Decision,
+  HandoffDetail,
   IdentityHeader,
   MissionSummary,
   ProcessCard,
@@ -161,6 +162,17 @@ export const fetchMissions      = (s?: AbortSignal) =>
   getJson<MissionSummary[]>("/missions", s);
 
 /** 把 mission 从 planning/paused 推进到 active(开始执行)。返回新 summary。 */
+export function fetchMissionHandoffs(
+  missionId: string,
+  includeDetails = true,
+  signal?: AbortSignal,
+): Promise<HandoffDetail[]> {
+  const p = new URLSearchParams();
+  p.set("mission_id", missionId);
+  if (includeDetails) p.set("include_details", "true");
+  return getJson<HandoffDetail[]>(`/handoffs?${p.toString()}`, signal);
+}
+
 export async function activateMission(id: string): Promise<MissionSummary> {
   return postJson<MissionSummary>(
     `/missions/${encodeURIComponent(id)}/activate`,

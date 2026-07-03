@@ -106,6 +106,40 @@ export interface MissionTimelineEvent {
   superseded_by?: string | null;
 }
 
+export interface HandoffEvidenceVerification {
+  status: string;
+  reason?: string;
+  kind?: string;
+  path?: string;
+  commit?: string;
+  content_hash?: string;
+  source?: Record<string, unknown>;
+}
+
+export interface HandoffDetail {
+  capsule_hash: string;
+  mission_id: string;
+  step_id: string;
+  finding: string;
+  root_cause_hypothesis: string;
+  verification_status: string;
+  author_did: string;
+  status: string;
+  evidence_count: number;
+  test_count: number;
+  risk_count: number;
+  refutation_count: number;
+  superseded_by: string;
+  evidence?: Record<string, unknown>[];
+  evidence_verification?: HandoffEvidenceVerification[];
+  changed_files?: string[];
+  tests?: string[];
+  next_actions?: string[];
+  risks?: string[];
+  refutations?: Record<string, unknown>[];
+  supersessions?: Record<string, unknown>[];
+}
+
 /** A running Mission as the UI cares about it.
  *  Aligns with nth_dao/orchestration/mission.py at the field level
  *  but flattens for sidebar display. */
