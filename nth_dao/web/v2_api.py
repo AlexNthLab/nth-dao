@@ -102,6 +102,19 @@ _HELPER_A = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A"
 _HELPER_B = "did:key:z6MkpQ8eF1xRzL3tJyN5sWvD9XbA2C7uYkP4hM8kT6f3B"
 _OPERATOR_DID = "did:key:z6MkmRxmBi9p9ziBz2JzBwd8Y5iMzzhPXAi95MPZiLEJJqjL"
 
+MISSION_CREATED = "mission.created"
+MISSION_ACTIVATED = "mission.activated"
+MISSION_STEP_ANNOUNCED = "mission.step.announced"
+MISSION_STEP_CLAIMED = "mission.step.claimed"
+MISSION_MARKET_CLAIM_VISIBLE = "mission.market_claim.visible"
+MISSION_EVENT_TYPES = (
+    MISSION_CREATED,
+    MISSION_ACTIVATED,
+    MISSION_STEP_ANNOUNCED,
+    MISSION_STEP_CLAIMED,
+    MISSION_MARKET_CLAIM_VISIBLE,
+)
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -205,7 +218,102 @@ def _seed_decisions() -> List[Dict[str, Any]]:
     ]
 
 
-def _mission_to_summary(m: Any) -> Dict[str, Any]:
+def _mission_step_to_view(step: Any) -> Dict[str, Any]:
+    notes = list(getattr(step, "notes", None) or [])
+    return {
+        "id": getattr(step, "id", "") or "",
+        "description": getattr(step, "description", "") or "",
+        "status": getattr(step, "status", "") or "",
+        "assignee": getattr(step, "assignee", None),
+        "required_capabilities": list(
+            getattr(step, "required_capabilities", None) or []
+        ),
+        "depends_on": list(getattr(step, "depends_on", None) or []),
+        "created_at": getattr(step, "created_at", None),
+        "updated_at": getattr(step, "updated_at", None),
+        "completed_at": getattr(step, "completed_at", None),
+        "notes": notes[-5:],
+        "notes_count": len(notes),
+    }
+
+
+def _mission_timeline_events(
+    m: Any,
+    step_views: List[Dict[str, Any]],
+    audit_events: Optional[List[Dict[str, Any]]] = None,
+    handoff_events: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Build the Mission timeline from real audit events plus state snapshots.
+
+    EventBus/Receipt entries are the execution facts. The step rows below are
+    retained as a UI snapshot fallback so an old workspace without Mission audit
+    history still explains the current state instead of going blank.
+    """
+    events: List[Dict[str, Any]] = []
+    for event in audit_events or []:
+        if isinstance(event, dict):
+            events.append(dict(event))
+    for event in handoff_events or []:
+        if isinstance(event, dict):
+            events.append(dict(event))
+
+    owner_did = getattr(m, "owner_did", "") or ""
+    created_at = getattr(m, "created_at", "") or ""
+    events.append({
+        "id": f"{m.id}:mission-created",
+        "kind": "mission",
+        "label": "Mission created",
+        "detail": getattr(m, "goal", "") or getattr(m, "title", "") or "",
+        "at": created_at,
+        "status": getattr(m, "status", "") or "",
+        "agent_did": owner_did or None,
+    })
+
+    meta = getattr(m, "metadata", None) or {}
+    source_announcement_id = meta.get("source_announcement_id")
+    if source_announcement_id:
+        events.append({
+            "id": f"{m.id}:task-claim",
+            "kind": "audit",
+            "label": "Task claim source",
+            "detail": f"source announcement {source_announcement_id}",
+            "at": created_at,
+            "status": "claimed",
+            "agent_did": owner_did or None,
+        })
+
+    for step in step_views:
+        desc = step["description"] or step["id"]
+        caps = step.get("required_capabilities") or []
+        cap_detail = f"requires {', '.join(caps)}" if caps else "no capability gate"
+        changed_at = step.get("updated_at") or step.get("created_at") or created_at
+        detail = f"current state snapshot; {cap_detail}"
+        events.append({
+            "id": f"{m.id}:{step['id']}:current",
+            "kind": "step",
+            "label": f"Step current {step['status']}: {desc}",
+            "detail": detail,
+            "at": changed_at,
+            "status": step["status"],
+            "agent_did": step.get("assignee"),
+        })
+        if step.get("completed_at"):
+            events.append({
+                "id": f"{m.id}:{step['id']}:completed",
+                "kind": "step",
+                "label": f"Step completed: {desc}",
+                "detail": cap_detail,
+                "at": step["completed_at"],
+                "status": "done",
+                "agent_did": step.get("assignee"),
+            })
+
+    indexed = list(enumerate(events))
+    indexed.sort(key=lambda item: (item[1].get("at") or "", item[0]))
+    return [event for _, event in indexed]
+
+
+def _mission_to_summary(m: Any, request: Optional[Request] = None) -> Dict[str, Any]:
     """真实 Mission(orchestration.mission)→ v2 MissionSummary 形状。
 
     driver 取 owner/owner_did(本层"谁推进"即 mission owner);next_actionable
@@ -213,11 +321,26 @@ def _mission_to_summary(m: Any) -> Dict[str, Any]:
     from nth_dao.orchestration.mission import StepStatus
 
     prog = m.progress()
+    steps = list(getattr(m, "steps", []) or [])
     nxt = next(
-        (s.description for s in m.steps if s.status == StepStatus.TODO.value),
+        (s.description for s in steps if s.status == StepStatus.TODO.value),
         None,
     )
+    current_statuses = (
+        StepStatus.ACTIVE.value,
+        StepStatus.CLAIMED.value,
+        StepStatus.NEEDS_REVIEW.value,
+        StepStatus.BLOCKED.value,
+        StepStatus.FAILED.value,
+    )
+    cur_step = None
+    for status in current_statuses:
+        cur_step = next((s for s in steps if s.status == status), None)
+        if cur_step is not None:
+            break
+    cur = getattr(cur_step, "description", None) if cur_step is not None else None
     meta = getattr(m, "metadata", None) or {}
+    step_views = [_mission_step_to_view(s) for s in steps]
     return {
         "id": m.id,
         "title": m.title,
@@ -231,6 +354,16 @@ def _mission_to_summary(m: Any) -> Dict[str, Any]:
         "started_at": getattr(m, "created_at", "") or "",
         "cap_token_id": meta.get("cap_token_id"),
         "next_actionable": nxt,
+        "current_action": cur,
+        "current_step_id": getattr(cur_step, "id", None) if cur_step is not None else None,
+        "current_step_status": getattr(cur_step, "status", None) if cur_step is not None else None,
+        "steps": step_views,
+        "timeline": _mission_timeline_events(
+            m,
+            step_views,
+            _mission_audit_events(request, m.id) if request is not None else [],
+            _mission_handoff_events(request, m.id) if request is not None else [],
+        ),
     }
 
 
@@ -1035,6 +1168,31 @@ class DecisionM(_Model):
     cap_expires_at: Optional[str] = None
 
 
+class MissionStepViewM(_Model):
+    id: str
+    description: str
+    status: str
+    required_capabilities: List[str] = Field(default_factory=list)
+    depends_on: List[str] = Field(default_factory=list)
+    assignee: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    notes: List[str] = Field(default_factory=list)
+    notes_count: int = 0
+
+
+class MissionTimelineEventM(_Model):
+    id: str
+    kind: str
+    label: str
+    detail: Optional[str] = None
+    at: Optional[str] = None
+    status: Optional[str] = None
+    agent_did: Optional[str] = None
+    receipt_id: Optional[str] = None
+
+
 class MissionSummaryM(_Model):
     id: str
     title: str
@@ -1048,6 +1206,11 @@ class MissionSummaryM(_Model):
     started_at: str
     cap_token_id: Optional[str] = None
     next_actionable: Optional[str] = None
+    current_action: Optional[str] = None
+    current_step_id: Optional[str] = None
+    current_step_status: Optional[str] = None
+    steps: List[MissionStepViewM] = Field(default_factory=list)
+    timeline: List[MissionTimelineEventM] = Field(default_factory=list)
 
 
 class CreateMissionStepBody(_Model):
@@ -1354,6 +1517,546 @@ def _state_receipts_store(request: Request) -> Optional[Any]:
         return request.app.state.nth.receipts
     except AttributeError:
         return None
+
+
+
+def _state_event_bus(request: Request) -> Optional[Any]:
+    """Return the workspace EventBus singleton used by v2 Mission evidence."""
+    try:
+        nth = request.app.state.nth
+    except AttributeError:
+        return None
+    bus = getattr(nth, "event_bus", None)
+    if bus is not None:
+        return bus
+    workspace = _state_workspace(request)
+    if workspace is None:
+        return None
+    identity = _state_node_identity(request)
+    if identity is not None and not getattr(identity, "can_sign", False):
+        identity = None
+    try:
+        from nth_dao.event_bus import EventBus
+
+        bus = EventBus(workspace, identity=identity)
+        nth.event_bus = bus
+        return bus
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("mission evidence EventBus unavailable: %s", exc)
+        return None
+
+
+
+def _json_safe(value: Any) -> Any:
+    """Constrain evidence payloads to canonical-JSON-friendly primitives."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value[:64]]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in list(value)[:64]]
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in list(value.items())[:128]}
+    return str(value)
+
+
+
+def _mission_event_label(event_type: str) -> str:
+    return {
+        MISSION_CREATED: "Mission created (audited)",
+        MISSION_ACTIVATED: "Mission activated",
+        MISSION_STEP_ANNOUNCED: "Step announced to Tasks",
+        MISSION_STEP_CLAIMED: "Step claimed by agent",
+        MISSION_MARKET_CLAIM_VISIBLE: "Task claim linked to Mission",
+    }.get(event_type, event_type)
+
+
+
+def _mission_event_detail(event_type: str, payload: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    step_id = str(payload.get("step_id", "") or "")
+    announcement_id = str(payload.get("announcement_id", "") or "")
+    source_announcement_id = str(payload.get("source_announcement_id", "") or "")
+    if step_id:
+        parts.append(f"step {step_id}")
+    if announcement_id:
+        parts.append(f"announcement {announcement_id}")
+    elif source_announcement_id:
+        parts.append(f"source announcement {source_announcement_id}")
+    if event_type == MISSION_CREATED:
+        title = str(payload.get("title", "") or payload.get("goal", "") or "")
+        if title:
+            parts.append(title[:120])
+    if event_type == MISSION_STEP_ANNOUNCED:
+        reward_minor = payload.get("reward_minor")
+        reward_asset = str(payload.get("reward_asset", "") or "")
+        if reward_minor is not None:
+            parts.append(f"reward {reward_minor} {reward_asset}".strip())
+    if event_type == MISSION_STEP_CLAIMED:
+        claimant = str(payload.get("claimant_did", "") or "")
+        if claimant:
+            parts.append(f"claimant {claimant[:32]}...")
+    if payload.get("agent_claim_receipt_id"):
+        parts.append(f"agent receipt {payload['agent_claim_receipt_id']}")
+    return "; ".join(parts)
+
+
+
+def _mission_audit_event_to_view(event: Any) -> Optional[Dict[str, Any]]:
+    payload = getattr(event, "payload", {}) or {}
+    if not isinstance(payload, dict):
+        return None
+    event_type = str(getattr(event, "event_type", "") or "")
+    status = (
+        payload.get("status")
+        or payload.get("step_status")
+        or payload.get("visibility_status")
+    )
+    agent_did = (
+        payload.get("agent_did")
+        or payload.get("claimant_did")
+        or payload.get("driver_did")
+        or payload.get("owner_did")
+    )
+    return {
+        "id": f"audit:{getattr(event, 'event_id', '')}",
+        "kind": "audit",
+        "label": _mission_event_label(event_type),
+        "detail": _mission_event_detail(event_type, payload) or None,
+        "at": str(getattr(event, "timestamp", "") or "") or None,
+        "status": str(status) if status is not None else None,
+        "agent_did": str(agent_did) if agent_did else None,
+        "receipt_id": str(payload.get("receipt_id", "") or "") or None,
+    }
+
+
+
+def _mission_audit_events(
+    request: Optional[Request], mission_id: str,
+) -> List[Dict[str, Any]]:
+    """Replay Mission-related EventBus facts for one mission.
+
+    The per-request cache avoids scanning the append-only event log once for
+    every row in GET /missions while keeping GET strictly read-only.
+    """
+    if request is None or not mission_id:
+        return []
+    req_state = getattr(request, "state", None)
+    cache = getattr(req_state, "_v2_mission_audit_events", None) if req_state is not None else None
+    if cache is None:
+        cache = {}
+        bus = _state_event_bus(request)
+        if bus is not None:
+            try:
+                for event in bus.replay(event_types=list(MISSION_EVENT_TYPES)):
+                    payload = getattr(event, "payload", {}) or {}
+                    if not isinstance(payload, dict):
+                        continue
+                    mid = str(payload.get("mission_id", "") or "")
+                    if not mid:
+                        continue
+                    view = _mission_audit_event_to_view(event)
+                    if view is not None:
+                        cache.setdefault(mid, []).append(view)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.warning("mission evidence replay failed: %s", exc)
+        if req_state is not None:
+            setattr(req_state, "_v2_mission_audit_events", cache)
+    return list(cache.get(mission_id, []))
+
+
+def _ms_to_iso(value: Any) -> Optional[str]:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _mission_handoff_record_to_view(rec: Any) -> Dict[str, Any]:
+    capsule = getattr(rec, "capsule", {}) or {}
+    status = str(getattr(rec, "status", "") or "proposed")
+    finding = str(capsule.get("finding", "") or "")
+    hypothesis = str(capsule.get("root_cause_hypothesis", "") or "")
+    evidence = capsule.get("evidence", []) if isinstance(capsule, dict) else []
+    next_actions = capsule.get("next_actions", []) if isinstance(capsule, dict) else []
+    refutations = list(getattr(rec, "refutations", []) or [])
+    authorization_reasons = [
+        str(item.get("authorization_reason", ""))
+        for item in refutations
+        if isinstance(item, dict) and item.get("authorized")
+    ]
+    detail_bits = []
+    if hypothesis:
+        detail_bits.append(f"hypothesis: {hypothesis}")
+    if isinstance(evidence, list):
+        detail_bits.append(f"claimed evidence: {len(evidence)} pointer(s)")
+    if isinstance(next_actions, list) and next_actions:
+        detail_bits.append(f"next: {next_actions[0]}")
+    label = {
+        "contested": "Handoff contested",
+        "refuted": "Handoff refuted",
+        "supersession_proposed": "Handoff supersession proposed",
+        "superseded": "Handoff superseded",
+    }.get(status, "Handoff proposed")
+    if finding:
+        label = f"{label}: {finding}"
+    return {
+        "id": f"handoff:{getattr(rec, 'capsule_hash', '')}",
+        "kind": "handoff",
+        "label": label,
+        "detail": "; ".join(detail_bits) or None,
+        "at": _ms_to_iso(capsule.get("issued_at_ms")),
+        "status": status,
+        "agent_did": str(getattr(rec, "author_did", "") or "") or None,
+        "capsule_hash": str(getattr(rec, "capsule_hash", "") or ""),
+        "refutation_count": len(refutations),
+        "authorized_refutation_count": len(authorization_reasons),
+        "authorization_reasons": authorization_reasons[:8],
+        "evidence_count": len(evidence) if isinstance(evidence, list) else 0,
+        "verification_status": str(capsule.get("verification_status", "") or ""),
+        "next_action": str(next_actions[0]) if isinstance(next_actions, list) and next_actions else "",
+        "superseded_by": str(getattr(rec, "superseded_by", "") or ""),
+    }
+
+
+def _handoff_mission_participant_dids(
+    request: Request, mission_id: str,
+) -> set[str]:
+    """DIDs that are already part of the mission execution graph."""
+    if not mission_id:
+        return set()
+    try:
+        store = getattr(request.app.state.nth, "missions", None)
+        mission = store.get(mission_id) if store is not None else None
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return set()
+    if mission is None:
+        return set()
+
+    out: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text.startswith("did:key:"):
+            out.add(text)
+
+    add(getattr(mission, "owner_did", ""))
+    add(getattr(mission, "owner", ""))
+    meta = getattr(mission, "metadata", None) or {}
+    if isinstance(meta, dict):
+        for key in ("driver_did", "claimant_did", "publisher_did"):
+            add(meta.get(key))
+    for step in list(getattr(mission, "steps", []) or []):
+        add(getattr(step, "assignee", ""))
+        for prior in list(getattr(step, "previous_assignees", []) or []):
+            add(prior)
+    return out
+
+
+def _handoff_team_role_reason(request: Request, responder_did: str) -> str:
+    """Return team role authority for a DID, or an empty string."""
+    if not responder_did:
+        return ""
+    try:
+        membership = getattr(request.app.state.nth, "membership", None)
+        config = membership.load_config() if membership is not None else None
+        role = config.role_for(responder_did) if config is not None else None
+        role_value = getattr(role, "value", str(role or ""))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return ""
+    if role_value in ("owner", "admin"):
+        return f"team_role:{role_value}"
+    return ""
+
+
+def _handoff_governance_reason(events: list, responder_did: str) -> str:
+    if not responder_did or not events:
+        return ""
+    try:
+        from nth_dao.governance import (
+            ACTION_HANDOFF_RESPOND,
+            PolicyProjection,
+            can,
+        )
+
+        gproj = PolicyProjection()
+        for ev in events:
+            gproj.apply(ev)
+        if not gproj.established:
+            return ""
+        decision = can(gproj.policy, responder_did, ACTION_HANDOFF_RESPOND)
+    except (ImportError, RuntimeError, TypeError, ValueError):
+        return ""
+    return "governance:handoff.respond" if decision.allowed else ""
+
+
+def _handoff_trust_reason(request: Request, responder_did: str) -> str:
+    if not responder_did:
+        return ""
+    try:
+        from nth_dao.identity import AgentIdentity
+
+        pubkey_hex = AgentIdentity.from_did(responder_did).pubkey_hex
+    except (ImportError, RuntimeError, TypeError, ValueError):
+        return ""
+    try:
+        trust = getattr(request.app.state.nth, "trust", None)
+        if trust is None:
+            return ""
+        agent_ids = [responder_did]
+        contacts = getattr(request.app.state.nth, "contacts", None)
+        if contacts is not None:
+            record = contacts.find_by_did(responder_did)
+            agent_id = getattr(record, "agent_id", "") if record is not None else ""
+            if agent_id and agent_id not in agent_ids:
+                agent_ids.append(agent_id)
+        for agent_id in agent_ids:
+            if trust.is_trusted(agent_id, pubkey_hex, context="handoff"):
+                return f"web_of_trust:{agent_id}"
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return ""
+    return ""
+
+
+def _handoff_responder_authorizer(request: Request, events: list):
+    """Build the real responder policy used by HandoffProjection.
+
+    The response signature proves who spoke. This policy decides whether that
+    speaker may move a capsule from contested into a terminal refuted or
+    superseded state.
+    """
+
+    def authorize(rec: Any, stmt: Dict[str, Any]) -> Tuple[bool, str]:
+        responder = str(stmt.get("author_did", "") or "")
+        if responder in _handoff_mission_participant_dids(request, rec.mission_id):
+            return True, "mission_participant"
+        role_reason = _handoff_team_role_reason(request, responder)
+        if role_reason:
+            return True, role_reason
+        gov_reason = _handoff_governance_reason(events, responder)
+        if gov_reason:
+            return True, gov_reason
+        trust_reason = _handoff_trust_reason(request, responder)
+        if trust_reason:
+            return True, trust_reason
+        return False, "no mission/team/governance/trust authority"
+
+    return authorize
+
+
+def _handoff_authz_cache_signature(request: Request) -> Tuple[Any, ...]:
+    """Filesystem signature for non-spine inputs used by handoff authz."""
+    workspace = _state_workspace(request)
+    if workspace is None:
+        return ()
+    candidates = [
+        workspace / "team.json",
+        workspace / "team_trust" / "roots.json",
+        workspace / "team_trust" / "endorsements.jsonl",
+        workspace / "team_trust" / "revocations.jsonl",
+        workspace / "contacts.json",
+    ]
+    missions_dir = workspace / "missions"
+    try:
+        candidates.extend(sorted(missions_dir.glob("*.json")))
+    except OSError:
+        pass
+    signature: List[Tuple[str, int, int]] = []
+    for path in candidates:
+        try:
+            st = path.stat()
+            signature.append((str(path), st.st_mtime_ns, st.st_size))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
+
+
+def _handoff_source_repo_root() -> Optional[Path]:
+    configured = os.environ.get("NTH_SOURCE_REPO", "").strip()
+    candidates = [Path(configured)] if configured else []
+    candidates.append(Path.cwd())
+    for candidate in candidates:
+        try:
+            root = candidate.resolve()
+        except OSError:
+            continue
+        if (root / ".git").exists():
+            return root
+    return None
+
+
+def _handoff_evidence_verification(evidence: List[Any]) -> List[Dict[str, Any]]:
+    from nth_dao.runtime import verify_source_evidence_report
+
+    repo_root = _handoff_source_repo_root()
+    reports: List[Dict[str, Any]] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            reports.append({
+                "status": "invalid",
+                "reason": "evidence item is not a dict",
+                "local_reachable": False,
+                "content_match": False,
+            })
+            continue
+        if item.get("kind") != "source_span":
+            reports.append({
+                "kind": item.get("kind", ""),
+                "status": "unsupported",
+                "reason": "only source_span local verification is implemented",
+                "local_reachable": False,
+                "content_match": False,
+            })
+            continue
+        if repo_root is None:
+            reports.append({
+                "kind": item.get("kind", ""),
+                "path": item.get("path", ""),
+                "commit": item.get("commit", ""),
+                "content_hash": item.get("content_hash", ""),
+                "source": item.get("source", {}),
+                "status": "unavailable",
+                "reason": "set NTH_SOURCE_REPO or start the hub from a git checkout",
+                "local_reachable": False,
+                "content_match": False,
+            })
+            continue
+        reports.append(verify_source_evidence_report(repo_root, item))
+    return reports
+
+
+def _verified_handoff_projection(request: Request) -> Optional[Any]:
+    """Return a HandoffProjection folded from the verified spine.
+
+    Cached by spine head hash so read paths do not rebuild the projection on
+    every /missions or /handoffs request.
+    """
+    events = _verified_spine_events(request)
+    if events is None:
+        return None
+    spine = _state_spine(request)
+    head = getattr(spine, "head_hash", "") if spine is not None else ""
+    authz_sig = _handoff_authz_cache_signature(request)
+    cache = getattr(spine, "_v2_handoff_projection_cache", None) if spine is not None else None
+    if cache is not None and cache[0] == (head, authz_sig):
+        return cache[1]
+    from nth_dao.runtime import HandoffProjection
+
+    proj = HandoffProjection(
+        responder_authorizer=_handoff_responder_authorizer(request, events),
+    )
+    for event in events:
+        proj.apply(event)
+    if spine is not None:
+        spine._v2_handoff_projection_cache = ((head, authz_sig), proj)
+    return proj
+
+
+def _mission_handoff_events(
+    request: Optional[Request], mission_id: str,
+) -> List[Dict[str, Any]]:
+    """Replay signed handoff capsules for one Mission into timeline rows."""
+    if request is None or not mission_id:
+        return []
+    req_state = getattr(request, "state", None)
+    cache = getattr(req_state, "_v2_mission_handoff_events", None) if req_state is not None else None
+    if cache is None:
+        cache = {}
+        try:
+            proj = _verified_handoff_projection(request)
+        except HTTPException as exc:
+            cache[mission_id] = [{
+                "id": f"handoff-warning:{mission_id}",
+                "kind": "warning",
+                "label": "Handoff evidence unavailable",
+                "detail": str(getattr(exc, "detail", "") or exc),
+                "at": _iso_now(),
+                "status": "warning",
+                "agent_did": None,
+            }]
+            if req_state is not None:
+                setattr(req_state, "_v2_mission_handoff_events", cache)
+            return list(cache.get(mission_id, []))
+        if proj is not None:
+            try:
+                for rec in proj.all():
+                    view = _mission_handoff_record_to_view(rec)
+                    cache.setdefault(rec.mission_id, []).append(view)
+            except (RuntimeError, TypeError, ValueError) as exc:
+                logger.warning("mission handoff replay failed: %s", exc)
+        if req_state is not None:
+            setattr(req_state, "_v2_mission_handoff_events", cache)
+    return list(cache.get(mission_id, []))
+
+
+
+def _emit_mission_evidence(
+    request: Request,
+    event_type: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist a signed receipt and append the matching Mission EventBus fact.
+
+    Mission mutations must not become invisible just because the evidence layer
+    is temporarily unavailable, so this is fail-soft and returns the IDs it did
+    manage to write. The mutation endpoints still log every evidence failure.
+    """
+    event_payload = _json_safe(dict(payload or {}))
+    if not isinstance(event_payload, dict):
+        event_payload = {}
+    evidence: Dict[str, Any] = {}
+    identity = _state_node_identity(request)
+    signer = identity if identity is not None and getattr(identity, "can_sign", False) else None
+    receipt_store = _state_receipts_store(request)
+    if signer is not None and receipt_store is not None:
+        try:
+            from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
+
+            receipt_payload = dict(event_payload)
+            receipt_payload["event_type"] = event_type
+            signer_did = str(signer.as_did())
+            prev_hash = receipt_store.head_content_hash(signer_did)
+            receipt = sign_receipt(
+                [TimelineEntry(
+                    timestamp=now_ms(),
+                    type="nth.mission_event",
+                    payload=receipt_payload,
+                )],
+                signer,
+                goal_id=str(event_payload.get("mission_id", "") or ""),
+                prev_content_hash=prev_hash,
+            )
+            receipt_store.save(receipt)
+            evidence["receipt_id"] = receipt.get("receipt_id", "")
+            evidence["receipt_hash"] = receipt.get("content_hash", "")
+            event_payload["receipt_id"] = evidence["receipt_id"]
+            event_payload["receipt_hash"] = evidence["receipt_hash"]
+            event_payload["receipt_signer_did"] = signer_did
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "mission receipt write failed for %s %s: %s",
+                event_type,
+                event_payload.get("mission_id", ""),
+                exc,
+            )
+    bus = _state_event_bus(request)
+    if bus is not None:
+        try:
+            event = bus.emit(event_type, event_payload, identity=signer)
+            evidence["event_id"] = getattr(event, "event_id", "")
+            evidence["event_hash"] = getattr(event, "event_hash", "")
+            evidence["event_seq"] = getattr(event, "seq", 0)
+            evidence["event_timestamp"] = getattr(event, "timestamp", "")
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "mission EventBus emit failed for %s %s: %s",
+                event_type,
+                event_payload.get("mission_id", ""),
+                exc,
+            )
+    return evidence
 
 
 
@@ -2255,6 +2958,16 @@ class DisputeStatementBody(BaseModel):
     statement: Dict[str, Any]
 
 
+class HandoffStatementBody(BaseModel):
+    """A pre-signed handoff capsule or response.
+
+    The server verifies and persists the statement but does not author it. A
+    valid signature proves the source of a claim, not that the claim is true.
+    """
+
+    statement: Dict[str, Any]
+
+
 class CapRequestBody(BaseModel):
     """能力授予请求提交体(授权收件箱):requester **预签**的 cap.request。"""
 
@@ -2655,7 +3368,7 @@ def register_v2_routes(app: FastAPI) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("v2_missions: list_all failed: %s", exc)
             return _seed_missions()
-        return [_mission_to_summary(m) for m in missions]
+        return [_mission_to_summary(m, request) for m in missions]
 
     @app.post("/api/v2/missions", response_model=MissionSummaryM)
     def v2_missions_create(
@@ -2715,7 +3428,16 @@ def register_v2_routes(app: FastAPI) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("v2_missions_create: store.create failed: %s", exc)
             raise HTTPException(status_code=500, detail=f"create failed: {exc}")
-        return _mission_to_summary(m)
+        _emit_mission_evidence(request, MISSION_CREATED, {
+            "mission_id": m.id,
+            "title": m.title,
+            "goal": m.goal,
+            "status": m.status,
+            "driver_label": getattr(m, "owner", "") or "",
+            "driver_did": getattr(m, "owner_did", "") or "",
+            "steps_total": len(getattr(m, "steps", []) or []),
+        })
+        return _mission_to_summary(m, request)
 
     @app.post(
         "/api/v2/missions/{mission_id}/activate",
@@ -2739,7 +3461,7 @@ def register_v2_routes(app: FastAPI) -> None:
         if m is None:
             raise HTTPException(status_code=404, detail="mission not found")
         if m.status == MissionStatus.ACTIVE.value:
-            return _mission_to_summary(m)  # 幂等
+            return _mission_to_summary(m, request)  # 幂等
         if not m.steps:
             raise HTTPException(
                 status_code=409,
@@ -2761,7 +3483,14 @@ def register_v2_routes(app: FastAPI) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("v2_mission_activate: save failed: %s", exc)
             raise HTTPException(status_code=500, detail=f"activate failed: {exc}")
-        return _mission_to_summary(m)
+        _emit_mission_evidence(request, MISSION_ACTIVATED, {
+            "mission_id": m.id,
+            "status": m.status,
+            "driver_label": getattr(m, "owner", "") or "",
+            "driver_did": getattr(m, "owner_did", "") or "",
+            "steps_total": len(getattr(m, "steps", []) or []),
+        })
+        return _mission_to_summary(m, request)
 
     @app.get("/api/v2/processes", response_model=List[ProcessCardM])
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
@@ -3246,6 +3975,107 @@ def register_v2_routes(app: FastAPI) -> None:
                 "arbiter_authorized": authorized,
                 "statement_count": len(rec.statements),
             })
+        return out
+
+    @app.post("/api/v2/handoffs")
+    def v2_handoff_record(
+        body: HandoffStatementBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Record a pre-signed HandoffCapsule to the signed spine.
+
+        Crypto-authorized: the capsule carries its author DID and signature.
+        The server only verifies and persists it; validity is not correctness.
+        """
+        from nth_dao.runtime import record_handoff
+        spine = _state_spine(request)
+        if spine is None:
+            raise HTTPException(
+                status_code=503, detail="spine unavailable; cannot record handoff")
+        try:
+            ev = record_handoff(spine, body.statement)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        stmt = body.statement
+        return {
+            "recorded": True,
+            "capsule_hash": str(stmt.get("capsule_hash", "")),
+            "mission_id": str(stmt.get("mission_id", "")),
+            "seq": ev.seq,
+            "event_hash": ev.content_hash,
+        }
+
+    @app.post("/api/v2/handoffs/responses")
+    def v2_handoff_response_record(
+        body: HandoffStatementBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Record a signed refutation or supersession for a handoff capsule."""
+        from nth_dao.runtime import record_handoff_response
+        spine = _state_spine(request)
+        if spine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="spine unavailable; cannot record handoff response",
+            )
+        try:
+            ev = record_handoff_response(spine, body.statement)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        stmt = body.statement
+        return {
+            "recorded": True,
+            "response_hash": str(stmt.get("response_hash", "")),
+            "target_capsule_hash": str(stmt.get("target_capsule_hash", "")),
+            "response_type": str(stmt.get("response_type", "")),
+            "seq": ev.seq,
+            "event_hash": ev.content_hash,
+        }
+
+    @app.get("/api/v2/handoffs")
+    def v2_handoffs_list(
+        request: Request, mission_id: str = "", include_details: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List handoff capsules from verified spine replay.
+
+        The returned status is a projection over signed capsule response
+        events; it is not a statement that the capsule's diagnosis is true.
+        """
+        proj = _verified_handoff_projection(request)
+        if proj is None:
+            return []
+        records = proj.for_mission(mission_id) if mission_id else proj.all()
+        out: List[Dict[str, Any]] = []
+        for rec in records:
+            capsule = rec.capsule
+            row = {
+                "capsule_hash": rec.capsule_hash,
+                "mission_id": rec.mission_id,
+                "step_id": str(capsule.get("step_id", "")),
+                "finding": str(capsule.get("finding", "")),
+                "root_cause_hypothesis": str(
+                    capsule.get("root_cause_hypothesis", "")),
+                "verification_status": str(
+                    capsule.get("verification_status", "")),
+                "author_did": rec.author_did,
+                "status": rec.status,
+                "evidence_count": len(list(capsule.get("evidence", []))),
+                "test_count": len(list(capsule.get("tests", []))),
+                "risk_count": len(list(capsule.get("risks", []))),
+                "refutation_count": len(rec.refutations),
+                "superseded_by": rec.superseded_by,
+            }
+            if include_details:
+                evidence = list(capsule.get("evidence", []))
+                row.update({
+                    "evidence": evidence,
+                    "evidence_verification": _handoff_evidence_verification(evidence),
+                    "changed_files": list(capsule.get("changed_files", [])),
+                    "tests": list(capsule.get("tests", [])),
+                    "next_actions": list(capsule.get("next_actions", [])),
+                    "risks": list(capsule.get("risks", [])),
+                    "refutations": rec.refutations,
+                    "supersessions": rec.supersessions,
+                })
+            out.append(row)
         return out
 
     @app.get("/api/v2/market/{announcement_id}/evidence")
@@ -3954,6 +4784,15 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400, detail=f"announce rejected: {exc}",
             )
+        _emit_mission_evidence(request, MISSION_STEP_ANNOUNCED, {
+            "mission_id": mission_id,
+            "step_id": step_id,
+            "step_status": step.status,
+            "announcement_id": aid,
+            "driver_did": getattr(mission, "owner_did", "") or "",
+            "reward_minor": int(body.reward_minor),
+            "reward_asset": body.reward_asset or "credit",
+        })
         d = ann.to_dict()
         d["already_announced"] = False
         return d
