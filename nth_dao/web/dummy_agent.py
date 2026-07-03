@@ -1009,6 +1009,39 @@ class _CodexCliAskBackend(_AskBackend):
             / rust_triple / "bin" / "codex.exe",
         ]
 
+    @staticmethod
+    def _codex_binary_runs(path: str) -> bool:
+        """Return True only if Windows can actually CreateProcess it.
+
+        WindowsApps may expose a real-looking ``codex.exe`` that exists on disk
+        but rejects direct execution with WinError 5 outside its package broker.
+        A path-exists check is therefore not enough for non-interactive A2A.
+        """
+        import subprocess as _sp
+
+        if not Path(path).is_file():
+            return False
+        creation_flags = (
+            getattr(_sp, "CREATE_NO_WINDOW", 0)
+            if sys.platform.startswith("win") else 0
+        )
+        try:
+            _sp.run(
+                [path, "--version"],
+                stdin=_sp.DEVNULL,
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=8.0,
+                check=False,
+                creationflags=creation_flags,
+            )
+            return True
+        except (_sp.TimeoutExpired, OSError):
+            return False
+
     def _resolve_binary(self) -> str:
         """Resolve a Codex executable that can actually run.
 
@@ -1032,7 +1065,7 @@ class _CodexCliAskBackend(_AskBackend):
         # dependency class.
         if sys.platform.startswith("win"):
             native = shutil.which("codex.exe")
-            if native and Path(native).is_file():
+            if native and self._codex_binary_runs(native):
                 return native
 
         if not self._looks_like_node_shim(shim):
@@ -1048,11 +1081,15 @@ class _CodexCliAskBackend(_AskBackend):
 
         mach = platform.machine().lower()
         if mach in ("amd64", "x86_64", "x64"):
-            arch_suffix = "x64"
-            rust_triple = "x86_64-pc-windows-msvc"
+            arch_options = [("x64", "x86_64-pc-windows-msvc")]
         elif mach in ("arm64", "aarch64"):
-            arch_suffix = "arm64"
-            rust_triple = "aarch64-pc-windows-msvc"
+            # Windows on ARM can run x64 binaries through emulation, and npm
+            # installs sometimes contain only the x64 Codex vendor package.
+            # Prefer native arm64 when present, then fall back to x64.
+            arch_options = [
+                ("arm64", "aarch64-pc-windows-msvc"),
+                ("x64", "x86_64-pc-windows-msvc"),
+            ]
         else:
             raise RuntimeError(
                 f"codex CLI: unsupported Windows machine arch "
@@ -1061,11 +1098,12 @@ class _CodexCliAskBackend(_AskBackend):
             )
 
         shim_dir = str(Path(shim).parent)
-        for candidate in self._codex_vendor_candidates(
-            shim_dir, arch_suffix, rust_triple,
-        ):
-            if candidate.is_file():
-                return str(candidate)
+        for arch_suffix, rust_triple in arch_options:
+            for candidate in self._codex_vendor_candidates(
+                shim_dir, arch_suffix, rust_triple,
+            ):
+                if candidate.is_file():
+                    return str(candidate)
 
         if self._node_bin_dir() is None:
             raise RuntimeError(
@@ -1221,16 +1259,25 @@ class _CodexCliAskBackend(_AskBackend):
             ) from exc
 
         if completed.returncode != 0:
-            # CO-7 fix (review round Phase 5.4 R1): subprocess.run
-            # with text=True + capture_output=True guarantees
-            # stderr is a str — drop the ``or ""`` deadcode.
-            err = completed.stderr.strip()[:2048]
+            # subprocess.run with text=True + capture_output=True gives str
+            # stderr. Keep both the full value for classification and a tail
+            # for display: Codex prints long startup banners before the real
+            # actionable error (e.g. usage limit) near the end.
+            err_full = completed.stderr.strip()
+            err = err_full[-4096:]
             # codex emits "401 Unauthorized" or "Not logged in"
             # when the OAuth session expires. Both phrasings have
             # been seen across versions; check separately so a
             # future-version-only phrasing still routes correctly.
-            err_lower = err.lower()
-            if "401" in err or "not logged in" in err_lower \
+            err_lower = err_full.lower()
+            if "usage limit" in err_lower or "purchase more credits" in err_lower:
+                raise RuntimeError(
+                    "codex CLI usage limit reached — visit "
+                    "https://chatgpt.com/codex/settings/usage to buy/refresh "
+                    "credits, or wait for the reset window shown by Codex CLI. "
+                    f"Tail: {err}"
+                )
+            if "401" in err_full or "not logged in" in err_lower \
                     or "please run codex login" in err_lower:
                 raise RuntimeError(
                     "codex CLI returned 401 / not-logged-in — "

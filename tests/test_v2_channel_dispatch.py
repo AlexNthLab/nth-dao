@@ -37,6 +37,62 @@ def test_dispatch_semaphore_is_bounded() -> None:
     _CHANNEL_DISPATCH_SEM.release()
 
 
+def test_dispatch_error_cooldown_blocks_repeated_failure_posts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web import v2_api as _v2
+
+    channel_id = "ops"
+    did = "did:key:z6MkBrokenCodex"
+
+    monkeypatch.setattr(_v2, "_CHANNEL_DISPATCH_ERROR_COOLDOWN_S", 10.0)
+    with _v2._CHANNEL_DISPATCH_ERROR_LOCK:
+        _v2._CHANNEL_DISPATCH_ERROR_UNTIL.clear()
+        _v2._CHANNEL_DISPATCH_IN_FLIGHT.clear()
+
+    try:
+        assert _v2._channel_dispatch_error_in_cooldown(
+            channel_id, did, now=100.0,
+        ) is False
+        assert _v2._channel_dispatch_note_error(
+            channel_id, did, now=100.0,
+        ) is True
+        assert _v2._channel_dispatch_error_in_cooldown(
+            channel_id, did, now=105.0,
+        ) is True
+        assert _v2._channel_dispatch_note_error(
+            channel_id, did, now=105.0,
+        ) is False
+        assert _v2._channel_dispatch_error_in_cooldown(
+            channel_id, did, now=111.0,
+        ) is False
+    finally:
+        with _v2._CHANNEL_DISPATCH_ERROR_LOCK:
+            _v2._CHANNEL_DISPATCH_ERROR_UNTIL.clear()
+            _v2._CHANNEL_DISPATCH_IN_FLIGHT.clear()
+
+
+def test_dispatch_try_begin_blocks_duplicate_inflight_calls() -> None:
+    from nth_dao.web import v2_api as _v2
+
+    channel_id = "ops"
+    did = "did:key:z6MkBusyCodex"
+    with _v2._CHANNEL_DISPATCH_ERROR_LOCK:
+        _v2._CHANNEL_DISPATCH_ERROR_UNTIL.clear()
+        _v2._CHANNEL_DISPATCH_IN_FLIGHT.clear()
+
+    try:
+        assert _v2._channel_dispatch_try_begin(channel_id, did) is True
+        assert _v2._channel_dispatch_try_begin(channel_id, did) is False
+        _v2._channel_dispatch_end(channel_id, did)
+        assert _v2._channel_dispatch_try_begin(channel_id, did) is True
+    finally:
+        _v2._channel_dispatch_end(channel_id, did)
+        with _v2._CHANNEL_DISPATCH_ERROR_LOCK:
+            _v2._CHANNEL_DISPATCH_ERROR_UNTIL.clear()
+            _v2._CHANNEL_DISPATCH_IN_FLIGHT.clear()
+
+
 def test_channel_agent_listens_and_replies(tmp_path: Path) -> None:
     app = create_app(tmp_path, require_console_auth=False)
     client = TestClient(app)

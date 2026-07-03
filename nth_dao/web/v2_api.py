@@ -3186,6 +3186,93 @@ _CHANNEL_DISPATCH_MAX = 16
 _CHANNEL_DISPATCH_SEM = threading.BoundedSemaphore(_CHANNEL_DISPATCH_MAX)
 _CHANNEL_DISPATCH_RETRIES = 8
 _CHANNEL_DISPATCH_RETRY_SLEEP_S = 0.25
+_CHANNEL_DISPATCH_ERROR_COOLDOWN_S = 300.0
+_CHANNEL_DISPATCH_ERROR_LOCK = threading.Lock()
+_CHANNEL_DISPATCH_ERROR_UNTIL: Dict[Tuple[str, str], float] = {}
+_CHANNEL_DISPATCH_IN_FLIGHT: set[Tuple[str, str]] = set()
+
+
+def _channel_dispatch_error_in_cooldown(
+    channel_id: str, did: str, *, now: Optional[float] = None,
+) -> bool:
+    """Return True when a channel agent is temporarily muted after failure."""
+    ts = time.time() if now is None else float(now)
+    key = (str(channel_id), str(did))
+    with _CHANNEL_DISPATCH_ERROR_LOCK:
+        until = _CHANNEL_DISPATCH_ERROR_UNTIL.get(key)
+        if until is None:
+            return False
+        if until > ts:
+            return True
+        _CHANNEL_DISPATCH_ERROR_UNTIL.pop(key, None)
+        return False
+
+
+def _channel_dispatch_note_error(
+    channel_id: str, did: str, *, now: Optional[float] = None,
+) -> bool:
+    """Record a dispatch failure.
+
+    Returns True when the failure should be posted to the channel. Repeated
+    failures during the cooldown are logged but not surfaced again, so a broken
+    backend cannot drown out healthy agent collaboration.
+    """
+    ts = time.time() if now is None else float(now)
+    key = (str(channel_id), str(did))
+    with _CHANNEL_DISPATCH_ERROR_LOCK:
+        until = _CHANNEL_DISPATCH_ERROR_UNTIL.get(key)
+        if until is not None and until > ts:
+            return False
+        _CHANNEL_DISPATCH_ERROR_UNTIL[key] = ts + _CHANNEL_DISPATCH_ERROR_COOLDOWN_S
+        return True
+
+
+def _channel_dispatch_clear_error(channel_id: str, did: str) -> None:
+    key = (str(channel_id), str(did))
+    with _CHANNEL_DISPATCH_ERROR_LOCK:
+        _CHANNEL_DISPATCH_ERROR_UNTIL.pop(key, None)
+
+
+def _channel_dispatch_public_error(exc: Exception) -> str:
+    """Build the human-facing channel error without subprocess log spam."""
+    text = str(exc).strip()
+    for marker in (" Tail:", "\nTail:", "\r\nTail:", "Tail:"):
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+            break
+    text = " ".join(text.split())
+    message = f"agent error: {type(exc).__name__}: {text}"
+    if len(message) > 420:
+        message = message[:417] + "..."
+    return message
+
+
+def _channel_dispatch_try_begin(channel_id: str, did: str) -> bool:
+    """Reserve a channel-agent dispatch slot.
+
+    This is separate from the global semaphore: the semaphore bounds total
+    system pressure, while this guard prevents repeated user messages from
+    launching concurrent calls into the same backend before the first one has
+    succeeded or failed.
+    """
+    ts = time.time()
+    key = (str(channel_id), str(did))
+    with _CHANNEL_DISPATCH_ERROR_LOCK:
+        until = _CHANNEL_DISPATCH_ERROR_UNTIL.get(key)
+        if until is not None:
+            if until > ts:
+                return False
+            _CHANNEL_DISPATCH_ERROR_UNTIL.pop(key, None)
+        if key in _CHANNEL_DISPATCH_IN_FLIGHT:
+            return False
+        _CHANNEL_DISPATCH_IN_FLIGHT.add(key)
+        return True
+
+
+def _channel_dispatch_end(channel_id: str, did: str) -> None:
+    key = (str(channel_id), str(did))
+    with _CHANNEL_DISPATCH_ERROR_LOCK:
+        _CHANNEL_DISPATCH_IN_FLIGHT.discard(key)
 
 
 def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt):
@@ -3234,7 +3321,9 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
                 ):
                     time.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
                     continue
-                raise
+                raise RuntimeError(
+                    f"a2a ask HTTP {exc.code}: {blob[:1000]}"
+                ) from exc
         reply = ""
         if isinstance(content, dict):
             result = content.get("result")
@@ -3243,9 +3332,25 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
         reply = reply.strip()
         if reply:
             groups.post_message(channel_id, sender_id=did, body=reply)
+            _channel_dispatch_clear_error(channel_id, did)
     except Exception as exc:  # noqa: BLE001
         logger.warning("channel agent dispatch failed for %s: %s", did, exc)
+        if not _channel_dispatch_note_error(channel_id, did):
+            logger.info(
+                "channel agent dispatch error suppressed during cooldown "
+                "for %s in %s", did, channel_id,
+            )
+            return
+        try:
+            message = _channel_dispatch_public_error(exc)
+            groups.post_message(channel_id, sender_id=did, body=message)
+        except Exception as post_exc:  # noqa: BLE001
+            logger.warning(
+                "channel agent dispatch error post failed for %s: %s",
+                did, post_exc,
+            )
     finally:
+        _channel_dispatch_end(channel_id, did)
         _CHANNEL_DISPATCH_SEM.release()  # 归还在飞配额
 
 
@@ -3293,9 +3398,16 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
             return
 
         for auth, did, port in targets:
+            if not _channel_dispatch_try_begin(channel_id, did):
+                logger.info(
+                    "channel dispatch skipped while busy/cooling for %s "
+                    "in %s", did, channel_id,
+                )
+                continue
             # 并发封顶:抢一个在飞槽位,抢不到就丢弃这条派发(不堆线程)。
             # 槽位由 _channel_ask_and_reply 的 finally 归还。
             if not _CHANNEL_DISPATCH_SEM.acquire(blocking=False):
+                _channel_dispatch_end(channel_id, did)
                 logger.warning(
                     "channel dispatch saturated (>=%d in flight); "
                     "dropping reply for %s", _CHANNEL_DISPATCH_MAX, did,
@@ -3308,6 +3420,7 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
                     daemon=True,
                 ).start()
             except Exception as exc:  # noqa: BLE001
+                _channel_dispatch_end(channel_id, did)
                 _CHANNEL_DISPATCH_SEM.release()  # 起线程失败,立刻归还配额
                 logger.warning("channel dispatch thread start failed: %s", exc)
     except Exception as exc:  # noqa: BLE001

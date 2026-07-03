@@ -3538,7 +3538,7 @@ def test_codex_backend_blocks_flag_injection_via_prompt(
 
     backend = _CodexCliAskBackend()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
 
     # Peer tries to override --model via prompt text.
@@ -3634,7 +3634,7 @@ def test_codex_backend_emits_stderr_event_when_max_tokens_ignored(
     monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
     backend = _CodexCliAskBackend()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
     backend.ask({"prompt": "hi", "max_tokens": 4096}, timeout_s=30.0)
     err = capsys.readouterr().err
@@ -3658,7 +3658,7 @@ def test_codex_backend_timeout_message_hints_tool_use(
     monkeypatch.setattr(_sp, "run", fake_run)
     backend = _CodexCliAskBackend()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
     with pytest.raises(TimeoutError, match="tool use|approval"):
         backend.ask({"prompt": "hi"}, timeout_s=30.0)
@@ -3687,7 +3687,7 @@ def test_codex_backend_timeout_uses_partial_stderr_when_approval_seen(
     monkeypatch.setattr(_sp, "run", fake_run)
     backend = _CodexCliAskBackend()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
     with pytest.raises(TimeoutError, match="approval") as exc_info:
         backend.ask({"prompt": "edit a file"}, timeout_s=30.0)
@@ -3717,7 +3717,7 @@ def test_codex_backend_timeout_at_tight_budget_blames_budget_first(
     monkeypatch.setattr(_sp, "run", fake_run)
     backend = _CodexCliAskBackend()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
     with pytest.raises(TimeoutError) as exc_info:
         backend.ask({"prompt": "hi"}, timeout_s=5.0)
@@ -3792,7 +3792,85 @@ def test_codex_backend_prefers_native_exe_over_node_shim(
         return None
 
     monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(
+        _CodexCliAskBackend, "_codex_binary_runs", staticmethod(lambda _path: True),
+    )
     assert _CodexCliAskBackend()._resolve_binary() == str(native)
+
+
+def test_codex_backend_skips_inaccessible_native_exe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """WindowsApps can expose codex.exe but deny CreateProcess.
+
+    Resolver must skip that path and use the npm vendored binary instead of
+    surfacing WinError 5 at request time.
+    """
+    import platform
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    npm = tmp_path / "npm-global"
+    native_dir = tmp_path / "WindowsApps" / "OpenAI.Codex" / "app" / "resources"
+    npm.mkdir()
+    native_dir.mkdir(parents=True)
+    cmd = npm / "codex.cmd"
+    native = native_dir / "codex.exe"
+    cmd.write_text("@node codex.js", encoding="utf-8")
+    native.write_text("native", encoding="utf-8")
+    vendored = (
+        npm / "node_modules" / "@openai" / "codex" / "node_modules"
+        / "@openai" / "codex-win32-x64" / "vendor"
+        / "x86_64-pc-windows-msvc" / "bin"
+    )
+    vendored.mkdir(parents=True)
+    exe = vendored / "codex.exe"
+    exe.write_text("# vendored", encoding="utf-8")
+
+    def fake_which(name: str) -> str | None:
+        if name == "codex":
+            return str(cmd)
+        if name == "codex.exe":
+            return str(native)
+        return None
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(
+        _CodexCliAskBackend, "_codex_binary_runs", staticmethod(lambda _path: False),
+    )
+
+    assert _CodexCliAskBackend()._resolve_binary() == str(exe)
+
+
+def test_codex_backend_arm64_falls_back_to_x64_vendor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """ARM64 Windows should use x64 vendor when arm64 package is absent."""
+    import platform
+    import shutil
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    npm = tmp_path / "npm-global"
+    cmd = npm / "codex.cmd"
+    npm.mkdir()
+    cmd.write_text("@node codex.js", encoding="utf-8")
+    vendored = (
+        npm / "node_modules" / "@openai" / "codex" / "node_modules"
+        / "@openai" / "codex-win32-x64" / "vendor"
+        / "x86_64-pc-windows-msvc" / "bin"
+    )
+    vendored.mkdir(parents=True)
+    exe = vendored / "codex.exe"
+    exe.write_text("# vendored", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda name: str(cmd) if name == "codex" else None)
+    monkeypatch.setattr(platform, "machine", lambda: "ARM64")
+
+    assert _CodexCliAskBackend()._resolve_binary() == str(exe)
+
 
 
 def test_codex_backend_accepts_nth_dao_node_directory(
@@ -3920,10 +3998,42 @@ def test_codex_backend_translates_unauthorized_error(
     monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
     backend = _CodexCliAskBackend()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
     with pytest.raises(RuntimeError, match="codex login"):
         backend.ask({"prompt": "hi"}, timeout_s=30.0)
+
+
+def test_codex_backend_translates_usage_limit_from_stderr_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex prints long banners before the actionable quota message.
+
+    The backend must classify against full stderr and display the tail so the
+    operator sees usage-limit rather than an irrelevant startup warning.
+    """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = (
+            "Reading additional input from stdin...\n"
+            + "HTTP 401 Unauthorized\n"
+            + "startup warning\n" * 300
+            + "ERROR: You've hit your usage limit. Visit "
+            "https://chatgpt.com/codex/settings/usage to purchase more credits."
+        )
+
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "codex-test-binary",
+    )
+    with pytest.raises(RuntimeError, match="usage limit") as exc_info:
+        backend.ask({"prompt": "hi"}, timeout_s=30.0)
+    assert "purchase more credits" in str(exc_info.value)
 
 
 # ─── Phase 5.4b: Hermes in-process backend ──────────────────────
@@ -4660,7 +4770,7 @@ def test_codex_backend_rejects_model_override_by_default(
 
     def fake_resolve(self: object) -> str:
         binary_lookups["n"] += 1
-        return "C:/fake/codex.exe"
+        return "codex-test-binary"
 
     monkeypatch.setattr(
         _CodexCliAskBackend, "_resolve_binary", fake_resolve,
@@ -4710,7 +4820,7 @@ def test_codex_backend_accepts_override_via_subclass_allowlist(
 
     backend = _PermissiveCodex()
     monkeypatch.setattr(
-        backend, "_resolve_binary", lambda: "C:/fake/codex.exe",
+        backend, "_resolve_binary", lambda: "codex-test-binary",
     )
     backend.ask(
         {"prompt": "hi", "model": "gpt-5-codex"}, timeout_s=10.0,
@@ -5383,6 +5493,61 @@ def test_channel_dispatch_retries_not_yet_authorized(
     assert groups.messages == [(
         "general", "did:key:z6MkAgent", "agent reply after warmup",
     )]
+
+
+
+def test_channel_dispatch_posts_visible_error_on_http_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed child /a2a/ask must be visible in the channel.
+
+    Without this, operators see Hermes reply but Codex silently vanish into logs,
+    which makes real collaboration impossible to diagnose from the UI.
+    """
+    import io
+    import urllib.error
+    import urllib.request
+    import nth_dao.web.v2_api as _v2
+
+    class Groups:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
+            self.messages.append((channel_id, sender_id, body))
+
+    def fake_urlopen(_req, timeout):  # noqa: ANN001, ARG001
+        raise urllib.error.HTTPError(
+            url="http://127.0.0.1:9999/a2a/ask",
+            code=502,
+            msg="Bad Gateway",
+            hdrs=None,
+            fp=io.BytesIO(
+                b'{"error":{"code":"backend-failed",'
+                b'"message":"codex CLI usage limit reached Tail: plugin assets spam"}}'
+            ),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    groups = Groups()
+    assert _v2._CHANNEL_DISPATCH_SEM.acquire(blocking=False)
+    _v2._channel_ask_and_reply(
+        groups, {"token_id": "tok", "subject_did": "did:key:z6MkCodex"},
+        "did:key:z6MkCodex", 9999, "general", "hello",
+    )
+
+    assert len(groups.messages) == 1
+    channel_id, sender_id, body = groups.messages[0]
+    assert channel_id == "general"
+    assert sender_id == "did:key:z6MkCodex"
+    assert "agent error" in body
+    assert "a2a ask HTTP 502" in body
+    assert "backend-failed" in body
+    assert "usage limit" in body
+    assert "Tail:" not in body
+    assert "plugin assets" not in body
+    assert len(body) <= 420
 
 
 # ─────────────────────────────────────────────────────────────
