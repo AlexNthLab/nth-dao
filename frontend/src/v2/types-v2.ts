@@ -73,6 +73,39 @@ export interface Decision {
   };
 }
 
+export interface MissionStepView {
+  id: string;
+  description: string;
+  status: "todo" | "claimed" | "active" | "done" | "needs_review" | "failed" | "handed_off" | "blocked" | string;
+  required_capabilities: string[];
+  depends_on?: string[];
+  assignee?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  notes?: string[];
+  notes_count?: number;
+}
+
+export interface MissionTimelineEvent {
+  id: string;
+  kind: "mission" | "step" | "receipt" | "audit" | "handoff" | "warning" | string;
+  label: string;
+  detail?: string | null;
+  at?: string | null;
+  status?: string | null;
+  agent_did?: string | null;
+  receipt_id?: string | null;
+  capsule_hash?: string | null;
+  refutation_count?: number;
+  authorized_refutation_count?: number;
+  authorization_reasons?: string[];
+  evidence_count?: number;
+  verification_status?: string | null;
+  next_action?: string | null;
+  superseded_by?: string | null;
+}
+
 /** A running Mission as the UI cares about it.
  *  Aligns with nth_dao/orchestration/mission.py at the field level
  *  but flattens for sidebar display. */
@@ -94,6 +127,18 @@ export interface MissionSummary {
   /** Optional next actionable step description (the bridge already
    *  exposes this via tasks/get enrichment). */
   next_actionable?: string;
+  /** Current in-flight/claimed/blocked step, if one exists. */
+  current_action?: string;
+  /** Stable locator for the current step, when current_action is present. */
+  current_step_id?: string | null;
+  current_step_status?: string | null;
+  /** Step-level execution state. Present on live v2 backend; optional
+   *  so older mock/demo payloads still render safely. */
+  steps?: MissionStepView[];
+  /** Human-readable execution-state snapshot derived from persisted
+   *  Mission state. It is display data only; Audit/Receipt/EventBus
+   *  remain canonical history. */
+  timeline?: MissionTimelineEvent[];
   /** Which human user initiated / owns this mission (audit pass#4
    *  fix I2, 2026-06-10). At N=50 the mission board shows missions
    *  driven by various people — without an owner, accountability

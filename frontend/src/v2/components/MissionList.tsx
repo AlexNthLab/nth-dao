@@ -24,7 +24,7 @@ import { IconPlus, IconTarget } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { progressColor, progressPct } from "../utils/mission";
 import { useLang } from "../i18n";
-import type { AgentEntry, MissionSummary } from "../types-v2";
+import type { AgentEntry, MissionSummary, MissionTimelineEvent } from "../types-v2";
 
 export interface MissionListProps {
   missions: MissionSummary[];
@@ -61,6 +61,9 @@ export interface NewMissionDraft {
 
 // (pct() / status-color logic moved to ../utils/mission, audit L4)
 
+const MAX_DETAIL_TIMELINE_EVENTS = 20;
+const MAX_DETAIL_STEPS = 64;
+
 function statusPill(s: MissionSummary["status"]): "ok" | "wait" | "bad" | "dim" {
   switch (s) {
     case "active":   return "ok";
@@ -72,6 +75,72 @@ function statusPill(s: MissionSummary["status"]): "ok" | "wait" | "bad" | "dim" 
   }
 }
 
+function stepPill(status: string): "ok" | "wait" | "bad" | "dim" {
+  switch (status) {
+    case "done":
+    case "handed_off":
+      return "ok";
+    case "active":
+    case "claimed":
+    case "needs_review":
+      return "wait";
+    case "failed":
+    case "blocked":
+      return "bad";
+    default:
+      return "dim";
+  }
+}
+
+function handoffPill(status?: string | null): "ok" | "wait" | "bad" | "dim" {
+  switch (status) {
+    case "refuted":
+    case "superseded":
+      return "ok";
+    case "contested":
+      return "bad";
+    case "supersession_proposed":
+    case "proposed":
+      return "wait";
+    default:
+      return "dim";
+  }
+}
+
+function stepDisplayRank(status: string): number {
+  switch (status) {
+    case "active":
+    case "claimed":
+    case "needs_review":
+    case "blocked":
+    case "failed":
+      return 0;
+    case "todo":
+      return 1;
+    case "done":
+    case "handed_off":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function formatTime(value?: string | null): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
+function timelineDotColor(
+  event: MissionTimelineEvent,
+  selected: MissionSummary,
+): string {
+  if (event.kind === "handoff") return "var(--accent-hover)";
+  if (event.kind === "warning") return "var(--warn, #d97706)";
+  if (event.kind === "audit" || event.kind === "receipt") return "var(--accent)";
+  return progressColor({ ...selected, status: selected.status });
+}
+
 export function MissionList({
   missions, onCreate, onActivate, driverOptions, focusId, onFocusConsumed,
 }: MissionListProps) {
@@ -81,6 +150,21 @@ export function MissionList({
   );
   const [createOpen, setCreateOpen] = useState(false);
   const selected = missions.find((m) => m.id === selectedId) ?? null;
+  const timelineEvents = selected?.timeline ?? [];
+  const handoffEvents = timelineEvents.filter((event) => event.kind === "handoff");
+  const visibleTimelineEvents = timelineEvents.slice(-MAX_DETAIL_TIMELINE_EVENTS);
+  const hiddenTimelineEvents = Math.max(
+    0, timelineEvents.length - visibleTimelineEvents.length,
+  );
+  const allSteps = selected?.steps ?? [];
+  const stepRows = allSteps
+    .map((step, index) => ({ step, index }))
+    .sort(
+      (a, b) => stepDisplayRank(a.step.status) - stepDisplayRank(b.step.status)
+        || a.index - b.index,
+    )
+    .slice(0, MAX_DETAIL_STEPS);
+  const hiddenStepRows = Math.max(0, allSteps.length - stepRows.length);
 
   // Auto-follow App's focus signal (set when the user creates a
   // new mission). Effect-based instead of inline so React batches
@@ -236,12 +320,12 @@ export function MissionList({
                     </div>
                   </div>
 
-                  {m.next_actionable && (
+                  {(m.current_action || m.next_actionable) && (
                     <div className="decision-card-rationale">
                       <span className="muted" style={{ fontSize: 11 }}>
-                        {t("下一步:", "Next:")}
+                        {m.current_action ? t("当前:", "Current:") : t("下一步:", "Next:")}
                       </span>{" "}
-                      {m.next_actionable}
+                      {m.current_action || m.next_actionable}
                     </div>
                   )}
 
@@ -299,11 +383,274 @@ export function MissionList({
                 </div>
                 <div className="detail-row">
                   <span className="key">{t("开始于", "Started")}</span>
-                  <span className="value">
-                    {new Date(selected.started_at).toLocaleString()}
-                  </span>
+                  <span className="value">{formatTime(selected.started_at)}</span>
                 </div>
               </div>
+
+              <div className="detail-section">
+                <div className="detail-section-label">{t("执行状态", "Execution state")}</div>
+                {timelineEvents.length === 0 ? (
+                  <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                    {t("还没有执行状态。", "No execution state yet.")}
+                  </p>
+                ) : (
+                  <ol
+                    style={{
+                      listStyle: "none",
+                      margin: 0,
+                      padding: 0,
+                      display: "grid",
+                      gap: 10,
+                    }}
+                  >
+                    {visibleTimelineEvents.map((event) => (
+                      <li
+                        key={event.id}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "10px minmax(0, 1fr)",
+                          gap: 10,
+                          alignItems: "start",
+                        }}
+                      >
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            width: 8,
+                            height: 8,
+                            marginTop: 5,
+                            borderRadius: "50%",
+                            background: timelineDotColor(event, selected),
+                          }}
+                        />
+                        <span style={{ minWidth: 0 }}>
+                          <span
+                            style={{
+                              display: "block",
+                              fontSize: 12,
+                              fontWeight: 600,
+                              color: "var(--fg-primary)",
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {event.label}
+                          </span>
+                          <span
+                            className="muted"
+                            style={{
+                              display: "block",
+                              fontSize: 11,
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {formatTime(event.at)}
+                            {event.detail ? ` · ${event.detail}` : ""}
+                          </span>
+                          {event.agent_did && (
+                            <code style={{ fontSize: 10, overflowWrap: "anywhere" }}>
+                              {event.agent_did}
+                            </code>
+                          )}
+                          {event.receipt_id && (
+                            <code style={{ fontSize: 10, overflowWrap: "anywhere", display: "block" }}>
+                              receipt {event.receipt_id.slice(0, 16)}
+                            </code>
+                          )}
+                          {event.capsule_hash && (
+                            <code style={{ fontSize: 10, overflowWrap: "anywhere", display: "block" }}>
+                              capsule {event.capsule_hash.slice(0, 19)}
+                            </code>
+                          )}
+                          {(event.refutation_count ?? 0) > 0 && (
+                            <span className="muted" style={{ display: "block", fontSize: 10 }}>
+                              {event.refutation_count} refutation(s)
+                            </span>
+                          )}
+                          {event.superseded_by && (
+                            <code style={{ fontSize: 10, overflowWrap: "anywhere", display: "block" }}>
+                              superseded by {event.superseded_by.slice(0, 19)}
+                            </code>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                {hiddenTimelineEvents > 0 && (
+                  <p className="muted" style={{ fontSize: 11, margin: "8px 0 0" }}>
+                    {t(
+                      `还有 ${hiddenTimelineEvents} 条较早状态未展开`,
+                      `${hiddenTimelineEvents} earlier state item(s) hidden`,
+                    )}
+                  </p>
+                )}
+              </div>
+
+              <div className="detail-section">
+                <div className="detail-section-label">Handoff workbench</div>
+                {handoffEvents.length === 0 ? (
+                  <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                    {t(
+                      "还没有 agent 交接 capsule。",
+                      "No agent handoff capsules yet.",
+                    )}
+                  </p>
+                ) : (
+                  <div className="stack" style={{ gap: 8 }}>
+                    {handoffEvents.map((event) => (
+                      <div
+                        key={`workbench-${event.id}`}
+                        style={{
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          padding: 10,
+                          background: "var(--bg-elevated)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "flex-start",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <strong
+                            style={{
+                              minWidth: 0,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {event.label}
+                          </strong>
+                          <span className={`pill ${handoffPill(event.status)}`}>
+                            {event.status || "unknown"}
+                          </span>
+                        </div>
+                        <div
+                          className="muted"
+                          style={{
+                            marginTop: 6,
+                            display: "grid",
+                            gap: 4,
+                            fontSize: 11,
+                          }}
+                        >
+                          {event.capsule_hash && (
+                            <span>
+                              Capsule <code>{event.capsule_hash.slice(0, 19)}</code>
+                            </span>
+                          )}
+                          <span>
+                            Evidence: {event.evidence_count ?? 0} pointer(s)
+                            {event.verification_status
+                              ? ` · ${event.verification_status}`
+                              : ""}
+                          </span>
+                          {(event.refutation_count ?? 0) > 0 && (
+                            <span>
+                              Refutations: {event.refutation_count}
+                              {typeof event.authorized_refutation_count === "number"
+                                ? ` · authorized ${event.authorized_refutation_count}`
+                                : ""}
+                            </span>
+                          )}
+                          {event.authorization_reasons && event.authorization_reasons.length > 0 && (
+                            <span>
+                              Authority: {event.authorization_reasons.join(", ")}
+                            </span>
+                          )}
+                          {event.superseded_by && (
+                            <span>
+                              Superseded by <code>{event.superseded_by.slice(0, 19)}</code>
+                            </span>
+                          )}
+                          {event.next_action && (
+                            <span>Next: {event.next_action}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="detail-section">
+                <div className="detail-section-label">Steps</div>
+                {(selected.steps ?? []).length === 0 ? (
+                  <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                    {t("还没有步骤。", "No steps yet.")}
+                  </p>
+                ) : (
+                  <div className="stack" style={{ gap: 8 }}>
+                    {stepRows.map(({ step, index }) => (
+                      <div
+                        key={step.id}
+                        style={{
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          padding: 10,
+                          background: "var(--bg-elevated)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "flex-start",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <strong
+                            style={{
+                              minWidth: 0,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {index + 1}. {step.description}
+                          </strong>
+                          <span className={`pill ${stepPill(step.status)}`}>
+                            {step.status}
+                          </span>
+                        </div>
+                        <div
+                          className="muted"
+                          style={{
+                            marginTop: 6,
+                            display: "grid",
+                            gap: 4,
+                            fontSize: 11,
+                          }}
+                        >
+                          <span>{t("更新", "Updated")}: {formatTime(step.updated_at)}</span>
+                          {step.assignee && <span>{t("执行者", "Agent")}: <code>{step.assignee}</code></span>}
+                          {step.required_capabilities.length > 0 && (
+                            <span>
+                              {t("能力", "Capabilities")}: {step.required_capabilities.join(", ")}
+                            </span>
+                          )}
+                          {(step.notes_count ?? 0) > 0 && (
+                            <span>{t("备注", "Notes")}: {step.notes_count}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {hiddenStepRows > 0 && (
+                  <p className="muted" style={{ fontSize: 11, margin: "8px 0 0" }}>
+                    {t(
+                      `还有 ${hiddenStepRows} 个步骤未展开`,
+                      `${hiddenStepRows} more step(s) hidden`,
+                    )}
+                  </p>
+                )}
+              </div>
+
               <SignaturePanel
                 value={selected}
                 title={t("Mission 结构", "Mission shape")}
