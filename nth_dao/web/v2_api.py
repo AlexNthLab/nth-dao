@@ -2075,10 +2075,55 @@ def _handoff_source_repo_root() -> Optional[Path]:
     return None
 
 
+def _handoff_source_repo_map() -> Dict[str, Path]:
+    """Parse repo locator mappings without exposing local paths in API output.
+
+    Format: ``NTH_SOURCE_REPOS="repo_id=PATH;repo_url=PATH"``. Keys are matched
+    against evidence.source.repo_id and evidence.source.repo_url.
+    """
+    raw = os.environ.get("NTH_SOURCE_REPOS", "")
+    out: Dict[str, Path] = {}
+    for entry in raw.replace("\n", ";").split(";"):
+        item = entry.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        out[key] = Path(value)
+    return out
+
+
+def _handoff_source_repo_root_for_evidence(
+    evidence: Dict[str, Any],
+) -> Tuple[Optional[Path], str, str]:
+    source = evidence.get("source", {}) if isinstance(evidence, dict) else {}
+    keys: List[str] = []
+    if isinstance(source, dict):
+        for field in ("repo_id", "repo_url"):
+            value = str(source.get(field, "") or "").strip()
+            if value:
+                keys.append(value)
+    repo_map = _handoff_source_repo_map()
+    for key in keys:
+        mapped = repo_map.get(key)
+        if mapped is None:
+            continue
+        try:
+            root = mapped.resolve()
+        except OSError:
+            return None, key, "mapped source repo cannot be resolved"
+        if (root / ".git").exists():
+            return root, key, ""
+        return None, key, "mapped source repo is not a git checkout"
+    return _handoff_source_repo_root(), "", ""
+
+
 def _handoff_evidence_verification(evidence: List[Any]) -> List[Dict[str, Any]]:
     from nth_dao.runtime import verify_source_evidence_report
 
-    repo_root = _handoff_source_repo_root()
     reports: List[Dict[str, Any]] = []
     for item in evidence:
         if not isinstance(item, dict):
@@ -2098,20 +2143,41 @@ def _handoff_evidence_verification(evidence: List[Any]) -> List[Dict[str, Any]]:
                 "content_match": False,
             })
             continue
+        repo_root, matched_by, resolver_error = _handoff_source_repo_root_for_evidence(item)
         if repo_root is None:
+            source = item.get("source", {}) if isinstance(item, dict) else {}
             reports.append({
                 "kind": item.get("kind", ""),
                 "path": item.get("path", ""),
                 "commit": item.get("commit", ""),
                 "content_hash": item.get("content_hash", ""),
-                "source": item.get("source", {}),
+                "source": source,
+                "resolver": {
+                    "type": "git",
+                    "repo_id": source.get("repo_id", "") if isinstance(source, dict) else "",
+                    "repo_url": source.get("repo_url", "") if isinstance(source, dict) else "",
+                    "commit": item.get("commit", ""),
+                    "path": item.get("path", ""),
+                    "content_hash": item.get("content_hash", ""),
+                    "source_present": bool(source),
+                    "matched_by": matched_by,
+                },
                 "status": "unavailable",
-                "reason": "set NTH_SOURCE_REPO or start the hub from a git checkout",
+                "reason": resolver_error or (
+                    "set NTH_SOURCE_REPOS repo_id=PATH or NTH_SOURCE_REPO, "
+                    "or start the hub from a git checkout"
+                ),
                 "local_reachable": False,
+                "commit_reachable": False,
+                "blob_reachable": False,
                 "content_match": False,
             })
             continue
-        reports.append(verify_source_evidence_report(repo_root, item))
+        report = verify_source_evidence_report(repo_root, item)
+        resolver = report.get("resolver")
+        if isinstance(resolver, dict):
+            resolver["matched_by"] = matched_by
+        reports.append(report)
     return reports
 
 

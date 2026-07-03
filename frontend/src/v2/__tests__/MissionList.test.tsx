@@ -38,6 +38,19 @@ beforeEach(() => {
           commit: "0123456789abcdef0123456789abcdef01234567",
           content_hash:
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          resolver: {
+            type: "git",
+            repo_id: "github.com/nth-dao/example",
+            repo_url: "https://github.com/nth-dao/example.git",
+            commit: "0123456789abcdef0123456789abcdef01234567",
+            path: "nth_dao/web/v2_api.py",
+            content_hash:
+              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            source_present: true,
+            matched_by: "github.com/nth-dao/example",
+          },
+          commit_reachable: true,
+          blob_reachable: true,
           reason: "content hash matches",
         },
       ],
@@ -150,6 +163,10 @@ describe("MissionList", () => {
     expect(screen.getByText(/Next: ask a second agent/)).toBeTruthy();
     expect(await screen.findByText("Evidence verification")).toBeTruthy();
     expect(screen.getByText(/nth_dao\/web\/v2_api.py @ 0123456789/)).toBeTruthy();
+    expect(screen.getByText(/source github.com\/nth-dao\/example/)).toBeTruthy();
+    expect(screen.getByText(/mapped github.com\/nth-dao\/examp/)).toBeTruthy();
+    expect(screen.getByText(/commit ok/)).toBeTruthy();
+    expect(screen.getByText(/blob ok/)).toBeTruthy();
     expect(screen.getByText(/content hash matches/)).toBeTruthy();
     expect(screen.getByText(/capsule hypothesis may still be wrong/)).toBeTruthy();
     expect(screen.getByText(/Response receipt\(s\): receipt-review-1/)).toBeTruthy();

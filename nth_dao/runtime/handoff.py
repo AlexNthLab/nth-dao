@@ -216,6 +216,21 @@ def _git(
     )
 
 
+def _git_failure_reason(prefix: str, exc: BaseException) -> str:
+    """Return a short git failure reason without leaking local checkout paths."""
+    stderr = getattr(exc, "stderr", "")
+    if isinstance(stderr, bytes):
+        detail = stderr.decode("utf-8", "replace")
+    else:
+        detail = str(stderr or "")
+    first_line = next((line.strip() for line in detail.splitlines() if line.strip()), "")
+    if first_line:
+        return f"{prefix}: {first_line[:240]}"
+    if isinstance(exc, (TypeError, ValueError)):
+        return f"{prefix}: {exc}"
+    return prefix
+
+
 def _resolve_commit(repo_root: str | Path, commit: str) -> str:
     if commit != "HEAD" and not _COMMIT_RE.match(commit):
         raise ValueError("commit must be HEAD or a hex commit SHA")
@@ -280,15 +295,28 @@ def verify_source_evidence_report(
     Cross-node consumers can use the optional ``source`` locator to fetch the
     same git object elsewhere, then run this verifier against their checkout.
     """
+    source = evidence.get("source", {}) if isinstance(evidence, dict) else {}
+    resolver: Dict[str, Any] = {
+        "type": "git",
+        "repo_id": source.get("repo_id", "") if isinstance(source, dict) else "",
+        "repo_url": source.get("repo_url", "") if isinstance(source, dict) else "",
+        "commit": evidence.get("commit", "") if isinstance(evidence, dict) else "",
+        "path": evidence.get("path", "") if isinstance(evidence, dict) else "",
+        "content_hash": evidence.get("content_hash", "") if isinstance(evidence, dict) else "",
+        "source_present": bool(source),
+    }
     report: Dict[str, Any] = {
         "kind": evidence.get("kind") if isinstance(evidence, dict) else "",
         "path": evidence.get("path") if isinstance(evidence, dict) else "",
         "commit": evidence.get("commit") if isinstance(evidence, dict) else "",
         "content_hash": evidence.get("content_hash") if isinstance(evidence, dict) else "",
-        "source": evidence.get("source", {}) if isinstance(evidence, dict) else {},
+        "source": source,
+        "resolver": resolver,
         "status": "invalid",
         "reason": "",
         "local_reachable": False,
+        "commit_reachable": False,
+        "blob_reachable": False,
         "content_match": False,
     }
     try:
@@ -297,15 +325,23 @@ def verify_source_evidence_report(
         report["reason"] = str(exc)
         return report
     try:
+        _resolve_commit(repo_root, str(evidence["commit"]))
+        report["commit_reachable"] = True
+    except (OSError, subprocess.CalledProcessError, TypeError, ValueError) as exc:
+        report["status"] = "unreachable"
+        report["reason"] = _git_failure_reason("commit not reachable", exc)
+        return report
+    try:
         rebuilt = source_evidence_from_git(
             repo_root,
             str(evidence["path"]),
             commit=str(evidence["commit"]),
         )
         report["local_reachable"] = True
+        report["blob_reachable"] = True
     except (OSError, subprocess.CalledProcessError, TypeError, ValueError) as exc:
         report["status"] = "unreachable"
-        report["reason"] = str(exc)
+        report["reason"] = _git_failure_reason("blob not reachable", exc)
         return report
     if rebuilt["content_hash"] != evidence.get("content_hash"):
         report["status"] = "mismatch"

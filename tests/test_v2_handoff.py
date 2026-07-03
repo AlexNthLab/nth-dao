@@ -1,6 +1,7 @@
 """v2 handoff endpoints persist only pre-signed capsules/responses."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,11 @@ from fastapi.testclient import TestClient
 
 from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
 from nth_dao.identity import AgentIdentity
-from nth_dao.runtime import sign_handoff_capsule, sign_handoff_response
+from nth_dao.runtime import (
+    sign_handoff_capsule,
+    sign_handoff_response,
+    source_evidence_from_git,
+)
 from nth_dao.web import create_app
 
 
@@ -29,6 +34,10 @@ def _source_evidence() -> dict:
 
 def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path, require_console_auth=False))
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
 def _handoff_response_receipt(
@@ -238,6 +247,100 @@ def test_handoff_endpoint_rejects_invalid_signature(tmp_path: Path) -> None:
     r = client.post("/api/v2/handoffs", json={"statement": capsule})
     assert r.status_code == 400
     assert "invalid handoff capsule" in r.text
+
+
+def test_handoff_details_verify_evidence_via_repo_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "source-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "nth-test.invalid")
+    _git(repo, "config", "user.name", "NTH Test")
+    src = repo / "pkg"
+    src.mkdir()
+    (src / "bug.py").write_text("def bug():\n    return 'fixed'\n", encoding="utf-8")
+    _git(repo, "add", "pkg/bug.py")
+    _git(repo, "commit", "-m", "add bug evidence")
+
+    evidence = source_evidence_from_git(
+        repo,
+        "pkg/bug.py",
+        repo_id="github.com/nth-dao/source-repo",
+        repo_url="https://github.com/nth-dao/source-repo.git",
+    )
+    monkeypatch.setenv(
+        "NTH_SOURCE_REPOS",
+        f"github.com/nth-dao/source-repo={repo}",
+    )
+    client = _client(tmp_path / "hub")
+    capsule = sign_handoff_capsule(
+        signer=AgentIdentity.generate(),
+        mission_id="mission-http",
+        finding="Mapped repo evidence should verify.",
+        root_cause_hypothesis="The receiving node has the matching checkout.",
+        evidence=[evidence],
+    )
+    assert client.post("/api/v2/handoffs", json={"statement": capsule}).status_code == 200
+
+    row = client.get(
+        "/api/v2/handoffs",
+        params={"mission_id": "mission-http", "include_details": True},
+    ).json()[0]
+    report = row["evidence_verification"][0]
+    assert report["status"] == "verified"
+    assert report["commit_reachable"] is True
+    assert report["blob_reachable"] is True
+    assert report["content_match"] is True
+    assert report["resolver"]["matched_by"] == "github.com/nth-dao/source-repo"
+    assert "repo_root" not in report["resolver"]
+
+
+def test_handoff_details_bad_repo_mapping_does_not_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "source-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "nth-test.invalid")
+    _git(repo, "config", "user.name", "NTH Test")
+    (repo / "bug.py").write_text("print('fixed')\n", encoding="utf-8")
+    _git(repo, "add", "bug.py")
+    _git(repo, "commit", "-m", "add evidence")
+
+    evidence = source_evidence_from_git(
+        repo,
+        "bug.py",
+        repo_id="github.com/nth-dao/source-repo",
+    )
+    not_git = tmp_path / "not-git"
+    not_git.mkdir()
+    monkeypatch.setenv(
+        "NTH_SOURCE_REPOS",
+        f"github.com/nth-dao/source-repo={not_git}",
+    )
+    monkeypatch.setenv("NTH_SOURCE_REPO", str(repo))
+    client = _client(tmp_path / "hub")
+    capsule = sign_handoff_capsule(
+        signer=AgentIdentity.generate(),
+        mission_id="mission-http",
+        finding="Bad mapping must not silently fall back.",
+        root_cause_hypothesis="The configured source repo is invalid.",
+        evidence=[evidence],
+    )
+    assert client.post("/api/v2/handoffs", json={"statement": capsule}).status_code == 200
+
+    row = client.get(
+        "/api/v2/handoffs",
+        params={"mission_id": "mission-http", "include_details": True},
+    ).json()[0]
+    report = row["evidence_verification"][0]
+    assert report["status"] == "unavailable"
+    assert report["resolver"]["matched_by"] == "github.com/nth-dao/source-repo"
+    assert report["commit_reachable"] is False
+    assert report["blob_reachable"] is False
+    assert "not a git checkout" in report["reason"]
+    assert str(not_git) not in report["reason"]
 
 
 def test_mission_timeline_includes_signed_handoffs(tmp_path: Path) -> None:

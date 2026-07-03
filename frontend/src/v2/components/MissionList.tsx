@@ -187,6 +187,18 @@ function HandoffDetailRows({ detail }: { detail?: HandoffDetail }) {
               </span>{" "}
               {item.path || item.kind || "evidence"}
               {item.commit ? ` @ ${shortValue(item.commit, 10)}` : ""}
+              {item.resolver?.repo_id || item.resolver?.repo_url
+                ? ` | source ${shortValue(item.resolver.repo_id || item.resolver.repo_url, 34)}`
+                : ""}
+              {item.resolver?.matched_by
+                ? ` | mapped ${shortValue(item.resolver.matched_by, 24)}`
+                : ""}
+              {typeof item.commit_reachable === "boolean"
+                ? ` | commit ${item.commit_reachable ? "ok" : "missing"}`
+                : ""}
+              {typeof item.blob_reachable === "boolean"
+                ? ` | blob ${item.blob_reachable ? "ok" : "missing"}`
+                : ""}
               {item.reason ? ` - ${item.reason}` : ""}
             </span>
           ))}

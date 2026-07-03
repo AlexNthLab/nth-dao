@@ -114,6 +114,20 @@ export interface HandoffEvidenceVerification {
   commit?: string;
   content_hash?: string;
   source?: Record<string, unknown>;
+  resolver?: {
+    type?: string;
+    repo_id?: string;
+    repo_url?: string;
+    commit?: string;
+    path?: string;
+    content_hash?: string;
+    source_present?: boolean;
+    matched_by?: string;
+  };
+  local_reachable?: boolean;
+  commit_reachable?: boolean;
+  blob_reachable?: boolean;
+  content_match?: boolean;
 }
 
 export interface HandoffDetail {

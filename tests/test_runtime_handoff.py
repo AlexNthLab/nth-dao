@@ -139,7 +139,11 @@ def test_source_evidence_from_git_verifies_real_blob(tmp_path: Path) -> None:
     report = verify_source_evidence_report(tmp_path, evidence)
     assert report["status"] == "verified"
     assert report["local_reachable"] is True
+    assert report["commit_reachable"] is True
+    assert report["blob_reachable"] is True
     assert report["content_match"] is True
+    assert report["resolver"]["repo_id"] == "github.com/nth-dao/example"
+    assert "repo_root" not in report["resolver"]
 
     tampered = dict(evidence)
     tampered["source"] = dict(evidence["source"])
@@ -148,6 +152,47 @@ def test_source_evidence_from_git_verifies_real_blob(tmp_path: Path) -> None:
     ok, why = verify_source_evidence(tmp_path, tampered)
     assert not ok
     assert "content_hash mismatch" in why
+
+
+def test_source_evidence_report_distinguishes_missing_blob(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "nth-test.invalid")
+    _git(tmp_path, "config", "user.name", "NTH Test")
+    (tmp_path / "demo.py").write_text("print('hello')\n", encoding="utf-8")
+    _git(tmp_path, "add", "demo.py")
+    _git(tmp_path, "commit", "-m", "add demo")
+
+    evidence = source_evidence_from_git(tmp_path, "demo.py")
+    missing = dict(evidence)
+    missing["path"] = "missing.py"
+    report = verify_source_evidence_report(tmp_path, missing)
+    assert report["status"] == "unreachable"
+    assert report["commit_reachable"] is True
+    assert report["blob_reachable"] is False
+    assert "blob not reachable" in report["reason"]
+    assert str(tmp_path) not in report["reason"]
+
+
+def test_source_evidence_report_does_not_leak_repo_path_on_missing_commit(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "nth-test.invalid")
+    _git(tmp_path, "config", "user.name", "NTH Test")
+    (tmp_path / "demo.py").write_text("print('hello')\n", encoding="utf-8")
+    _git(tmp_path, "add", "demo.py")
+    _git(tmp_path, "commit", "-m", "add demo")
+
+    evidence = source_evidence_from_git(tmp_path, "demo.py")
+    missing = dict(evidence)
+    missing["commit"] = "0" * 40
+    source = dict(evidence.get("source", {}))
+    if source:
+        source["commit"] = missing["commit"]
+        missing["source"] = source
+    report = verify_source_evidence_report(tmp_path, missing)
+    assert report["status"] == "unreachable"
+    assert report["commit_reachable"] is False
+    assert "commit not reachable" in report["reason"]
+    assert str(tmp_path) not in report["reason"]
 
 
 def test_source_evidence_rejects_tokenized_repo_url(tmp_path: Path) -> None:
