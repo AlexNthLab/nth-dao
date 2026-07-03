@@ -167,9 +167,13 @@ describe("MissionList", () => {
     expect(screen.getByText(/mapped github.com\/nth-dao\/examp/)).toBeTruthy();
     expect(screen.getByText(/commit ok/)).toBeTruthy();
     expect(screen.getByText(/blob ok/)).toBeTruthy();
-    expect(screen.getByText(/content hash matches/)).toBeTruthy();
-    expect(screen.getByText(/capsule hypothesis may still be wrong/)).toBeTruthy();
+    expect(screen.getAllByText(/content hash matches/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/capsule hypothesis may still be wrong/).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Response receipt\(s\): receipt-review-1/)).toBeTruthy();
+    expect(screen.getByText("Review packet")).toBeTruthy();
+    expect(screen.getByText(/least context needed to re-check/)).toBeTruthy();
+    expect(screen.getByText(/Verify each evidence pointer/)).toBeTruthy();
+    expect(screen.getByText(/sign a refutation or superseding handoff/)).toBeTruthy();
 
     const stepsSection = screen.getByText("Steps").closest(".detail-section");
     expect(stepsSection).toBeTruthy();

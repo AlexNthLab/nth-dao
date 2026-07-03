@@ -223,6 +223,36 @@ function HandoffDetailRows({ detail }: { detail?: HandoffDetail }) {
   );
 }
 
+function buildHandoffReviewPacket(
+  event: MissionTimelineEvent,
+  detail: HandoffDetail,
+): Record<string, unknown> {
+  return {
+    warning: "Signed handoff is a claim, not a verified fact.",
+    goal: "Use the least context needed to re-check, continue, or refute this handoff.",
+    mission_id: detail.mission_id,
+    step_id: detail.step_id,
+    capsule_hash: detail.capsule_hash || event.capsule_hash || "",
+    status: detail.status || event.status || "",
+    verification_status: detail.verification_status || event.verification_status || "",
+    author_did: detail.author_did || event.agent_did || "",
+    finding: detail.finding,
+    root_cause_hypothesis: detail.root_cause_hypothesis,
+    evidence_verification: detail.evidence_verification ?? [],
+    changed_files: detail.changed_files ?? [],
+    tests: detail.tests ?? [],
+    risks: detail.risks ?? [],
+    next_actions: detail.next_actions ?? (
+      event.next_action ? [event.next_action] : []
+    ),
+    required_review_steps: [
+      "Verify each evidence pointer against its pinned commit and content hash.",
+      "Rerun or inspect the listed tests before trusting the finding.",
+      "If the claim is wrong, sign a refutation or superseding handoff with a receipt.",
+    ],
+  };
+}
+
 function timelineDotColor(
   event: MissionTimelineEvent,
   selected: MissionSummary,
@@ -715,6 +745,38 @@ export function MissionList({
                           )}
                         </div>
                         <HandoffDetailRows detail={detail} />
+                        {detail && (
+                          <details
+                            style={{
+                              marginTop: 8,
+                              borderTop: "1px solid var(--border)",
+                              paddingTop: 8,
+                            }}
+                          >
+                            <summary
+                              style={{
+                                cursor: "pointer",
+                                fontSize: 11,
+                                color: "var(--fg-secondary)",
+                                fontWeight: 600,
+                              }}
+                            >
+                              Review packet
+                            </summary>
+                            <pre
+                              className="signature-panel"
+                              style={{
+                                marginTop: 8,
+                                maxHeight: 220,
+                                overflow: "auto",
+                                whiteSpace: "pre-wrap",
+                                fontSize: 11,
+                              }}
+                            >
+                              {JSON.stringify(buildHandoffReviewPacket(event, detail), null, 2)}
+                            </pre>
+                          </details>
+                        )}
                       </div>
                       );
                     })}
