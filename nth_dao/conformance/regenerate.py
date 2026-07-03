@@ -435,6 +435,71 @@ def gen_replay_window() -> list:
 # ─────────────────── top-level ───────────────────
 
 
+def gen_handoff_response_v2() -> list:
+    """Signed handoff response v2 and its receipt-binding timeline entry."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+
+    from ..identity import AgentID, AgentIdentity
+    from ..runtime import sign_handoff_response
+
+    alice_sk = SigningKey(bytes.fromhex(ALICE_SEED_HEX))
+    alice_pk = alice_sk.verify_key.encode()
+    alice = AgentIdentity(
+        agent_id=AgentID.from_pubkey(alice_pk.hex()),
+        label="Alice",
+        _signing_key=bytes.fromhex(ALICE_SEED_HEX),
+        _verify_key=alice_pk,
+    )
+    stmt = sign_handoff_response(
+        signer=alice,
+        response_type="superseded",
+        target_capsule_hash="sha256:" + "1" * 64,
+        replacement_capsule_hash="sha256:" + "2" * 64,
+        mission_id="mission-conformance-1",
+        reason=(
+            "Replacement capsule corrects the prior claim after re-checking "
+            "pinned evidence."
+        ),
+        counter_evidence=[{
+            "kind": "source_span",
+            "commit": "a" * 40,
+            "path": "nth_dao/runtime/handoff.py",
+            "symbol": "record_handoff_response_checked",
+            "content_hash": "sha256:" + "3" * 64,
+        }],
+        receipt_id="receipt-handoff-1",
+        receipt_content_hash="4" * 64,
+        issued_at_ms=1800000000000,
+    )
+    receipt_entry = {
+        "timestamp": 1800000000001,
+        "type": "nth.handoff_response",
+        "payload": {
+            "mission_id": stmt["mission_id"],
+            "response_type": stmt["response_type"],
+            "target_capsule_hash": stmt["target_capsule_hash"],
+            "replacement_capsule_hash": stmt["replacement_capsule_hash"],
+        },
+    }
+    return [{
+        "id": "handoff-response-v2-001",
+        "description": (
+            "Signed v2 supersession response with receipt binding timeline entry"
+        ),
+        "statement": stmt,
+        "expected_response_hash": stmt["response_hash"],
+        "expected_signing_body_hex": canonical_json({
+            k: v for k, v in stmt.items() if k != "sig"
+        }).hex(),
+        "receipt_timeline_entry": receipt_entry,
+        "expected_receipt_timeline_entry_hex": canonical_json(receipt_entry).hex(),
+        "expected_valid": True,
+    }]
+
+
 def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors = {
         "format": "nth-dao-conformance-v1",
@@ -453,6 +518,7 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             "did_key_encoding":            gen_did_key_encoding(),
             "lan_psk_tag":                 gen_lan_psk_tag(),
             "replay_window":               gen_replay_window(),
+            "handoff_response_v2":         gen_handoff_response_v2(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

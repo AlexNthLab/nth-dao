@@ -47,6 +47,7 @@ def test_each_category_has_at_least_one_vector():
         "did_key_encoding",
         "lan_psk_tag",
         "replay_window",
+        "handoff_response_v2",
     }
     data = load_vectors()
     present = set(data["vectors"].keys())
@@ -76,3 +77,29 @@ def test_replay_window_covers_both_boundaries():
     )
     assert has_past_reject, "no vector rejects ancient (replay) message"
     assert has_future_reject, "no vector rejects too-future (skew) message"
+
+
+def test_handoff_response_v2_vector_pins_receipt_binding():
+    """The handoff response v2 vector must pin both signature and receipt bytes."""
+    data = load_vectors()
+    cases = data["vectors"].get("handoff_response_v2", [])
+    assert len(cases) == 1
+    v = cases[0]
+    stmt = v["statement"]
+    assert stmt["kind"] == "nth-handoff-response-v2"
+    assert stmt["response_type"] == "superseded"
+    assert stmt["receipt_id"]
+    assert len(stmt["receipt_content_hash"]) == 64
+    entry = v["receipt_timeline_entry"]
+    assert entry["type"] == "nth.handoff_response"
+    payload = entry["payload"]
+    assert payload["target_capsule_hash"] == stmt["target_capsule_hash"]
+    assert payload["replacement_capsule_hash"] == stmt["replacement_capsule_hash"]
+
+
+def test_handoff_response_v2_vector_matches_generator():
+    """The shipped vector must match the deterministic generator."""
+    from nth_dao.conformance.regenerate import gen_handoff_response_v2
+
+    data = load_vectors()
+    assert data["vectors"]["handoff_response_v2"] == gen_handoff_response_v2()

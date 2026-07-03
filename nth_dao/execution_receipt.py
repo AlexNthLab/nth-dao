@@ -1,90 +1,45 @@
-"""Signed execution receipts — L1-1 work-proof primitive (2026-06-08).
+"""Signed execution receipts: L1 work-proof primitive.
 
-Strategic alignment: this module implements the wire format and
-signing rules of motebit's ``execution-ledger@1.0`` spec
-(motebit/motebit ``spec/execution-ledger-v1.md``) so a receipt
-produced by an NTH DAO node verifies against any motebit consumer,
-and vice versa. The goal: "工作量证明" — a third party can verify
-that this agent really did the work it claims, without trusting NTH's
-filesystem or even talking to the NTH node again.
+This module implements the wire format and signing rules for NTH DAO
+execution receipts. The format is aligned with motebit's
+``execution-ledger@1.0`` model: a receipt is a signed timeline of typed
+execution entries, so a third party can verify what an agent claimed to do
+without trusting the local filesystem or the NTH DAO process.
 
-Why a NEW module rather than extending ``nth_dao/agent_ledger.py``:
-  * agent_ledger is long-lived per-agent reputation accumulation
-    (jsonl append, fingerprint-scoped, reducer-based stats)
-  * an execution receipt is a per-GOAL atomic, signed artifact —
-    one document per finished execution, not a stream
-  * the canonicalization rules + signing input differ (motebit
-    requires a very specific newline-joined per-entry canonical
-    form that agent_ledger doesn't speak)
+Why this is separate from ``agent_ledger``:
 
-Conflating them would either pollute agent_ledger's reducer or
-sacrifice motebit interop. Keep separate; they CAN cite each other
-later (e.g. agent_ledger could record "completed receipt X" pointers).
-
-═══════════════════════════════════════════════════════════════════
-Motebit execution-ledger@1.0 wire format (quoted from spec §5–§6)
-═══════════════════════════════════════════════════════════════════
+* ``agent_ledger`` is a long-lived per-agent reputation stream.
+* an execution receipt is a per-goal signed artifact.
+* receipt canonicalization signs a newline-joined timeline digest, while the
+  agent ledger has different reducer and storage semantics.
 
 Per-entry canonical JSON:
-  * keys sorted lexicographically
-  * no whitespace (no spaces after ``:`` or ``,``)
-  * all three fields present (payload, timestamp, type)
-  * nested objects also sorted
 
-Example entry (verbatim from spec):
-  {"payload":{"goal_id":"goal-01","prompt":"Search for flights"},"timestamp":1710288000000,"type":"goal_started"}
+* keys sorted lexicographically;
+* no whitespace between JSON tokens;
+* all three fields present: ``payload``, ``timestamp``, ``type``;
+* nested objects sorted by the same canonical JSON rules.
 
 Content hash:
-  1. Canonicalize each entry individually
-  2. Join with ``\\n`` (U+000A)
-  3. SHA-256 over the resulting UTF-8 bytes
-  4. Encode as lowercase hex (64 chars)
+
+1. canonicalize each timeline entry individually;
+2. join the canonical entry bytes with ``\n``;
+3. compute SHA-256 over the resulting UTF-8 bytes;
+4. encode the digest as lowercase 64-character hex.
 
 Signature:
-  * ``signature = Ed25519_Sign(content_hash_bytes, private_key)``
-  * **Signed payload is the 32-byte raw hash digest**, NOT its hex
-    representation. Implementers who sign the hex string by mistake
-    produce signatures that no motebit verifier will accept.
-  * Encoded as base64url (RFC 4648 §5, no padding) — alphabet uses
-    ``-`` and ``_`` instead of ``+`` and ``/``
 
-Timestamps:
-  * Integer milliseconds since Unix epoch (NOT float seconds)
-  * Verified against the spec example: ``1710288000000``
+* the signing input is the raw 32-byte SHA-256 digest, not the hex string;
+* the signature is Ed25519;
+* the wire encoding is base64url without padding.
 
-═══════════════════════════════════════════════════════════════════
-NTH envelope on top of motebit's signed core
-═══════════════════════════════════════════════════════════════════
+NTH wraps the signed timeline core in an envelope:
 
-A motebit receipt = ``content_hash`` + ``signature`` + ``timeline``.
-We wrap that core in an outer NTH envelope so an NTH-only consumer
-gets discovery metadata (kind, receipt_id, signer DID) without
-needing a separate index:
-
-    {
-      "kind": "nth-execution-receipt-v1",
-      "compatible_with": "motebit/execution-ledger@1.0",
-      "receipt_id": "<uuid>",
-      "goal_id": "<caller-supplied>",
-      "signer_did": "did:key:z…",
-      "signer_pubkey_hex": "<64 hex>",
-      "issued_at": "<ISO, display only>",
-
-      # ── motebit core (these are what get verified) ────────────
-      "timeline": [<entry>, …],
-      "content_hash": "<64 hex>",
-      "sig": "<base64url>"
-    }
-
-The envelope fields (kind, receipt_id, goal_id, signer_did,
-signer_pubkey_hex, issued_at) are NOT covered by ``sig``. They are
-discovery metadata only. The signature covers ``content_hash``, and
-``content_hash`` covers ``timeline`` — together they bind the agent
-to its claimed execution history. An attacker who edits ``timeline``
-invalidates the hash; one who edits ``content_hash`` invalidates the
-sig; one who edits envelope fields is just lying about discovery
-metadata, which is the consumer's responsibility to cross-check
-(e.g. via the DID's published identity card).
+``kind``, ``receipt_id``, ``goal_id``, ``signer_did``,
+``signer_pubkey_hex``, and ``issued_at`` are discovery metadata. The signature
+covers ``content_hash``; ``content_hash`` covers ``timeline``. A verifier must
+cross-check metadata such as ``signer_did`` against the signed core and any
+external trust material it relies on.
 """
 
 from __future__ import annotations

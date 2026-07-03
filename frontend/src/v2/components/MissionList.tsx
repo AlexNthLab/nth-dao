@@ -144,6 +144,19 @@ function shortValue(value?: string | null, size = 19): string {
 function HandoffDetailRows({ detail }: { detail?: HandoffDetail }) {
   if (!detail) return null;
   const evidence = detail.evidence_verification ?? [];
+  const responseReceipts = [
+    ...(detail.refutations ?? []),
+    ...(detail.supersessions ?? []),
+  ]
+    .map((item) => {
+      const receiptId = item.receipt_id;
+      const hash = item.receipt_content_hash;
+      if (typeof receiptId !== "string" || receiptId.length === 0) return "";
+      return typeof hash === "string" && hash.length > 0
+        ? `${receiptId} (${shortValue(hash, 12)})`
+        : receiptId;
+    })
+    .filter(Boolean);
   return (
     <div
       className="muted"
@@ -190,6 +203,9 @@ function HandoffDetailRows({ detail }: { detail?: HandoffDetail }) {
       )}
       {(detail.refutations ?? []).length > 0 && (
         <span>Signed responses: {(detail.refutations ?? []).length}</span>
+      )}
+      {responseReceipts.length > 0 && (
+        <span>Response receipt(s): {responseReceipts.slice(0, 3).join(", ")}</span>
       )}
     </div>
   );
@@ -594,6 +610,10 @@ export function MissionList({
                   </p>
                 ) : (
                   <div className="stack" style={{ gap: 8 }}>
+                    <p className="muted" style={{ fontSize: 11, margin: 0 }}>
+                      Signed handoff is a claim, not a verified fact. Re-check
+                      pinned evidence before acting.
+                    </p>
                     {handoffDetailsStatus === "loading" && (
                       <p className="muted" style={{ fontSize: 11, margin: 0 }}>
                         Loading signed handoff details...

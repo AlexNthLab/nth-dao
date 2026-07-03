@@ -363,6 +363,57 @@ def check_mandate_negative_expiry(vectors: List[dict]) -> List[ConformanceFailur
     return failures
 
 
+def check_handoff_response_v2(vectors: List[dict]) -> List[ConformanceFailure]:
+    """Signed handoff response v2 and receipt-binding entry bytes are stable."""
+    from ..runtime import verify_handoff_response
+
+    failures: List[ConformanceFailure] = []
+    for v in vectors:
+        statement = v["statement"]
+        ok, reason = verify_handoff_response(statement)
+        expected_valid = bool(v.get("expected_valid", True))
+        if ok != expected_valid:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_response_v2",
+                description=v.get("description", ""),
+                expected=expected_valid,
+                actual=f"{ok}: {reason}",
+            ))
+        actual_hash = statement.get("response_hash")
+        expected_hash = v["expected_response_hash"]
+        if actual_hash != expected_hash:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_response_v2",
+                description="response_hash",
+                expected=expected_hash,
+                actual=actual_hash,
+            ))
+        signing_body = {k: val for k, val in statement.items() if k != "sig"}
+        actual_body_hex = canonical_json(signing_body).hex()
+        expected_body_hex = v["expected_signing_body_hex"]
+        if actual_body_hex != expected_body_hex:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_response_v2",
+                description="canonical signing body",
+                expected=expected_body_hex,
+                actual=actual_body_hex,
+            ))
+        actual_entry_hex = canonical_json(v["receipt_timeline_entry"]).hex()
+        expected_entry_hex = v["expected_receipt_timeline_entry_hex"]
+        if actual_entry_hex != expected_entry_hex:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_response_v2",
+                description="receipt timeline entry canonical bytes",
+                expected=expected_entry_hex,
+                actual=actual_entry_hex,
+            ))
+    return failures
+
+
 _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "canonical_json":              check_canonical_json,
     "fingerprint":                 check_fingerprint,
@@ -381,6 +432,7 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "mandate_payment_canonical":   check_mandate_canonical("mandate_payment_canonical"),
     "mandate_negative_binding":    check_mandate_negative_binding,
     "mandate_negative_expiry":     check_mandate_negative_expiry,
+    "handoff_response_v2":         check_handoff_response_v2,
 }
 
 

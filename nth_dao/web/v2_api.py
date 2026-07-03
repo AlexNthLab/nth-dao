@@ -2115,6 +2115,114 @@ def _handoff_evidence_verification(evidence: List[Any]) -> List[Dict[str, Any]]:
     return reports
 
 
+def _receipt_payload_binds_handoff_response(
+    receipt: Dict[str, Any], stmt: Dict[str, Any],
+) -> bool:
+    """Return True when a signed receipt timeline names this response target.
+
+    ``receipt_id`` and ``goal_id`` are discovery envelope fields. The binding
+    that matters for handoff audit must live inside the signed timeline payload.
+    """
+    for entry in list(receipt.get("timeline", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "")) != "nth.handoff_response":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("mission_id", "")) != str(stmt.get("mission_id", "")):
+            continue
+        if str(payload.get("response_type", "")) != str(stmt.get("response_type", "")):
+            continue
+        if str(payload.get("target_capsule_hash", "")) != str(
+            stmt.get("target_capsule_hash", ""),
+        ):
+            continue
+        if stmt.get("response_type") == "superseded":
+            if str(payload.get("replacement_capsule_hash", "")) != str(
+                stmt.get("replacement_capsule_hash", ""),
+            ):
+                continue
+        return True
+    return False
+
+
+def _require_handoff_response_target_known(
+    request: Request, stmt: Dict[str, Any],
+) -> None:
+    target_hash = str(stmt.get("target_capsule_hash", "") or "")
+    proj = _verified_handoff_projection(request)
+    if proj is None:
+        raise HTTPException(
+            status_code=503,
+            detail="handoff projection unavailable; cannot verify target capsule",
+        )
+    if proj.get(target_hash) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"target handoff capsule not found: {target_hash}",
+        )
+
+
+def _validate_handoff_response_receipt_binding(
+    request: Request, stmt: Dict[str, Any],
+) -> None:
+    receipt_id = str(stmt.get("receipt_id", "") or "")
+    receipt_content_hash = str(stmt.get("receipt_content_hash", "") or "")
+    if not receipt_id and not receipt_content_hash:
+        return
+    receipts = _state_receipts_store(request)
+    if receipts is None:
+        raise HTTPException(
+            status_code=503,
+            detail="receipt store unavailable; cannot verify handoff response receipt",
+        )
+    receipt = receipts.load(receipt_id)
+    if receipt is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"handoff response receipt not found: {receipt_id}",
+        )
+    if str(receipt.get("receipt_id", "") or "") != receipt_id:
+        raise HTTPException(
+            status_code=400,
+            detail="handoff response receipt_id mismatch",
+        )
+    if str(receipt.get("content_hash", "") or "") != receipt_content_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="handoff response receipt content_hash mismatch",
+        )
+    try:
+        from nth_dao.execution_receipt import verify_receipt
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="receipt verifier unavailable",
+        ) from exc
+    if not verify_receipt(receipt):
+        raise HTTPException(
+            status_code=400,
+            detail="handoff response receipt failed signature/content verification",
+        )
+    if str(receipt.get("signer_did", "") or "") != str(stmt.get("author_did", "")):
+        raise HTTPException(
+            status_code=400,
+            detail="handoff response receipt signer_did mismatch",
+        )
+    if str(receipt.get("goal_id", "") or "") != str(stmt.get("mission_id", "")):
+        raise HTTPException(
+            status_code=400,
+            detail="handoff response receipt goal_id mismatch",
+        )
+    if not _receipt_payload_binds_handoff_response(receipt, stmt):
+        raise HTTPException(
+            status_code=400,
+            detail="handoff response receipt does not bind target/replacement",
+        )
+
+
 def _verified_handoff_projection(request: Request) -> Optional[Any]:
     """Return a HandoffProjection folded from the verified spine.
 
@@ -4310,13 +4418,24 @@ def register_v2_routes(app: FastAPI) -> None:
         body: HandoffStatementBody, request: Request,
     ) -> Dict[str, Any]:
         """Record a signed refutation or supersession for a handoff capsule."""
-        from nth_dao.runtime import record_handoff_response
+        from nth_dao.runtime import (
+            record_handoff_response,
+            verify_handoff_response,
+        )
         spine = _state_spine(request)
         if spine is None:
             raise HTTPException(
                 status_code=503,
                 detail="spine unavailable; cannot record handoff response",
             )
+        ok, why = verify_handoff_response(body.statement)
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid handoff response: {why}",
+            )
+        _require_handoff_response_target_known(request, body.statement)
+        _validate_handoff_response_receipt_binding(request, body.statement)
         try:
             ev = record_handoff_response(spine, body.statement)
         except ValueError as exc:

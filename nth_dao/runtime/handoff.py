@@ -23,11 +23,23 @@ from nth_dao.spine.event import SpineEvent
 from nth_dao.spine.projection import Projection
 
 HANDOFF_CAPSULE_KIND = "nth-handoff-capsule-v1"
-HANDOFF_RESPONSE_KIND = "nth-handoff-response-v1"
+HANDOFF_RESPONSE_KIND_V1 = "nth-handoff-response-v1"
+HANDOFF_RESPONSE_KIND_V2 = "nth-handoff-response-v2"
+HANDOFF_RESPONSE_KIND = HANDOFF_RESPONSE_KIND_V2
+HANDOFF_RESPONSE_KINDS = (
+    HANDOFF_RESPONSE_KIND_V2,
+    HANDOFF_RESPONSE_KIND_V1,
+)
 
-EVENT_EXEC_HANDOFF = "exec.handoff"
+EVENT_EXEC_HANDOFF_LEGACY = "exec.handoff"
+EVENT_EXEC_HANDOFF_PROPOSED = "exec.handoff.proposed"
+EVENT_EXEC_HANDOFF = EVENT_EXEC_HANDOFF_PROPOSED
 EVENT_EXEC_HANDOFF_REFUTED = "exec.handoff.refuted"
 EVENT_EXEC_HANDOFF_SUPERSEDED = "exec.handoff.superseded"
+EVENT_EXEC_HANDOFF_PROPOSED_TYPES = (
+    EVENT_EXEC_HANDOFF_PROPOSED,
+    EVENT_EXEC_HANDOFF_LEGACY,
+)
 
 STATUS_PROPOSED = "proposed"
 STATUS_CONTESTED = "contested"
@@ -47,6 +59,8 @@ VERIFICATION_STATUSES = (
 RESPONSE_TYPES = ("refuted", "superseded")
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,160}$")
+_RECEIPT_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _SCP_GIT_RE = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:[^\s]+$")
@@ -70,6 +84,39 @@ def _digest_statement(stmt: Dict[str, Any], hash_field: str) -> str:
 
 def _is_hash(value: Any) -> bool:
     return isinstance(value, str) and bool(_SHA256_RE.match(value))
+
+
+def _validate_receipt_binding(
+    stmt: Dict[str, Any], *, require_for_superseded: bool,
+) -> None:
+    receipt_id = stmt.get("receipt_id", "")
+    if not isinstance(receipt_id, str):
+        raise ValueError("receipt_id must be a string")
+    if receipt_id and not _RECEIPT_ID_RE.match(receipt_id):
+        raise ValueError("receipt_id must use [A-Za-z0-9-] and be <= 160 chars")
+
+    receipt_content_hash = stmt.get("receipt_content_hash", "")
+    if (
+        not isinstance(receipt_content_hash, str)
+        or len(receipt_content_hash) > 128
+    ):
+        raise ValueError("receipt_content_hash must be a string")
+    if receipt_content_hash and not _RECEIPT_CONTENT_HASH_RE.match(receipt_content_hash):
+        raise ValueError("receipt_content_hash must be 64-char lowercase hex")
+    if bool(receipt_id) != bool(receipt_content_hash):
+        raise ValueError(
+            "receipt binding requires both receipt_id and receipt_content_hash",
+        )
+
+    if require_for_superseded and stmt.get("response_type") == "superseded":
+        if not receipt_id:
+            raise ValueError("superseded responses require receipt_id")
+        if not receipt_content_hash:
+            raise ValueError("superseded responses require receipt_content_hash")
+
+
+def _response_has_receipt_binding(stmt: Dict[str, Any]) -> bool:
+    return bool(stmt.get("receipt_id")) and bool(stmt.get("receipt_content_hash"))
 
 
 def _canonical_size(value: Dict[str, Any]) -> int:
@@ -383,7 +430,8 @@ def _validate_capsule_shape(stmt: Dict[str, Any]) -> None:
 def _validate_response_shape(stmt: Dict[str, Any]) -> None:
     if not isinstance(stmt, dict):
         raise ValueError("not a dict")
-    if stmt.get("kind") != HANDOFF_RESPONSE_KIND:
+    kind = stmt.get("kind")
+    if kind not in HANDOFF_RESPONSE_KINDS:
         raise ValueError("wrong kind")
     response_type = stmt.get("response_type")
     if response_type not in RESPONSE_TYPES:
@@ -401,6 +449,10 @@ def _validate_response_shape(stmt: Dict[str, Any]) -> None:
         raise ValueError("superseded responses require replacement_capsule_hash")
     if replacement_hash and not _is_hash(replacement_hash):
         raise ValueError("replacement_capsule_hash must be sha256:<hex>")
+    _validate_receipt_binding(
+        stmt,
+        require_for_superseded=kind == HANDOFF_RESPONSE_KIND_V2,
+    )
     issued_at = stmt.get("issued_at_ms")
     if not isinstance(issued_at, int) or isinstance(issued_at, bool) or issued_at <= 0:
         raise ValueError("issued_at_ms must be a positive int")
@@ -488,17 +540,22 @@ def sign_handoff_response(
     reason: str,
     counter_evidence: Optional[List[Dict[str, Any]]] = None,
     replacement_capsule_hash: str = "",
+    receipt_id: str = "",
+    receipt_content_hash: str = "",
+    kind: str = HANDOFF_RESPONSE_KIND,
     issued_at_ms: int = 0,
 ) -> Dict[str, Any]:
     """Sign a refutation or supersession for an existing capsule."""
     stmt: Dict[str, Any] = {
-        "kind": HANDOFF_RESPONSE_KIND,
+        "kind": str(kind),
         "response_type": str(response_type),
         "target_capsule_hash": str(target_capsule_hash),
         "replacement_capsule_hash": str(replacement_capsule_hash),
         "mission_id": str(mission_id),
         "reason": str(reason),
         "counter_evidence": [dict(item) for item in (counter_evidence or [])],
+        "receipt_id": str(receipt_id),
+        "receipt_content_hash": str(receipt_content_hash),
         "author_did": signer.as_did(),
         "issued_at_ms": int(issued_at_ms or now_ms()),
     }
@@ -533,17 +590,49 @@ def record_handoff(spine: Any, statement: Dict[str, Any]) -> Any:
     return spine.append(EVENT_EXEC_HANDOFF, statement)
 
 
-def record_handoff_response(spine: Any, statement: Dict[str, Any]) -> Any:
-    """Record a valid handoff refutation or supersession to the signed spine."""
-    ok, why = verify_handoff_response(statement)
-    if not ok:
-        raise ValueError(f"refusing to record invalid handoff response: {why}")
+def _append_handoff_response_unchecked(spine: Any, statement: Dict[str, Any]) -> Any:
     event_type = (
         EVENT_EXEC_HANDOFF_SUPERSEDED
         if statement.get("response_type") == "superseded"
         else EVENT_EXEC_HANDOFF_REFUTED
     )
     return spine.append(event_type, statement)
+
+
+def _require_known_handoff_response_target(
+    spine: Any, statement: Dict[str, Any],
+) -> None:
+    projection = HandoffProjection()
+    try:
+        events = spine.read_all()
+    except AttributeError as exc:
+        raise ValueError("spine must expose read_all() for handoff responses") from exc
+    for event in events:
+        projection.apply(event)
+    target = projection.get(str(statement.get("target_capsule_hash", "")))
+    if target is None:
+        raise ValueError("refusing to record handoff response for unknown target capsule")
+    if str(statement.get("mission_id", "")) != target.mission_id:
+        raise ValueError("refusing to record handoff response for a different mission")
+
+
+def record_handoff_response(spine: Any, statement: Dict[str, Any]) -> Any:
+    """Record a handoff response only if its target capsule is already known.
+
+    This public writer is intentionally checked. A signed response proves who
+    spoke, not that the referenced capsule exists, so online writers must not
+    append orphaned responses.
+    """
+    ok, why = verify_handoff_response(statement)
+    if not ok:
+        raise ValueError(f"refusing to record invalid handoff response: {why}")
+    _require_known_handoff_response_target(spine, statement)
+    return _append_handoff_response_unchecked(spine, statement)
+
+
+def record_handoff_response_checked(spine: Any, statement: Dict[str, Any]) -> Any:
+    """Compatibility alias for the checked public handoff response writer."""
+    return record_handoff_response(spine, statement)
 
 
 @dataclass
@@ -579,7 +668,7 @@ class HandoffProjection(Projection):
         self._by_mission.clear()
 
     def apply(self, event: SpineEvent) -> None:
-        if event.type == EVENT_EXEC_HANDOFF:
+        if event.type in EVENT_EXEC_HANDOFF_PROPOSED_TYPES:
             self._apply_capsule(event.payload if isinstance(event.payload, dict) else {})
             return
         if event.type in (EVENT_EXEC_HANDOFF_REFUTED, EVENT_EXEC_HANDOFF_SUPERSEDED):
@@ -624,7 +713,11 @@ class HandoffProjection(Projection):
             return
         rec.supersessions.append(stored)
         rec.superseded_by = stmt.get("replacement_capsule_hash", "")
-        if authorized and self._valid_replacement(rec):
+        if (
+            authorized
+            and _response_has_receipt_binding(stmt)
+            and self._valid_replacement(rec)
+        ):
             rec.status = STATUS_SUPERSEDED
         elif authorized and rec.status == STATUS_PROPOSED:
             rec.status = STATUS_SUPERSESSION_PROPOSED
@@ -651,10 +744,21 @@ class HandoffProjection(Projection):
         replacement = self._records.get(rec.superseded_by)
         return replacement is not None and replacement.mission_id == rec.mission_id
 
+    def _has_authorized_receipt_bound_supersession(self, rec: HandoffRecord) -> bool:
+        return any(
+            bool(stmt.get("authorized"))
+            and _response_has_receipt_binding(stmt)
+            and stmt.get("replacement_capsule_hash") == rec.superseded_by
+            for stmt in rec.supersessions
+        )
+
     def _resolve_waiting_supersessions(self, capsule_hash: str) -> None:
         for rec in self._records.values():
             if rec.superseded_by == capsule_hash and rec.status == STATUS_SUPERSESSION_PROPOSED:
-                if self._valid_replacement(rec):
+                if (
+                    self._valid_replacement(rec)
+                    and self._has_authorized_receipt_bound_supersession(rec)
+                ):
                     rec.status = STATUS_SUPERSEDED
 
     def get(self, capsule_hash: str) -> Optional[HandoffRecord]:

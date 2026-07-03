@@ -10,9 +10,13 @@ pytest.importorskip("nacl")
 
 from nth_dao.identity import AgentIdentity
 from nth_dao.runtime import (
+    EVENT_EXEC_HANDOFF_LEGACY,
+    EVENT_EXEC_HANDOFF_PROPOSED,
     HandoffProjection,
+    HANDOFF_RESPONSE_KIND_V1,
     record_handoff,
     record_handoff_response,
+    record_handoff_response_checked,
     sign_handoff_capsule,
     sign_handoff_response,
     source_evidence_from_git,
@@ -165,7 +169,8 @@ def test_source_evidence_rejects_tokenized_repo_url(tmp_path: Path) -> None:
 def test_untrusted_refutation_contests_capsule(tmp_path: Path) -> None:
     spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
     capsule = _capsule()
-    record_handoff(spine, capsule)
+    ev = record_handoff(spine, capsule)
+    assert ev.type == EVENT_EXEC_HANDOFF_PROPOSED
     response = sign_handoff_response(
         signer=_id(),
         response_type="refuted",
@@ -184,6 +189,74 @@ def test_untrusted_refutation_contests_capsule(tmp_path: Path) -> None:
     assert rec is not None
     assert rec.status == "contested"
     assert rec.refutations[0]["response_hash"] == response["response_hash"]
+
+
+def test_checked_response_rejects_unknown_target(tmp_path: Path) -> None:
+    spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
+    response = sign_handoff_response(
+        signer=_id(),
+        response_type="refuted",
+        target_capsule_hash="sha256:" + "9" * 64,
+        mission_id="mission-1",
+        reason="This response names a capsule that has not been recorded.",
+    )
+    with pytest.raises(ValueError, match="unknown target capsule"):
+        record_handoff_response_checked(spine, response)
+
+
+def test_public_response_writer_rejects_unknown_target(tmp_path: Path) -> None:
+    spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
+    response = sign_handoff_response(
+        signer=_id(),
+        response_type="refuted",
+        target_capsule_hash="sha256:" + "8" * 64,
+        mission_id="mission-1",
+        reason="The public writer must not append orphaned responses.",
+    )
+    with pytest.raises(ValueError, match="unknown target capsule"):
+        record_handoff_response(spine, response)
+
+
+def test_checked_response_rejects_cross_mission_target(tmp_path: Path) -> None:
+    spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
+    capsule = _capsule()
+    record_handoff(spine, capsule)
+    response = sign_handoff_response(
+        signer=_id(),
+        response_type="refuted",
+        target_capsule_hash=capsule["capsule_hash"],
+        mission_id="other-mission",
+        reason="This response targets a real capsule but the wrong mission.",
+    )
+    with pytest.raises(ValueError, match="different mission"):
+        record_handoff_response_checked(spine, response)
+
+
+def test_checked_response_records_known_target(tmp_path: Path) -> None:
+    spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
+    capsule = _capsule()
+    record_handoff(spine, capsule)
+    response = sign_handoff_response(
+        signer=_id(),
+        response_type="refuted",
+        target_capsule_hash=capsule["capsule_hash"],
+        mission_id="mission-1",
+        reason="Known-target response can be appended.",
+    )
+    ev = record_handoff_response_checked(spine, response)
+    assert ev.type == "exec.handoff.refuted"
+
+
+def test_projection_replays_legacy_handoff_event_type(tmp_path: Path) -> None:
+    spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
+    capsule = _capsule()
+    spine.append(EVENT_EXEC_HANDOFF_LEGACY, capsule)
+
+    proj = HandoffProjection()
+    replay(spine.read_all(), proj)
+    rec = proj.get(capsule["capsule_hash"])
+    assert rec is not None
+    assert rec.status == "proposed"
 
 
 def test_trusted_refutation_can_refute_capsule(tmp_path: Path) -> None:
@@ -237,7 +310,7 @@ def test_custom_responder_authorizer_controls_terminal_status(tmp_path: Path) ->
     assert rec.refutations[0]["authorization_reason"] == "mission_participant"
 
 
-def test_superseded_response_requires_replacement_hash() -> None:
+def test_superseded_response_requires_replacement_and_receipt_binding() -> None:
     capsule = _capsule()
     with pytest.raises(ValueError, match="replacement_capsule_hash"):
         sign_handoff_response(
@@ -246,6 +319,36 @@ def test_superseded_response_requires_replacement_hash() -> None:
             target_capsule_hash=capsule["capsule_hash"],
             mission_id="mission-1",
             reason="A corrected capsule should replace this one.",
+        )
+    with pytest.raises(ValueError, match="receipt_id"):
+        sign_handoff_response(
+            signer=_id(),
+            response_type="superseded",
+            target_capsule_hash=capsule["capsule_hash"],
+            replacement_capsule_hash="sha256:" + "c" * 64,
+            mission_id="mission-1",
+            reason="A corrected capsule should replace this one.",
+        )
+    with pytest.raises(ValueError, match="both receipt_id and receipt_content_hash"):
+        sign_handoff_response(
+            signer=_id(),
+            response_type="superseded",
+            target_capsule_hash=capsule["capsule_hash"],
+            replacement_capsule_hash="sha256:" + "c" * 64,
+            mission_id="mission-1",
+            reason="A corrected capsule should replace this one.",
+            receipt_id="receipt-1",
+        )
+    with pytest.raises(ValueError, match="receipt_id"):
+        sign_handoff_response(
+            signer=_id(),
+            response_type="superseded",
+            target_capsule_hash=capsule["capsule_hash"],
+            replacement_capsule_hash="sha256:" + "c" * 64,
+            mission_id="mission-1",
+            reason="A corrected capsule should replace this one.",
+            receipt_id="receipt_1",
+            receipt_content_hash="a" * 64,
         )
 
 
@@ -268,6 +371,8 @@ def test_supersession_waits_for_existing_replacement(tmp_path: Path) -> None:
         replacement_capsule_hash=replacement["capsule_hash"],
         mission_id="mission-1",
         reason="Replacing the earlier capsule with a corrected one.",
+        receipt_id="receipt-fix-1",
+        receipt_content_hash="d" * 64,
     )
     record_handoff(spine, original)
     record_handoff_response(spine, response)
@@ -284,6 +389,40 @@ def test_supersession_waits_for_existing_replacement(tmp_path: Path) -> None:
     rec = proj.get(original["capsule_hash"])
     assert rec is not None
     assert rec.status == "superseded"
+    assert rec.supersessions[0]["receipt_id"] == "receipt-fix-1"
+    assert rec.supersessions[0]["receipt_content_hash"] == "d" * 64
+
+
+def test_legacy_v1_supersession_does_not_become_receipt_bound_terminal(tmp_path: Path) -> None:
+    spine = SignedEventLog(tmp_path / "spine.jsonl", _id())
+    author = _id()
+    original = _capsule(author)
+    replacement = sign_handoff_capsule(
+        signer=author,
+        mission_id="mission-1",
+        finding="Legacy replacement.",
+        root_cause_hypothesis="Old records lacked receipt binding.",
+        evidence=[_source_evidence()],
+        parent_capsule_hash=original["capsule_hash"],
+    )
+    legacy_response = sign_handoff_response(
+        signer=author,
+        response_type="superseded",
+        target_capsule_hash=original["capsule_hash"],
+        replacement_capsule_hash=replacement["capsule_hash"],
+        mission_id="mission-1",
+        reason="Legacy supersede without receipt binding.",
+        kind=HANDOFF_RESPONSE_KIND_V1,
+    )
+    record_handoff(spine, original)
+    record_handoff_response(spine, legacy_response)
+    record_handoff(spine, replacement)
+
+    proj = HandoffProjection()
+    replay(spine.read_all(), proj)
+    rec = proj.get(original["capsule_hash"])
+    assert rec is not None
+    assert rec.status == "supersession_proposed"
 
 
 def test_statement_size_cap_rejects_payload_bloat() -> None:

@@ -860,6 +860,86 @@ The signature input is **the 32-byte raw digest**, not the hex string.
 Multiple round-trip tests across Rust + TS verifiers have caught
 implementations that signed the hex.
 
+### 11.4 Handoff Response Receipt Binding
+
+When an agent supersedes a handoff capsule, the response is not enough
+by itself. The superseding agent MUST also cite a signed execution
+receipt that proves it performed the replacement work.
+
+The handoff response statement uses `kind = "nth-handoff-response-v2"` and
+includes:
+
+```json
+{
+  "response_type": "superseded",
+  "target_capsule_hash": "sha256:<64-hex>",
+  "replacement_capsule_hash": "sha256:<64-hex>",
+  "mission_id": "mission-...",
+  "receipt_id": "receipt-handoff-1",
+  "receipt_content_hash": "<64-hex>",
+  "author_did": "did:key:z6Mk...",
+  "response_hash": "sha256:<64-hex>",
+  "sig": "<base64url Ed25519 signature>"
+}
+```
+
+`receipt_id` is limited to `[A-Za-z0-9-]{1,160}` so every signed response
+can be resolved by the reference `ReceiptStore`. `receipt_content_hash`
+MUST be the cited receipt's content hash.
+
+The receipt MUST contain a signed timeline entry:
+
+```json
+{
+  "timestamp": 1800000000001,
+  "type": "nth.handoff_response",
+  "payload": {
+    "mission_id": "mission-...",
+    "response_type": "superseded",
+    "target_capsule_hash": "sha256:<64-hex>",
+    "replacement_capsule_hash": "sha256:<64-hex>"
+  }
+}
+```
+
+The verifier MUST check all of:
+
+1. `verify_handoff_response(statement)` succeeds.
+2. The target capsule already exists in the handoff projection.
+3. The cited receipt exists locally and `verify_receipt(receipt)` succeeds.
+4. `receipt.signer_did == statement.author_did`.
+5. The receipt timeline contains the `nth.handoff_response` entry above.
+6. The timeline payload matches `mission_id`, `response_type`,
+   `target_capsule_hash`, and for supersession, `replacement_capsule_hash`.
+
+A signed handoff remains a claim, not a verified fact. Receipts prove who
+performed a follow-up action and what they signed; the next agent still
+has to re-check pinned evidence before trusting the conclusion.
+
+### 11.5 Handoff Spine Events
+
+Handoff capsule proposals are appended as:
+
+```json
+{
+  "type": "exec.handoff.proposed",
+  "payload": { "...": "nth-handoff-capsule-v1 statement" }
+}
+```
+
+`exec.handoff` is accepted as a legacy alias for replay only. New writers
+MUST emit `exec.handoff.proposed`.
+
+Responses are appended as:
+
+- `exec.handoff.refuted`
+- `exec.handoff.superseded`
+
+Online writers SHOULD use the public `record_handoff_response()` primitive,
+which verifies that the response target is already present before appending.
+Migration tools that repair historical logs must perform their own offline
+projection checks before writing directly to the spine.
+
 ---
 
 ## 12. A2A Method Surface (`POST /a2a/<method>`)

@@ -10,6 +10,7 @@ pytest.importorskip("nacl")
 
 from fastapi.testclient import TestClient
 
+from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
 from nth_dao.identity import AgentIdentity
 from nth_dao.runtime import sign_handoff_capsule, sign_handoff_response
 from nth_dao.web import create_app
@@ -28,6 +29,32 @@ def _source_evidence() -> dict:
 
 def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path, require_console_auth=False))
+
+
+def _handoff_response_receipt(
+    signer: AgentIdentity,
+    *,
+    mission_id: str,
+    response_type: str,
+    target_capsule_hash: str,
+    replacement_capsule_hash: str = "",
+    receipt_id: str = "receipt-handoff-1",
+) -> dict:
+    return sign_receipt(
+        [TimelineEntry(
+            timestamp=now_ms(),
+            type="nth.handoff_response",
+            payload={
+                "mission_id": mission_id,
+                "response_type": response_type,
+                "target_capsule_hash": target_capsule_hash,
+                "replacement_capsule_hash": replacement_capsule_hash,
+            },
+        )],
+        signer,
+        goal_id=mission_id,
+        receipt_id=receipt_id,
+    )
 
 
 def test_handoff_endpoint_records_and_lists_capsule(tmp_path: Path) -> None:
@@ -95,6 +122,107 @@ def test_handoff_endpoint_records_refutation(tmp_path: Path) -> None:
     assert row["status"] == "contested"
     assert row["refutations"][0]["response_hash"] == response["response_hash"]
     assert row["refutations"][0]["authorized"] is False
+
+
+def test_handoff_response_rejects_unknown_target(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    response = sign_handoff_response(
+        signer=AgentIdentity.generate(),
+        response_type="refuted",
+        target_capsule_hash="sha256:" + "e" * 64,
+        mission_id="mission-http",
+        reason="No capsule exists for this hash.",
+    )
+    rr = client.post("/api/v2/handoffs/responses", json={"statement": response})
+    assert rr.status_code == 404
+    assert "target handoff capsule not found" in rr.text
+
+
+def test_superseded_response_requires_existing_bound_receipt(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    author = AgentIdentity.generate()
+    original = sign_handoff_capsule(
+        signer=author,
+        mission_id="mission-http",
+        finding="Original diagnosis.",
+        root_cause_hypothesis="This should be replaced.",
+        evidence=[_source_evidence()],
+    )
+    replacement = sign_handoff_capsule(
+        signer=author,
+        mission_id="mission-http",
+        finding="Corrected diagnosis.",
+        root_cause_hypothesis="This one is backed by a receipt.",
+        evidence=[_source_evidence()],
+        parent_capsule_hash=original["capsule_hash"],
+    )
+    assert client.post("/api/v2/handoffs", json={"statement": original}).status_code == 200
+    assert client.post("/api/v2/handoffs", json={"statement": replacement}).status_code == 200
+
+    missing_receipt = sign_handoff_response(
+        signer=author,
+        response_type="superseded",
+        target_capsule_hash=original["capsule_hash"],
+        replacement_capsule_hash=replacement["capsule_hash"],
+        mission_id="mission-http",
+        reason="Replace with a corrected capsule.",
+        receipt_id="receipt-missing",
+        receipt_content_hash="a" * 64,
+    )
+    rr = client.post("/api/v2/handoffs/responses", json={"statement": missing_receipt})
+    assert rr.status_code == 400
+    assert "receipt not found" in rr.text
+
+    wrong_payload = _handoff_response_receipt(
+        author,
+        mission_id="mission-http",
+        response_type="superseded",
+        target_capsule_hash="sha256:" + "f" * 64,
+        replacement_capsule_hash=replacement["capsule_hash"],
+        receipt_id="receipt-wrong-payload",
+    )
+    client.app.state.nth.receipts.save(wrong_payload)
+    unbound = sign_handoff_response(
+        signer=author,
+        response_type="superseded",
+        target_capsule_hash=original["capsule_hash"],
+        replacement_capsule_hash=replacement["capsule_hash"],
+        mission_id="mission-http",
+        reason="Receipt payload points at the wrong target.",
+        receipt_id=wrong_payload["receipt_id"],
+        receipt_content_hash=wrong_payload["content_hash"],
+    )
+    rr = client.post("/api/v2/handoffs/responses", json={"statement": unbound})
+    assert rr.status_code == 400
+    assert "does not bind target/replacement" in rr.text
+
+    receipt = _handoff_response_receipt(
+        author,
+        mission_id="mission-http",
+        response_type="superseded",
+        target_capsule_hash=original["capsule_hash"],
+        replacement_capsule_hash=replacement["capsule_hash"],
+        receipt_id="receipt-bound",
+    )
+    client.app.state.nth.receipts.save(receipt)
+    response = sign_handoff_response(
+        signer=author,
+        response_type="superseded",
+        target_capsule_hash=original["capsule_hash"],
+        replacement_capsule_hash=replacement["capsule_hash"],
+        mission_id="mission-http",
+        reason="Receipt proves the replacement work was executed.",
+        receipt_id=receipt["receipt_id"],
+        receipt_content_hash=receipt["content_hash"],
+    )
+    rr = client.post("/api/v2/handoffs/responses", json={"statement": response})
+    assert rr.status_code == 200, rr.text
+    row = client.get(
+        "/api/v2/handoffs",
+        params={"mission_id": "mission-http", "include_details": True},
+    ).json()[0]
+    assert row["status"] == "superseded"
+    assert row["supersessions"][0]["receipt_id"] == "receipt-bound"
 
 
 def test_handoff_endpoint_rejects_invalid_signature(tmp_path: Path) -> None:

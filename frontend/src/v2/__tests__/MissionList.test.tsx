@@ -43,7 +43,13 @@ beforeEach(() => {
       ],
       next_actions: ["ask a second agent to verify pinned evidence"],
       risks: ["capsule hypothesis may still be wrong"],
-      refutations: [{ author_did: "did:key:zReviewer", authorized: false }],
+      refutations: [{
+        author_did: "did:key:zReviewer",
+        authorized: false,
+        receipt_id: "receipt-review-1",
+        receipt_content_hash:
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      }],
     },
   ]);
 });
@@ -138,6 +144,7 @@ describe("MissionList", () => {
     expect(screen.getByText("1 refutation(s)")).toBeTruthy();
     expect(screen.getByText("receipt receipt-created-")).toBeTruthy();
     expect(screen.getByText("Handoff workbench")).toBeTruthy();
+    expect(screen.getByText(/Signed handoff is a claim, not a verified fact/)).toBeTruthy();
     expect(screen.getByText(/Evidence: 2 pointer\(s\) - unverified/)).toBeTruthy();
     expect(screen.getByText(/Refutations: 1 - authorized 0/)).toBeTruthy();
     expect(screen.getByText(/Next: ask a second agent/)).toBeTruthy();
@@ -145,6 +152,7 @@ describe("MissionList", () => {
     expect(screen.getByText(/nth_dao\/web\/v2_api.py @ 0123456789/)).toBeTruthy();
     expect(screen.getByText(/content hash matches/)).toBeTruthy();
     expect(screen.getByText(/capsule hypothesis may still be wrong/)).toBeTruthy();
+    expect(screen.getByText(/Response receipt\(s\): receipt-review-1/)).toBeTruthy();
 
     const stepsSection = screen.getByText("Steps").closest(".detail-section");
     expect(stepsSection).toBeTruthy();

@@ -13,27 +13,37 @@ Wire-protocol specs in plain English (like `docs/PROTOCOLS.md`) tell you
 *what* to implement. Conformance vectors tell you *whether you did it right*.
 
 Without them, "I implemented the spec" is a guess. With them, "I pass all
-22 vectors" is a checkmark.
+38 vectors" is a checkmark.
 
-## What's covered in v0.9.4
+## What's Covered
 
 | Category | Count | Tests |
 |----------|-------|-------|
 | `canonical_json` | 8 | Encoder produces byte-identical output for the same input across implementations. Field-sort order, unicode, nested objects, arrays, booleans, null. |
+| `channel_message_canonical` | 2 | Channel message signing payload canonical bytes. |
+| `did_key_encoding` | 3 | did:key encoding for deterministic Ed25519 public keys. |
 | `fingerprint` | 3 | `AgentIdentity.fingerprint()` = `SHA-256(pubkey_hex or agent_id)[:16]`. |
 | `signature_verify` | 3 | Ed25519 verify with fixed test keys: valid signature accepted, wrong pubkey rejected, tampered signature rejected. |
 | `endorsement_canonical_payload` | 2 | `Endorsement.signable_dict()` canonicalized produces stable bytes for two field combinations. |
+| `invitation_canonical` | 1 | Invitation signing payload canonical bytes. |
+| `lan_psk_tag` | 2 | LAN discovery PSK HMAC tag construction. |
+| `team_config_canonical` | 1 | TeamConfig owner-signing payload canonical bytes. |
 | `template_canonical_payload` | 1 | `MissionTemplate.signable_dict()` canonical bytes. |
+| `mandate_intent_canonical` | 1 | IntentMandate canonical bytes. |
+| `mandate_cart_canonical` | 1 | CartMandate canonical bytes. |
+| `mandate_payment_canonical` | 1 | PaymentMandate canonical bytes. |
+| `mandate_negative_binding` | 2 | Cart/payment binding attacks rejected with stable reason substrings. |
+| `mandate_negative_expiry` | 1 | Intent expiry check with a fixed clock. |
 | `replay_window` | 5 | gossip replay window boundaries (10-min past / 60-sec future drift). |
+| `handoff_response_v2` | 1 | Signed handoff supersession response plus the canonical receipt timeline entry that binds target and replacement capsule hashes. |
 
-**Total: 22 vectors in v0.9.4.** This grows with the protocol.
+**Total: 38 vectors.** This grows with the protocol.
 
 ## What's NOT covered yet (planned for v0.9.5+)
 
-- Channel message signing & verification end-to-end
+- Channel message signature verification end-to-end
 - Invitation URL round-trip
-- TeamConfig owner signature
-- LAN discovery PSK HMAC tag computation
+- TeamConfig owner signature verification end-to-end
 - WoT BFS resolution outcomes
 
 These will be added as vectors when their wire format is considered frozen.
