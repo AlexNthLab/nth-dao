@@ -18,6 +18,23 @@ import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
 import type { AgentEntry, TaskAnnouncement, TaskCategory } from "../types-v2";
 
+function visibilityWarningLabel(
+  code: string,
+  t: (zh: string, en: string) => string,
+): string {
+  switch (code) {
+    case "mission_visibility_failed":
+      return t("Mission 执行视图写入失败", "Mission execution view failed to persist");
+    case "blackboard_visibility_failed":
+      return t("Blackboard 协作现场写入失败", "Blackboard collaboration view failed to persist");
+    default:
+      if (code.startsWith("linked_mission_")) {
+        return t("关联 Mission 同步失败", "Linked Mission sync failed");
+      }
+      return t("执行视图写入异常", "Execution view persistence warning");
+  }
+}
+
 export function TasksView() {
   const toast = useToast();
   const { t } = useLang();
@@ -155,10 +172,25 @@ export function TasksView() {
       const result =
         (r.body.result as Record<string, unknown>) || r.body;
       if (r.status === 200 && result.claimed) {
-        toast.push(
-          `${t("已认领 · 收据", "Claimed · receipt")} ${String(result.receipt_id || "").slice(0, 12)}…`,
-          "success",
-        );
+        const missionHint = result.mission_id
+          ? ` · ${t("已进入 Missions", "now in Missions")} ${String(result.mission_id).slice(0, 12)}…`
+          : "";
+        const visibilityStatus = String(result.visibility_status || "ok");
+        const warnings = Array.isArray(result.visibility_warnings)
+          ? Array.from(new Set(result.visibility_warnings.map(String).filter(Boolean)))
+          : [];
+        const warningText = warnings
+          .map((warning) => visibilityWarningLabel(warning, t))
+          .join(" · ");
+        const receiptText = `${t("已认领 · 收据", "Claimed · receipt")} ${String(result.receipt_id || "").slice(0, 12)}…${missionHint}`;
+        if (visibilityStatus === "ok") {
+          toast.push(receiptText, "success");
+        } else {
+          toast.push(
+            `${receiptText} · ${t("执行视图未完全写入", "execution view not fully persisted")}${warningText ? `: ${warningText}` : ""}`,
+            "warn",
+          );
+        }
         setReloadKey((k) => k + 1); // 任务离开广场
       } else {
         const err = (r.body.error as Record<string, unknown>) || {};
@@ -303,6 +335,12 @@ export function TasksView() {
               {t("任务市场 · 发现并承接各 DAO 的活", "Task marketplace · discover & take on work across DAOs")}
             </p>
             <h1 className="main-title">Tasks {loading ? "…" : `(${shown.length})`}</h1>
+            <p className="main-subtitle">
+              {t(
+                "发布或承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
+                "Publish or claim outside work. Claimed tasks move into Missions and show status on Blackboard.",
+              )}
+            </p>
           </div>
           <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
             {showForm ? t("取消", "Cancel") : t("+ 发布任务", "+ Publish task")}

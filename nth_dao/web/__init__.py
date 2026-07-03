@@ -389,6 +389,11 @@ class WebState:
         # 建;node_identity 缺失 / 日志损坏时降级为 None(market 等回退到只写自身
         # feed,不影子双写)。
         self.spine: Optional[Any] = None
+        # Mission execution evidence (2026-07-02): lazy EventBus singleton.
+        # v2 mission mutations emit signed audit events here and link them to
+        # team_receipts entries. It stays lazy so bootstrap can survive broken
+        # audit directories; mutation endpoints degrade with warnings instead.
+        self.event_bus: Optional[Any] = None
         # LAN DID publish (2026-06-07): the running mDNS responder, or
         # None when ``NTH_LAN_PUBLISH=0`` / zeroconf is missing / startup
         # failed. Closed by ``_register_shutdown_hooks`` on process exit

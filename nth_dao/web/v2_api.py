@@ -72,6 +72,7 @@ last in the routing table.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -367,47 +368,234 @@ def _mission_to_summary(m: Any, request: Optional[Request] = None) -> Dict[str, 
     }
 
 
-def _reflect_claim_to_mission(
-    request: Request, ann: Any, announcement_id: str, claimant_did: str,
-) -> bool:
-    """认领成功后回流:把对应 mission step 标 CLAIMED + 记 assignee
-    (目标↔市场双向同步的最后一段)。只对带 mission_id 的公告(由
-    announce_step 发的)做;独立 announce 的没有 mission 归属,跳过。
+def _claim_visibility_ids(announcement_id: str) -> Tuple[str, str, str]:
+    digest = hashlib.sha256(announcement_id.encode("utf-8")).hexdigest()
+    return f"claim-{digest[:16]}", f"claim-{digest[:12]}", digest
 
-    步骤定位用确定性 announcement_id_for(mid, step.id) 反查匹配,避免解析
-    标题。best-effort:认领已成功(agent 已签收据、任务已下架),回流失败
-    只告警、不回滚认领。返回是否更新了某个 step。
+
+def _ensure_claim_execution_visible(
+    request: Request, ann: Any, announcement_id: str, claimant_did: str,
+    agent_receipt_id: str = "",
+) -> Dict[str, Any]:
+    """Ensure a standalone claimed market task appears in Missions and Blackboard.
+
+    Mission-linked announcements already flow through _reflect_claim_to_mission().
+    Plain market tasks otherwise disappear from Tasks after claim with only a toast,
+    leaving the user no visible execution trail. This helper creates an idempotent
+    Mission plus a Blackboard process card keyed by announcement_id.
     """
-    mid = getattr(ann, "mission_id", "") or ""
-    if not mid:
-        return False
+    if getattr(ann, "mission_id", ""):
+        return {"visibility_status": "ok", "visibility_warnings": []}
+
+    mission_id, entry_id, digest = _claim_visibility_ids(announcement_id)
+    out: Dict[str, Any] = {
+        "visibility_status": "failed",
+        "visibility_warnings": [],
+    }
+    mission_ok = False
+    process_ok = False
+    mission_created = False
+
     try:
-        from nth_dao.orchestration.market_coordinator import announcement_id_for
-        from nth_dao.orchestration.mission import StepStatus
+        from nth_dao.orchestration.mission import Mission, MissionStatus, StepStatus
+        from nth_dao.util.io import InterProcessLock
 
         mstore = getattr(request.app.state.nth, "missions", None)
         if mstore is None:
-            return False
-        mission = mstore.get(mid)
-        if mission is None:
-            return False
-        for step in mission.steps:
-            if announcement_id_for(mid, step.id) == announcement_id:
-                # 对抗审查:只允许 todo→claimed。认领是幂等的(同一 agent 重
-                # 认领仍返回 claimed),若无条件回写,一次幂等重认领会把已
-                # 推进到 active/done 的 step **倒退**回 claimed。已非 todo
-                # 就别动状态(可能已在干/已完成)。
-                if step.status != StepStatus.TODO.value:
-                    return False
-                step.status = StepStatus.CLAIMED.value
-                step.assignee = claimant_did
-                mstore.save(mission)
-                return True
+            raise RuntimeError("mission store unavailable")
+        lock_root = Path(getattr(mstore, "root", Path("missions")))
+        lock_path = lock_root / f".claim-visible-{digest}.mission"
+        with InterProcessLock(lock_path):
+            mission = mstore.get(mission_id)
+            if mission is None:
+                # Compatibility: adopt a legacy random-id mission if an older
+                # build already created one for this announcement.
+                for existing in mstore.list_all():
+                    meta = getattr(existing, "metadata", None) or {}
+                    if meta.get("source_announcement_id") == announcement_id:
+                        mission = existing
+                        break
+            if mission is None:
+                title = str(getattr(ann, "title", "") or "Claimed task").strip()
+                desc = str(getattr(ann, "description", "") or title).strip() or title
+                caps = [
+                    str(c).strip()
+                    for c in (getattr(ann, "capability_set", None) or [])
+                    if str(c).strip()
+                ]
+                mission = Mission.new(
+                    title=title[:200],
+                    goal=desc[:2000],
+                    owner=claimant_did,
+                    owner_did=claimant_did,
+                    steps=[{
+                        "description": desc[:500],
+                        "required_capabilities": caps[:16],
+                    }],
+                )
+                mission.id = mission_id
+                mission.status = MissionStatus.ACTIVE.value
+                mission.metadata = dict(mission.metadata or {})
+                mission.metadata.update({
+                    "source": "market_claim",
+                    "source_announcement_id": announcement_id,
+                    "claimant_did": claimant_did,
+                    "publisher_did": str(getattr(ann, "publisher_did", "") or ""),
+                    "reward_minor": int(getattr(ann, "reward_minor", 0) or 0),
+                    "reward_asset": str(getattr(ann, "reward_asset", "") or ""),
+                })
+                if mission.steps:
+                    mission.steps[0].status = StepStatus.CLAIMED.value
+                    mission.steps[0].assignee = claimant_did
+                try:
+                    mstore.create(mission)
+                    mission_created = True
+                except FileExistsError:
+                    mission = mstore.get(mission_id)
+                    if mission is None:
+                        raise
+            out["mission_id"] = mission.id
+            mission_ok = True
+    except Exception as exc:  # noqa: BLE001
+        out["visibility_warnings"].append("mission_visibility_failed")
+        logger.warning("claim->visible mission failed for %s: %s", announcement_id, exc)
+
+    if mission_ok and mission_created:
+        _emit_mission_evidence(request, MISSION_MARKET_CLAIM_VISIBLE, {
+            "mission_id": str(out.get("mission_id", "") or ""),
+            "status": "active",
+            "visibility_status": "ok",
+            "claimant_did": claimant_did,
+            "source_announcement_id": announcement_id,
+            "agent_claim_receipt_id": agent_receipt_id,
+        })
+
+    try:
+        from nth_dao.util.io import InterProcessLock
+
+        blackboard = _state_blackboard(request)
+        if blackboard is None:
+            raise RuntimeError("blackboard unavailable")
+        lock_root = Path(getattr(blackboard, "root", Path("blackboard")))
+        lock_path = lock_root / f".claim-visible-{digest}.blackboard"
+        with InterProcessLock(lock_path):
+            existing = blackboard.get(entry_id, "shared")
+            if existing is None:
+                meta: Dict[str, Any] = {
+                    "workflow": "tasks",
+                    "auto": True,
+                    "current_agent": claimant_did,
+                    "created_by": "nth-dao-hub",
+                    "created_by_did": claimant_did,
+                    "claimant_did": claimant_did,
+                    "source": "market_claim",
+                    "source_announcement_id": announcement_id,
+                }
+                if out.get("mission_id"):
+                    meta["mission_id"] = out["mission_id"]
+                entry = blackboard.post(
+                    topic=str(getattr(ann, "title", "") or "Claimed task")[:200],
+                    author="nth-dao-hub",
+                    scope="shared",
+                    status="doing",
+                    content=str(getattr(ann, "description", "") or "")[:1000],
+                    metadata=meta,
+                    entry_id=entry_id,
+                )
+            else:
+                entry = existing
+                if out.get("mission_id") and not entry.metadata.get("mission_id"):
+                    entry = blackboard.update(
+                        entry_id,
+                        author="nth-dao-hub",
+                        scope="shared",
+                        metadata_patch={"mission_id": out["mission_id"]},
+                    )
+            out["process_id"] = entry.id
+            process_ok = True
+    except Exception as exc:  # noqa: BLE001
+        out["visibility_warnings"].append("blackboard_visibility_failed")
+        logger.warning("claim->visible process failed for %s: %s", announcement_id, exc)
+
+    if mission_ok and process_ok:
+        out["visibility_status"] = "ok"
+    elif mission_ok or process_ok:
+        out["visibility_status"] = "partial"
+    else:
+        out["visibility_status"] = "failed"
+    return out
+
+def _reflect_claim_to_mission(
+    request: Request, ann: Any, announcement_id: str, claimant_did: str,
+    agent_receipt_id: str = "",
+) -> Dict[str, Any]:
+    """Reflect a successful market claim back into its linked Mission step.
+
+    Returns a small status object instead of a bool so the API can distinguish
+    "already reflected / already advanced" from real visibility failures. Claim
+    settlement remains best-effort and never rolls back a signed receipt.
+    """
+    mid = getattr(ann, "mission_id", "") or ""
+    if not mid:
+        return {"reflected": False, "reason": "no_mission_id"}
+    try:
+        from nth_dao.orchestration.market_coordinator import announcement_id_for
+        from nth_dao.orchestration.mission import StepStatus
+        from nth_dao.util.io import InterProcessLock, safe_id
+
+        mstore = getattr(request.app.state.nth, "missions", None)
+        if mstore is None:
+            return {"reflected": False, "reason": "mission_store_unavailable"}
+        lock_root = Path(getattr(mstore, "root", Path("missions")))
+        lock_path = lock_root / f".claim-reflect-{safe_id(mid)}"
+        with InterProcessLock(lock_path):
+            mission = mstore.get(mid)
+            if mission is None:
+                return {"reflected": False, "reason": "mission_missing"}
+            for step in mission.steps:
+                if announcement_id_for(mid, step.id) == announcement_id:
+                    # Only todo -> claimed is a mutation. If the same claim is
+                    # replayed after an agent has advanced the step, preserve
+                    # that progress. It is visibility-ok only when the current
+                    # assignee is the same claimant; otherwise the receipt and
+                    # Mission execution view disagree and must be surfaced.
+                    if step.status != StepStatus.TODO.value:
+                        current_assignee = str(getattr(step, "assignee", "") or "")
+                        if current_assignee == claimant_did:
+                            return {
+                                "reflected": False,
+                                "reason": "already_same_claimant",
+                                "step_status": step.status,
+                            }
+                        if current_assignee:
+                            return {
+                                "reflected": False,
+                                "reason": "already_claimed_by_other",
+                                "step_status": step.status,
+                            }
+                        return {
+                            "reflected": False,
+                            "reason": "already_non_todo_unassigned",
+                            "step_status": step.status,
+                        }
+                    step.status = StepStatus.CLAIMED.value
+                    step.assignee = claimant_did
+                    mstore.save(mission)
+                    _emit_mission_evidence(request, MISSION_STEP_CLAIMED, {
+                        "mission_id": mid,
+                        "step_id": step.id,
+                        "step_status": step.status,
+                        "claimant_did": claimant_did,
+                        "announcement_id": announcement_id,
+                        "agent_claim_receipt_id": agent_receipt_id,
+                    })
+                    return {"reflected": True, "reason": "reflected"}
+            return {"reflected": False, "reason": "step_missing"}
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "claim->mission reflect failed for %s: %s", announcement_id, exc,
         )
-    return False
+        return {"reflected": False, "reason": "reflect_failed"}
 
 
 def _seed_missions() -> List[Dict[str, Any]]:
@@ -4711,9 +4899,30 @@ def register_v2_routes(app: FastAPI) -> None:
         if resp_status == 200 and isinstance(content, dict):
             result = content.get("result")
             if isinstance(result, dict) and result.get("claimed"):
-                _reflect_claim_to_mission(
-                    request, ann, announcement_id, agent_did,
+                mission_id = getattr(ann, "mission_id", "") or ""
+                agent_receipt_id = str(result.get("receipt_id", "") or "")
+                reflect = _reflect_claim_to_mission(
+                    request, ann, announcement_id, agent_did, agent_receipt_id,
                 )
+                if mission_id:
+                    reason = str(reflect.get("reason") or "reflect_failed")
+                    result["mission_id"] = mission_id
+                    result["mission_reflected"] = bool(reflect.get("reflected"))
+                    result["mission_reflect_reason"] = reason
+                    if reason in {"reflected", "already_same_claimant"}:
+                        result["visibility_status"] = "ok"
+                        result["visibility_warnings"] = []
+                    else:
+                        result["visibility_status"] = "failed"
+                        result["visibility_warnings"] = [f"linked_mission_{reason}"]
+                    content["result"] = result
+                else:
+                    visible = _ensure_claim_execution_visible(
+                        request, ann, announcement_id, agent_did,
+                        str(result.get("receipt_id", "") or ""),
+                    )
+                    result.update(visible)
+                    content["result"] = result
         return JSONResponse(status_code=resp_status, content=content)
 
     @app.post("/api/v2/missions/{mission_id}/steps/{step_id}/announce")
