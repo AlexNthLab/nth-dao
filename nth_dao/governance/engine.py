@@ -25,6 +25,7 @@ ACTION_FUND_AUTHORIZE = "fund.authorize"
 ACTION_DISPUTE_RESOLVE = "dispute.resolve"
 ACTION_TASK_ACCEPT = "task.accept"
 ACTION_POLICY_AMEND = "policy.amend"
+ACTION_HANDOFF_RESPOND = "handoff.respond"
 
 
 @dataclass

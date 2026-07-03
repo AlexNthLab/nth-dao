@@ -233,6 +233,25 @@ from .fault_isolation import (
     FailureRecord,
     FaultIsolator,
 )
+# Runtime handoff primitives: signed, evidence-pinned, refutable agent handoff.
+from .runtime import (
+    EVENT_EXEC_HANDOFF,
+    EVENT_EXEC_HANDOFF_REFUTED,
+    EVENT_EXEC_HANDOFF_SUPERSEDED,
+    HANDOFF_CAPSULE_KIND,
+    HANDOFF_RESPONSE_KIND,
+    HandoffProjection,
+    HandoffRecord,
+    record_handoff,
+    record_handoff_response,
+    sign_handoff_capsule,
+    sign_handoff_response,
+    source_evidence_from_git,
+    verify_source_evidence,
+    verify_source_evidence_report,
+    verify_handoff_capsule,
+    verify_handoff_response,
+)
 # v0.10 Sprint Zero (T-1): Mandate primitives - AP2-shape signed
 # authorisation, will be joined by Cart (T-2) and Payment (T-3).
 from .mandate import (
@@ -458,6 +477,23 @@ __all__ = [
     "CircuitState",
     "FailureRecord",
     "FaultIsolator",
+    # Runtime handoff capsules
+    "HANDOFF_CAPSULE_KIND",
+    "HANDOFF_RESPONSE_KIND",
+    "EVENT_EXEC_HANDOFF",
+    "EVENT_EXEC_HANDOFF_REFUTED",
+    "EVENT_EXEC_HANDOFF_SUPERSEDED",
+    "HandoffProjection",
+    "HandoffRecord",
+    "sign_handoff_capsule",
+    "source_evidence_from_git",
+    "verify_source_evidence",
+    "verify_source_evidence_report",
+    "verify_handoff_capsule",
+    "record_handoff",
+    "sign_handoff_response",
+    "verify_handoff_response",
+    "record_handoff_response",
     # v0.10 T-1 Mandate primitives
     "build_intent_mandate",
     "intent_mandate_digest",
