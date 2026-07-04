@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { IconPlus, IconTarget } from "./Icons";
+import { IconCopy, IconPlus, IconTarget } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { fetchMissionHandoffs } from "../api";
 import { progressColor, progressPct } from "../utils/mission";
@@ -314,6 +314,7 @@ export function MissionList({
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [handoffDetailsError, setHandoffDetailsError] = useState("");
+  const [copiedPacketKey, setCopiedPacketKey] = useState("");
 
   useEffect(() => {
     if (!selected?.id || handoffEvents.length === 0) {
@@ -352,6 +353,26 @@ export function MissionList({
       onFocusConsumed?.();
     }
   }, [focusId, onFocusConsumed]);
+
+  async function copyReviewPacket(
+    key: string,
+    packet: Record<string, unknown>,
+  ): Promise<void> {
+    if (!navigator.clipboard?.writeText) {
+      setHandoffDetailsStatus("error");
+      setHandoffDetailsError("Clipboard is unavailable in this browser.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(packet, null, 2));
+      setCopiedPacketKey(key);
+    } catch (err) {
+      setHandoffDetailsStatus("error");
+      setHandoffDetailsError(
+        err instanceof Error ? err.message : "Clipboard write failed.",
+      );
+    }
+  }
 
   return (
     <>
@@ -689,6 +710,11 @@ export function MissionList({
                       const detail = event.capsule_hash
                         ? handoffDetails[event.capsule_hash]
                         : undefined;
+                      const packet = detail
+                        ? detail.review_packet ?? buildHandoffReviewPacket(event, detail)
+                        : null;
+                      const packetKey = detail?.capsule_hash || event.capsule_hash || event.id;
+                      const packetCopied = Boolean(packetKey) && copiedPacketKey === packetKey;
                       return (
                       <div
                         key={`workbench-${event.id}`}
@@ -782,6 +808,17 @@ export function MissionList({
                             >
                               Review packet
                             </summary>
+                            <button
+                              type="button"
+                              className="ghost-btn"
+                              style={{ marginTop: 8 }}
+                              onClick={() => packet && copyReviewPacket(packetKey, packet)}
+                              disabled={!packet}
+                              title="Copy the derived handoff packet for another agent to re-check"
+                            >
+                              <IconCopy size={14} />
+                              {packetCopied ? "Copied" : "Copy packet"}
+                            </button>
                             <pre
                               className="signature-panel"
                               style={{
@@ -792,11 +829,7 @@ export function MissionList({
                                 fontSize: 11,
                               }}
                             >
-                              {JSON.stringify(
-                                detail.review_packet ?? buildHandoffReviewPacket(event, detail),
-                                null,
-                                2,
-                              )}
+                              {JSON.stringify(packet, null, 2)}
                             </pre>
                           </details>
                         )}

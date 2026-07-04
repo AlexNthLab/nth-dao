@@ -173,6 +173,16 @@ export function fetchMissionHandoffs(
   return getJson<HandoffDetail[]>(`/handoffs?${p.toString()}`, signal);
 }
 
+export function fetchHandoffReviewPacket(
+  capsuleHash: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>(
+    `/handoffs/${encodeURIComponent(capsuleHash)}/review_packet`,
+    signal,
+  );
+}
+
 export async function activateMission(id: string): Promise<MissionSummary> {
   return postJson<MissionSummary>(
     `/missions/${encodeURIComponent(id)}/activate`,

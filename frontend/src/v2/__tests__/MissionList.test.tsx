@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LangProvider } from "../i18n";
 import { MissionList } from "../components/MissionList";
@@ -16,6 +16,12 @@ const capsuleHash =
 
 beforeEach(() => {
   localStorage.setItem("nth.v2.lang", "en");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: vi.fn().mockResolvedValue(undefined),
+    },
+  });
   vi.mocked(fetchMissionHandoffs).mockResolvedValue([
     {
       capsule_hash: capsuleHash,
@@ -197,6 +203,12 @@ describe("MissionList", () => {
     expect(screen.getByText(/least context needed to re-check/)).toBeTruthy();
     expect(screen.getByText(/Verify each evidence pointer/)).toBeTruthy();
     expect(screen.getByText(/sign a refutation or superseding handoff/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Copy packet"));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0][0];
+    expect(copied).toContain("nth-handoff-review-packet-v1");
+    expect(copied).toContain("Signed handoff is a claim, not a verified fact.");
+    expect(await screen.findByText("Copied")).toBeTruthy();
 
     const stepsSection = screen.getByText("Steps").closest(".detail-section");
     expect(stepsSection).toBeTruthy();
