@@ -49,6 +49,7 @@ export interface MissionListProps {
    *  detail rail populate immediately. Null disables. */
   focusId?: string | null;
   onFocusConsumed?: () => void;
+  onNavigate?: (target: "blackboard" | "tasks" | "audit") => void;
 }
 
 /** Minimal shape the create form emits. The receiver hydrates into
@@ -282,8 +283,13 @@ function timelineDotColor(
   return progressColor({ ...selected, status: selected.status });
 }
 
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.filter((v): v is string => Boolean(v))));
+}
+
 export function MissionList({
   missions, onCreate, onActivate, driverOptions, focusId, onFocusConsumed,
+  onNavigate,
 }: MissionListProps) {
   const { t } = useLang();
   const [selectedId, setSelectedId] = useState<string | null>(
@@ -309,6 +315,17 @@ export function MissionList({
   const handoffHashKey = handoffEvents
     .map((event) => event.capsule_hash || event.id)
     .join("|");
+  const sourceAnnouncementIds = uniqueNonEmpty([
+    selected?.source_announcement_id,
+    ...timelineEvents.map((event) => (
+      event.source_announcement_id || event.announcement_id
+    )),
+  ]);
+  const processIds = uniqueNonEmpty([
+    selected?.process_id,
+    ...timelineEvents.map((event) => event.process_id),
+  ]);
+  const receiptIds = uniqueNonEmpty(timelineEvents.map((event) => event.receipt_id));
   const [handoffDetails, setHandoffDetails] = useState<Record<string, HandoffDetail>>({});
   const [handoffDetailsStatus, setHandoffDetailsStatus] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -583,6 +600,78 @@ export function MissionList({
                   <span className="key">{t("Started", "Started")}</span>
                   <span className="value">{formatTime(selected.started_at)}</span>
                 </div>
+              </div>
+
+              <div className="detail-section">
+                <div className="detail-section-label">{t("Work links", "Work links")}</div>
+                <div className="detail-row">
+                  <span className="key">{t("Task source", "Task source")}</span>
+                  <span className="value">
+                    {sourceAnnouncementIds[0]
+                      ? <code>{shortValue(sourceAnnouncementIds[0], 24)}</code>
+                      : "-"}
+                  </span>
+                </div>
+                <div className="detail-row">
+                  <span className="key">Blackboard</span>
+                  <span className="value">
+                    {processIds[0] ? <code>{shortValue(processIds[0], 24)}</code> : "-"}
+                  </span>
+                </div>
+                <div className="detail-row">
+                  <span className="key">Receipts</span>
+                  <span className="value">{receiptIds.length}</span>
+                </div>
+                <div className="detail-row">
+                  <span className="key">Handoffs</span>
+                  <span className="value">{handoffEvents.length}</span>
+                </div>
+                {onNavigate && (
+                  <div className="quick-actions" style={{ marginTop: 10 }}>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate("blackboard")}
+                      disabled={processIds.length === 0}
+                      title={
+                        processIds.length
+                          ? "Open the Blackboard process board"
+                          : "No linked Blackboard process yet"
+                      }
+                    >
+                      Blackboard
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate("tasks")}
+                      disabled={sourceAnnouncementIds.length === 0}
+                      title={
+                        sourceAnnouncementIds.length
+                          ? "Open Tasks to inspect the market source"
+                          : "No linked Task source yet"
+                      }
+                    >
+                      Tasks
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate("audit")}
+                      disabled={receiptIds.length === 0}
+                      title={
+                        receiptIds.length
+                          ? "Open Audit to inspect signed receipts"
+                          : "No receipts on this mission timeline yet"
+                      }
+                    >
+                      Audit
+                    </button>
+                  </div>
+                )}
+                <p className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+                  {t(
+                    "Task 是来源/订单,Blackboard 是协作现场,Mission 是执行引擎,Audit 是可验证结果。",
+                    "Task is the source/order, Blackboard is the work scene, Mission is the execution engine, and Audit is the verifiable result.",
+                  )}
+                </p>
               </div>
 
               <div className="detail-section">

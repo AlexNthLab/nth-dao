@@ -96,6 +96,9 @@ export interface MissionTimelineEvent {
   status?: string | null;
   agent_did?: string | null;
   receipt_id?: string | null;
+  announcement_id?: string | null;
+  source_announcement_id?: string | null;
+  process_id?: string | null;
   capsule_hash?: string | null;
   refutation_count?: number;
   authorized_refutation_count?: number;
@@ -172,6 +175,10 @@ export interface MissionSummary {
   driver_did: string;
   /** Cap_token authorizing the driver, if any. */
   cap_token_id?: string;
+  /** Market announcement this mission was claimed from, if any. */
+  source_announcement_id?: string | null;
+  /** Blackboard process card mirroring this mission, if any. */
+  process_id?: string | null;
   started_at: string;
   /** Optional next actionable step description (the bridge already
    *  exposes this via tasks/get enrichment). */

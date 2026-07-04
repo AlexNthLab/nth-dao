@@ -390,6 +390,7 @@ export interface BackendStatus {
   label: string;
   ready: boolean;
   available: boolean;
+  runtime?: string;
   detail: string;
   warning?: string;
 }
@@ -445,28 +446,6 @@ export const spawnAgent = (body: SpawnAgentRequest) =>
 export const stopAgent = (agentId: string) =>
   postJson<{ agent_id: string; stopped: boolean }>(`/agents/${encodeURIComponent(agentId)}/stop`);
 
-async function postLegacyJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...authHeader(),
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail = `${res.status}`;
-    try {
-      const errBody = await res.json();
-      detail = errBody?.detail ?? detail;
-    } catch { /* keep status */ }
-    throw new Error(`POST ${path} -> HTTP ${res.status}: ${detail}`);
-  }
-  return (await res.json()) as T;
-}
-
 export function addAgentByDid(input: {
   actorId: string;
   didOrAgentId: string;
@@ -474,7 +453,7 @@ export function addAgentByDid(input: {
 }): Promise<AddAgentByDidResponse> {
   const value = input.didOrAgentId.trim();
   const isDid = value.startsWith("did:key:");
-  return postLegacyJson<AddAgentByDidResponse>("/api/agents/add", {
+  return postJson<AddAgentByDidResponse>("/agents/add", {
     actor_id: input.actorId,
     target_agent_id: isDid ? "" : value,
     target_did: isDid ? value : "",
@@ -487,7 +466,7 @@ export async function discoverLanAgents(input: {
   timeoutSeconds?: number;
   wantedCapabilities?: string[];
 }): Promise<AgentEntry[]> {
-  const data = await postLegacyJson<{ peers: LanPeer[] }>("/api/agents/lan_discover", {
+  const data = await postJson<{ peers: LanPeer[] }>("/agents/lan_discover", {
     actor_id: input.actorId,
     timeout_seconds: input.timeoutSeconds ?? 2,
     wanted_capabilities: input.wantedCapabilities ?? [],

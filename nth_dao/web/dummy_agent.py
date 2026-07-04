@@ -59,6 +59,7 @@ import argparse
 import http.server
 import importlib.util
 import json
+import locale
 import os
 import signal
 import socketserver
@@ -857,7 +858,7 @@ class _ClaudeCliAskBackend(_AskBackend):
                 argv,
                 stdin=_sp.DEVNULL,
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=max(5.0, timeout_s),
                 check=False,
                 creationflags=creation_flags,
@@ -924,6 +925,48 @@ class _CodexCliAskBackend(_AskBackend):
     name = "codex"
     DEFAULT_TIMEOUT_S = 90.0  # Codex is slower than Claude SDK
     DEFAULT_MAX_TOKENS = 0    # codex doesn't take max_tokens on CLI
+
+    @staticmethod
+    def _decode_cli_output(value: Any) -> str:
+        """Decode subprocess output without corrupting Windows shell errors."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, (bytes, bytearray)):
+            return str(value)
+        data = bytes(value)
+        encodings = [
+            "utf-8",
+            locale.getpreferredencoding(False),
+        ]
+        if sys.platform.startswith("win"):
+            encodings.extend(["mbcs", "cp936", "gbk"])
+        seen: set[str] = set()
+        for enc in encodings:
+            enc = (enc or "").strip()
+            if not enc or enc.lower() in seen:
+                continue
+            seen.add(enc.lower())
+            try:
+                return data.decode(enc)
+            except (LookupError, UnicodeDecodeError):
+                continue
+        return data.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _looks_like_node_missing_error(text: str) -> bool:
+        lower = text.lower()
+        return any(
+            marker in lower
+            for marker in (
+                "node: command not found",
+                "node is not recognized",
+                '"node" is not recognized',
+                "'node' is not recognized",
+                "\u4e0d\u662f\u5185\u90e8\u6216\u5916\u90e8\u547d\u4ee4",
+            )
+        )
 
     @staticmethod
     def _looks_like_node_shim(path: str) -> bool:
@@ -1184,8 +1227,6 @@ class _CodexCliAskBackend(_AskBackend):
                 # 输出(中文/特殊符号)会让 capture_output 的 reader 线程
                 # UnicodeDecodeError 崩掉 → 回应丢成空。codex CLI 一律 UTF-8,
                 # 这里钉死 utf-8 + replace,跨平台稳。
-                encoding="utf-8",
-                errors="replace",
                 # CO-3 fix (review round Phase 5.4 R1): drop the
                 # ``max(10.0, ...)`` floor — caller's effective
                 # budget passes through verbatim, matching the
@@ -1219,11 +1260,7 @@ class _CodexCliAskBackend(_AskBackend):
             partial = ""
             try:
                 if exc.stderr:
-                    raw = exc.stderr
-                    partial = (
-                        raw if isinstance(raw, str)
-                        else raw.decode("utf-8", errors="replace")
-                    )[-400:]
+                    partial = self._decode_cli_output(exc.stderr)[-400:]
             except Exception:  # noqa: BLE001 — diagnostic best-effort
                 partial = ""
             saw_approval = any(
@@ -1259,12 +1296,19 @@ class _CodexCliAskBackend(_AskBackend):
             ) from exc
 
         if completed.returncode != 0:
-            # subprocess.run with text=True + capture_output=True gives str
-            # stderr. Keep both the full value for classification and a tail
-            # for display: Codex prints long startup banners before the real
-            # actionable error (e.g. usage limit) near the end.
-            err_full = completed.stderr.strip()
+            # Keep both the full value for classification and a tail for
+            # display: Codex prints long startup banners before the real
+            # actionable error (e.g. usage limit) near the end. The child may
+            # be a Windows Node shim, so decode bytes with a locale fallback.
+            err_full = self._decode_cli_output(completed.stderr).strip()
             err = err_full[-4096:]
+            if self._looks_like_node_missing_error(err_full):
+                raise RuntimeError(
+                    "codex CLI npm shim could not start because Node.js is "
+                    "not available to the child process. Install Node.js, set "
+                    "NTH_DAO_NODE to node.exe or its directory, or use a "
+                    "native vendored codex.exe."
+                )
             # codex emits "401 Unauthorized" or "Not logged in"
             # when the OAuth session expires. Both phrasings have
             # been seen across versions; check separately so a
@@ -1286,7 +1330,7 @@ class _CodexCliAskBackend(_AskBackend):
             raise RuntimeError(
                 f"codex CLI exited {completed.returncode}: {err}"
             )
-        response = (completed.stdout or "").strip()
+        response = self._decode_cli_output(completed.stdout).strip()
         return {
             "response": response,
             "backend": self.name,
@@ -1766,9 +1810,15 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     anthropic_pkg = importlib.util.find_spec("anthropic") is not None
     claude_cli = shutil.which("claude") is not None
     codex_error = ""
+    codex_runtime = "missing"
     try:
-        _CodexCliAskBackend()._resolve_binary()
+        codex_binary = _CodexCliAskBackend()._resolve_binary()
         codex_cli = True
+        codex_runtime = (
+            "node-shim"
+            if _CodexCliAskBackend._looks_like_node_shim(codex_binary)
+            else "native"
+        )
     except RuntimeError as exc:
         codex_cli = False
         codex_error = str(exc)
@@ -1808,8 +1858,11 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             "label": "Codex",
             "ready": codex_ready,
             "available": codex_cli,
+            "runtime": codex_runtime,
             "detail": (
-                "Codex CLI and local profile detected."
+                "Codex native executable and local profile detected."
+                if codex_ready and codex_runtime == "native" else
+                "Codex npm shim, Node runtime, and local profile detected."
                 if codex_ready else
                 "Codex CLI detected, but no local profile was found; run codex login."
                 if codex_cli else
@@ -1817,7 +1870,13 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 if codex_error else
                 "Install Codex CLI and run codex login."
             ),
-            "warning": "Prompts that require tool approval may time out in non-interactive A2A calls.",
+            "warning": (
+                "Codex is routed through an npm Node shim; if calls fail, set "
+                "NTH_DAO_NODE to node.exe or its directory, or install a "
+                "native vendored codex.exe."
+                if codex_runtime == "node-shim" else
+                "Prompts that require tool approval may time out in non-interactive A2A calls."
+            ),
         },
         "hermes": {
             "kind": "hermes",

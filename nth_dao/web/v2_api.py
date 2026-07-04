@@ -354,6 +354,8 @@ def _mission_to_summary(m: Any, request: Optional[Request] = None) -> Dict[str, 
         "driver_did": getattr(m, "owner_did", "") or "",
         "started_at": getattr(m, "created_at", "") or "",
         "cap_token_id": meta.get("cap_token_id"),
+        "source_announcement_id": meta.get("source_announcement_id"),
+        "process_id": meta.get("process_id"),
         "next_actionable": nxt,
         "current_action": cur,
         "current_step_id": getattr(cur_step, "id", None) if cur_step is not None else None,
@@ -516,6 +518,29 @@ def _ensure_claim_execution_visible(
     except Exception as exc:  # noqa: BLE001
         out["visibility_warnings"].append("blackboard_visibility_failed")
         logger.warning("claim->visible process failed for %s: %s", announcement_id, exc)
+
+    if mission_ok and process_ok and out.get("mission_id") and out.get("process_id"):
+        try:
+            from nth_dao.util.io import InterProcessLock
+
+            mstore = getattr(request.app.state.nth, "missions", None)
+            if mstore is None:
+                raise RuntimeError("mission store unavailable")
+            lock_root = Path(getattr(mstore, "root", Path("missions")))
+            lock_path = lock_root / f".claim-visible-{digest}.mission"
+            with InterProcessLock(lock_path):
+                mission = mstore.get(str(out["mission_id"]))
+                if mission is not None:
+                    mission.metadata = dict(getattr(mission, "metadata", None) or {})
+                    if mission.metadata.get("process_id") != out["process_id"]:
+                        mission.metadata["process_id"] = out["process_id"]
+                        mstore.save(mission)
+        except Exception as exc:  # noqa: BLE001
+            out["visibility_warnings"].append("mission_process_link_failed")
+            logger.warning(
+                "claim->visible process link failed for %s: %s",
+                announcement_id, exc,
+            )
 
     if mission_ok and process_ok:
         out["visibility_status"] = "ok"
@@ -1379,6 +1404,9 @@ class MissionTimelineEventM(_Model):
     status: Optional[str] = None
     agent_did: Optional[str] = None
     receipt_id: Optional[str] = None
+    announcement_id: Optional[str] = None
+    source_announcement_id: Optional[str] = None
+    process_id: Optional[str] = None
 
 
 class MissionSummaryM(_Model):
@@ -1393,6 +1421,8 @@ class MissionSummaryM(_Model):
     driver_did: str
     started_at: str
     cap_token_id: Optional[str] = None
+    source_announcement_id: Optional[str] = None
+    process_id: Optional[str] = None
     next_actionable: Optional[str] = None
     current_action: Optional[str] = None
     current_step_id: Optional[str] = None
@@ -1815,6 +1845,11 @@ def _mission_audit_event_to_view(event: Any) -> Optional[Dict[str, Any]]:
         "status": str(status) if status is not None else None,
         "agent_did": str(agent_did) if agent_did else None,
         "receipt_id": str(payload.get("receipt_id", "") or "") or None,
+        "announcement_id": str(payload.get("announcement_id", "") or "") or None,
+        "source_announcement_id": (
+            str(payload.get("source_announcement_id", "") or "") or None
+        ),
+        "process_id": str(payload.get("process_id", "") or "") or None,
     }
 
 

@@ -104,12 +104,17 @@ def test_claim_closed_loop_agent_self_signs(tmp_path: Path) -> None:
         mission = app.state.nth.missions.get(mission_id)
         assert mission is not None
         assert mission.metadata["source_announcement_id"] == ann_id
+        assert mission.metadata["process_id"] == process_id
         assert mission.owner_did == agent_did
         assert mission.steps[0].assignee == agent_did
         process = app.state.nth.blackboard.get(process_id, "shared")
         assert process is not None
         assert process.metadata["mission_id"] == mission_id
         assert process.metadata["source_announcement_id"] == ann_id
+        mission_rows = client.get("/api/v2/missions").json()
+        mission_row = next(x for x in mission_rows if x["id"] == mission_id)
+        assert mission_row["source_announcement_id"] == ann_id
+        assert mission_row["process_id"] == process_id
 
         # 已认领 → 不再出现在开放广场。
         open_ids = {

@@ -3973,6 +3973,37 @@ def test_codex_backend_shim_gets_bundled_node_on_path(
     assert os.path.normcase(first_path) == os.path.normcase(str(node_dir))
 
 
+def test_codex_backend_classifies_windows_node_missing_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows npm shims can emit GBK shell errors when node.exe is absent.
+
+    The operator should see a targeted Node.js diagnostic, not mojibake or a
+    generic "codex exited 1" message.
+    """
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = b""
+        stderr = (
+            '"node" \u4e0d\u662f\u5185\u90e8\u6216\u5916\u90e8\u547d\u4ee4'
+        ).encode("gbk")
+
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(backend, "_resolve_binary", lambda: "codex.cmd")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        backend.ask({"prompt": "hi"}, timeout_s=30.0)
+
+    msg = str(exc_info.value)
+    assert "Node.js is not available" in msg
+    assert "codex CLI npm shim" in msg
+    assert "\ufffd" not in msg
+
+
 @pytest.mark.parametrize("stderr_msg", [
     "401 Unauthorized",
     "Not logged in. Run: codex login",

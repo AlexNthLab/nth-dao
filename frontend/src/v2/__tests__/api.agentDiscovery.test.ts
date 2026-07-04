@@ -31,7 +31,7 @@ describe("v2 agent discovery API wiring", () => {
 
     expect(res.agent_id).toBe("agent-from-did");
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/agents/add",
+      "/api/v2/agents/add",
       expect.objectContaining({ method: "POST" }),
     );
     const init = fetchMock.mock.calls[0][1] as RequestInit;
@@ -75,7 +75,7 @@ describe("v2 agent discovery API wiring", () => {
       has_active_cap: false,
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/agents/lan_discover",
+      "/api/v2/agents/lan_discover",
       expect.objectContaining({ method: "POST" }),
     );
     const init = fetchMock.mock.calls[0][1] as RequestInit;

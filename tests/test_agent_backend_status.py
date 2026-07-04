@@ -31,3 +31,30 @@ def test_backend_status_route_is_not_swallowed_by_did_route(tmp_path):
     resp = client.get("/api/v2/agents/backends/status")
     assert resp.status_code == 200
     assert "backends" in resp.json()
+
+
+def test_backend_status_reports_codex_runtime_without_paths(tmp_path, monkeypatch):
+    import nth_dao.web.dummy_agent as dummy_agent
+
+    (tmp_path / ".codex").mkdir()
+    monkeypatch.setattr(dummy_agent.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(
+        dummy_agent._CodexCliAskBackend,
+        "_resolve_binary",
+        lambda self: r"C:\Example\npm\codex.cmd",
+    )
+    monkeypatch.setattr(
+        dummy_agent._CodexCliAskBackend,
+        "_looks_like_node_shim",
+        staticmethod(lambda _path: True),
+    )
+
+    status = dummy_agent.backend_runtime_status()["codex"]
+
+    assert status["ready"] is True
+    assert status["runtime"] == "node-shim"
+    assert "npm shim" in status["detail"]
+    rendered = repr(status)
+    assert "Users" not in rendered
+    assert "AppData" not in rendered
+    assert "codex.cmd" not in rendered

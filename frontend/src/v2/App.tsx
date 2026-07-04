@@ -1035,6 +1035,7 @@ function AppInner() {
         driverOptions={agents}
         focusId={focusMissionId}
         onFocusConsumed={() => setFocusMissionId(null)}
+        onNavigate={(target) => setActive(target)}
       />
     );
   } else if (active === "rules") {

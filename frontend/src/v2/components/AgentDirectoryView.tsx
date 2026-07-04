@@ -522,6 +522,11 @@ export function AgentDirectoryView({
                       <p className="muted" style={{ fontSize: 11, margin: "8px 0", lineHeight: 1.35 }}>
                         {b.detail}
                       </p>
+                      {b.runtime && (
+                        <p className="muted" style={{ fontSize: 10, margin: "-4px 0 8px", lineHeight: 1.3 }}>
+                          runtime: {b.runtime}
+                        </p>
+                      )}
                       {b.warning && (
                         <p style={{ fontSize: 11, margin: "0 0 8px", color: "var(--warn, #d97706)", lineHeight: 1.35 }}>
                           {b.warning}

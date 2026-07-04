@@ -2110,6 +2110,7 @@ def create_app(
             "results": rows,
         }
 
+    @app.post("/api/v2/agents/lan_discover")
     @app.post("/api/agents/lan_discover")
     def lan_discover(payload: LANDiscoverPayload) -> dict[str, Any]:
         """Active "people nearby" via UDP broadcast on the LAN.
@@ -2185,6 +2186,7 @@ def create_app(
             ],
         }
 
+    @app.post("/api/v2/agents/add")
     @app.post("/api/agents/add")
     def add_agent(payload: AddAgentPayload) -> dict[str, Any]:
         """Add a known agent as a member of the local team.

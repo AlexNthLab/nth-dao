@@ -112,6 +112,8 @@ const mission: MissionSummary = {
   driver_label: "codex-local",
   driver_did: "did:key:zCodexLocal",
   started_at: "2026-07-02T08:00:00Z",
+  source_announcement_id: "ann-debug-111",
+  process_id: "process-debug-111",
   next_actionable: "write a fix",
   current_action: "reproduce the crash",
   steps: [
@@ -142,6 +144,8 @@ const mission: MissionSummary = {
       status: "active",
       agent_did: "did:key:zCodexLocal",
       receipt_id: "receipt-created-1234567890",
+      source_announcement_id: "ann-debug-111",
+      process_id: "process-debug-111",
     },
     {
       id: "m-vis-1:s1:status",
@@ -172,11 +176,22 @@ const mission: MissionSummary = {
 
 describe("MissionList", () => {
   it("shows step-level execution flow and signed handoff details", async () => {
+    const onNavigate = vi.fn();
     render(
       <LangProvider>
-        <MissionList missions={[mission]} />
+        <MissionList missions={[mission]} onNavigate={onNavigate} />
       </LangProvider>,
     );
+
+    expect(screen.getByText("Work links")).toBeTruthy();
+    const workLinks = screen.getByText("Work links").closest(".detail-section");
+    expect(workLinks).toBeTruthy();
+    const linkScope = within(workLinks as HTMLElement);
+    expect(linkScope.getByText("ann-debug-111")).toBeTruthy();
+    expect(linkScope.getByText("process-debug-111")).toBeTruthy();
+    expect(linkScope.getAllByText("1").length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(linkScope.getByRole("button", { name: "Tasks" }));
+    expect(onNavigate).toHaveBeenCalledWith("tasks");
 
     expect(screen.getByText("Execution state")).toBeTruthy();
     expect(screen.getByText("Step current active: reproduce the crash")).toBeTruthy();

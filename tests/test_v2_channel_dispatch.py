@@ -149,3 +149,67 @@ def test_channel_agent_listens_and_replies(tmp_path: Path) -> None:
         assert n2 - n1 <= 1, f"runaway agent replies: {n1} -> {n2}"
     finally:
         client.post(f"/api/v2/agents/{agent_id}/stop")
+
+
+def test_two_channel_agents_reply_without_runaway_loop(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    spawned = []
+    try:
+        for label in ("codex-mock", "hermes-mock"):
+            sp = client.post(
+                "/api/v2/agents/spawn",
+                json={"kind": "mock", "label": label, "capabilities": []},
+            )
+            assert sp.status_code in (200, 201), sp.text
+            agent = sp.json()
+            assert agent.get("a2a_port"), "spawned agent must expose an a2a_port"
+            spawned.append(agent)
+
+        client.post("/api/v2/channels", json={"name": "debug-room"})
+        for agent in spawned:
+            j = client.post(
+                "/api/v2/channels/debug-room/join",
+                json={"agent_id": agent["did"]},
+            )
+            assert j.status_code == 200, j.text
+
+        def replies_by_agent() -> dict[str, list]:
+            msgs = client.get("/api/v2/channels/debug-room/messages").json()
+            out = {agent["did"]: [] for agent in spawned}
+            for msg in msgs:
+                if msg["sender_id"] in out:
+                    out[msg["sender_id"]].append(msg)
+            return out
+
+        got: dict[str, list] = {}
+        for _ in range(20):
+            client.post(
+                "/api/v2/channels/debug-room/messages",
+                json={"agent_id": "admin", "body": "triage bug 111"},
+            )
+            for _ in range(8):
+                time.sleep(0.5)
+                got = replies_by_agent()
+                if all(got[agent["did"]] for agent in spawned):
+                    break
+            if all(got[agent["did"]] for agent in spawned):
+                break
+
+        assert all(got[agent["did"]] for agent in spawned), got
+        for agent in spawned:
+            first = got[agent["did"]][0]
+            assert first["sender_id"] == agent["did"]
+            assert first["body"].strip()
+
+        before = {did: len(rows) for did, rows in replies_by_agent().items()}
+        time.sleep(2.0)
+        after = {did: len(rows) for did, rows in replies_by_agent().items()}
+        for did in before:
+            assert after[did] - before[did] <= 1, (
+                f"runaway replies for {did}: {before[did]} -> {after[did]}"
+            )
+    finally:
+        for agent in spawned:
+            client.post(f"/api/v2/agents/{agent['agent_id']}/stop")

@@ -129,6 +129,15 @@ it("renders backend startup guide and gates unavailable backends", () => {
             available: true,
             detail: "Built-in smoke backend.",
           },
+          codex: {
+            kind: "codex",
+            label: "Codex",
+            ready: true,
+            available: true,
+            runtime: "node-shim",
+            detail: "Codex npm shim, Node runtime, and local profile detected.",
+            warning: "Codex is routed through an npm Node shim.",
+          },
           hermes: {
             kind: "hermes",
             label: "Hermes",
@@ -144,6 +153,8 @@ it("renders backend startup guide and gates unavailable backends", () => {
 
   expect(screen.getByText("Local backend startup")).toBeTruthy();
   expect(screen.getByText("Mock")).toBeTruthy();
+  expect(screen.getByText("Codex")).toBeTruthy();
+  expect(screen.getByText("runtime: node-shim")).toBeTruthy();
   expect(screen.getByText("Hermes")).toBeTruthy();
   expect(screen.getByText("setup needed")).toBeTruthy();
   expect(screen.getByText("Hermes runs in-process.")).toBeTruthy();
