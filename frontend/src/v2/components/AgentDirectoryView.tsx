@@ -106,7 +106,9 @@ export function AgentDirectoryView({
   const [addOpen, setAddOpen] = useState(false);
   const [newDid, setNewDid] = useState("");
   const [newLabel, setNewLabel] = useState("");
+  const [addError, setAddError] = useState("");
   const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState("");
   const [spawningKind, setSpawningKind] = useState<string | null>(null);
   const [stoppingAgentId, setStoppingAgentId] = useState<string | null>(null);
   const [selectedDid, setSelectedDid] = useState<string | null>(
@@ -348,16 +350,24 @@ export function AgentDirectoryView({
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     if (!newDid.trim()) return;
-    await onAddByDid(newDid.trim(), newLabel.trim());
-    setNewDid("");
-    setNewLabel("");
-    setAddOpen(false);
+    setAddError("");
+    try {
+      await onAddByDid(newDid.trim(), newLabel.trim());
+      setNewDid("");
+      setNewLabel("");
+      setAddOpen(false);
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function handleScan() {
     setScanning(true);
+    setScanError("");
     try {
       await onScanLan();
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : String(err));
     } finally {
       setScanning(false);
     }
@@ -462,6 +472,11 @@ export function AgentDirectoryView({
               />
             </div>
           </div>
+          {scanError && (
+            <p style={{ fontSize: 12, color: "var(--warn, #d97706)", margin: "-8px 0 14px" }}>
+              {t("局域网扫描失败:", "LAN scan failed:")} {scanError}
+            </p>
+          )}
 
 
           {backendCards.length > 0 && (
@@ -574,6 +589,11 @@ export function AgentDirectoryView({
                   <strong>{t("联系人", "Contacts")}</strong>
                   {t("下。要授权,去 Delegate 页签签发一个 cap_token。", " immediately. To grant authority, issue a cap_token from the Delegate tab.")}
                 </p>
+                {addError && (
+                  <p style={{ fontSize: 12, color: "var(--warn, #d97706)", margin: 0 }}>
+                    {t("添加失败:", "Add failed:")} {addError}
+                  </p>
+                )}
               </form>
             </div>
           )}

@@ -24,7 +24,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, activateMission, askAgentStream, createMission, createProcess, fetchAgents, fetchBackendStatus, fetchCapTokens,
+  a2aEchoApi, activateMission, addAgentByDid, askAgentStream, createMission, createProcess,
+  discoverLanAgents, fetchAgents, fetchBackendStatus, fetchCapTokens, fetchIdentity,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
   resolveDecisionApi, spawnAgent, stopAgent, summarizeAgent,
@@ -184,6 +185,8 @@ function AppInner() {
     useState<CapTokenSummary[]>(mockCapTokens);
   const [receipts, setReceipts] =
     useState<ReceiptSummary[]>(mockReceipts);
+  const [identity, setIdentity] =
+    useState<IdentityHeader>(MOCK_IDENTITY);
   /* Lifted for symmetry with the bootstrap fetcher — agents stayed
    * mock before because the boot effect only toasted on success
    * without applying. */
@@ -240,6 +243,7 @@ function AppInner() {
       // Fan out — but don't bail the whole batch on one failure.
       // Order MUST match the destructuring below.
       const settled = await Promise.allSettled([
+        fetchIdentity(ctrl.signal),
         fetchDecisions(ctrl.signal),
         fetchMissions(ctrl.signal),
         fetchProcesses(ctrl.signal),
@@ -256,9 +260,10 @@ function AppInner() {
       ]);
       if (cancelled) return;
       const [
-        decRes, misRes, procRes, agRes, backendRes, convRes, capRes, recRes,
+        idRes, decRes, misRes, procRes, agRes, backendRes, convRes, capRes, recRes,
         capReqRes, dispRes, socialRes,
       ] = settled;
+      if (idRes.status === "fulfilled")   setIdentity(idRes.value);
       if (decRes.status === "fulfilled")  setDecisions(decRes.value);
       if (misRes.status === "fulfilled")  setMissions(misRes.value);
       if (procRes.status === "fulfilled") setProcesses(procRes.value);
@@ -500,9 +505,9 @@ function AppInner() {
   // Status bar facts — derived state, no separate source of truth.
   const statusBar: StatusBarState = useMemo(
     () => ({
-      agent_id: MOCK_IDENTITY.agent_id,
-      code: MOCK_IDENTITY.code,
-      did: MOCK_IDENTITY.did,
+      agent_id: identity.agent_id,
+      code: identity.code,
+      did: identity.did,
       // Review fix C2 (2026-06-10): read from lifted state, not
       // module-scope mocks. When the hub is online these track
       // live caps + chain head; when offline they fall through to
@@ -518,7 +523,7 @@ function AppInner() {
       ).length,
       pending_decisions: decisions.length,
     }),
-    [decisions, missions, capTokens, receipts],
+    [identity, decisions, missions, capTokens, receipts],
   );
 
   // Command palette items — flat list, substring search.
@@ -613,11 +618,11 @@ function AppInner() {
         last_at: "",
         unread: 0,
         kind: "dm" as const,
-        participant_dids: [MOCK_IDENTITY.did, a.did],
+        participant_dids: [identity.did, a.did],
       }))
       .filter((d) => !have.has(d.id));
     return dms.length ? [...conversations, ...dms] : conversations;
-  }, [conversations, agents]);
+  }, [conversations, agents, identity.did]);
 
   const handleChatConversationSelect = useCallback(async (convId: string) => {
     setChatSelectedId(convId); // 切片1:记住选中会话(持久),在 fetch 守卫之前
@@ -655,7 +660,7 @@ function AppInner() {
   function pickAgentForConv(conv: Conversation | undefined): AgentEntry | null {
     const drivable = agents.filter(
       (a) =>
-        a.did !== MOCK_IDENTITY.did &&
+        a.did !== identity.did &&
         a.supervised &&
         a.alive &&
         typeof a.a2a_port === "number",
@@ -718,7 +723,7 @@ function AppInner() {
   async function handleChatSend(convId: string, body: string) {
     const msg: ChatMessage = {
       message_id: `m-local-${Date.now()}`,
-      sender_id: MOCK_IDENTITY.agent_id,
+      sender_id: identity.agent_id,
       sender_label: "you",
       body,
       created_at: new Date().toISOString(),
@@ -850,27 +855,53 @@ function AppInner() {
     }
   }
 
-  function handleAddAgent(did: string, label: string) {
-    // TODO: POST /api/agents/add with {target_did, label}
+  async function handleAddAgent(did: string, label: string) {
+    const res = await addAgentByDid({
+      actorId: identity.agent_id,
+      didOrAgentId: did,
+      label,
+    });
+    const entryDid = res.did || did.trim() || res.agent_id;
+    setAgents((prev) => [
+      {
+        did: entryDid,
+        code: res.agent_id.slice(0, 8),
+        label: res.label || label || res.agent_id,
+        source: "contact",
+        capabilities: [],
+        has_active_cap: false,
+        agent_id: res.agent_id,
+      },
+      ...prev.filter((a) => a.did !== entryDid && a.agent_id !== res.agent_id),
+    ]);
     toast.push(
-      `Added ${label || did.slice(0, 16) + "…"} to your contacts.`,
+      `Added ${res.label || label || entryDid.slice(0, 16) + "…"} to your contacts.`,
       "success",
     );
   }
-  /* LAN scan handler (audit fix M14/M15 + review#N2 2026-06-10):
-   *   The setTimeout-based mock outcome used to fire-and-forget,
-   *   so rapid double-clicks of "Scan LAN" produced duplicate
-   *   "complete" toasts even though the button was disabled
-   *   client-side. Converting to an actual Promise that resolves
-   *   at the simulated scan deadline lets AgentDirectoryView's
-   *   own `scanning` state (await-gated) correctly disable the
-   *   button for the full window, and centralises debouncing.
-   *   When the backend integration lands, the body becomes a
-   *   single `await fetch("/api/agents/lan_discover")`. */
+  /* LAN scan handler: v2 now calls the hardened legacy discovery
+   * endpoint instead of a simulated timeout. AgentDirectoryView still
+   * owns the disabled/scanning state, while App owns merging newly
+   * discovered peers into the shared Agents list. */
   async function handleScanLan() {
     toast.push("Scanning LAN for nearby agents…", "info");
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
-    toast.push("LAN scan complete. No new peers found.", "info");
+    const peers = await discoverLanAgents({
+      actorId: identity.agent_id,
+      timeoutSeconds: 2,
+    });
+    setAgents((prev) => {
+      const seen = new Set(peers.map((p) => p.did));
+      return [
+        ...peers,
+        ...prev.filter((a) => !seen.has(a.did)),
+      ];
+    });
+    toast.push(
+      peers.length
+        ? `LAN scan complete. Found ${peers.length} peer(s).`
+        : "LAN scan complete. No new peers found.",
+      "info",
+    );
   }
   function handleIssueCap(did: string) {
     setActive("inbox");
@@ -1057,7 +1088,7 @@ function AppInner() {
         onSend={handleChatSend}
         onConversationSelect={handleChatConversationSelect}
         focusConversationId={focusChatConversationId}
-        currentUserId={MOCK_IDENTITY.agent_id}
+        currentUserId={identity.agent_id}
       />
     );
   } else if (active === "channels") {
@@ -1111,7 +1142,7 @@ function AppInner() {
 
   return (
     <div className="app-shell">
-      <Topbar identity={MOCK_IDENTITY} onCmdK={() => setCmdkOpen(true)} />
+      <Topbar identity={identity} onCmdK={() => setCmdkOpen(true)} />
 
       <IconNav
         active={active}

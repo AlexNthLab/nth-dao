@@ -416,6 +416,26 @@ export interface SpawnAgentResponse {
   agent: AgentEntry;
 }
 
+export interface AddAgentByDidResponse {
+  ok: boolean;
+  agent_id: string;
+  did: string;
+  label: string;
+}
+
+export interface LanPeer {
+  agent_id: string;
+  label: string;
+  capabilities: string[];
+  groups: string[];
+  ws_url: string;
+  pubkey_hex: string;
+  pubkey_prefix?: string;
+  did?: string;
+  source_addr: string;
+  rtt_ms: number;
+}
+
 export const fetchBackendStatus = (signal?: AbortSignal) =>
   getJson<BackendStatusResponse>("/agents/backends/status", signal);
 
@@ -424,6 +444,79 @@ export const spawnAgent = (body: SpawnAgentRequest) =>
 
 export const stopAgent = (agentId: string) =>
   postJson<{ agent_id: string; stopped: boolean }>(`/agents/${encodeURIComponent(agentId)}/stop`);
+
+async function postLegacyJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...authHeader(),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const errBody = await res.json();
+      detail = errBody?.detail ?? detail;
+    } catch { /* keep status */ }
+    throw new Error(`POST ${path} -> HTTP ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as T;
+}
+
+export function addAgentByDid(input: {
+  actorId: string;
+  didOrAgentId: string;
+  label?: string;
+}): Promise<AddAgentByDidResponse> {
+  const value = input.didOrAgentId.trim();
+  const isDid = value.startsWith("did:key:");
+  return postLegacyJson<AddAgentByDidResponse>("/api/agents/add", {
+    actor_id: input.actorId,
+    target_agent_id: isDid ? "" : value,
+    target_did: isDid ? value : "",
+    label: input.label ?? "",
+  });
+}
+
+export async function discoverLanAgents(input: {
+  actorId: string;
+  timeoutSeconds?: number;
+  wantedCapabilities?: string[];
+}): Promise<AgentEntry[]> {
+  const data = await postLegacyJson<{ peers: LanPeer[] }>("/api/agents/lan_discover", {
+    actor_id: input.actorId,
+    timeout_seconds: input.timeoutSeconds ?? 2,
+    wanted_capabilities: input.wantedCapabilities ?? [],
+  });
+  return data.peers
+    .filter((peer) => peer.did || peer.pubkey_hex || peer.agent_id)
+    .map((peer) => {
+      const stableId = peer.did || peer.agent_id || peer.pubkey_hex;
+      return {
+        did: stableId,
+        code: peer.pubkey_prefix || peer.agent_id.slice(0, 8),
+        label: peer.label || peer.agent_id || "LAN peer",
+        source: "lan",
+        capabilities: peer.capabilities ?? [],
+        last_seen: new Date().toISOString(),
+        has_active_cap: false,
+        agent_card: {
+          agent_id: peer.agent_id,
+          groups: peer.groups ?? [],
+          ws_url: peer.ws_url,
+          source_addr: peer.source_addr,
+          rtt_ms: peer.rtt_ms,
+          pubkey_prefix: peer.pubkey_prefix,
+          did: peer.did || "",
+          pubkey_hex: peer.pubkey_hex,
+        },
+      };
+    });
+}
 
 /** UI 集成（2026-06-13）：驱动一个 spawn 出来的 agent 跑一个任务，**流式**
  *  接收输出。打的是 hub 端点 ``POST /api/v2/agents/{did}/ask-stream`` ——
