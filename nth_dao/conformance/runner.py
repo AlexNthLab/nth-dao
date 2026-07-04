@@ -414,6 +414,82 @@ def check_handoff_response_v2(vectors: List[dict]) -> List[ConformanceFailure]:
     return failures
 
 
+def check_handoff_review_packet_v1(vectors: List[dict]) -> List[ConformanceFailure]:
+    """Derived handoff review packet v1 shape and canonical bytes are stable."""
+    failures: List[ConformanceFailure] = []
+    for v in vectors:
+        packet = v["packet"]
+        if packet.get("packet_kind") != "nth-handoff-review-packet-v1":
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_review_packet_v1",
+                description="packet_kind",
+                expected="nth-handoff-review-packet-v1",
+                actual=packet.get("packet_kind"),
+            ))
+        if packet.get("packet_version") != 1:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_review_packet_v1",
+                description="packet_version",
+                expected=1,
+                actual=packet.get("packet_version"),
+            ))
+        expected_signed = bool(v.get("expected_packet_is_signed", False))
+        if bool(packet.get("packet_is_signed")) != expected_signed:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_review_packet_v1",
+                description="packet_is_signed",
+                expected=expected_signed,
+                actual=packet.get("packet_is_signed"),
+            ))
+        expected_truth = bool(v.get("expected_is_truth_verdict", False))
+        if bool(packet.get("is_truth_verdict")) != expected_truth:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_review_packet_v1",
+                description="is_truth_verdict",
+                expected=expected_truth,
+                actual=packet.get("is_truth_verdict"),
+            ))
+        actual_summary: Dict[str, int] = {
+            "total": len(packet.get("evidence_verification", [])),
+            "verified": 0,
+            "unreachable": 0,
+            "unavailable": 0,
+            "mismatch": 0,
+            "invalid": 0,
+            "unsupported": 0,
+        }
+        for item in packet.get("evidence_verification", []):
+            status = str(item.get("status", "invalid"))
+            actual_summary[status] = actual_summary.get(status, 0) + 1
+        expected_summary = v.get("expected_evidence_summary", {})
+        if actual_summary != expected_summary or packet.get("evidence_summary") != expected_summary:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_review_packet_v1",
+                description="evidence_summary",
+                expected=expected_summary,
+                actual={
+                    "computed": actual_summary,
+                    "packet": packet.get("evidence_summary"),
+                },
+            ))
+        actual_hex = canonical_json(packet).hex()
+        expected_hex = v["expected_canonical_hex"]
+        if actual_hex != expected_hex:
+            failures.append(ConformanceFailure(
+                vector_id=v["id"],
+                category="handoff_review_packet_v1",
+                description="canonical packet bytes",
+                expected=expected_hex,
+                actual=actual_hex,
+            ))
+    return failures
+
+
 _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "canonical_json":              check_canonical_json,
     "fingerprint":                 check_fingerprint,
@@ -433,6 +509,7 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "mandate_negative_binding":    check_mandate_negative_binding,
     "mandate_negative_expiry":     check_mandate_negative_expiry,
     "handoff_response_v2":         check_handoff_response_v2,
+    "handoff_review_packet_v1":    check_handoff_review_packet_v1,
 }
 
 

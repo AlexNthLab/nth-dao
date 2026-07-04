@@ -943,8 +943,10 @@ projection checks before writing directly to the spine.
 ### 11.6 Handoff Review Packet
 
 `GET /api/v2/handoffs?include_details=true` MAY include a derived
-`review_packet` object for each handoff capsule. This packet is optimized for
-the next agent in a debugging chain: it gives enough stable context to
+`review_packet` object for each handoff capsule. Agents MAY also fetch a
+single packet with
+`GET /api/v2/handoffs/{capsule_hash}/review_packet`. This packet is optimized
+for the next agent in a debugging chain: it gives enough stable context to
 re-check, continue, refute, or supersede a handoff with fewer tokens.
 
 The packet is not itself a signed statement and MUST NOT be treated as a

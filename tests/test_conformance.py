@@ -48,11 +48,31 @@ def test_each_category_has_at_least_one_vector():
         "lan_psk_tag",
         "replay_window",
         "handoff_response_v2",
+        "handoff_review_packet_v1",
     }
     data = load_vectors()
     present = set(data["vectors"].keys())
     missing = expected_categories - present
     assert not missing, f"missing categories: {missing}"
+
+
+def test_main_regenerator_preserves_documented_categories(tmp_path):
+    """The top-level regenerator must not drop categories added by sub-generators."""
+    from nth_dao.conformance.regenerate import regenerate
+
+    out = tmp_path / "vectors.json"
+    regenerate(out)
+    data = load_vectors(out)
+    present = set(data["vectors"].keys())
+    assert {
+        "mandate_intent_canonical",
+        "mandate_cart_canonical",
+        "mandate_payment_canonical",
+        "mandate_negative_binding",
+        "mandate_negative_expiry",
+        "handoff_response_v2",
+        "handoff_review_packet_v1",
+    } <= present
 
 
 def test_canonical_json_has_unicode_vector():
@@ -103,3 +123,27 @@ def test_handoff_response_v2_vector_matches_generator():
 
     data = load_vectors()
     assert data["vectors"]["handoff_response_v2"] == gen_handoff_response_v2()
+
+
+def test_handoff_review_packet_v1_vector_is_explicitly_not_truth():
+    """Review packet vectors must not blur projection data into facts."""
+    data = load_vectors()
+    cases = data["vectors"].get("handoff_review_packet_v1", [])
+    assert len(cases) == 1
+    v = cases[0]
+    packet = v["packet"]
+    assert packet["packet_kind"] == "nth-handoff-review-packet-v1"
+    assert packet["packet_version"] == 1
+    assert packet["packet_is_signed"] is False
+    assert packet["is_truth_verdict"] is False
+    assert packet["evidence_summary"] == v["expected_evidence_summary"]
+    assert packet["evidence_summary"]["total"] == len(packet["evidence_verification"])
+    assert "claim, not a verified fact" in packet["warning"]
+
+
+def test_handoff_review_packet_v1_vector_matches_generator():
+    """The shipped review packet vector must match the deterministic generator."""
+    from nth_dao.conformance.regenerate import gen_handoff_review_packet_v1
+
+    data = load_vectors()
+    assert data["vectors"]["handoff_review_packet_v1"] == gen_handoff_review_packet_v1()

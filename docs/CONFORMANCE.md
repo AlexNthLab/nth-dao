@@ -36,8 +36,9 @@ Without them, "I implemented the spec" is a guess. With them, "I pass all
 | `mandate_negative_expiry` | 1 | Intent expiry check with a fixed clock. |
 | `replay_window` | 5 | gossip replay window boundaries (10-min past / 60-sec future drift). |
 | `handoff_response_v2` | 1 | Signed handoff supersession response plus the canonical receipt timeline entry that binds target and replacement capsule hashes. |
+| `handoff_review_packet_v1` | 1 | Derived handoff review packet canonical bytes, evidence summary, and explicit "not a truth verdict" flags. |
 
-**Total: 38 vectors.** This grows with the protocol.
+**Total: 39 vectors.** This grows with the protocol.
 
 ## What's NOT covered yet (planned for v0.9.5+)
 

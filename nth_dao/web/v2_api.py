@@ -4569,6 +4569,30 @@ def register_v2_routes(app: FastAPI) -> None:
             "event_hash": ev.content_hash,
         }
 
+    @app.get("/api/v2/handoffs/{capsule_hash}/review_packet")
+    def v2_handoff_review_packet(
+        capsule_hash: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Return the minimal agent-facing review packet for one handoff."""
+        proj = _verified_handoff_projection(request)
+        if proj is None:
+            raise HTTPException(
+                status_code=503,
+                detail="handoff projection unavailable; cannot build review packet",
+            )
+        rec = next(
+            (row for row in proj.all() if row.capsule_hash == capsule_hash),
+            None,
+        )
+        if rec is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"handoff capsule not found: {capsule_hash}",
+            )
+        evidence = list(rec.capsule.get("evidence", []))
+        evidence_verification = _handoff_evidence_verification(evidence)
+        return _handoff_review_packet(rec, evidence_verification)
+
     @app.get("/api/v2/handoffs")
     def v2_handoffs_list(
         request: Request, mission_id: str = "", include_details: bool = False,

@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..identity import canonical_json
+from ._gen_mandate_vectors import build_mandate_vectors
 from .runner import VECTORS_PATH
 
 
@@ -500,6 +501,93 @@ def gen_handoff_response_v2() -> list:
     }]
 
 
+def gen_handoff_review_packet_v1() -> list:
+    """Derived handoff review packet v1 projection.
+
+    This vector deliberately does NOT sign the packet. The packet is a
+    replay/projection helper; the signed truth claims are the handoff capsule
+    and response statements that feed it.
+    """
+    evidence_verification = [
+        {
+            "kind": "source_span",
+            "commit": "a" * 40,
+            "path": "nth_dao/runtime/handoff.py",
+            "symbol": "record_handoff_response",
+            "content_hash": "sha256:" + "1" * 64,
+            "status": "verified",
+            "reason": "content hash matches pinned git blob",
+            "source": "env:NTH_SOURCE_REPOS",
+            "repo_matched_by": "repo_url",
+            "commit_reachable": True,
+            "blob_reachable": True,
+        },
+        {
+            "kind": "source_span",
+            "commit": "b" * 40,
+            "path": "nth_dao/web/v2_api.py",
+            "symbol": "_handoff_review_packet",
+            "content_hash": "sha256:" + "2" * 64,
+            "status": "unreachable",
+            "reason": "commit not found in mapped source repository",
+            "source": "env:NTH_SOURCE_REPOS",
+            "repo_matched_by": "source_root",
+            "commit_reachable": False,
+            "blob_reachable": False,
+        },
+    ]
+    evidence_summary = {
+        "total": 2,
+        "verified": 1,
+        "unreachable": 1,
+        "unavailable": 0,
+        "mismatch": 0,
+        "invalid": 0,
+        "unsupported": 0,
+    }
+    packet = {
+        "packet_kind": "nth-handoff-review-packet-v1",
+        "packet_version": 1,
+        "packet_is_signed": False,
+        "is_truth_verdict": False,
+        "warning": "Signed handoff is a claim, not a verified fact.",
+        "goal": (
+            "Use the least context needed to re-check, continue, or refute "
+            "this handoff."
+        ),
+        "mission_id": "mission-conformance-1",
+        "step_id": "step-review",
+        "capsule_hash": "sha256:" + "3" * 64,
+        "status": "proposed",
+        "verification_status": "unverified",
+        "author_did": "did:key:z6MkconformanceAuthor",
+        "finding": "The dispatch path drops signed handoff responses.",
+        "root_cause_hypothesis": (
+            "The response writer did not bind receipts to target capsules."
+        ),
+        "evidence_summary": evidence_summary,
+        "evidence_verification": evidence_verification,
+        "changed_files": ["nth_dao/runtime/handoff.py"],
+        "tests": ["python -m pytest tests/test_runtime_handoff.py -q"],
+        "risks": ["Signature proves authorship, not correctness."],
+        "next_actions": ["Re-check evidence, then refute or supersede if wrong."],
+        "required_review_steps": [
+            "Verify each evidence pointer against its pinned commit and content hash.",
+            "Rerun or inspect the listed tests before trusting the finding.",
+            "If the claim is wrong, sign a refutation or superseding handoff with a receipt.",
+        ],
+    }
+    return [{
+        "id": "handoff-review-packet-v1-001",
+        "description": "Derived v1 review packet is stable and explicitly non-truth.",
+        "packet": packet,
+        "expected_canonical_hex": canonical_json(packet).hex(),
+        "expected_evidence_summary": evidence_summary,
+        "expected_packet_is_signed": False,
+        "expected_is_truth_verdict": False,
+    }]
+
+
 def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors = {
         "format": "nth-dao-conformance-v1",
@@ -518,12 +606,14 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             "did_key_encoding":            gen_did_key_encoding(),
             "lan_psk_tag":                 gen_lan_psk_tag(),
             "replay_window":               gen_replay_window(),
+            **build_mandate_vectors(),
             "handoff_response_v2":         gen_handoff_response_v2(),
+            "handoff_review_packet_v1":    gen_handoff_review_packet_v1(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(vectors, f, indent=2, ensure_ascii=False)
+        json.dump(vectors, f, indent=2, ensure_ascii=False, sort_keys=True)
     counts = {k: len(v) for k, v in vectors["vectors"].items()}
     print(f"wrote {path}")
     print(f"  categories: {len(counts)}")

@@ -122,6 +122,25 @@ def test_handoff_endpoint_records_and_lists_capsule(tmp_path: Path) -> None:
         for step in packet["required_review_steps"]
     )
 
+    packet_by_hash = client.get(
+        f"/api/v2/handoffs/{capsule['capsule_hash']}/review_packet",
+    )
+    assert packet_by_hash.status_code == 200, packet_by_hash.text
+    assert packet_by_hash.json() == packet
+
+
+def test_handoff_review_packet_endpoint_returns_404_for_unknown_hash(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    r = client.get(
+        "/api/v2/handoffs/sha256:"
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        "/review_packet",
+    )
+    assert r.status_code == 404
+    assert "handoff capsule not found" in r.text
+
 
 def test_handoff_endpoint_records_refutation(tmp_path: Path) -> None:
     client = _client(tmp_path)
