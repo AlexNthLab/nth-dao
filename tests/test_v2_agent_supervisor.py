@@ -5149,6 +5149,26 @@ def test_hub_proxy_ask_uses_per_method_timeout(
         f"expected per-method timeout 65.0 for 'ask', got {seen_timeouts!r}"
     )
 
+    seen_timeouts.clear()
+    resp_long = client.post(
+        f"/api/v2/agents/{target_did}/a2a/ask",
+        json={"prompt": "hi", "timeout_s": 100},
+    )
+    assert resp_long.status_code == 200, resp_long.text
+    assert seen_timeouts == [105.0], (
+        f"expected requested timeout + slack for ask, got {seen_timeouts!r}"
+    )
+
+    seen_timeouts.clear()
+    resp_capped = client.post(
+        f"/api/v2/agents/{target_did}/a2a/ask",
+        json={"prompt": "hi", "timeout_s": 9999},
+    )
+    assert resp_capped.status_code == 200, resp_capped.text
+    assert seen_timeouts == [_v2._A2A_MAX_FORWARD_TIMEOUT_S], (
+        f"expected capped timeout for huge ask, got {seen_timeouts!r}"
+    )
+
     # And a non-mapped method falls back to the snappy default.
     seen_timeouts.clear()
     resp2 = client.post(
@@ -5547,7 +5567,10 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
         def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
             self.messages.append((channel_id, sender_id, body))
 
+    seen_timeouts: list[float] = []
+
     def fake_urlopen(_req, timeout):  # noqa: ANN001, ARG001
+        seen_timeouts.append(timeout)
         raise urllib.error.HTTPError(
             url="http://127.0.0.1:9999/a2a/ask",
             code=502,
@@ -5579,6 +5602,56 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
     assert "Tail:" not in body
     assert "plugin assets" not in body
     assert len(body) <= 420
+    assert seen_timeouts == [125.0]
+
+
+def test_child_error_decode_strips_replacement_characters() -> None:
+    import json
+    import nth_dao.web.v2_api as _v2
+
+    raw = json.dumps({
+        "error": {
+            "code": "backend-failed",
+            "message": "ACCESS_VIOLATION \ufffd\ufffd known Windows quirk",
+        }
+    }).encode("utf-8")
+
+    decoded = _v2._decode_or_passthrough(raw)
+    assert decoded["error"]["message"] == (
+        "ACCESS_VIOLATION -- known Windows quirk"
+    )
+
+    claude_raw = json.dumps({
+        "error": {
+            "code": "backend-failed",
+            "message": (
+                "RuntimeError: claude CLI crashed with ACCESS_VIOLATION "
+                "(0xC0000005) \ufffd\ufffd known Windows + piped-stdout "
+                "quirk in claude.exe."
+            ),
+        }
+    }).encode("utf-8")
+    claude_decoded = _v2._decode_or_passthrough(claude_raw)
+    assert claude_decoded["error"]["message"] == (
+        "RuntimeError: claude CLI crashed with ACCESS_VIOLATION "
+        "(0xC0000005) - known Windows + piped-stdout quirk in "
+        "claude.exe. Use kind=mock for this agent until a ConPTY "
+        "wrapper lands."
+    )
+
+
+def test_a2a_forward_timeout_rejects_bool_and_bounds_extreme_values() -> None:
+    import nth_dao.web.v2_api as _v2
+
+    assert _v2._a2a_forward_timeout("ask", b'{"timeout_s": true}') == 65.0
+
+    huge = ("1" + ("0" * 10000)).encode("ascii")
+    assert _v2._a2a_forward_timeout(
+        "ask", b'{"timeout_s": ' + huge + b"}",
+    ) == 65.0
+    assert _v2._a2a_forward_timeout(
+        "ask", b'{"timeout_s": 1e999}',
+    ) == _v2._A2A_MAX_FORWARD_TIMEOUT_S
 
 
 # ─────────────────────────────────────────────────────────────

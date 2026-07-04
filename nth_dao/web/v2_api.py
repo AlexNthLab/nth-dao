@@ -2667,6 +2667,41 @@ _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     # 125s = 120s backend allowance + 5s for hub round-trip overhead.
     "ask-stream": 125.0,
 }
+_A2A_TIMEOUT_SLACK_S = 5.0
+_A2A_MAX_FORWARD_TIMEOUT_S = 180.0
+_CHANNEL_DISPATCH_ASK_TIMEOUT_S = 120.0
+
+
+def _a2a_forward_timeout(method: str, body_bytes: bytes) -> float:
+    """Return the hub->child timeout for an A2A method.
+
+    The per-method map is the minimum. For model-backed methods, callers may
+    request a larger ``timeout_s`` in the JSON body; the proxy adds a small
+    round-trip slack and clamps to a hard ceiling so one request cannot pin a
+    worker indefinitely.
+    """
+    base = _A2A_METHOD_TIMEOUTS.get(method, _A2A_DEFAULT_TIMEOUT_S)
+    if method not in {"ask", "ask-stream"}:
+        return base
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return base
+    if not isinstance(payload, dict):
+        return base
+    requested = payload.get("timeout_s")
+    if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+        return base
+    try:
+        requested_f = float(requested)
+    except (OverflowError, ValueError):
+        return _A2A_MAX_FORWARD_TIMEOUT_S
+    if requested_f <= 0 or requested_f != requested_f:
+        return base
+    return min(
+        max(base, requested_f + _A2A_TIMEOUT_SLACK_S),
+        _A2A_MAX_FORWARD_TIMEOUT_S,
+    )
 
 
 def _state_supervisor(request: Request) -> Optional[Any]:
@@ -3168,18 +3203,39 @@ def _proxy_ssestream(
     )
 
 
+def _sanitize_replacement_chars(value: Any) -> Any:
+    """Remove U+FFFD from child diagnostics without changing JSON shape."""
+    if isinstance(value, str):
+        if (
+            "claude CLI crashed with ACCESS_VIOLATION" in value
+            and "0xC0000005" in value
+        ):
+            return (
+                "RuntimeError: claude CLI crashed with ACCESS_VIOLATION "
+                "(0xC0000005) - known Windows + piped-stdout quirk in "
+                "claude.exe. Use kind=mock for this agent until a ConPTY "
+                "wrapper lands."
+            )
+        return value.replace("\ufffd", "-")
+    if isinstance(value, list):
+        return [_sanitize_replacement_chars(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _sanitize_replacement_chars(v) for k, v in value.items()}
+    return value
+
+
 def _decode_or_passthrough(raw: bytes) -> Any:
     """Decode JSON bytes; on failure return ``{raw_text: <str>}``
     so the caller still gets SOMETHING readable instead of a 500.
     """
     try:
-        return json.loads(raw.decode("utf-8"))
+        return _sanitize_replacement_chars(json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError):
         # Truncate for safety — a 1MB binary blob in the JSON
         # response would be wasteful.
         text = raw[:1024].decode("utf-8", errors="replace")
         return {
-            "raw_text_preview": text,
+            "raw_text_preview": _sanitize_replacement_chars(text),
             "raw_length": len(raw),
             "note": "child returned non-JSON; preview truncated to 1KB",
         }
@@ -3552,14 +3608,20 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
     from nth_dao.cap_token import encode_authorization_header
 
     try:
-        body_bytes = json.dumps({"prompt": prompt}, ensure_ascii=False).encode("utf-8")
+        body_bytes = json.dumps(
+            {
+                "prompt": prompt,
+                "timeout_s": _CHANNEL_DISPATCH_ASK_TIMEOUT_S,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
         url = f"http://127.0.0.1:{a2a_port}/a2a/ask"
         headers = {
             "Content-Type": "application/json; charset=utf-8",
             "Content-Length": str(len(body_bytes)),
             "Authorization": f"CapToken {encode_authorization_header(auth_token)}",
         }
-        timeout = _A2A_METHOD_TIMEOUTS.get("ask", _A2A_DEFAULT_TIMEOUT_S)
+        timeout = _a2a_forward_timeout("ask", body_bytes)
         content: Any = {}
         for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
             req = urllib.request.Request(
@@ -5883,9 +5945,7 @@ def register_v2_routes(app: FastAPI) -> None:
         # timeout so slow backends (claude-code, future Hermes,
         # etc.) aren't capped at the snappy default that was sized
         # for /ping + /echo. Unknown methods inherit the default.
-        forward_timeout = _A2A_METHOD_TIMEOUTS.get(
-            method, _A2A_DEFAULT_TIMEOUT_S,
-        )
+        forward_timeout = _a2a_forward_timeout(method, body_bytes)
 
         # Phase 5.2: SSE streaming proxy. We dispatch to a separate
         # forwarder because the buffered path uses ``asyncio.to_thread``
@@ -5992,7 +6052,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "Content-Length": str(len(body_bytes)),
             "Authorization": f"CapToken {encode_authorization_header(token)}",
         }
-        forward_timeout = _A2A_METHOD_TIMEOUTS.get(method, _A2A_DEFAULT_TIMEOUT_S)
+        forward_timeout = _a2a_forward_timeout(method, body_bytes)
 
         if method == "ask-stream":
             return _proxy_ssestream(
