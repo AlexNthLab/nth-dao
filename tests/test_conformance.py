@@ -75,6 +75,16 @@ def test_main_regenerator_preserves_documented_categories(tmp_path):
     } <= present
 
 
+def test_main_regenerator_matches_shipped_vectors_byte_for_byte(tmp_path):
+    """Full regeneration must be deterministic and audit-friendly."""
+    from nth_dao.conformance.regenerate import regenerate
+    from nth_dao.conformance.runner import VECTORS_PATH
+
+    out = tmp_path / "vectors.json"
+    regenerate(out)
+    assert out.read_bytes() == VECTORS_PATH.read_bytes()
+
+
 def test_canonical_json_has_unicode_vector():
     """Cross-implementation unicode handling is critical; ensure coverage."""
     data = load_vectors()

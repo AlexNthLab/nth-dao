@@ -13,7 +13,7 @@ Wire-protocol specs in plain English (like `docs/PROTOCOLS.md`) tell you
 *what* to implement. Conformance vectors tell you *whether you did it right*.
 
 Without them, "I implemented the spec" is a guess. With them, "I pass all
-38 vectors" is a checkmark.
+39 vectors" is a checkmark.
 
 ## What's Covered
 
@@ -104,6 +104,7 @@ should be rejected.
 
 - `format: "nth-dao-conformance-v1"` — the schema of the file itself
 - `schema_version: 1` — bumped if the runner's expected fields change
+- `generated_at` - a deterministic vector-set stamp, not wall-clock time
 
 A port should read both and refuse to run against a vectors file with
 mismatched schema. Wire-protocol version negotiation is separate — see

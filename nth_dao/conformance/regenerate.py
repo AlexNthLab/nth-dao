@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 from pathlib import Path
 
 from ..identity import canonical_json
 from ._gen_mandate_vectors import build_mandate_vectors
 from .runner import VECTORS_PATH
+
+
+VECTOR_GENERATED_AT = "2026-07-04T00:00:00"
 
 
 # ─────────────────── fixed test keys ───────────────────
@@ -592,7 +594,7 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors = {
         "format": "nth-dao-conformance-v1",
         "schema_version": 1,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": VECTOR_GENERATED_AT,
         "reference_impl": "nth-dao Python (pyproject version)",
         "vectors": {
             "canonical_json":              gen_canonical_json(),
