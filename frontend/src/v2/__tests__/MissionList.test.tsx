@@ -54,6 +54,20 @@ beforeEach(() => {
           reason: "content hash matches",
         },
       ],
+      review_packet: {
+        warning: "Signed handoff is a claim, not a verified fact.",
+        goal: "Server-issued packet: use the least context needed to re-check this handoff.",
+        capsule_hash: capsuleHash,
+        evidence_verification: [{
+          status: "verified",
+          reason: "content hash matches",
+        }],
+        risks: ["capsule hypothesis may still be wrong"],
+        required_review_steps: [
+          "Verify each evidence pointer against its pinned commit and content hash.",
+          "If the claim is wrong, sign a refutation or superseding handoff with a receipt.",
+        ],
+      },
       next_actions: ["ask a second agent to verify pinned evidence"],
       risks: ["capsule hypothesis may still be wrong"],
       refutations: [{
@@ -171,6 +185,7 @@ describe("MissionList", () => {
     expect(screen.getAllByText(/capsule hypothesis may still be wrong/).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Response receipt\(s\): receipt-review-1/)).toBeTruthy();
     expect(screen.getByText("Review packet")).toBeTruthy();
+    expect(screen.getByText(/Server-issued packet/)).toBeTruthy();
     expect(screen.getByText(/least context needed to re-check/)).toBeTruthy();
     expect(screen.getByText(/Verify each evidence pointer/)).toBeTruthy();
     expect(screen.getByText(/sign a refutation or superseding handoff/)).toBeTruthy();

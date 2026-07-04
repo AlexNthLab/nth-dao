@@ -89,6 +89,7 @@ def test_handoff_endpoint_records_and_lists_capsule(tmp_path: Path) -> None:
     assert rows[0]["finding"] == capsule["finding"]
     assert rows[0]["evidence_count"] == 1
     assert "evidence" not in rows[0]
+    assert "review_packet" not in rows[0]
 
     detailed = client.get(
         "/api/v2/handoffs",
@@ -99,6 +100,18 @@ def test_handoff_endpoint_records_and_lists_capsule(tmp_path: Path) -> None:
         "unreachable",
         "unavailable",
     }
+    packet = detailed[0]["review_packet"]
+    assert packet["warning"] == "Signed handoff is a claim, not a verified fact."
+    assert "least context needed" in packet["goal"]
+    assert packet["capsule_hash"] == capsule["capsule_hash"]
+    assert packet["finding"] == capsule["finding"]
+    assert packet["evidence_verification"] == detailed[0]["evidence_verification"]
+    assert packet["next_actions"] == ["Post a refutation if another agent disagrees."]
+    assert packet["risks"] == ["Signature does not make the diagnosis true."]
+    assert any(
+        "refutation or superseding handoff" in step
+        for step in packet["required_review_steps"]
+    )
 
 
 def test_handoff_endpoint_records_refutation(tmp_path: Path) -> None:

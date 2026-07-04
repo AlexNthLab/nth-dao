@@ -146,6 +146,7 @@ export interface HandoffDetail {
   superseded_by: string;
   evidence?: Record<string, unknown>[];
   evidence_verification?: HandoffEvidenceVerification[];
+  review_packet?: Record<string, unknown>;
   changed_files?: string[];
   tests?: string[];
   next_actions?: string[];

@@ -773,7 +773,11 @@ export function MissionList({
                                 fontSize: 11,
                               }}
                             >
-                              {JSON.stringify(buildHandoffReviewPacket(event, detail), null, 2)}
+                              {JSON.stringify(
+                                detail.review_packet ?? buildHandoffReviewPacket(event, detail),
+                                null,
+                                2,
+                              )}
                             </pre>
                           </details>
                         )}

@@ -2181,6 +2181,42 @@ def _handoff_evidence_verification(evidence: List[Any]) -> List[Dict[str, Any]]:
     return reports
 
 
+def _handoff_review_packet(
+    rec: Any,
+    evidence_verification: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build the agent-facing minimal review packet for a handoff claim."""
+    capsule = rec.capsule
+    return {
+        "warning": "Signed handoff is a claim, not a verified fact.",
+        "goal": (
+            "Use the least context needed to re-check, continue, or refute "
+            "this handoff."
+        ),
+        "mission_id": rec.mission_id,
+        "step_id": str(capsule.get("step_id", "")),
+        "capsule_hash": rec.capsule_hash,
+        "status": rec.status,
+        "verification_status": str(capsule.get("verification_status", "")),
+        "author_did": rec.author_did,
+        "finding": str(capsule.get("finding", "")),
+        "root_cause_hypothesis": str(capsule.get("root_cause_hypothesis", "")),
+        "evidence_verification": evidence_verification,
+        "changed_files": list(capsule.get("changed_files", [])),
+        "tests": list(capsule.get("tests", [])),
+        "risks": list(capsule.get("risks", [])),
+        "next_actions": list(capsule.get("next_actions", [])),
+        "required_review_steps": [
+            "Verify each evidence pointer against its pinned commit and content hash.",
+            "Rerun or inspect the listed tests before trusting the finding.",
+            (
+                "If the claim is wrong, sign a refutation or superseding "
+                "handoff with a receipt."
+            ),
+        ],
+    }
+
+
 def _receipt_payload_binds_handoff_response(
     receipt: Dict[str, Any], stmt: Dict[str, Any],
 ) -> bool:
@@ -4551,9 +4587,12 @@ def register_v2_routes(app: FastAPI) -> None:
             }
             if include_details:
                 evidence = list(capsule.get("evidence", []))
+                evidence_verification = _handoff_evidence_verification(evidence)
                 row.update({
                     "evidence": evidence,
-                    "evidence_verification": _handoff_evidence_verification(evidence),
+                    "evidence_verification": evidence_verification,
+                    "review_packet": _handoff_review_packet(
+                        rec, evidence_verification),
                     "changed_files": list(capsule.get("changed_files", [])),
                     "tests": list(capsule.get("tests", [])),
                     "next_actions": list(capsule.get("next_actions", [])),
