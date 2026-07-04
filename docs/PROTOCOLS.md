@@ -940,6 +940,58 @@ which verifies that the response target is already present before appending.
 Migration tools that repair historical logs must perform their own offline
 projection checks before writing directly to the spine.
 
+### 11.6 Handoff Review Packet
+
+`GET /api/v2/handoffs?include_details=true` MAY include a derived
+`review_packet` object for each handoff capsule. This packet is optimized for
+the next agent in a debugging chain: it gives enough stable context to
+re-check, continue, refute, or supersede a handoff with fewer tokens.
+
+The packet is not itself a signed statement and MUST NOT be treated as a
+truth verdict. The signature remains on the handoff capsule or response; the
+packet is a replay/projection helper.
+
+```json
+{
+  "packet_kind": "nth-handoff-review-packet-v1",
+  "packet_version": 1,
+  "packet_is_signed": false,
+  "is_truth_verdict": false,
+  "warning": "Signed handoff is a claim, not a verified fact.",
+  "mission_id": "mission-...",
+  "step_id": "step-...",
+  "capsule_hash": "sha256:<64-hex>",
+  "status": "proposed",
+  "verification_status": "unverified",
+  "author_did": "did:key:z6Mk...",
+  "finding": "short claim",
+  "root_cause_hypothesis": "hypothesis to re-check",
+  "evidence_summary": {
+    "total": 1,
+    "verified": 0,
+    "unreachable": 1,
+    "unavailable": 0,
+    "mismatch": 0,
+    "invalid": 0,
+    "unsupported": 0
+  },
+  "evidence_verification": [],
+  "changed_files": [],
+  "tests": [],
+  "risks": [],
+  "next_actions": [],
+  "required_review_steps": [
+    "Verify each evidence pointer against its pinned commit and content hash.",
+    "Rerun or inspect the listed tests before trusting the finding.",
+    "If the claim is wrong, sign a refutation or superseding handoff with a receipt."
+  ]
+}
+```
+
+Implementations SHOULD preserve unknown fields for forward compatibility and
+MUST keep local checkout paths, credentials, and private runtime data out of
+`review_packet`.
+
 ---
 
 ## 12. A2A Method Surface (`POST /a2a/<method>`)

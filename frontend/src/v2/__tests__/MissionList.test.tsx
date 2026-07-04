@@ -55,9 +55,17 @@ beforeEach(() => {
         },
       ],
       review_packet: {
+        packet_kind: "nth-handoff-review-packet-v1",
+        packet_version: 1,
+        packet_is_signed: false,
+        is_truth_verdict: false,
         warning: "Signed handoff is a claim, not a verified fact.",
         goal: "Server-issued packet: use the least context needed to re-check this handoff.",
         capsule_hash: capsuleHash,
+        evidence_summary: {
+          total: 1,
+          verified: 1,
+        },
         evidence_verification: [{
           status: "verified",
           reason: "content hash matches",

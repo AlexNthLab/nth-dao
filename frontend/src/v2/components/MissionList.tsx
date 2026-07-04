@@ -227,7 +227,25 @@ function buildHandoffReviewPacket(
   event: MissionTimelineEvent,
   detail: HandoffDetail,
 ): Record<string, unknown> {
+  const evidenceVerification = detail.evidence_verification ?? [];
+  const evidenceSummary: Record<string, number> = {
+    total: evidenceVerification.length,
+    verified: 0,
+    unreachable: 0,
+    unavailable: 0,
+    mismatch: 0,
+    invalid: 0,
+    unsupported: 0,
+  };
+  for (const item of evidenceVerification) {
+    const status = item.status || "invalid";
+    evidenceSummary[status] = (evidenceSummary[status] ?? 0) + 1;
+  }
   return {
+    packet_kind: "nth-handoff-review-packet-v1",
+    packet_version: 1,
+    packet_is_signed: false,
+    is_truth_verdict: false,
     warning: "Signed handoff is a claim, not a verified fact.",
     goal: "Use the least context needed to re-check, continue, or refute this handoff.",
     mission_id: detail.mission_id,
@@ -238,7 +256,8 @@ function buildHandoffReviewPacket(
     author_did: detail.author_did || event.agent_did || "",
     finding: detail.finding,
     root_cause_hypothesis: detail.root_cause_hypothesis,
-    evidence_verification: detail.evidence_verification ?? [],
+    evidence_summary: evidenceSummary,
+    evidence_verification: evidenceVerification,
     changed_files: detail.changed_files ?? [],
     tests: detail.tests ?? [],
     risks: detail.risks ?? [],

@@ -2187,7 +2187,23 @@ def _handoff_review_packet(
 ) -> Dict[str, Any]:
     """Build the agent-facing minimal review packet for a handoff claim."""
     capsule = rec.capsule
+    evidence_summary: Dict[str, int] = {
+        "total": len(evidence_verification),
+        "verified": 0,
+        "unreachable": 0,
+        "unavailable": 0,
+        "mismatch": 0,
+        "invalid": 0,
+        "unsupported": 0,
+    }
+    for item in evidence_verification:
+        status = str(item.get("status", "invalid"))
+        evidence_summary[status] = evidence_summary.get(status, 0) + 1
     return {
+        "packet_kind": "nth-handoff-review-packet-v1",
+        "packet_version": 1,
+        "packet_is_signed": False,
+        "is_truth_verdict": False,
         "warning": "Signed handoff is a claim, not a verified fact.",
         "goal": (
             "Use the least context needed to re-check, continue, or refute "
@@ -2201,6 +2217,7 @@ def _handoff_review_packet(
         "author_did": rec.author_did,
         "finding": str(capsule.get("finding", "")),
         "root_cause_hypothesis": str(capsule.get("root_cause_hypothesis", "")),
+        "evidence_summary": evidence_summary,
         "evidence_verification": evidence_verification,
         "changed_files": list(capsule.get("changed_files", [])),
         "tests": list(capsule.get("tests", [])),
