@@ -137,6 +137,53 @@ def test_backend_status_keeps_windows_claude_cli_disabled_with_pywinpty(
     assert "claude.CMD" not in rendered
 
 
+def test_backend_status_rejects_windows_claude_cli_when_health_fails(
+    tmp_path, monkeypatch,
+):
+    import importlib.util
+    import shutil
+    import nth_dao.web.dummy_agent as dummy_agent
+
+    monkeypatch.setattr(dummy_agent.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(dummy_agent.sys, "platform", "win32")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("NTH_ENABLE_WINDOWS_CLAUDE_CLI", "1")
+    original_find_spec = importlib.util.find_spec
+
+    class _Spec:
+        pass
+
+    def fake_find_spec(name: str):
+        if name == "winpty":
+            return _Spec()
+        if name in {"anthropic", "run_agent"}:
+            return None
+        return original_find_spec(name)
+
+    def fake_which(name: str):
+        if name == "claude":
+            return r"C:\Example\bin\claude.CMD"
+        return None
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(
+        dummy_agent._ClaudeCliAskBackend,
+        "_windows_cli_health",
+        classmethod(lambda cls: (False, "health-access-violation")),
+    )
+
+    status = dummy_agent.backend_runtime_status()["claude-code"]
+
+    assert status["available"] is True
+    assert status["ready"] is False
+    assert status["runtime"] == "cli-conpty-unhealthy"
+    assert "health-access-violation" in status["detail"]
+    rendered = repr(status)
+    assert "C:\\Example" not in rendered
+    assert "claude.CMD" not in rendered
+
+
 def test_backend_status_allows_windows_claude_cli_with_explicit_opt_in(
     tmp_path, monkeypatch,
 ):
@@ -167,6 +214,11 @@ def test_backend_status_allows_windows_claude_cli_with_explicit_opt_in(
 
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
     monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(
+        dummy_agent._ClaudeCliAskBackend,
+        "_windows_cli_health",
+        classmethod(lambda cls: (True, "ok")),
+    )
 
     status = dummy_agent.backend_runtime_status()["claude-code"]
 

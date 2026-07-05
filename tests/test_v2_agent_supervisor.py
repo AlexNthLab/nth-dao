@@ -4989,6 +4989,38 @@ def test_claude_code_backend_refuses_windows_cli_without_conpty(
         _ClaudeCliAskBackend().ask({"prompt": "hi"}, timeout_s=1.0)
 
 
+def test_claude_conpty_runner_fails_if_reader_does_not_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys as _sys
+    import time as _time
+    import types as _types
+
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
+
+    class _HungPtyProcess:
+        exitstatus = 0
+
+        @classmethod
+        def spawn(cls, *_args: object, **_kwargs: object) -> "_HungPtyProcess":
+            return cls()
+
+        def read(self, _size: int = 1024) -> str:
+            _time.sleep(5.0)
+            return ""
+
+        def isalive(self) -> bool:
+            return False
+
+    fake_winpty = _types.SimpleNamespace(PtyProcess=_HungPtyProcess)
+    monkeypatch.setitem(_sys.modules, "winpty", fake_winpty)
+
+    with pytest.raises(RuntimeError, match="reader did not close"):
+        _ClaudeCliAskBackend._run_with_conpty(
+            ["claude.exe", "-p", "hi"], timeout_s=5.0,
+        )
+
+
 def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

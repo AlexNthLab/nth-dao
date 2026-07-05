@@ -68,7 +68,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterator, Optional, Tuple
+from typing import Any, ClassVar, Dict, FrozenSet, Iterator, Optional, Tuple
 
 
 _STOP = False
@@ -772,6 +772,9 @@ class _ClaudeCliAskBackend(_AskBackend):
     # responses; Phase 4f could lift it or add streaming.
     DEFAULT_TIMEOUT_S = 60.0
     WINDOWS_SHIM_SUFFIXES = frozenset({".ps1", ".cmd", ".bat"})
+    HEALTH_TTL_S = 300.0
+    _health_lock: ClassVar[threading.Lock] = threading.Lock()
+    _health_cache: ClassVar[Tuple[float, str, bool, str] | None] = None
 
     @classmethod
     def _resolve_binary(cls) -> str:
@@ -815,6 +818,57 @@ class _ClaudeCliAskBackend(_AskBackend):
         return os.environ.get(
             "NTH_ENABLE_WINDOWS_CLAUDE_CLI", "",
         ).strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _windows_cli_health(cls) -> Tuple[bool, str]:
+        if not cls._windows_cli_opt_in():
+            return False, "windows-cli-disabled"
+        if not cls._can_use_conpty():
+            return False, "pywinpty-missing"
+        try:
+            binary = cls._resolve_binary()
+        except RuntimeError as exc:
+            return False, str(exc)
+
+        now = time.monotonic()
+        with cls._health_lock:
+            cached = cls._health_cache
+            if (
+                cached is not None
+                and cached[1] == binary
+                and now - cached[0] < cls.HEALTH_TTL_S
+            ):
+                return cached[2], cached[3]
+
+        timeout_s = 20.0
+        raw_timeout = os.environ.get("NTH_CLAUDE_HEALTH_TIMEOUT_S", "").strip()
+        if raw_timeout:
+            try:
+                timeout_s = max(5.0, min(60.0, float(raw_timeout)))
+            except ValueError:
+                timeout_s = 20.0
+
+        ok = False
+        reason = "health-check-failed"
+        try:
+            code, output = cls._run_with_conpty(
+                [binary, "-p", "Return exactly NTH-CLAUDE-READY"],
+                timeout_s,
+            )
+            ok = code == 0 and "NTH-CLAUDE-READY" in output
+            reason = "ok" if ok else f"health-exit-{code}"
+        except TimeoutError:
+            reason = "health-timeout"
+        except RuntimeError as exc:
+            text = str(exc)
+            if "3221225477" in text or "-1073741819" in text:
+                reason = "health-access-violation"
+            else:
+                reason = "health-runtime-error"
+
+        with cls._health_lock:
+            cls._health_cache = (time.monotonic(), binary, ok, reason)
+        return ok, reason
 
     @staticmethod
     def _strip_terminal_sequences(text: str) -> str:
@@ -881,12 +935,18 @@ class _ClaudeCliAskBackend(_AskBackend):
                     proc.kill(signal.SIGTERM)
                 except Exception:
                     pass
-            done.wait(2.0)
+            if not done.wait(2.0):
+                raise TimeoutError(
+                    "claude CLI timed out and ConPTY reader did not close"
+                )
             raise TimeoutError(
                 f"claude CLI did not respond within "
                 f"{max(5.0, timeout_s):.1f}s"
             )
-        done.wait(2.0)
+        if not done.wait(2.0):
+            raise RuntimeError(
+                "claude ConPTY reader did not close after process exit"
+            )
         if errors:
             raise RuntimeError(f"claude ConPTY read failed: {errors[0]}")
         output = cls._strip_terminal_sequences("".join(chunks))
@@ -923,7 +983,7 @@ class _ClaudeCliAskBackend(_AskBackend):
             self._check_model_allowed(explicit_model.strip())
 
         binary = self._resolve_binary()
-        if False and not binary:
+        if not binary:
             raise RuntimeError(
                 "claude CLI not on PATH — install Claude Code or "
                 "switch agent to kind=mock"
@@ -934,7 +994,7 @@ class _ClaudeCliAskBackend(_AskBackend):
         # documented ACCESS_VIOLATION quirk (exit 0xC0000005); the
         # adjacent ``claude.exe`` (vendor binary) is what the .ps1
         # ultimately invokes, so we prefer it directly when present.
-        if False and binary.lower().endswith(".ps1"):
+        if sys.platform.startswith("win") and binary.lower().endswith(".ps1"):
             import os as _os
             candidate = _os.path.join(
                 _os.path.dirname(binary),
@@ -1982,11 +2042,27 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     claude_cli = shutil.which("claude") is not None
     claude_conpty = _ClaudeCliAskBackend._can_use_conpty()
     claude_windows_cli_opt_in = _ClaudeCliAskBackend._windows_cli_opt_in()
+    claude_cli_health_ok = False
+    claude_cli_health_reason = ""
+    if (
+        claude_cli
+        and sys.platform.startswith("win")
+        and claude_conpty
+        and claude_windows_cli_opt_in
+    ):
+        (
+            claude_cli_health_ok,
+            claude_cli_health_reason,
+        ) = _ClaudeCliAskBackend._windows_cli_health()
     claude_cli_ready = (
         claude_cli
         and (
             not sys.platform.startswith("win")
-            or (claude_conpty and claude_windows_cli_opt_in)
+            or (
+                claude_conpty
+                and claude_windows_cli_opt_in
+                and claude_cli_health_ok
+            )
         )
     )
     codex_error = ""
@@ -2031,6 +2107,13 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 if claude_cli_ready and sys.platform.startswith("win") else
                 "cli"
                 if claude_cli_ready else
+                "cli-conpty-unhealthy"
+                if (
+                    claude_cli
+                    and sys.platform.startswith("win")
+                    and claude_conpty
+                    and claude_windows_cli_opt_in
+                ) else
                 "cli-conpty-disabled"
                 if (
                     claude_cli
@@ -2049,6 +2132,13 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 if claude_cli_ready and sys.platform.startswith("win") else
                 "Claude CLI detected."
                 if claude_cli_ready else
+                f"Claude CLI and pywinpty are installed, but the Windows CLI health check failed ({claude_cli_health_reason})."
+                if (
+                    claude_cli
+                    and sys.platform.startswith("win")
+                    and claude_conpty
+                    and claude_windows_cli_opt_in
+                ) else
                 "Claude CLI and pywinpty are installed, but Windows CLI mode is disabled by default because local print-mode calls can crash before quota/auth diagnostics."
                 if (
                     claude_cli
@@ -2061,6 +2151,14 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 "Install/log in to Claude Code, or configure SDK credentials with the anthropic package."
             ),
             "warning": (
+                "Disable NTH_ENABLE_WINDOWS_CLAUDE_CLI or configure SDK credentials with the anthropic package; this CLI path did not pass health check."
+                if (
+                    claude_cli
+                    and sys.platform.startswith("win")
+                    and claude_conpty
+                    and claude_windows_cli_opt_in
+                    and not claude_ready
+                ) else
                 "Configure SDK credentials with the anthropic package for stable Claude A2A; set NTH_ENABLE_WINDOWS_CLAUDE_CLI=1 only after manual ConPTY verification."
                 if (
                     claude_cli
