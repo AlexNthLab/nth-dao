@@ -61,6 +61,7 @@ import importlib.util
 import json
 import locale
 import os
+import re
 import signal
 import socketserver
 import sys
@@ -770,11 +771,130 @@ class _ClaudeCliAskBackend(_AskBackend):
     # timeout (2s in the hub proxy) is too tight for real LLM
     # responses; Phase 4f could lift it or add streaming.
     DEFAULT_TIMEOUT_S = 60.0
+    WINDOWS_SHIM_SUFFIXES = frozenset({".ps1", ".cmd", ".bat"})
+
+    @classmethod
+    def _resolve_binary(cls) -> str:
+        import shutil
+
+        binary = shutil.which("claude")
+        if not binary:
+            raise RuntimeError(
+                "claude CLI not on PATH - install Claude Code or "
+                "switch agent to kind=mock"
+            )
+        if sys.platform.startswith("win"):
+            suffix = Path(binary).suffix.lower()
+            if suffix in cls.WINDOWS_SHIM_SUFFIXES:
+                candidate = (
+                    Path(binary).parent
+                    / "node_modules"
+                    / "@anthropic-ai"
+                    / "claude-code"
+                    / "bin"
+                    / "claude.exe"
+                )
+                if candidate.is_file():
+                    return str(candidate)
+                raise RuntimeError(
+                    "Claude Code shim was found, but the vendored "
+                    "claude.exe next to it is missing. Reinstall "
+                    "Claude Code or switch the agent to kind=mock."
+                )
+        return binary
+
+    @staticmethod
+    def _can_use_conpty() -> bool:
+        return (
+            sys.platform.startswith("win")
+            and importlib.util.find_spec("winpty") is not None
+        )
+
+    @staticmethod
+    def _windows_cli_opt_in() -> bool:
+        return os.environ.get(
+            "NTH_ENABLE_WINDOWS_CLAUDE_CLI", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _strip_terminal_sequences(text: str) -> str:
+        # pywinpty returns the pseudo-terminal stream, including console
+        # probes such as ESC[?1004h. Strip terminal control sequences before
+        # the response is exposed through the A2A API.
+        text = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", text)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+        text = re.sub(r"\x1b[@-_]", "", text)
+        return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    @classmethod
+    def _run_with_conpty(
+        cls, argv: list[str], timeout_s: float,
+    ) -> Tuple[int, str]:
+        try:
+            from winpty import PtyProcess
+        except ImportError as exc:
+            raise RuntimeError(
+                "Claude Code CLI on Windows requires pywinpty/ConPTY "
+                "for non-interactive A2A calls. Install pywinpty or "
+                "configure SDK credentials with the anthropic package."
+            ) from exc
+
+        proc = PtyProcess.spawn(argv, dimensions=(30, 160))
+        chunks: list[str] = []
+        errors: list[BaseException] = []
+        done = threading.Event()
+
+        def _reader() -> None:
+            try:
+                while True:
+                    try:
+                        chunk = proc.read(4096)
+                    except EOFError:
+                        break
+                    if chunk:
+                        chunks.append(str(chunk))
+                    if not proc.isalive():
+                        # Keep reading until EOF so we don't drop the final
+                        # line emitted just before the process exits.
+                        continue
+            except BaseException as exc:  # pragma: no cover - defensive
+                errors.append(exc)
+            finally:
+                done.set()
+
+        reader = threading.Thread(
+            target=_reader,
+            name="nth-claude-conpty-reader",
+            daemon=True,
+        )
+        reader.start()
+        deadline = time.monotonic() + max(5.0, timeout_s)
+        while proc.isalive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if proc.isalive():
+            try:
+                proc.terminate(force=True)
+            except TypeError:
+                proc.terminate()
+            except Exception:
+                try:
+                    proc.kill(signal.SIGTERM)
+                except Exception:
+                    pass
+            done.wait(2.0)
+            raise TimeoutError(
+                f"claude CLI did not respond within "
+                f"{max(5.0, timeout_s):.1f}s"
+            )
+        done.wait(2.0)
+        if errors:
+            raise RuntimeError(f"claude ConPTY read failed: {errors[0]}")
+        output = cls._strip_terminal_sequences("".join(chunks))
+        return int(proc.exitstatus or 0), output
 
     def ask(
         self, params: Dict[str, Any], timeout_s: float,
     ) -> Dict[str, Any]:
-        import shutil
         import subprocess as _sp
         import tempfile
 
@@ -802,8 +922,8 @@ class _ClaudeCliAskBackend(_AskBackend):
         if isinstance(explicit_model, str) and explicit_model.strip():
             self._check_model_allowed(explicit_model.strip())
 
-        binary = shutil.which("claude")
-        if not binary:
+        binary = self._resolve_binary()
+        if False and not binary:
             raise RuntimeError(
                 "claude CLI not on PATH — install Claude Code or "
                 "switch agent to kind=mock"
@@ -814,7 +934,7 @@ class _ClaudeCliAskBackend(_AskBackend):
         # documented ACCESS_VIOLATION quirk (exit 0xC0000005); the
         # adjacent ``claude.exe`` (vendor binary) is what the .ps1
         # ultimately invokes, so we prefer it directly when present.
-        if binary.lower().endswith(".ps1"):
+        if False and binary.lower().endswith(".ps1"):
             import os as _os
             candidate = _os.path.join(
                 _os.path.dirname(binary),
@@ -840,6 +960,36 @@ class _ClaudeCliAskBackend(_AskBackend):
                     "agent to kind=mock."
                 )
         argv = [binary, "-p", prompt]
+
+        if sys.platform.startswith("win"):
+            if not self._can_use_conpty():
+                raise RuntimeError(
+                    "Claude Code CLI was detected, but Windows "
+                    "non-interactive A2A calls require pywinpty/ConPTY. "
+                    "Install pywinpty or configure SDK credentials with "
+                    "the anthropic package."
+                )
+            if not self._windows_cli_opt_in():
+                raise RuntimeError(
+                    "Claude Code CLI print mode is disabled for Windows "
+                    "A2A by default because this host crashes before "
+                    "returning quota/auth diagnostics. Configure SDK "
+                    "credentials with the anthropic package, or set "
+                    "NTH_ENABLE_WINDOWS_CLAUDE_CLI=1 only after manually "
+                    "verifying the CLI works under ConPTY."
+                )
+            return_code, output = self._run_with_conpty(
+                argv, max(5.0, timeout_s),
+            )
+            if return_code != 0:
+                raise RuntimeError(
+                    f"claude CLI exited {return_code}: {output[:2048]}"
+                )
+            return {
+                "response": output,
+                "backend": self.name,
+                "exit_code": return_code,
+            }
 
         # M-2 fix (review round Phase 4 R1): on Windows, suppress
         # the console-window flash that subprocess.run would
@@ -1830,14 +1980,14 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     anthropic_pkg = importlib.util.find_spec("anthropic") is not None
     claude_cli = shutil.which("claude") is not None
-    claude_conpty = (
-        importlib.util.find_spec("winpty") is not None
-        or importlib.util.find_spec("pywinpty") is not None
-        or shutil.which("winpty") is not None
-    )
+    claude_conpty = _ClaudeCliAskBackend._can_use_conpty()
+    claude_windows_cli_opt_in = _ClaudeCliAskBackend._windows_cli_opt_in()
     claude_cli_ready = (
         claude_cli
-        and (not sys.platform.startswith("win") or claude_conpty)
+        and (
+            not sys.platform.startswith("win")
+            or (claude_conpty and claude_windows_cli_opt_in)
+        )
     )
     codex_error = ""
     codex_runtime = "missing"
@@ -1881,6 +2031,13 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 if claude_cli_ready and sys.platform.startswith("win") else
                 "cli"
                 if claude_cli_ready else
+                "cli-conpty-disabled"
+                if (
+                    claude_cli
+                    and sys.platform.startswith("win")
+                    and claude_conpty
+                    and not claude_windows_cli_opt_in
+                ) else
                 "cli-needs-conpty"
                 if claude_cli and sys.platform.startswith("win") else
                 "missing"
@@ -1888,16 +2045,31 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             "detail": (
                 "Anthropic SDK credentials detected."
                 if anthropic_key and anthropic_pkg else
-                "Claude CLI detected with ConPTY support."
+                "Claude CLI detected with pywinpty/ConPTY support."
                 if claude_cli_ready and sys.platform.startswith("win") else
                 "Claude CLI detected."
                 if claude_cli_ready else
-                "Claude CLI detected, but Windows non-interactive A2A calls need a ConPTY wrapper."
+                "Claude CLI and pywinpty are installed, but Windows CLI mode is disabled by default because local print-mode calls can crash before quota/auth diagnostics."
+                if (
+                    claude_cli
+                    and sys.platform.startswith("win")
+                    and claude_conpty
+                    and not claude_windows_cli_opt_in
+                ) else
+                "Claude CLI detected, but Windows non-interactive A2A calls need pywinpty/ConPTY."
                 if claude_cli and sys.platform.startswith("win") else
                 "Install/log in to Claude Code, or configure SDK credentials with the anthropic package."
             ),
             "warning": (
-                "Install pywinpty/winpty or configure SDK credentials with the anthropic package before spawning Claude Code."
+                "Configure SDK credentials with the anthropic package for stable Claude A2A; set NTH_ENABLE_WINDOWS_CLAUDE_CLI=1 only after manual ConPTY verification."
+                if (
+                    claude_cli
+                    and sys.platform.startswith("win")
+                    and claude_conpty
+                    and not claude_windows_cli_opt_in
+                    and not claude_ready
+                ) else
+                "Install pywinpty or configure SDK credentials with the anthropic package before spawning Claude Code."
                 if claude_cli and sys.platform.startswith("win") and not claude_ready else
                 "CLI mode can be slower on Windows; SDK mode is preferred when configured."
             ),

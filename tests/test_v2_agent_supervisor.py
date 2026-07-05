@@ -4869,10 +4869,9 @@ def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
     """BUG-5 fix (review round Phase 4 R2): when ``shutil.which``
     returns the npm ``claude.ps1`` shim, the backend must walk to
     the adjacent vendored ``claude.exe`` rather than invoking the
-    broken .ps1 path. Verifies the argv that's handed to
-    subprocess.run starts with the .exe, not the .ps1. """
+    broken .ps1 path. Verifies the argv handed to ConPTY starts
+    with the .exe, not the .ps1. """
     import shutil
-    import subprocess as _sp
 
     from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
@@ -4890,36 +4889,104 @@ def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
     exe.write_text("# vendored binary", encoding="utf-8")
 
     monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
+    monkeypatch.setattr(
+        _ClaudeCliAskBackend,
+        "_can_use_conpty",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        _ClaudeCliAskBackend,
+        "_windows_cli_opt_in",
+        staticmethod(lambda: True),
+    )
 
-    captured: list[tuple[list[str], dict]] = []
+    captured: list[tuple[list[str], float]] = []
 
-    class _FakeCompleted:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
+    def fake_conpty(
+        cls, argv: list[str], timeout_s: float,
+    ) -> tuple[int, str]:
+        captured.append((list(argv), timeout_s))
+        return 0, "ok"
 
-    def fake_run(argv: list[str], **kw: object) -> _FakeCompleted:
-        captured.append((list(argv), dict(kw)))
-        stdout = kw.get("stdout")
-        if hasattr(stdout, "write"):
-            stdout.write(b"ok")
-        return _FakeCompleted()
-
-    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr(
+        _ClaudeCliAskBackend,
+        "_run_with_conpty",
+        classmethod(fake_conpty),
+    )
 
     out = _ClaudeCliAskBackend().ask(
         {"prompt": "hello"}, timeout_s=5.0,
     )
     assert out["response"] == "ok"
-    assert captured, "subprocess.run was not invoked"
+    assert captured, "ConPTY runner was not invoked"
     # First arg of argv must be the resolved .exe, NOT the .ps1.
     invoked = captured[0][0][0]
     assert invoked == str(exe), (
         f"expected {exe} to be invoked; got {invoked!r}"
     )
-    run_kwargs = captured[0][1]
-    assert run_kwargs.get("stdout") is not _sp.PIPE
-    assert run_kwargs.get("stderr") is not _sp.PIPE
+
+
+def test_claude_code_backend_prefers_adjacent_exe_over_cmd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows npm installs can expose claude.CMD to Python
+    ``shutil.which`` even when PowerShell sees claude.ps1. The
+    backend must still resolve to the adjacent vendored exe before
+    invoking ConPTY. """
+    import shutil
+
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
+
+    npm_dir = tmp_path / "npm-global"
+    cmd = npm_dir / "claude.CMD"
+    npm_dir.mkdir()
+    cmd.write_text("@echo off", encoding="utf-8")
+    exe_dir = (
+        npm_dir / "node_modules" / "@anthropic-ai" / "claude-code" / "bin"
+    )
+    exe_dir.mkdir(parents=True)
+    exe = exe_dir / "claude.exe"
+    exe.write_text("# vendored binary", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda _n: str(cmd))
+    resolved = _ClaudeCliAskBackend._resolve_binary()
+    assert resolved == str(exe)
+
+
+def test_claude_code_backend_strips_conpty_terminal_sequences() -> None:
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
+
+    noisy = "\x1b[1t\x1b[c\x1b[?1004hNTH-CLAUDE-OK\r\n\x1b[?1004l"
+    assert (
+        _ClaudeCliAskBackend._strip_terminal_sequences(noisy)
+        == "NTH-CLAUDE-OK"
+    )
+
+
+def test_claude_code_backend_refuses_windows_cli_without_conpty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+    import subprocess as _sp
+    import nth_dao.web.dummy_agent as dummy_agent
+
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
+
+    monkeypatch.setattr(dummy_agent.sys, "platform", "win32")
+    monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/claude.exe")
+    monkeypatch.setattr(
+        _ClaudeCliAskBackend,
+        "_can_use_conpty",
+        staticmethod(lambda: False),
+    )
+
+    def fail_run(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("Windows Claude CLI must not use subprocess without ConPTY")
+
+    monkeypatch.setattr(_sp, "run", fail_run)
+    with pytest.raises(RuntimeError, match="pywinpty/ConPTY"):
+        _ClaudeCliAskBackend().ask({"prompt": "hi"}, timeout_s=1.0)
 
 
 def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(
@@ -4942,7 +5009,7 @@ def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(
     ps1.write_text("# shim", encoding="utf-8")
     monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
 
-    with pytest.raises(RuntimeError, match="install layout may be broken"):
+    with pytest.raises(RuntimeError, match="vendored claude.exe"):
         _ClaudeCliAskBackend().ask(
             {"prompt": "hi"}, timeout_s=5.0,
         )
@@ -5050,10 +5117,12 @@ def test_claude_code_backend_translates_windows_access_violation(
     slip past the hint translation. """
     import shutil
     import subprocess as _sp
+    import nth_dao.web.dummy_agent as dummy_agent
 
     from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
 
     # Pretend the binary IS on PATH (skip the not-on-PATH branch).
+    monkeypatch.setattr(dummy_agent.sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda _name: "C:/fake/claude.exe")
 
     class _FakeCompleted:
