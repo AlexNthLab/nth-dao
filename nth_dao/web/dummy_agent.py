@@ -776,6 +776,7 @@ class _ClaudeCliAskBackend(_AskBackend):
     ) -> Dict[str, Any]:
         import shutil
         import subprocess as _sp
+        import tempfile
 
         prompt = str(params.get("prompt") or "").strip()
         if not prompt:
@@ -847,6 +848,10 @@ class _ClaudeCliAskBackend(_AskBackend):
         # concept) so we fall back to 0.
         creation_flags = getattr(_sp, "CREATE_NO_WINDOW", 0) \
             if sys.platform.startswith("win") else 0
+        out_fd, out_path = tempfile.mkstemp(prefix="claude-out-", suffix=".txt")
+        err_fd, err_path = tempfile.mkstemp(prefix="claude-err-", suffix=".txt")
+        os.close(out_fd)
+        os.close(err_fd)
         try:
             # BUG-4 fix (review round Phase 4 R2): explicit
             # ``stdin=DEVNULL`` instead of ``input=""``. Both
@@ -854,23 +859,39 @@ class _ClaudeCliAskBackend(_AskBackend):
             # read, but ``input=""`` is misleading — it suggests
             # we're writing something. DEVNULL also avoids the
             # implicit pipe allocation that input= performs.
-            completed = _sp.run(
-                argv,
-                stdin=_sp.DEVNULL,
-                capture_output=True,
-                text=False,
-                timeout=max(5.0, timeout_s),
-                check=False,
-                creationflags=creation_flags,
-            )
+            with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
+                completed = _sp.run(
+                    argv,
+                    stdin=_sp.DEVNULL,
+                    stdout=out_f,
+                    stderr=err_f,
+                    text=False,
+                    timeout=max(5.0, timeout_s),
+                    check=False,
+                    creationflags=creation_flags,
+                )
         except _sp.TimeoutExpired as exc:
             raise TimeoutError(
                 f"claude CLI did not respond within "
                 f"{exc.timeout:.1f}s for prompt[{len(prompt)}]"
             ) from exc
+        finally:
+            try:
+                stdout_bytes = Path(out_path).read_bytes()
+            except OSError:
+                stdout_bytes = b""
+            try:
+                stderr_bytes = Path(err_path).read_bytes()
+            except OSError:
+                stderr_bytes = b""
+            for p in (out_path, err_path):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
         if completed.returncode != 0:
-            err = (completed.stderr or "").strip()[:2048]
+            err = stderr_bytes.decode("utf-8", errors="replace").strip()[:2048]
             # Windows ACCESS_VIOLATION (see Known Windows quirk note
             # in docstring). Surface a targeted message so the
             # operator knows to switch to kind=mock for now.
@@ -897,7 +918,7 @@ class _ClaudeCliAskBackend(_AskBackend):
             raise RuntimeError(
                 f"claude CLI exited {completed.returncode}: {err}"
             )
-        response = (completed.stdout or "").strip()
+        response = stdout_bytes.decode("utf-8", errors="replace").strip()
         return {
             "response": response,
             "backend": self.name,
@@ -1809,6 +1830,15 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     anthropic_pkg = importlib.util.find_spec("anthropic") is not None
     claude_cli = shutil.which("claude") is not None
+    claude_conpty = (
+        importlib.util.find_spec("winpty") is not None
+        or importlib.util.find_spec("pywinpty") is not None
+        or shutil.which("winpty") is not None
+    )
+    claude_cli_ready = (
+        claude_cli
+        and (not sys.platform.startswith("win") or claude_conpty)
+    )
     codex_error = ""
     codex_runtime = "missing"
     try:
@@ -1826,7 +1856,7 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     hermes_pkg = importlib.util.find_spec("run_agent") is not None
     hermes_profile = (home / ".hermes").exists()
 
-    claude_ready = (anthropic_key and anthropic_pkg) or claude_cli
+    claude_ready = (anthropic_key and anthropic_pkg) or claude_cli_ready
     codex_ready = codex_cli and codex_profile
     hermes_ready = hermes_pkg and hermes_profile
 
@@ -1843,15 +1873,34 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             "kind": "claude-code",
             "label": "Claude Code",
             "ready": claude_ready,
-            "available": claude_ready,
+            "available": (anthropic_key and anthropic_pkg) or claude_cli,
+            "runtime": (
+                "sdk"
+                if anthropic_key and anthropic_pkg else
+                "cli-conpty"
+                if claude_cli_ready and sys.platform.startswith("win") else
+                "cli"
+                if claude_cli_ready else
+                "cli-needs-conpty"
+                if claude_cli and sys.platform.startswith("win") else
+                "missing"
+            ),
             "detail": (
                 "Anthropic SDK credentials detected."
                 if anthropic_key and anthropic_pkg else
+                "Claude CLI detected with ConPTY support."
+                if claude_cli_ready and sys.platform.startswith("win") else
                 "Claude CLI detected."
-                if claude_cli else
-                "Install/log in to Claude Code, or set ANTHROPIC_API_KEY with the anthropic package."
+                if claude_cli_ready else
+                "Claude CLI detected, but Windows non-interactive A2A calls need a ConPTY wrapper."
+                if claude_cli and sys.platform.startswith("win") else
+                "Install/log in to Claude Code, or configure SDK credentials with the anthropic package."
             ),
-            "warning": "CLI mode can be slower on Windows; SDK mode is preferred when configured.",
+            "warning": (
+                "Install pywinpty/winpty or configure SDK credentials with the anthropic package before spawning Claude Code."
+                if claude_cli and sys.platform.startswith("win") and not claude_ready else
+                "CLI mode can be slower on Windows; SDK mode is preferred when configured."
+            ),
         },
         "codex": {
             "kind": "codex",

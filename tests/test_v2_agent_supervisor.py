@@ -4891,15 +4891,18 @@ def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
 
     monkeypatch.setattr(shutil, "which", lambda _n: str(ps1))
 
-    captured: list[list[str]] = []
+    captured: list[tuple[list[str], dict]] = []
 
     class _FakeCompleted:
         returncode = 0
         stdout = "ok"
         stderr = ""
 
-    def fake_run(argv: list[str], **_kw: object) -> _FakeCompleted:
-        captured.append(list(argv))
+    def fake_run(argv: list[str], **kw: object) -> _FakeCompleted:
+        captured.append((list(argv), dict(kw)))
+        stdout = kw.get("stdout")
+        if hasattr(stdout, "write"):
+            stdout.write(b"ok")
         return _FakeCompleted()
 
     monkeypatch.setattr(_sp, "run", fake_run)
@@ -4910,10 +4913,13 @@ def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
     assert out["response"] == "ok"
     assert captured, "subprocess.run was not invoked"
     # First arg of argv must be the resolved .exe, NOT the .ps1.
-    invoked = captured[0][0]
+    invoked = captured[0][0][0]
     assert invoked == str(exe), (
         f"expected {exe} to be invoked; got {invoked!r}"
     )
+    run_kwargs = captured[0][1]
+    assert run_kwargs.get("stdout") is not _sp.PIPE
+    assert run_kwargs.get("stderr") is not _sp.PIPE
 
 
 def test_claude_code_backend_raises_when_ps1_has_no_adjacent_exe(

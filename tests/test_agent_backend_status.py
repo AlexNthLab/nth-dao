@@ -58,3 +58,39 @@ def test_backend_status_reports_codex_runtime_without_paths(tmp_path, monkeypatc
     assert "Users" not in rendered
     assert "AppData" not in rendered
     assert "codex.cmd" not in rendered
+
+
+def test_backend_status_gates_windows_claude_cli_without_conpty(
+    tmp_path, monkeypatch,
+):
+    import importlib.util
+    import shutil
+    import nth_dao.web.dummy_agent as dummy_agent
+
+    monkeypatch.setattr(dummy_agent.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(dummy_agent.sys, "platform", "win32")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    original_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str):
+        if name in {"anthropic", "winpty", "pywinpty", "run_agent"}:
+            return None
+        return original_find_spec(name)
+
+    def fake_which(name: str):
+        if name == "claude":
+            return r"C:\Example\bin\claude.exe"
+        return None
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(shutil, "which", fake_which)
+
+    status = dummy_agent.backend_runtime_status()["claude-code"]
+
+    assert status["available"] is True
+    assert status["ready"] is False
+    assert status["runtime"] == "cli-needs-conpty"
+    assert "ConPTY" in status["detail"]
+    rendered = repr(status)
+    assert "C:\\Example" not in rendered
+    assert "claude.exe" not in rendered

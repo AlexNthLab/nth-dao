@@ -129,6 +129,15 @@ it("renders backend startup guide and gates unavailable backends", () => {
             available: true,
             detail: "Built-in smoke backend.",
           },
+          "claude-code": {
+            kind: "claude-code",
+            label: "Claude Code",
+            ready: false,
+            available: true,
+            runtime: "cli-needs-conpty",
+            detail: "Claude CLI detected, but Windows non-interactive A2A calls need a ConPTY wrapper.",
+            warning: "Install pywinpty/winpty before spawning Claude Code.",
+          },
           codex: {
             kind: "codex",
             label: "Codex",
@@ -153,10 +162,12 @@ it("renders backend startup guide and gates unavailable backends", () => {
 
   expect(screen.getByText("Local backend startup")).toBeTruthy();
   expect(screen.getByText("Mock")).toBeTruthy();
+  expect(screen.getByText("Claude Code")).toBeTruthy();
+  expect(screen.getByText("runtime: cli-needs-conpty")).toBeTruthy();
   expect(screen.getByText("Codex")).toBeTruthy();
   expect(screen.getByText("runtime: node-shim")).toBeTruthy();
   expect(screen.getByText("Hermes")).toBeTruthy();
-  expect(screen.getByText("setup needed")).toBeTruthy();
+  expect(screen.getAllByText("setup needed")).toHaveLength(2);
   expect(screen.getByText("Hermes runs in-process.")).toBeTruthy();
 
   const startButtons = screen.getAllByText("Start");
@@ -165,6 +176,8 @@ it("renders backend startup guide and gates unavailable backends", () => {
 
   const disabledHermes = startButtons.find((b) => b.hasAttribute("disabled"));
   expect(disabledHermes).toBeTruthy();
+  const disabledClaude = screen.getByTitle(/ConPTY wrapper/);
+  expect(disabledClaude.hasAttribute("disabled")).toBe(true);
 });
 
 it("surfaces Hermes warmup status while an agent task is starting", async () => {
