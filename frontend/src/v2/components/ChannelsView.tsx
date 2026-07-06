@@ -25,6 +25,22 @@ import type { AgentEntry, Channel, ChannelMessage } from "../types-v2";
 
 const ME = "admin";  // 当前人类用户(与后端发消息的默认 sender 一致)
 
+const DEFAULT_AGENT_REPLY_WAIT_MS = 30_000;
+const AGENT_REPLY_WAIT_MS_BY_KIND: Record<string, number> = {
+  mock: 30_000,
+  codex: 100_000,
+  hermes: 180_000,
+  "claude-code": 130_000,
+};
+
+export function agentReplyWaitMs(agents: AgentEntry[]): number {
+  if (agents.length === 0) return DEFAULT_AGENT_REPLY_WAIT_MS;
+  return Math.max(
+    DEFAULT_AGENT_REPLY_WAIT_MS,
+    ...agents.map((a) => AGENT_REPLY_WAIT_MS_BY_KIND[a.kind || ""] ?? DEFAULT_AGENT_REPLY_WAIT_MS),
+  );
+}
+
 export function ChannelsView() {
   const { t } = useLang();
   const toast = useToast();
@@ -43,12 +59,31 @@ export function ChannelsView() {
   const threadRef = useRef<HTMLDivElement | null>(null);
 
   const selected = channels.find((c) => c.channel_id === selectedId) ?? null;
-  const hasAgentMember = useMemo(
-    () => !!selected && selected.member_ids.some(
-      (m) => m !== ME && m.startsWith("did:"),
-    ),
-    [selected],
+  const channelAgentMembers = useMemo(
+    () => {
+      if (!selected) return [];
+      const memberIds = new Set(
+        selected.member_ids.filter((m) => m !== ME && m.startsWith("did:")),
+      );
+      return agents.filter((a) => a.did && memberIds.has(a.did));
+    },
+    [selected, agents],
   );
+  const drivableChannelAgents = useMemo(
+    () => channelAgentMembers.filter(
+      (a) => a.supervised === true
+        && a.alive === true
+        && a.has_active_cap === true
+        && typeof a.a2a_port === "number",
+    ),
+    [channelAgentMembers],
+  );
+  const hasAgentMember = drivableChannelAgents.length > 0;
+  const agentWaitMs = useMemo(
+    () => agentReplyWaitMs(drivableChannelAgents),
+    [drivableChannelAgents],
+  );
+  const agentWaitSeconds = Math.round(agentWaitMs / 1000);
 
   // 频道列表 + agent 目录:初次 + 3s 轮询。
   useEffect(() => {
@@ -61,9 +96,18 @@ export function ChannelsView() {
         setSelectedId((cur) => cur ?? cs[0]?.channel_id ?? null);
       } catch { /* hub 离线 — 保留现状 */ }
     }
+    async function loadAgents() {
+      try {
+        const rows = await fetchAgents();
+        if (!cancelled) setAgents(rows);
+      } catch { /* hub 离线 — 保留现状 */ }
+    }
     loadChannels();
-    fetchAgents().then((a) => { if (!cancelled) setAgents(a); }).catch(() => {});
-    const id = window.setInterval(loadChannels, 3000);
+    loadAgents();
+    const id = window.setInterval(() => {
+      void loadChannels();
+      void loadAgents();
+    }, 3000);
     return () => { cancelled = true; window.clearInterval(id); };
   }, []);
 
@@ -125,11 +169,15 @@ export function ChannelsView() {
       if (hasAgentMember) {
         setAwaiting(true);
         if (awaitTimer.current) window.clearTimeout(awaitTimer.current);
-        // 30s 没等到回帖 → 撤指示并显式告知(不静默,补隐患②)。
+        // Slow backends (Hermes/Codex/Claude) can legitimately exceed
+        // the old 30s UI window; use the same backend-aware budget the
+        // hub uses for A2A ask forwarding.
         awaitTimer.current = window.setTimeout(() => {
           setAwaiting(false);
           setAwaitTimedOut(true);
-        }, 30000);
+        }, agentWaitMs);
+      } else if (channelAgentMembers.length > 0) {
+        setAwaitTimedOut(true);
       }
       const ms = await listChannelMessages(selectedId);
       setMessages(ms);
@@ -295,8 +343,10 @@ export function ChannelsView() {
               )}
               {awaitTimedOut && (
                 <div className="chat-system" style={{ fontSize: 11 }} aria-live="polite">
-                  {t("agent 未在 30s 内回复(可能没有在线 agent,或它出错了)。",
-                     "No agent reply within 30s — no online agent, or it errored.")}
+                  {t(
+                    `agent 未在 ${agentWaitSeconds}s 内回复(可能没有可驱动 agent、它出错了,或仍在运行)。`,
+                    `No agent reply after ${agentWaitSeconds}s - no drivable agent, it errored, or it is still running.`,
+                  )}
                 </div>
               )}
             </div>

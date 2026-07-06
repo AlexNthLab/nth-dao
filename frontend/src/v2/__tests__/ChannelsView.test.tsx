@@ -32,11 +32,55 @@ vi.mock("../api", () => ({
   fetchAgents: vi.fn().mockResolvedValue([]),
 }));
 
-import { ChannelsView } from "../components/ChannelsView";
+import { ChannelsView, agentReplyWaitMs } from "../components/ChannelsView";
 
 afterEach(cleanup);
 
 describe("ChannelsView", () => {
+  it("uses slow-backend wait budgets for model agents", () => {
+    expect(agentReplyWaitMs([])).toBe(30_000);
+    expect(agentReplyWaitMs([
+      {
+        did: "did:test-hermes",
+        code: "hermes",
+        label: "Hermes",
+        source: "local",
+        capabilities: [],
+        has_active_cap: true,
+        supervised: true,
+        alive: true,
+        a2a_port: 1,
+        kind: "hermes",
+      },
+    ])).toBe(180_000);
+    expect(agentReplyWaitMs([
+      {
+        did: "did:test-mock",
+        code: "mock",
+        label: "Mock",
+        source: "local",
+        capabilities: [],
+        has_active_cap: true,
+        supervised: true,
+        alive: true,
+        a2a_port: 1,
+        kind: "mock",
+      },
+      {
+        did: "did:test-codex",
+        code: "codex",
+        label: "Codex",
+        source: "local",
+        capabilities: [],
+        has_active_cap: true,
+        supervised: true,
+        alive: true,
+        a2a_port: 2,
+        kind: "codex",
+      },
+    ])).toBe(100_000);
+  });
+
   it("渲染频道、消息流、主题", async () => {
     render(
       <LangProvider>

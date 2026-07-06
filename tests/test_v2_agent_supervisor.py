@@ -5290,6 +5290,142 @@ def test_hub_proxy_ask_uses_per_method_timeout(
     )
 
 
+def test_hub_proxy_ask_uses_backend_specific_timeout_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hermes has a 120s backend default, so the hub must not kill a
+    healthy no-timeout /ask call at the generic 65s floor."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+    from nth_dao.web import v2_api as _v2
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:key:z6MkHermesTimeoutProbe"
+    rec = AgentRecord(
+        agent_id="hermes-timeout-probe", kind="hermes",
+        label="hermes-timeout-probe", did=target_did,
+        capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, a2a_port=52999,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["hermes-timeout-probe"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["hermes-timeout-probe"] = True  # type: ignore[attr-defined]
+
+    import urllib.request as _ureq
+    seen_timeouts: list[float] = []
+
+    class _FakeResp:
+        status = 200
+        def __enter__(self) -> "_FakeResp": return self
+        def __exit__(self, *_a: object) -> None: return None
+        def read(self) -> bytes:
+            return json.dumps({"result": {"ok": True}}).encode("utf-8")
+
+    def fake_urlopen(_req: object, *, timeout: float = 0) -> _FakeResp:
+        seen_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/v2/agents/{target_did}/a2a/ask",
+        json={"prompt": "hi"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen_timeouts == [
+        _v2._A2A_BACKEND_METHOD_TIMEOUTS[("hermes", "ask")]
+    ]
+
+
+def test_hub_injected_ask_uses_backend_specific_timeout_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser-facing /ask endpoint injects the agent cap_token.
+
+    It must use the same backend-specific timeout floor as the raw A2A
+    proxy, otherwise a Hermes call can still be killed by the hub at the
+    generic Claude-sized 65s budget.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NTH_V2_WORKSPACE_ONLY", "true")
+
+    from nth_dao.web import create_app
+    from nth_dao.web.agent_supervisor import AgentRecord
+    from nth_dao.web import v2_api as _v2
+
+    app = create_app(
+        workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
+        require_console_auth=False,
+    )
+    sup = AgentSupervisor(InMemoryRunner())
+    app.state.v2_supervisor = sup
+    target_did = "did:test-hermes-injected-ask-probe"
+    token_id = "tok-hermes-ask"
+    app.state.nth.cap_tokens.record({
+        "kind": "nth-cap-token-v1",
+        "token_id": token_id,
+        "issuer_did": "did:key:z6MkIssuer",
+        "subject_did": target_did,
+        "capabilities": ["a2a:message_send"],
+        "not_before": 0,
+        "not_after": 9_999_999_999,
+        "nonce": "nonce",
+        "sig": "sig",
+    })
+    rec = AgentRecord(
+        agent_id="hermes-injected-ask", kind="hermes",
+        label="hermes-injected-ask", did=target_did,
+        capabilities=[],
+        started_at="2026-06-11T00:00:00+00:00",
+        last_seen="2026-06-11T00:00:00+00:00",
+        alive=True, pid=1, cap_token_id=token_id, a2a_port=53999,
+    )
+    with sup._lock:  # type: ignore[attr-defined]
+        sup._agents["hermes-injected-ask"] = rec  # type: ignore[attr-defined]
+    sup._runner._alive["hermes-injected-ask"] = True  # type: ignore[attr-defined]
+
+    import urllib.request as _ureq
+    seen_timeouts: list[float] = []
+
+    class _FakeResp:
+        status = 200
+        def __enter__(self) -> "_FakeResp": return self
+        def __exit__(self, *_a: object) -> None: return None
+        def read(self) -> bytes:
+            return json.dumps({"result": {"ok": True}}).encode("utf-8")
+
+    def fake_urlopen(_req: object, *, timeout: float = 0) -> _FakeResp:
+        seen_timeouts.append(timeout)
+        return _FakeResp()
+
+    monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/v2/agents/{target_did}/ask",
+        json={"prompt": "hi"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen_timeouts == [
+        _v2._A2A_BACKEND_METHOD_TIMEOUTS[("hermes", "ask")]
+    ]
+
+
 def test_hub_proxy_ask_end_to_end_through_real_subprocess(
     tmp_path: Path,
 ) -> None:
@@ -5655,6 +5791,136 @@ def test_channel_dispatch_retries_not_yet_authorized(
     )]
 
 
+def test_channel_dispatch_persists_response_receipt_before_posting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Channel auto-replies are execution evidence too.
+
+    A child response carrying result.receipt must pass through the same
+    persistence gate as /api/v2/agents/{did}/ask before the channel reply
+    is made visible.
+    """
+    import urllib.request
+    import nth_dao.web.v2_api as _v2
+
+    events: list[tuple[str, object]] = []
+
+    class Groups:
+        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
+            events.append(("post", (channel_id, sender_id, body)))
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({
+                "result": {
+                    "response": "receipt-backed channel reply",
+                    "receipt": {"receipt_id": "r-channel-1"},
+                },
+            }).encode("utf-8")
+
+    def fake_urlopen(_req, timeout):  # noqa: ANN001, ARG001
+        return Response()
+
+    def fake_persist(store, agent_id, expected_did, content):  # noqa: ANN001
+        events.append(("persist", (store, agent_id, expected_did, content)))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_v2, "_persist_agent_response_receipt_to_store", fake_persist)
+
+    receipts_store = object()
+    groups = Groups()
+    assert _v2._CHANNEL_DISPATCH_SEM.acquire(blocking=False)
+    _v2._channel_ask_and_reply(
+        groups,
+        {"token_id": "tok", "subject_did": "did:key:z6MkAgent"},
+        "did:key:z6MkAgent",
+        9999,
+        "general",
+        "hello",
+        receipts_store,
+        "agent-123",
+    )
+
+    assert events[0][0] == "persist"
+    assert events[1] == (
+        "post",
+        ("general", "did:key:z6MkAgent", "receipt-backed channel reply"),
+    )
+    _, persisted = events[0]
+    store, agent_id, expected_did, content = persisted  # type: ignore[misc]
+    assert store is receipts_store
+    assert agent_id == "agent-123"
+    assert expected_did == "did:key:z6MkAgent"
+    assert content["result"]["receipt"]["receipt_id"] == "r-channel-1"
+
+
+def test_channel_dispatch_uses_hermes_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hermes channel replies need a longer real-world provider window."""
+    import urllib.request
+    import nth_dao.web.v2_api as _v2
+
+    seen_timeouts: list[float] = []
+    seen_payloads: list[dict] = []
+
+    class Groups:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
+            self.messages.append((channel_id, sender_id, body))
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({
+                "result": {"response": "slow hermes reply"},
+            }).encode("utf-8")
+
+    def fake_urlopen(req, timeout):  # noqa: ANN001
+        seen_timeouts.append(timeout)
+        seen_payloads.append(json.loads(req.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    groups = Groups()
+    assert _v2._CHANNEL_DISPATCH_SEM.acquire(blocking=False)
+    _v2._channel_ask_and_reply(
+        groups,
+        {"token_id": "tok", "subject_did": "did:key:z6MkHermes"},
+        "did:key:z6MkHermes",
+        9999,
+        "general",
+        "hello",
+        None,
+        "agent-hermes",
+        "hermes",
+    )
+
+    assert seen_payloads[0]["timeout_s"] == 170.0
+    assert seen_timeouts == [175.0]
+    assert groups.messages == [
+        ("general", "did:key:z6MkHermes", "slow hermes reply"),
+    ]
+
+
 
 def test_channel_dispatch_posts_visible_error_on_http_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -5753,6 +6019,9 @@ def test_a2a_forward_timeout_rejects_bool_and_bounds_extreme_values() -> None:
     import nth_dao.web.v2_api as _v2
 
     assert _v2._a2a_forward_timeout("ask", b'{"timeout_s": true}') == 65.0
+    assert _v2._a2a_forward_timeout(
+        "ask", b'{"timeout_s": true}', backend_kind="hermes",
+    ) == _v2._A2A_BACKEND_METHOD_TIMEOUTS[("hermes", "ask")]
 
     huge = ("1" + ("0" * 10000)).encode("ascii")
     assert _v2._a2a_forward_timeout(

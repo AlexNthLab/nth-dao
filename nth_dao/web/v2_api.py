@@ -2564,6 +2564,26 @@ def _persist_agent_response_receipt(
     be verified and on disk before the HTTP response is handed back to
     the UI.
     """
+    _persist_agent_response_receipt_to_store(
+        _state_receipts_store(request),
+        agent_id,
+        expected_did,
+        content,
+    )
+
+
+def _persist_agent_response_receipt_to_store(
+    receipts: Any,
+    agent_id: str,
+    expected_did: str,
+    content: Any,
+) -> None:
+    """Verify and persist a receipt from an agent response.
+
+    This store-level helper lets background channel dispatch reuse the
+    exact same receipt gate as browser-driven /ask without holding a
+    FastAPI Request object as the persistence authority.
+    """
     if not isinstance(content, dict):
         return
     result = content.get("result")
@@ -2583,7 +2603,6 @@ def _persist_agent_response_receipt(
         )
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    receipts = _state_receipts_store(request)
     if receipts is None:
         raise HTTPException(
             status_code=500,
@@ -2667,20 +2686,62 @@ _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     # 125s = 120s backend allowance + 5s for hub round-trip overhead.
     "ask-stream": 125.0,
 }
+_A2A_BACKEND_METHOD_TIMEOUTS: Dict[Tuple[str, str], float] = {
+    # Hermes defaults to 120s internally. Without a backend-aware hub
+    # budget, browser-driven /ask calls time out at the hub after 65s
+    # while the Hermes worker is still legitimately waiting on its
+    # provider. Keep this as a minimum only; caller-supplied timeout_s
+    # may still raise it up to _A2A_MAX_FORWARD_TIMEOUT_S.
+    ("hermes", "ask"): 125.0,
+    ("hermes", "ask-stream"): 125.0,
+    # Codex CLI defaults to 90s. It can cold-start slowly, so do not
+    # inherit the Claude-sized 65s floor when the supervisor knows the
+    # child is a Codex agent.
+    ("codex", "ask"): 95.0,
+    ("codex", "ask-stream"): 125.0,
+}
 _A2A_TIMEOUT_SLACK_S = 5.0
 _A2A_MAX_FORWARD_TIMEOUT_S = 180.0
-_CHANNEL_DISPATCH_ASK_TIMEOUT_S = 120.0
+_CHANNEL_DISPATCH_DEFAULT_ASK_TIMEOUT_S = 120.0
+_CHANNEL_DISPATCH_ASK_TIMEOUTS: Dict[str, float] = {
+    # Hermes/DeepSeek often queues longer than 120s in real local tests.
+    # Keep below _A2A_MAX_FORWARD_TIMEOUT_S after proxy slack is added.
+    "hermes": 170.0,
+    "codex": 120.0,
+    "claude-code": 120.0,
+    "mock": 30.0,
+}
 
 
-def _a2a_forward_timeout(method: str, body_bytes: bytes) -> float:
+def _channel_dispatch_ask_timeout(backend_kind: str | None) -> float:
+    return _CHANNEL_DISPATCH_ASK_TIMEOUTS.get(
+        str(backend_kind or ""),
+        _CHANNEL_DISPATCH_DEFAULT_ASK_TIMEOUT_S,
+    )
+
+
+def _a2a_forward_timeout(
+    method: str,
+    body_bytes: bytes,
+    *,
+    backend_kind: str | None = None,
+) -> float:
     """Return the hub->child timeout for an A2A method.
 
-    The per-method map is the minimum. For model-backed methods, callers may
-    request a larger ``timeout_s`` in the JSON body; the proxy adds a small
-    round-trip slack and clamps to a hard ceiling so one request cannot pin a
-    worker indefinitely.
+    The per-method map is the generic minimum. When the supervisor knows the
+    child's backend kind, backend-specific floors may raise that minimum so
+    slow-but-healthy providers are not killed by a hub timeout before their own
+    backend timeout fires. For model-backed methods, callers may request a
+    larger ``timeout_s`` in the JSON body; the proxy adds a small round-trip
+    slack and clamps to a hard ceiling so one request cannot pin a worker
+    indefinitely.
     """
     base = _A2A_METHOD_TIMEOUTS.get(method, _A2A_DEFAULT_TIMEOUT_S)
+    if backend_kind:
+        base = max(
+            base,
+            _A2A_BACKEND_METHOD_TIMEOUTS.get((str(backend_kind), method), base),
+        )
     if method not in {"ask", "ask-stream"}:
         return base
     try:
@@ -3593,7 +3654,17 @@ def _channel_dispatch_end(channel_id: str, did: str) -> None:
         _CHANNEL_DISPATCH_IN_FLIGHT.discard(key)
 
 
-def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt):
+def _channel_ask_and_reply(
+    groups,
+    auth_token,
+    did,
+    a2a_port,
+    channel_id,
+    prompt,
+    receipts_store: Any = None,
+    agent_id: str = "",
+    backend_kind: str = "",
+):
     """P2 后台:问一个 agent 的 /a2a/ask,把回复回帖到频道。best-effort。
 
     用 agent 自己的 spawn cap_token 作 Authorization(与 claim/ask 同款注入);
@@ -3611,7 +3682,7 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
         body_bytes = json.dumps(
             {
                 "prompt": prompt,
-                "timeout_s": _CHANNEL_DISPATCH_ASK_TIMEOUT_S,
+                "timeout_s": _channel_dispatch_ask_timeout(backend_kind),
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -3650,6 +3721,9 @@ def _channel_ask_and_reply(groups, auth_token, did, a2a_port, channel_id, prompt
                 ) from exc
         reply = ""
         if isinstance(content, dict):
+            _persist_agent_response_receipt_to_store(
+                receipts_store, agent_id or did, did, content,
+            )
             result = content.get("result")
             if isinstance(result, dict):
                 reply = str(result.get("response") or "")
@@ -3698,7 +3772,8 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
         members = set(channel.member_ids or [])
         store = _state_cap_tokens_store(request)
 
-        targets: List[Tuple[Any, str, int]] = []  # (auth_token, did, a2a_port)
+        receipts_store = _state_receipts_store(request)
+        targets: List[Tuple[Any, str, int, str, str]] = []
         driver_dids: set = set()
         for rec in sup.list_agents():
             did = getattr(rec, "did", "") or ""
@@ -3715,13 +3790,19 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
             driver_dids.add(did)
             auth = store.get(tok_id) if store is not None else None
             if isinstance(auth, dict):
-                targets.append((auth, did, port))
+                targets.append((
+                    auth,
+                    did,
+                    port,
+                    getattr(rec, "agent_id", "") or "",
+                    getattr(rec, "kind", "") or "",
+                ))
 
         # 防环:消息作者本身就是可驱动 agent → 这是 agent 的回帖,不再派发。
         if message.sender_id in driver_dids:
             return
 
-        for auth, did, port in targets:
+        for auth, did, port, agent_id, backend_kind in targets:
             if not _channel_dispatch_try_begin(channel_id, did):
                 logger.info(
                     "channel dispatch skipped while busy/cooling for %s "
@@ -3740,7 +3821,10 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
             try:
                 threading.Thread(
                     target=_channel_ask_and_reply,
-                    args=(groups, auth, did, port, channel_id, message.body),
+                    args=(
+                        groups, auth, did, port, channel_id, message.body,
+                        receipts_store, agent_id, backend_kind,
+                    ),
                     daemon=True,
                 ).start()
             except Exception as exc:  # noqa: BLE001
@@ -5945,7 +6029,9 @@ def register_v2_routes(app: FastAPI) -> None:
         # timeout so slow backends (claude-code, future Hermes,
         # etc.) aren't capped at the snappy default that was sized
         # for /ping + /echo. Unknown methods inherit the default.
-        forward_timeout = _a2a_forward_timeout(method, body_bytes)
+        forward_timeout = _a2a_forward_timeout(
+            method, body_bytes, backend_kind=getattr(rec, "kind", None),
+        )
 
         # Phase 5.2: SSE streaming proxy. We dispatch to a separate
         # forwarder because the buffered path uses ``asyncio.to_thread``
@@ -6052,7 +6138,9 @@ def register_v2_routes(app: FastAPI) -> None:
             "Content-Length": str(len(body_bytes)),
             "Authorization": f"CapToken {encode_authorization_header(token)}",
         }
-        forward_timeout = _a2a_forward_timeout(method, body_bytes)
+        forward_timeout = _a2a_forward_timeout(
+            method, body_bytes, backend_kind=getattr(rec, "kind", None),
+        )
 
         if method == "ask-stream":
             return _proxy_ssestream(
