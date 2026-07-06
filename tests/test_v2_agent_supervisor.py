@@ -354,13 +354,16 @@ def test_spawn_endpoint_returns_201(hub_client: TestClient) -> None:
 def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
     tmp_path: Path,
 ) -> None:
-    """UI 集成 keystone（2026-06-13）：浏览器没有签名私钥，直接打
-    ``/a2a/ask`` 代理（原样透传 auth）→ 子端 401。新的 hub 端点
-    ``POST /api/v2/agents/{did}/ask`` 由 hub 注入该 agent 自己的
-    cap_token → 200。这就是"任务流程无法在 UI 跑通"的根因修复。
+    """UI integration keystone (2026-06-13).
 
-    用真 subprocess supervisor（不是 InMemoryRunner）—— keystone 本质是
-    端到端：要有真子进程绑 a2a_port + 加载 cap_token 才能验证注入。"""
+    Browsers do not hold the agent's signing key. A raw proxied
+    ``/a2a/ask`` call forwards auth as-is and receives child-side 401.
+    The hub endpoint ``POST /api/v2/agents/{did}/ask`` injects that
+    agent's own cap_token and returns 200 after the child authorizes.
+
+    Use the real subprocess supervisor, not InMemoryRunner: this must
+    validate a real child process, a bound a2a_port, and cap_token load.
+    """
     import time
     from fastapi.testclient import TestClient
     from nth_dao.web import create_app
@@ -375,11 +378,11 @@ def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
     did = r.json()["did"]
     agent_id = r.json()["agent_id"]
     try:
-        # 原代理无 auth → 401（浏览器会遇到的破路径）
+        # Raw proxy without auth -> 401, matching the browser failure path.
         raw = c.post(f"/api/v2/agents/{did}/a2a/ask", json={"prompt": "hi"})
         assert raw.status_code == 401, raw.text
 
-        # 新 hub /ask：hub 注入 cap_token → 200（轮询等子端 authorized）
+        # Hub /ask injects cap_token -> 200 after the child authorizes.
         ok = None
         for _ in range(12):
             ask = c.post(f"/api/v2/agents/{did}/ask", json={"prompt": "hello UI"})
@@ -387,7 +390,7 @@ def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
                 ok = ask
                 break
             time.sleep(0.5)
-        assert ok is not None, "hub /ask 应在 agent authorized 后返回 200"
+        assert ok is not None, "hub /ask should return 200 after authorization"
         body = ok.json()
         assert body["result"]["backend"] == "mock"
         assert "hello UI" in body["result"]["response"]
@@ -4301,10 +4304,9 @@ def test_hermes_backend_returns_response_via_fake_agent(
     assert out == {
         "response": "PONG",
         "backend": "hermes",
-        # L-2 revert (5.4b R2 自审): 实测 Hermes 接的是裸名,
-        # canonical ``provider/model`` 形式会被透传给 DeepSeek
-        # 而 DeepSeek 直接 HTTP 400。详见 _HermesAskBackend
-        # DEFAULT_MODEL 上方的注释。
+        # L-2 revert (5.4b R2 review): field tests showed Hermes
+        # expects the bare model name here; canonical ``provider/model``
+        # is forwarded literally to DeepSeek and rejected.
         "model": "deepseek-v4-pro",
     }
     assert captured["prompt"] == "hello hermes"
@@ -4614,7 +4616,7 @@ def test_anthropic_backend_allowlist_includes_sonnet_and_haiku() -> None:
     on the operator's bill. Locks the starter set so a refactor
     that absentmindedly adds "claude-opus-4-8" gets caught.
 
-    S-1 自审 (Phase 6a): two haiku aliases are listed — bare
+    Phase 6a self-review: two haiku aliases are listed — bare
     ``claude-haiku-4-5`` plus dated canonical
     ``claude-haiku-4-5-20251001`` — because Anthropic's bare-name
     aliasing for Haiku 4.5 isn't reliable. Operators don't have
@@ -4665,7 +4667,7 @@ def test_anthropic_backend_rejects_opus_override(
 def test_anthropic_backend_rejects_opus_override_on_stream_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S-8 自审 (Phase 6a): the buffered ``ask()`` rejects opus
+    """Phase 6a self-review: the buffered ``ask()`` rejects opus
     overrides — verify the SAME check fires on the SSE streaming
     path so a future refactor that touches only one branch doesn't
     silently widen the attack surface for streaming callers. """
@@ -6137,20 +6139,20 @@ def test_subprocess_runner_cap_token_file_round_trip(
         runner.stop(agent_id)
 
 
-# 运行态 agent 数量天花板(2026-06-14 审查补:auto/scale 显式上限)。
+# Live-agent capacity ceiling (2026-06-14 review: explicit auto/scale limit).
 def test_spawn_enforces_live_agent_ceiling():
     from nth_dao.web.agent_supervisor import AgentCapacityExceeded
 
     sup = AgentSupervisor(InMemoryRunner(), max_live_agents=2)
     sup.spawn(kind="mock", label="a")
     sup.spawn(kind="mock", label="b")
-    # 第三个超限 → 拒绝(且未起任何子进程)。
+    # Third spawn exceeds the cap and must not start any child process.
     with pytest.raises(AgentCapacityExceeded):
         sup.spawn(kind="mock", label="c")
-    # 停掉一个腾出名额 → 又能起。
+    # Stop one agent to free capacity, then spawning is allowed again.
     victim = sup.list_agents()[0].agent_id
     assert sup.stop(victim) is True
-    sup.spawn(kind="mock", label="d")  # 不再抛
+    sup.spawn(kind="mock", label="d")  # should not raise
     assert len(sup.list_agents()) == 2
 
 

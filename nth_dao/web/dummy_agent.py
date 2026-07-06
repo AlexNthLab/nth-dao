@@ -173,9 +173,11 @@ _A2A_METHOD_CAPABILITIES: Dict[str, str] = {
     # protocol-layer act ("peer sends a message to this agent and
     # gets a response") is identical; only the transport differs.
     "ask-stream": "a2a:message_send",
-    # 切片B:认领。调用方鉴权同 ask(a2a:message_send = "hub 可驱动本 agent")。
-    # 真正的认领授权是 params 里那张按需铸的 cap_token,由 claim_announcement
-    # 校验(能力子集 + subject==本 agent)。
+    # Slice B: market-claim methods. Wire authorization matches
+    # ``ask`` (a2a:message_send = "hub may drive this agent"). The
+    # actual claim authorization is the per-call cap_token carried in
+    # params and verified by claim_announcement (cap subset +
+    # subject == this agent).
     "claim": "a2a:message_send",
     "claim-sign": "a2a:message_send",
 }
@@ -265,37 +267,30 @@ class _AskBackend:
     name: str = "(abstract)"
     DEFAULT_TIMEOUT_S: float = 30.0
 
-    # Phase 6a (2026-06-12): model-allowlist 防线 (defense in depth).
+    # Phase 6a (2026-06-12): model allowlist as defense in depth.
     #
-    # 谁会用到这个？带有效 cap_token 的对端可以把 ``params['model']``
-    # 设成任何字符串。如果 backend 直接透传给底层 provider，对端就
-    # 能借机点 "最贵的型号"（anthropic-opus、未来的 deepseek-v5
-    # 等等）烧操作员的钱。``MODEL_ALLOWLIST`` 决定调用方可以通过
-    # ``params['model']`` 显式选择的型号集合：
+    # A peer with a valid cap_token can send any string in
+    # ``params['model']``. If the backend forwarded that value directly
+    # to the provider, a peer could burn operator budget by selecting an
+    # expensive model. ``MODEL_ALLOWLIST`` defines which explicit model
+    # overrides are accepted:
     #
-    #   • ``None``  = "完全不接受 ``params['model']``"。
-    #                 backend 只用自己的 DEFAULT_MODEL（或委托给
-    #                 底层 CLI/SDK 的默认值）。这是默认安全姿态。
-    #   • ``frozenset({...})`` = 显式允许 override 的型号集合。
+    #   * ``None`` rejects every caller-supplied model override. The
+    #     backend uses its DEFAULT_MODEL, or lets the underlying CLI/SDK
+    #     choose its own default. This is the safe default.
+    #   * ``frozenset({...})`` lists accepted override model names.
     #
-    # 注意：DEFAULT_MODEL 路径 *不走* allowlist 检查。两个概念分开:
-    #   - DEFAULT_MODEL：调用方没指定时 backend 内部默认用啥
-    #   - MODEL_ALLOWLIST：调用方 *能不能* 显式覆盖 default，能的话
-    #     可选的范围是啥
-    # 这两件事不一定要重合（比如允许 sonnet 当默认但只对外开 haiku，
-    # 用 frozenset({"claude-haiku-4-5"}) 即可）。
+    # DEFAULT_MODEL is intentionally separate from MODEL_ALLOWLIST:
+    #   * DEFAULT_MODEL is what the backend uses when the caller omits
+    #     ``params['model']``.
+    #   * MODEL_ALLOWLIST decides whether the caller may override that
+    #     default, and which values are allowed.
     #
-    # PA-4 自审 (Phase 6a R1) — operator 纪律点: 既然 DEFAULT_MODEL
-    # 路径不走 allowlist，operator 把 DEFAULT_MODEL 直接钉成
-    # "claude-opus-4-8" 之类的高价模型时，没有 backend 这层兜底。
-    # MODEL_ALLOWLIST 的双层防御（backend + Phase 6b cap_token 层）
-    # 是针对 *peer-supplied* override 的；operator 自己写死的默认值
-    # 视为可信。换句话说：operator 改 DEFAULT_MODEL 等于改 cost
-    # 默认值，应当在 PR review 阶段被同事看到。
-    #
-    # Phase 6b 会引入 cap_token 层的 ``scope_model_allowlist`` 字段
-    # 作为更细粒度的 *per-token* 授权。两层独立生效：cap_token 层
-    # 可以把 backend 名单进一步缩小（不能放宽）。
+    # Operator-owned DEFAULT_MODEL changes are trusted configuration and
+    # should be caught in PR review. The allowlist protects only the
+    # peer-supplied override path. Phase 6b adds per-token
+    # ``scope_model_allowlist`` as a second layer that may narrow, but
+    # never widen, this backend-level policy.
     MODEL_ALLOWLIST: Optional[FrozenSet[str]] = None
 
     def _check_model_allowed(self, requested: str) -> None:
@@ -318,9 +313,10 @@ class _AskBackend:
                 in the allowed set. The A2A handler converts this
                 into a 400 bad-request.
         """
-        # PA-3 修复 (Phase 6a R1): 显式拒绝空串，避免 "model '' not in
-        # [...]" 这种容易被误读为 "operator 漏配了空名" 的错误。
-        # 调用方契约是 stripped 非空，但作为公共方法防御一下。
+        # Phase 6a R1: reject empty strings explicitly so the operator
+        # does not see a misleading ``model '' not in [...]`` error.
+        # Callers should pass a stripped non-empty string, but this is a
+        # public helper and keeps its own guardrail.
         if not requested:
             raise ValueError(
                 f"{self.name} backend got empty params['model'] — "
@@ -451,15 +447,13 @@ class _AnthropicSdkAskBackend(_AskBackend):
     # short prompts; long outputs should use ask-stream.
     DEFAULT_TIMEOUT_S = 120.0
     DEFAULT_MODEL = "claude-sonnet-4-6"
-    # Phase 6a: 默认放开 sonnet + haiku（haiku 比 sonnet 还便宜，
-    # 拿来跑廉价场景；opus 单价大约是 sonnet 的 5x，operator 想
-    # 放开得显式扩这个集合，避免对端拿一个 cap_token 就刷 opus
-    # 把账单推爆）。子类化可覆盖。
-    # S-1 自审 (Phase 6a): Sonnet 4.6 + Opus 4.8 在 SDK 里都用裸名
-    # 别名 (``claude-sonnet-4-6`` / ``claude-opus-4-8``)；Haiku 4.5
-    # 的 canonical name 是带日期的 ``claude-haiku-4-5-20251001``，
-    # 裸名 ``claude-haiku-4-5`` 是否被 SDK 接受不一致。两种形式
-    # 都放进 allowlist，让 operator 不用纠结写哪个。
+    # Phase 6a: allow Sonnet and Haiku by default. Haiku is cheaper
+    # and useful for low-cost flows; Opus is intentionally absent so a
+    # peer cannot spend operator budget by passing a premium override.
+    # Operators may subclass this backend to widen the set explicitly.
+    # The Anthropic SDK accepts short aliases for Sonnet/Opus, while
+    # Haiku has a dated canonical form. Include both Haiku spellings so
+    # operators do not have to remember which spelling the SDK accepts.
     MODEL_ALLOWLIST = frozenset({
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
@@ -522,9 +516,9 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 "'pip install anthropic' or switch to kind=mock"
             ) from exc
 
-        # Phase 6a: 仅在调用方显式传 model 时走 allowlist 检查。
-        # default 路径无条件信任 (default 是 operator 自己钉的)。
-        # buffered 和 streaming 两条路径都要查 —— 一条放过等于全放过。
+        # Phase 6a: enforce the allowlist only for explicit caller
+        # model overrides. The default path is trusted operator config.
+        # Buffered and streaming paths must both check this policy.
         explicit_model = params.get("model")
         if isinstance(explicit_model, str) and explicit_model.strip():
             explicit_model = explicit_model.strip()
@@ -651,9 +645,9 @@ class _AnthropicSdkAskBackend(_AskBackend):
                 "'pip install anthropic' or switch to kind=mock"
             ) from exc
 
-        # Phase 6a: 仅在调用方显式传 model 时走 allowlist 检查。
-        # default 路径无条件信任 (default 是 operator 自己钉的)。
-        # buffered 和 streaming 两条路径都要查 —— 一条放过等于全放过。
+        # Phase 6a: enforce the allowlist only for explicit caller
+        # model overrides. The default path is trusted operator config.
+        # Buffered and streaming paths must both check this policy.
         explicit_model = params.get("model")
         if isinstance(explicit_model, str) and explicit_model.strip():
             explicit_model = explicit_model.strip()
@@ -969,15 +963,13 @@ class _ClaudeCliAskBackend(_AskBackend):
                 f"prompt too long ({len(prompt)} chars); 32KB cap"
             )
 
-        # PA-1 修复 (Phase 6a R1): 这个 CLI backend 跟 _AnthropicSdkAskBackend
-        # 共用 ``kind=claude-code``，dispatcher 根据 ANTHROPIC_API_KEY
-        # 在两者之间选实现。peer 看到的是 "claude-code backend"，
-        # 不该因为 dispatcher 选了 CLI 路径就突然变 "model override 静默
-        # 忽略"。即便 ``claude -p`` 这个调用方式 *本身* 没有 --model
-        # 这个开关（CLI 内部用 ~/.claude/config 决定模型，peer 改不了)
-        # 我们还是走 allowlist 检查 —— SDK 兄弟做什么我们做什么。这样
-        # peer 拿到的语义是 "claude-code backend 整体 default-closed"，
-        # 跟具体哪份实现接管无关。
+        # Phase 6a R1: the CLI backend shares kind=claude-code with
+        # _AnthropicSdkAskBackend. The dispatcher chooses SDK or CLI
+        # based on local configuration, but peers should see one stable
+        # contract: claude-code is default-closed for caller-supplied
+        # model overrides. Even though ``claude -p`` itself does not
+        # expose ``--model`` here, enforce the same allowlist semantics
+        # as the SDK sibling.
         explicit_model = params.get("model")
         if isinstance(explicit_model, str) and explicit_model.strip():
             self._check_model_allowed(explicit_model.strip())
@@ -1419,11 +1411,11 @@ class _CodexCliAskBackend(_AskBackend):
         binary = self._resolve_binary()
         argv = [binary, "exec", "--skip-git-repo-check"]
         # Optional model override — codex accepts ``--model <name>``.
-        # Phase 6a: 走 allowlist 查一遍。MODEL_ALLOWLIST=None 时 (codex
-        # 默认) 任何 override 都拒绝；codex CLI 自己也会按 OAuth scope
-        # 卡模型可用性，但 defense in depth：网络层先挡掉。
-        # S-5 自审: ``.strip()`` 用一个临时变量存住，免得多次重复
-        # 调用同一个无副作用的方法。
+        # Phase 6a: apply the allowlist before invoking the CLI. When
+        # MODEL_ALLOWLIST is None (the default for Codex), every
+        # caller-supplied override is rejected. The Codex CLI also
+        # enforces OAuth/model availability, but the network boundary
+        # should fail closed first.
         model_override = params.get("model")
         if isinstance(model_override, str) and model_override.strip():
             stripped = model_override.strip()
@@ -1453,11 +1445,11 @@ class _CodexCliAskBackend(_AskBackend):
                 stdin=_sp.DEVNULL,
                 capture_output=True,
                 text=True,
-                # 2026-06-13 真实测试修复:显式 UTF-8 解码。``text=True``
-                # 默认用平台 locale(Windows 中文机是 GBK),codex 的非 ASCII
-                # 输出(中文/特殊符号)会让 capture_output 的 reader 线程
-                # UnicodeDecodeError 崩掉 → 回应丢成空。codex CLI 一律 UTF-8,
-                # 这里钉死 utf-8 + replace,跨平台稳。
+                # 2026-06-13 field-test fix: decode UTF-8 explicitly.
+                # ``text=True`` uses the platform locale (GBK on many
+                # Chinese Windows hosts), which can crash on non-ASCII
+                # Codex output. Codex CLI output is UTF-8, so decode it
+                # with replacement for cross-platform stability.
                 # CO-3 fix (review round Phase 5.4 R1): drop the
                 # ``max(10.0, ...)`` floor — caller's effective
                 # budget passes through verbatim, matching the
@@ -1570,63 +1562,52 @@ class _CodexCliAskBackend(_AskBackend):
 
 
 class _HermesAskBackend(_AskBackend):
-    """Phase 5.4b (2026-06-12): Hermes 本机子代理。
+    """Phase 5.4b (2026-06-12): local Hermes sub-agent backend.
 
-    把一次 ``/a2a/ask`` 转成 hermes-agent 包里的
-    ``run_agent.AIAgent.chat(message) -> str``。
+    Translates one ``/a2a/ask`` call into
+    ``run_agent.AIAgent.chat(message) -> str`` from hermes-agent.
 
-    为什么用进程内导入而不是 subprocess（沿用 "先查现成轮子" 法则）：
-      • hermes-agent 已经把单次 prompt 的入口暴露成了
-        ``AIAgent.chat()``，它就是我们要的 "现成轮子"。
-        再撸一遍 HTTP / CLI 包装只会把同一份逻辑写两次。
-      • 走 subprocess 还得跟 Windows 的 stdout 死锁与 codex
-        的 approval 死等之类的坑赛跑——而 in-process 直接
-        绕开这一整类问题。
-      • hermes-agent 是 editable 安装在用户机器上，
-        ``import run_agent`` 几乎是免费的（除了第一次
-        构造 ``AIAgent`` 时约 30 秒的 config + provider 装载）。
+    Why import in-process instead of wrapping a subprocess:
+      * hermes-agent already exposes the one-shot entry point we need.
+        Re-wrapping it in another HTTP/CLI layer would duplicate logic.
+      * In-process execution avoids Windows stdout deadlocks and
+        approval-wait failure modes that affect CLI-style integrations.
+      * Local Hermes is expected to be editable-installed on the
+        operator machine, so importing ``run_agent`` is cheap except for
+        the first ``AIAgent`` construction/config/provider load.
 
-    每次 ``ask`` 都新建一个 ``AIAgent``：
-      • 状态隔离：每个 prompt 都是干净的对话历史，
-        不会因为前后两次调用串了上下文。
-      • 简单到不需要锁：单实例并发会引起内部状态污染，
-        每次新建一个就完全没这个问题。
-      • 代价：每次约 +30 秒的构造开销。在演示/单 operator
-        场景下可接受；生产场景应改为复用 agent + 调用
-        ``reset_session_state()``，并用 lock 串行 ``chat()``。
+    Each ``ask`` creates a fresh ``AIAgent``:
+      * State isolation: each prompt gets a clean conversation history.
+      * No shared instance lock is needed; concurrent calls cannot
+        corrupt one another's agent state.
+      * Cost: construction can add roughly 30 seconds. This is
+        acceptable for demos/single-operator use; production should
+        reuse an agent, call ``reset_session_state()``, and serialize
+        ``chat()`` behind a lock.
 
-    Auth：Hermes 自己读 ``~/.hermes/config.yaml`` + ``auth.json``，
-    我们不掺和。默认 provider = deepseek (``deepseek-v4-pro``)，
-    用户可通过 ``params['model']`` 改成 ``~/.hermes/auth.json``
-    里其他已配置的模型。
+    Auth is delegated to Hermes itself via ``~/.hermes/config.yaml``
+    and ``auth.json``. The default provider/model is DeepSeek
+    ``deepseek-v4-pro``. Operators may subclass to allow explicit model
+    overrides for other Hermes-configured aliases.
 
-    Timeout: ``AIAgent.chat()`` 自身没有 timeout 入参，
-    Hermes 内部对 HTTP 调用有 retry/timeout 配置。我们额外
-    用一个 daemon 工作线程 + ``Thread.join(timeout)`` 做硬截止：
-    超时时抛 ``TimeoutError`` 给调用方，后台线程会随进程退出
-    被回收（文档化在 docstring 里）。
+    ``AIAgent.chat()`` has no timeout parameter. Hermes has its own
+    HTTP retry/timeout behavior, and this adapter adds a hard outer
+    cutoff via a daemon worker thread plus ``Thread.join(timeout)``.
     """
 
     name = "hermes"
-    # 30s 构造 + chat 一般 7~60s + 余量。DeepSeek 较慢，留宽一点。
+    # 30s construction + 7-60s chat + margin. DeepSeek is often slow.
     DEFAULT_TIMEOUT_S = 120.0
 
-    # 默认模型：裸名 ``deepseek-v4-pro``。
-    #
-    # L-2 误判记录 (5.4b R1 提案 → R2 自审 revert):
-    #   ~/.hermes/config.yaml 里写的是 ``deepseek/deepseek-v4-pro``，
-    #   外审建议用这个规范化形式以便未来 provider 切换。但实测
-    #   ``AIAgent(model='deepseek/deepseek-v4-pro')`` 直接 HTTP 400:
-    #   Hermes 把整串当模型名透传给 DeepSeek，DeepSeek 回
-    #   "supported model names are deepseek-v4-pro or
-    #   deepseek-v4-flash"。也就是说配置文件里的斜杠只在 Hermes
-    #   解析阶段 split provider/model 时用，AIAgent(model=) 入参
-    #   反而要去掉前缀。外审是基于猜测的（没实测），所以维持
-    #   裸名。教训：依赖现成轮子时，"应该这样调"和"实际怎么调"
-    #   永远以实测为准。
+    # Default model: bare ``deepseek-v4-pro``. Field testing showed
+    # that ``AIAgent(model='deepseek/deepseek-v4-pro')`` is forwarded
+    # as a literal model string and rejected by DeepSeek. The provider
+    # prefix belongs in Hermes config parsing, not the AIAgent model
+    # argument. For third-party packages, measured behavior wins over
+    # guessed API shape.
     DEFAULT_MODEL = "deepseek-v4-pro"
 
-    # prompt 上限和其他 backend 对齐，防止恶意 peer 耗 LLM 上下文。
+    # Align prompt cap with other backends to bound hostile context use.
     MAX_PROMPT_CHARS = 32 * 1024
 
     _IMPORT_LOCK = threading.RLock()
@@ -1704,9 +1685,9 @@ class _HermesAskBackend(_AskBackend):
     def _raise_import_error(cls, exc: ImportError) -> None:
         if cls._is_run_agent_missing(exc):
             raise RuntimeError(
-                "hermes-agent 未安装；请到 hermes-agent 仓库根"
-                "目录执行 'pip install -e .'（仓库参考 "
-                "https://github.com/NousResearch/hermes-agent）"
+                "hermes-agent is not installed. From the hermes-agent "
+                "repository root, run 'pip install -e .' "
+                "(see https://github.com/NousResearch/hermes-agent)."
             ) from exc
         dep = getattr(exc, "name", "") or "unknown"
         raise RuntimeError(
@@ -1727,11 +1708,10 @@ class _HermesAskBackend(_AskBackend):
                 f"prompt too long ({len(prompt)} chars); 32KB cap"
             )
 
-        # 调用方可以指定一个 Hermes 已配置的别名（auth.json 里有的），
-        # Phase 6a 起 override 路径走 backend 层 allowlist 检查 ——
-        # MODEL_ALLOWLIST=None 时（hermes 默认）任何 override 都拒绝,
-        # 调用方只能用 DEFAULT_MODEL。operator 可以子类化把名单
-        # 显式扩开（比如同时允许 deepseek-v4-flash）。
+        # Callers may request a Hermes-configured alias only when the
+        # operator has explicitly widened MODEL_ALLOWLIST. With the
+        # default None policy, every caller override is rejected and
+        # DEFAULT_MODEL is used.
         explicit_model = params.get("model")
         if isinstance(explicit_model, str) and explicit_model.strip():
             explicit_model = explicit_model.strip()
@@ -1746,8 +1726,8 @@ class _HermesAskBackend(_AskBackend):
         except ImportError as exc:
             self._raise_import_error(exc)
 
-        # 跑在 daemon 线程里以便我们自己卡 timeout
-        # （AIAgent.chat 没有 timeout 入参）。
+        # Run in a daemon worker so this adapter can enforce an outer
+        # timeout; AIAgent.chat() has no timeout argument.
         result_box: Dict[str, Any] = {}
 
         def _worker() -> None:
@@ -1796,20 +1776,19 @@ class _HermesAskBackend(_AskBackend):
         worker.start()
         worker.join(timeout=timeout_s)
         if worker.is_alive():
-            # 工作线程仍在跑——HTTP 还没回。我们放弃等待，
-            # 让线程随进程退出被回收。下次 ask 会新起一个 agent，
-            # 不复用这个被遗弃的实例。
+            # The worker is still waiting on provider I/O. Give up and
+            # let the daemon thread die with the process; the next ask
+            # creates a fresh AIAgent instead of reusing this instance.
             raise TimeoutError(
                 f"hermes AIAgent.chat did not respond within "
                 f"{timeout_s:.1f}s for prompt[{len(prompt)}]. "
-                f"DeepSeek/远端可能在排队；可加大 timeout_s 或换 "
-                f"params['model'] 到 ~/.hermes/auth.json 里更快的 "
-                f"provider。"
+                "The remote provider may be queued; increase timeout_s "
+                "or use a faster model configured in ~/.hermes/auth.json."
             )
 
         err = result_box.get("error")
         if err is not None:
-            # 透传 ValueError / RuntimeError 以保留诊断信息。
+            # Preserve ValueError/RuntimeError diagnostics from Hermes.
             raise err
         # Defensive guard: BaseException subclasses should now be wrapped by
         # the worker above. If a future path exits without setting either
@@ -2247,9 +2226,9 @@ def _resolve_ask_backend(kind: str) -> _AskBackend:
         return _CodexCliAskBackend()
     if kind == "hermes":
         # Phase 5.4b (2026-06-12): hermes-agent in-process backend.
-        # 走 ``import run_agent`` 直接调 ``AIAgent.chat()``。
-        # 认证 / provider 选择都由 ~/.hermes/ 自己接管，我们不
-        # 替它做决定。详见 ``_HermesAskBackend`` docstring。
+        # Call ``AIAgent.chat()`` through ``import run_agent``. Auth and
+        # provider selection remain owned by ~/.hermes; see
+        # ``_HermesAskBackend`` for details.
         return _HermesAskBackend()
     if kind == "claude-code":
         # BUG-3 fix (review round Phase 5.1 R2): the dispatcher
@@ -2550,10 +2529,12 @@ def _start_a2a_server(
                 self._stream_ask(ask_backend, params, token)
                 return
             elif method == "claim":
-                # 切片B:agent 用**自己的私钥**认领一条市场公告。hub 不持有
-                # agent 私钥,所以认领必须由 agent 自己签 —— 这是"谁干谁签"。
-                # cap_token 由 hub 按需铸好(subject=本 agent DID、能力=任务
-                # 所需)随 params 传入;feed/claim 走共享 workspace。
+                # Slice B: the agent claims a market announcement with
+                # its own private key. The hub does not hold agent
+                # private keys, so claims follow "who acts, signs".
+                # The hub passes a per-call cap_token in params
+                # (subject=this agent DID, capabilities=task needs);
+                # feed and claim state live in the shared workspace.
                 ann_id = str(params.get("announcement_id", "")).strip()
                 claim_cap = params.get("cap_token")
                 if not ann_id or not isinstance(claim_cap, dict):
@@ -2613,10 +2594,12 @@ def _start_a2a_server(
                     "claim_record": outcome.claim_record,
                 }}
             elif method == "claim-sign":
-                # XDAO-2:跨 DAO 认领的「只签」侧。agent 用**自己的私钥**为一条
-                # **外部**公告自签 cap_token + ClaimReceipt,**不落盘**(本地没
-                # 这条公告)。产物回给 hub,转投到公告主 DAO 的 /claim-foreign
-                # 落 CAS。permissionless:自签 cap_token,来源侧验签即可。
+                # XDAO-2: sign-only side of cross-DAO claim. The agent
+                # self-signs a cap_token + ClaimReceipt for an external
+                # announcement with its own private key, without writing
+                # local claim state for an announcement this DAO does not
+                # own. The hub forwards the result to the source DAO's
+                # /claim-foreign endpoint, where CAS is enforced.
                 ann_dict = params.get("announcement")
                 if not isinstance(ann_dict, dict) or not ann_dict.get(
                     "announcement_id"
@@ -3064,9 +3047,10 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default="",
         help=(
-            "持久身份文件路径。存在 → 载入已存密钥(重启后同一 DID,信誉/关系"
-            "延续);不存在 → 生成并保存到此路径供下次复用。空 → 每次新生成"
-            "(临时身份,旧行为)。"
+            "Persistent identity file path. Existing files are loaded "
+            "so restarts keep the same DID/reputation/relationships; "
+            "missing files are generated and saved for reuse. Empty "
+            "means generate an ephemeral identity each run."
         ),
     )
     args = parser.parse_args(argv)
@@ -3116,12 +3100,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         idf = (args.identity_file or "").strip()
         if idf and Path(idf).exists():
-            # 稳定身份:载入已存密钥 → 重启后仍是同一 DID。
+            # Stable identity: load persisted key so restarts keep DID.
             identity = AgentIdentity.load(idf)
         else:
             identity = AgentIdentity.generate(label=args.id)
             if idf:
-                # 首次:落盘(save 内部做 owner-only ACL 加固),供重启复用。
+                # First run: persist key with owner-only ACL hardening.
                 identity.save(idf)
         did = identity.as_did()
         pubkey_hex = identity.pubkey_hex
@@ -3164,8 +3148,9 @@ def main(argv: list[str] | None = None) -> int:
         # unchanged).
         signer=identity,
         agent_id=args.id,
-        # 切片B:把共享 workspace 传进 handler,让 `claim` 方法够得到
-        # 市场 feed/claim store(用 agent 自己的私钥认领并签收据)。
+        # Slice B: pass the shared workspace into the handler so claim
+        # methods can reach market feed/claim stores and sign receipts
+        # with the agent's own private key.
         workspace=Path(args.workspace) if args.workspace.strip() else None,
     )
 
