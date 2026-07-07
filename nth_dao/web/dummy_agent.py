@@ -79,6 +79,25 @@ def _request_stop(_signum: int, _frame: object) -> None:
     _STOP = True
 
 
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if value != value:
+        return default
+    return max(minimum, min(maximum, value))
+
+
 def _print_event(**fields: object) -> None:
     """Emit one NDJSON event line to stdout. Flushes so the
     supervisor's reader thread sees the line promptly. """
@@ -1596,8 +1615,14 @@ class _HermesAskBackend(_AskBackend):
     """
 
     name = "hermes"
-    # 30s construction + 7-60s chat + margin. DeepSeek is often slow.
-    DEFAULT_TIMEOUT_S = 120.0
+    # 30s construction + provider queue + chat + margin. DeepSeek can
+    # queue for several minutes; keep this finite and operator-tunable.
+    DEFAULT_TIMEOUT_S = _env_float(
+        "NTH_HERMES_ASK_TIMEOUT_S",
+        300.0,
+        minimum=30.0,
+        maximum=300.0,
+    )
 
     # Default model: bare ``deepseek-v4-pro``. Field testing showed
     # that ``AIAgent(model='deepseek/deepseek-v4-pro')`` is forwarded

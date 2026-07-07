@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -398,6 +399,22 @@ def test_store_save_is_atomic_no_tmp_lingers(tmp_path):
     # After a successful save, no .tmp file should remain
     leftover = list((tmp_path / "team_receipts").glob("*.tmp"))
     assert not leftover, f"orphaned .tmp files: {leftover}"
+
+
+def test_store_save_recreates_receipts_dir_if_removed(tmp_path):
+    """Runtime cleanup or operator repair can remove team_receipts
+    after app bootstrap. save() must self-heal the directory instead
+    of turning a valid agent reply into a channel error."""
+    store = ReceiptStore(tmp_path)
+    shutil.rmtree(tmp_path / "team_receipts")
+    ident = AgentIdentity.generate(label="recreate")
+    e = TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)
+    receipt = sign_receipt([e], ident)
+
+    path = store.save(receipt)
+
+    assert path.exists()
+    assert store.load(receipt["receipt_id"]) is not None
 
 
 def test_store_rejects_traversal_in_receipt_id(tmp_path):

@@ -123,6 +123,34 @@ function loadActiveNav(): NavId {
 /** 默认落地:Blackboard。UI 给人看,首屏先呈现当前工作状态,再让用户进入 Missions / Tasks / Channels。 */
 const DEFAULT_NAV: NavId = "blackboard";
 
+const AGENT_STREAM_IDLE_TIMEOUT_MS_BY_KIND: Record<string, number> = {
+  mock: 60_000,
+  codex: 150_000,
+  hermes: 330_000,
+  "claude-code": 160_000,
+};
+
+const AGENT_BACKEND_TIMEOUT_S_BY_KIND: Record<string, number> = {
+  mock: 30,
+  codex: 120,
+  hermes: 300,
+  "claude-code": 120,
+};
+
+function agentKindForDid(agents: AgentEntry[], did: string): string {
+  return agents.find((agent) => agent.did === did)?.kind || "";
+}
+
+function agentStreamIdleTimeoutMs(agents: AgentEntry[], did: string): number {
+  const kind = agentKindForDid(agents, did);
+  return AGENT_STREAM_IDLE_TIMEOUT_MS_BY_KIND[kind] ?? 120_000;
+}
+
+function agentBackendTimeoutS(agents: AgentEntry[], did: string): number | undefined {
+  const kind = agentKindForDid(agents, did);
+  return AGENT_BACKEND_TIMEOUT_S_BY_KIND[kind];
+}
+
 function AppInner() {
   /* Default landing = Blackboard (2026-06-14 重定:A2A 任务优先).
    * 项目第一性原则是 A2A 任务协调,落地页给"运行态总览"——每个 agent
@@ -806,11 +834,19 @@ function AppInner() {
         };
       });
     try {
-      const res = await askAgentStream(agent.did, body, (delta) => {
-        acc += delta;
-        clearTyping(); // 首 token 到达即收起三点,真实气泡接管
-        upsert(acc);
-      });
+      const res = await askAgentStream(
+        agent.did,
+        body,
+        (delta) => {
+          acc += delta;
+          clearTyping(); // 首 token 到达即收起三点,真实气泡接管
+          upsert(acc);
+        },
+        undefined,
+        undefined,
+        agentStreamIdleTimeoutMs(agents, agent.did),
+        agentBackendTimeoutS(agents, agent.did),
+      );
       clearTyping();
       upsert(acc || res.text || t("(空回复)", "(empty reply)"));
     } catch (e) {
@@ -1075,7 +1111,15 @@ function AppInner() {
         /* UI 集成（2026-06-13）：派任务 + 流式输出。hub 替操作员注入
            cap_token（浏览器无签名私钥）。 */
         onAskAgent={(did, prompt, onDelta, signal, onStatus) =>
-          askAgentStream(did, prompt, onDelta, signal, onStatus)
+          askAgentStream(
+            did,
+            prompt,
+            onDelta,
+            signal,
+            onStatus,
+            agentStreamIdleTimeoutMs(agents, did),
+            agentBackendTimeoutS(agents, did),
+          )
         }
       />
     );

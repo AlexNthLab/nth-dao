@@ -9,14 +9,19 @@
  */
 import { useEffect, useState } from "react";
 import {
-  announceTask, claimFederatedTask, claimTask, fetchAgents, listOpenTasks,
-  listTaskCategories,
+  announceTask, claimFederatedTask, claimTask, fetchAgents, getFederationStatus,
+  listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
 import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
-import type { AgentEntry, TaskAnnouncement, TaskCategory } from "../types-v2";
+import type {
+  AgentEntry,
+  FederationStatus,
+  TaskAnnouncement,
+  TaskCategory,
+} from "../types-v2";
 
 function visibilityWarningLabel(
   code: string,
@@ -32,6 +37,15 @@ function visibilityWarningLabel(
         return t("关联 Mission 同步失败", "Linked Mission sync failed");
       }
       return t("执行视图写入异常", "Execution view persistence warning");
+  }
+}
+
+function formatFederationRefresh(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "Never";
+  try {
+    return relativeTimeShort(new Date(ms).toISOString());
+  } catch {
+    return "Unknown";
   }
 }
 
@@ -51,9 +65,11 @@ export function TasksView() {
   // 市场化分区 + 排序。market=可承接的活(本节点+联邦);mine=我发布的。
   const [tab, setTab] = useState<"market" | "mine">("market");
   const [sort, setSort] = useState<"recent" | "reward">("recent");
+  const [listingFilter, setListingFilter] = useState<"" | "task" | "service" | "product">("");
 
   // 发布表单
   const [showForm, setShowForm] = useState(false);
+  const [fListingType, setFListingType] = useState<"task" | "service" | "product">("task");
   const [fTitle, setFTitle] = useState("");
   const [fCaps, setFCaps] = useState("");
   const [fReward, setFReward] = useState("");
@@ -68,6 +84,9 @@ export function TasksView() {
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [claimAgent, setClaimAgent] = useState("");
   const [claimingId, setClaimingId] = useState("");
+  const [fedStatus, setFedStatus] = useState<FederationStatus | null>(null);
+  const [fedPeerUrl, setFedPeerUrl] = useState("");
+  const [fedBusy, setFedBusy] = useState(false);
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -84,6 +103,7 @@ export function TasksView() {
         {
           context: ctx,
           capability: cap,
+          listingType: listingFilter,
           minReward: minReward ? Number(minReward) : 0,
           q,
         },
@@ -110,6 +130,15 @@ export function TasksView() {
     }
   }
 
+  async function loadFederation(signal?: AbortSignal) {
+    try {
+      setFedStatus(await getFederationStatus(signal));
+    } catch {
+      // Federation status is operational context. Keep the market usable when
+      // the status endpoint is temporarily unavailable.
+    }
+  }
+
   // 任务:筛选变化(文本防抖 300ms,避免逐键刷屏)或发布后(reloadKey)重拉。
   // AbortController 取消上一笔,防乱序覆盖。
   useEffect(() => {
@@ -120,12 +149,19 @@ export function TasksView() {
       ac.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx, cap, minReward, q, reloadKey]);
+  }, [ctx, cap, listingFilter, minReward, q, reloadKey]);
 
   // 类别分面是全局 facet(不随筛选变),只在挂载 + 发布后刷新。
   useEffect(() => {
     const ac = new AbortController();
     void loadCategories(ac.signal);
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey]);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    void loadFederation(ac.signal);
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
@@ -215,6 +251,7 @@ export function TasksView() {
     try {
       await announceTask({
         title: fTitle.trim(),
+        listing_type: fListingType,
         capability_set: fCaps
           .split(",")
           .map((s) => s.trim())
@@ -225,6 +262,7 @@ export function TasksView() {
       });
       toast.push(t("任务已发布", "Task published"), "success");
       setFTitle("");
+      setFListingType("task");
       setFCaps("");
       setFReward("");
       setFContext("");
@@ -238,6 +276,81 @@ export function TasksView() {
       );
     } finally {
       setPublishing(false);
+    }
+  }
+
+  async function handleFederationRefresh() {
+    if (fedBusy) return;
+    setFedBusy(true);
+    try {
+      const status = await refreshFederation();
+      setFedStatus(status);
+      setReloadKey((k) => k + 1);
+      toast.push(t("Federation refreshed", "Federation refreshed"), "success");
+    } catch (e) {
+      toast.push(
+        `${t("Federation refresh failed", "Federation refresh failed")}:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setFedBusy(false);
+    }
+  }
+
+  async function handleFederationPeerSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const peer = fedPeerUrl.trim();
+    if (!peer || fedBusy) return;
+    setFedBusy(true);
+    try {
+      const status = await updateFederationPeer(peer, "add");
+      setFedStatus(status);
+      setFedPeerUrl("");
+      try {
+        const refreshed = await refreshFederation();
+        setFedStatus(refreshed);
+      } catch (refreshErr) {
+        toast.push(
+          `${t("Peer saved, refresh failed", "Peer saved, refresh failed")}:${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`,
+          "warn",
+        );
+      }
+      setReloadKey((k) => k + 1);
+      toast.push(t("Federation peer added", "Federation peer added"), "success");
+    } catch (e) {
+      toast.push(
+        `${t("Add peer failed", "Add peer failed")}:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setFedBusy(false);
+    }
+  }
+
+  async function handleFederationPeerRemove(peer: string) {
+    if (!peer || fedBusy) return;
+    setFedBusy(true);
+    try {
+      const status = await updateFederationPeer(peer, "remove");
+      setFedStatus(status);
+      try {
+        const refreshed = await refreshFederation();
+        setFedStatus(refreshed);
+      } catch (refreshErr) {
+        toast.push(
+          `${t("Peer removed, refresh failed", "Peer removed, refresh failed")}:${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`,
+          "warn",
+        );
+      }
+      setReloadKey((k) => k + 1);
+      toast.push(t("Federation peer removed", "Federation peer removed"), "success");
+    } catch (e) {
+      toast.push(
+        `${t("Remove peer failed", "Remove peer failed")}:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setFedBusy(false);
     }
   }
 
@@ -317,6 +430,99 @@ export function TasksView() {
               </option>
             ))}
           </select>
+          <div
+            style={{
+              borderTop: "1px solid var(--border)",
+              marginTop: 6,
+              paddingTop: 10,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <strong style={{ fontSize: 12 }}>{t("Federation", "Federation")}</strong>
+              <span className="pill dim" style={{ fontSize: 10, marginLeft: "auto" }}>
+                {fedStatus?.cached_announcements ?? 0} {t("remote", "remote")}
+              </span>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
+              {fedStatus?.peers.length
+                ? t(
+                    "Seed peers gossip other DAO task feeds. Tasks still require signed announcements and claim receipts.",
+                    "Seed peers gossip other DAO task feeds. Tasks still require signed announcements and claim receipts.",
+                  )
+                : t(
+                    "Add a reachable DAO URL to discover tasks beyond this workspace.",
+                    "Add a reachable DAO URL to discover tasks beyond this workspace.",
+                  )}
+            </div>
+            <form onSubmit={handleFederationPeerSubmit} style={{ display: "flex", gap: 6 }}>
+              <input
+                placeholder="http://192.168.1.20:8080"
+                value={fedPeerUrl}
+                onChange={(e) => setFedPeerUrl(e.target.value)}
+                disabled={fedBusy}
+                style={{ minWidth: 0, flex: 1 }}
+              />
+              <button
+                type="submit"
+                className="btn"
+                disabled={!fedPeerUrl.trim() || fedBusy}
+                style={{ fontSize: 11, padding: "6px 8px" }}
+              >
+                {t("Add", "Add")}
+              </button>
+            </form>
+            <button
+              className="btn btn-ghost"
+              disabled={fedBusy}
+              onClick={() => void handleFederationRefresh()}
+              style={{ fontSize: 11, justifyContent: "center" }}
+            >
+              {fedBusy ? t("Syncing...", "Syncing...") : t("Refresh federation", "Refresh federation")}
+            </button>
+            <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.5 }}>
+              {t("Peers", "Peers")}: {fedStatus?.peers.length ?? 0}
+              {" · "}
+              {t("last", "last")}: {formatFederationRefresh(fedStatus?.last_refresh_ms ?? 0)}
+              {fedStatus?.poller_started ? " · poller on" : ""}
+            </div>
+            {fedStatus?.last_error && (
+              <div style={{ fontSize: 10, color: "var(--danger)", lineHeight: 1.4 }}>
+                {fedStatus.last_error}
+              </div>
+            )}
+            {fedStatus?.file_peers.length ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {fedStatus.file_peers.map((peer) => (
+                  <div
+                    key={peer}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 10,
+                      fontFamily: "var(--t-mono)",
+                      color: "var(--fg-secondary)",
+                    }}
+                  >
+                    <span className="truncate" title={peer} style={{ minWidth: 0, flex: 1 }}>
+                      {peer}
+                    </span>
+                    <button
+                      className="btn btn-ghost"
+                      disabled={fedBusy}
+                      onClick={() => void handleFederationPeerRemove(peer)}
+                      style={{ fontSize: 10, padding: "3px 6px" }}
+                    >
+                      {t("Remove", "Remove")}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       </aside>
 
@@ -371,6 +577,23 @@ export function TasksView() {
             >
               {t("我发布的", "My published")} ({myTasks.length})
             </button>
+            {(["", "task", "service", "product"] as const).map((kind) => (
+              <button
+                key={kind || "all"}
+                className={`btn ${listingFilter === kind ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 12 }}
+                onClick={() => setListingFilter(kind)}
+                title={t("按发布类型筛选", "Filter by listing type")}
+              >
+                {kind === ""
+                  ? t("All", "All")
+                  : kind === "task"
+                    ? t("Tasks", "Tasks")
+                    : kind === "service"
+                      ? t("Services", "Services")
+                      : t("Products", "Products")}
+              </button>
+            ))}
             <span style={{ flex: 1 }} />
             <label
               className="muted"
@@ -400,6 +623,22 @@ export function TasksView() {
                 gap: 8,
               }}
             >
+              <label
+                className="muted"
+                style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 8 }}
+              >
+                {t("发布类型", "Listing type")}
+                <select
+                  value={fListingType}
+                  onChange={(e) =>
+                    setFListingType(e.target.value as "task" | "service" | "product")
+                  }
+                >
+                  <option value="task">{t("Task", "Task")}</option>
+                  <option value="service">{t("Service", "Service")}</option>
+                  <option value="product">{t("Product", "Product")}</option>
+                </select>
+              </label>
               <input
                 placeholder={t("任务标题 *", "Task title *")}
                 value={fTitle}
@@ -479,6 +718,13 @@ export function TasksView() {
                         {task.context}
                       </span>
                     )}
+                    <span className="pill dim" style={{ fontSize: 10 }}>
+                      {task.listing_type === "product"
+                        ? t("Product", "Product")
+                        : task.listing_type === "service"
+                          ? t("Service", "Service")
+                          : t("Task", "Task")}
+                    </span>
                     {task.federated && (
                       <span
                         className="pill"

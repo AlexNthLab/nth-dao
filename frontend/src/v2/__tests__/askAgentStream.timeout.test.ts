@@ -6,7 +6,8 @@ import { askAgentStream } from "../api";
 describe("askAgentStream 空闲超时", () => {
   afterEach(() => {
     vi.useRealTimers();
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("流挂起 → idleTimeoutMs 后 abort 抛超时", async () => {

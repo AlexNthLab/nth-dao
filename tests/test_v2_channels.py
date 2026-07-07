@@ -13,6 +13,9 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
 
+from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
+from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
+from nth_dao.identity import AgentIdentity
 from nth_dao.web import create_app
 
 
@@ -35,6 +38,86 @@ def test_channel_crud_roundtrip(tmp_path: Path) -> None:
 
     assert "general" in {x["channel_id"] for x in c.get("/api/v2/channels").json()}
     assert [m["body"] for m in c.get(f"/api/v2/channels/{cid}/messages").json()] == ["hello"]
+
+
+def test_channel_messages_promote_receipt_metadata(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    c = TestClient(app)
+
+    r = c.post("/api/v2/channels", json={"name": "general"})
+    assert r.status_code == 200, r.text
+    app.state.nth.groups.post_message(
+        "general",
+        sender_id="admin",
+        body="receipt-backed reply",
+        metadata={
+            "nth_receipt_id": "r-channel-1",
+            "nth_receipt_content_hash": "abc123",
+        },
+    )
+
+    messages = c.get("/api/v2/channels/general/messages").json()
+    signed = [m for m in messages if m["body"] == "receipt-backed reply"][0]
+    assert signed["metadata"]["nth_receipt_id"] == "r-channel-1"
+    assert signed["nth_receipt_id"] == "r-channel-1"
+    assert signed["nth_receipt_content_hash"] == "abc123"
+
+
+def test_receipt_detail_endpoint_returns_raw_receipt(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    c = TestClient(app)
+    issuer = AgentIdentity.generate(label="issuer")
+    signer = AgentIdentity.generate(label="agent")
+    cap = sign_cap_token(
+        issuer=issuer,
+        subject_did=signer.as_did(),
+        capabilities=[CAP_NTH_RECEIPT_SIGN],
+        scope_task_id="mission-channel-1",
+        scope_dao="home",
+        scope_model_allowlist=["mock-model"],
+        ttl_ms=60_000,
+        token_id="cap-channel-detail-1",
+    )
+    receipt = sign_receipt(
+        [
+            TimelineEntry(
+                timestamp=now_ms(),
+                type="nth.agent_response",
+                payload={"ok": True},
+            )
+        ],
+        signer,
+        goal_id="mission-channel-1",
+        receipt_id="r-channel-detail-1",
+        authorizing_cap_token=cap,
+    )
+    app.state.nth.receipts.save(receipt)
+
+    no_token = c.get("/api/v2/receipts/r-channel-detail-1")
+    assert no_token.status_code == 401, no_token.text
+
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    r = c.get("/api/v2/receipts/r-channel-detail-1", headers=headers)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["receipt"]["receipt_id"] == "r-channel-detail-1"
+    assert data["receipt"]["timeline"][0]["payload"]["ok"] is True
+    assert data["verification"] == {
+        "verified": True,
+        "status": "verified",
+        "reason": "",
+    }
+    assert data["summary"]["signer_did"] == signer.as_did()
+    assert data["summary"]["goal_id"] == "mission-channel-1"
+    assert data["summary"]["cap_scope"]["present"] is True
+    assert data["summary"]["cap_scope"]["token_id"] == "cap-channel-detail-1"
+    assert data["summary"]["cap_scope"]["capabilities"] == [CAP_NTH_RECEIPT_SIGN]
+    assert data["summary"]["cap_scope"]["scope_task_id"] == "mission-channel-1"
+    assert data["summary"]["cap_scope"]["scope_dao"] == "home"
+    assert data["summary"]["cap_scope"]["scope_model_allowlist"] == ["mock-model"]
+
+    assert c.get("/api/v2/receipts/no-such-receipt", headers=headers).status_code == 404
+    assert c.get("/api/v2/receipts/..%2Fsecret", headers=headers).status_code == 404
 
 
 def test_channel_join_adds_member(tmp_path: Path) -> None:

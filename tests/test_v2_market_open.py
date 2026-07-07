@@ -97,6 +97,55 @@ def test_market_announce_then_open_shows_it(tmp_path: Path) -> None:
     assert hit["claimed"] is False
 
 
+def test_market_announce_product_listing_is_signed_and_filterable(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    task = client.post(
+        "/api/v2/market/announce",
+        json={"title": "debug a Python crash", "listing_type": "task"},
+    )
+    assert task.status_code == 200, task.text
+    product = client.post(
+        "/api/v2/market/announce",
+        json={
+            "title": "NTH hardware key",
+            "listing_type": "product",
+            "description": "offline signing token",
+            "reward_minor": 9900,
+            "reward_asset": "usd-cent",
+            "context": "hardware",
+        },
+    )
+    assert product.status_code == 200, product.text
+    product_body = product.json()
+    assert product_body["input_schema"]["__nth_listing_type"] == "product"
+
+    all_rows = client.get("/api/v2/market/open").json()
+    by_title = {r["title"]: r for r in all_rows}
+    assert by_title["debug a Python crash"]["listing_type"] == "task"
+    assert by_title["NTH hardware key"]["listing_type"] == "product"
+
+    product_rows = client.get(
+        "/api/v2/market/open", params={"listing_type": "product"},
+    ).json()
+    assert [r["title"] for r in product_rows] == ["NTH hardware key"]
+    task_rows = client.get(
+        "/api/v2/market/open", params={"listing_type": "task"},
+    ).json()
+    assert {r["title"] for r in task_rows} == {"debug a Python crash"}
+
+
+def test_market_announce_rejects_unknown_listing_type(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    r = client.post(
+        "/api/v2/market/announce",
+        json={"title": "x", "listing_type": "auction"},
+    )
+    assert r.status_code == 400
+
+
 def test_market_announce_rejects_empty_title(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path, require_console_auth=False))
     r = client.post("/api/v2/market/announce", json={"title": "   "})

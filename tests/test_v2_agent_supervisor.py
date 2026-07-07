@@ -5740,10 +5740,13 @@ def test_channel_dispatch_retries_not_yet_authorized(
 
     class Groups:
         def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
+            self.messages: list[tuple[str, str, str, object]] = []
 
-        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
-            self.messages.append((channel_id, sender_id, body))
+        def post_message(
+            self, channel_id: str, sender_id: str, body: str,
+            metadata: object = None,
+        ) -> None:
+            self.messages.append((channel_id, sender_id, body, metadata))
 
     class Response:
         status = 200
@@ -5787,7 +5790,7 @@ def test_channel_dispatch_retries_not_yet_authorized(
 
     assert calls == 2
     assert groups.messages == [(
-        "general", "did:key:z6MkAgent", "agent reply after warmup",
+        "general", "did:key:z6MkAgent", "agent reply after warmup", None,
     )]
 
 
@@ -5806,8 +5809,11 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
     events: list[tuple[str, object]] = []
 
     class Groups:
-        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
-            events.append(("post", (channel_id, sender_id, body)))
+        def post_message(
+            self, channel_id: str, sender_id: str, body: str,
+            metadata: object = None,
+        ) -> None:
+            events.append(("post", (channel_id, sender_id, body, metadata)))
 
     class Response:
         status = 200
@@ -5831,6 +5837,10 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
 
     def fake_persist(store, agent_id, expected_did, content):  # noqa: ANN001
         events.append(("persist", (store, agent_id, expected_did, content)))
+        return {
+            "nth_receipt_id": "r-channel-1",
+            "nth_receipt_content_hash": "abc123",
+        }
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(_v2, "_persist_agent_response_receipt_to_store", fake_persist)
@@ -5852,7 +5862,15 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
     assert events[0][0] == "persist"
     assert events[1] == (
         "post",
-        ("general", "did:key:z6MkAgent", "receipt-backed channel reply"),
+        (
+            "general",
+            "did:key:z6MkAgent",
+            "receipt-backed channel reply",
+            {
+                "nth_receipt_id": "r-channel-1",
+                "nth_receipt_content_hash": "abc123",
+            },
+        ),
     )
     _, persisted = events[0]
     store, agent_id, expected_did, content = persisted  # type: ignore[misc]
@@ -5874,10 +5892,13 @@ def test_channel_dispatch_uses_hermes_timeout_budget(
 
     class Groups:
         def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
+            self.messages: list[tuple[str, str, str, object]] = []
 
-        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
-            self.messages.append((channel_id, sender_id, body))
+        def post_message(
+            self, channel_id: str, sender_id: str, body: str,
+            metadata: object = None,
+        ) -> None:
+            self.messages.append((channel_id, sender_id, body, metadata))
 
     class Response:
         status = 200
@@ -5914,10 +5935,10 @@ def test_channel_dispatch_uses_hermes_timeout_budget(
         "hermes",
     )
 
-    assert seen_payloads[0]["timeout_s"] == 170.0
-    assert seen_timeouts == [175.0]
+    assert seen_payloads[0]["timeout_s"] == 300.0
+    assert seen_timeouts == [305.0]
     assert groups.messages == [
-        ("general", "did:key:z6MkHermes", "slow hermes reply"),
+        ("general", "did:key:z6MkHermes", "slow hermes reply", None),
     ]
 
 
@@ -5937,10 +5958,13 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
 
     class Groups:
         def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
+            self.messages: list[tuple[str, str, str, object]] = []
 
-        def post_message(self, channel_id: str, sender_id: str, body: str) -> None:
-            self.messages.append((channel_id, sender_id, body))
+        def post_message(
+            self, channel_id: str, sender_id: str, body: str,
+            metadata: object = None,
+        ) -> None:
+            self.messages.append((channel_id, sender_id, body, metadata))
 
     seen_timeouts: list[float] = []
 
@@ -5967,9 +5991,10 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
     )
 
     assert len(groups.messages) == 1
-    channel_id, sender_id, body = groups.messages[0]
+    channel_id, sender_id, body, metadata = groups.messages[0]
     assert channel_id == "general"
     assert sender_id == "did:key:z6MkCodex"
+    assert metadata is None
     assert "agent error" in body
     assert "a2a ask HTTP 502" in body
     assert "backend-failed" in body
@@ -5978,6 +6003,140 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
     assert "plugin assets" not in body
     assert len(body) <= 420
     assert seen_timeouts == [125.0]
+
+
+def test_channel_dispatch_formats_backend_timeout_for_operators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hermes provider queue timeouts should be readable in-channel."""
+    import io
+    import urllib.error
+    import urllib.request
+    import nth_dao.web.v2_api as _v2
+
+    class Groups:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str, object]] = []
+
+        def post_message(
+            self, channel_id: str, sender_id: str, body: str,
+            metadata: object = None,
+        ) -> None:
+            self.messages.append((channel_id, sender_id, body, metadata))
+
+    def fake_urlopen(_req, timeout):  # noqa: ANN001, ARG001
+        raise urllib.error.HTTPError(
+            url="http://127.0.0.1:9999/a2a/ask",
+            code=504,
+            msg="Gateway Timeout",
+            hdrs=None,
+            fp=io.BytesIO(
+                b'{"error":{"code":"backend-timeout",'
+                b'"message":"hermes AIAgent.chat did not respond within '
+                b'300.0s Tail: provider debug spam"}}'
+            ),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    groups = Groups()
+    assert _v2._CHANNEL_DISPATCH_SEM.acquire(blocking=False)
+    _v2._channel_ask_and_reply(
+        groups,
+        {"token_id": "tok", "subject_did": "did:key:z6MkHermes"},
+        "did:key:z6MkHermes",
+        9999,
+        "general",
+        "hello",
+        None,
+        "agent-hermes",
+        "hermes",
+    )
+
+    assert len(groups.messages) == 1
+    body = groups.messages[0][2]
+    assert "agent error: backend-timeout" in body
+    assert "Hermes may still be queued" in body
+    assert "Tail:" not in body
+    assert "provider debug spam" not in body
+    assert len(body) <= 420
+
+
+def test_channel_dispatch_public_error_redacts_local_paths() -> None:
+    import nth_dao.web.v2_api as _v2
+
+    local_path = "\\".join([
+        "C:",
+        "Users",
+        "ExampleUser",
+        ".nth-dao",
+        "workspaces",
+        "default",
+        "team_receipts",
+        "r.json.tmp",
+    ])
+    exc = RuntimeError(
+        f"[WinError 2] missing: '{local_path}'"
+    )
+
+    body = _v2._channel_dispatch_public_error(exc)
+
+    assert "agent error" in body
+    assert "<local-path>" in body
+    assert "ExampleUser" not in body
+    assert "C:" not in body
+    assert "Users" not in body
+    assert ".nth-dao" not in body
+
+
+def test_agent_response_receipt_error_detail_redacts_local_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.web.v2_api as _v2
+
+    local_path = "\\".join([
+        "C:",
+        "Users",
+        "ExampleUser",
+        ".nth-dao",
+        "workspaces",
+        "default",
+        "team_receipts",
+        "r.json.tmp",
+    ])
+
+    class Store:
+        def save(self, receipt):  # noqa: ANN001
+            raise OSError(f"cannot write '{local_path}'")
+
+    monkeypatch.setattr(
+        _v2,
+        "_verify_agent_receipt",
+        lambda *, agent_id, expected_did, receipt: None,
+    )
+
+    with pytest.raises(_v2.HTTPException) as exc_info:
+        _v2._persist_agent_response_receipt_to_store(
+            Store(),
+            "agent-1",
+            "did:key:zAgent",
+            {
+                "result": {
+                    "receipt": {
+                        "receipt_id": "r-channel-1",
+                        "content_hash": "abc123",
+                    },
+                },
+            },
+        )
+
+    detail = str(exc_info.value.detail)
+    assert exc_info.value.status_code == 500
+    assert "<local-path>" in detail
+    assert "ExampleUser" not in detail
+    assert "C:" not in detail
+    assert "Users" not in detail
+    assert ".nth-dao" not in detail
 
 
 def test_child_error_decode_strips_replacement_characters() -> None:

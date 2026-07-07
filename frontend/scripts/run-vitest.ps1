@@ -33,7 +33,12 @@ if (-not $node) {
 }
 
 if (-not $VitestArgs -or $VitestArgs.Count -eq 0) {
-    $VitestArgs = @("run", "--environment", "jsdom")
+    # Several jsdom tests intentionally stub globals such as fetch, window,
+    # timers, and module mocks. Running test files in parallel lets those
+    # globals bleed across files in Vitest's shared worker context, producing
+    # order-dependent false negatives. Keep frontend verification deterministic
+    # by default; callers can still pass their own VitestArgs for local speed.
+    $VitestArgs = @("run", "--environment", "jsdom", "--fileParallelism=false")
 }
 
 & $node $vitest @VitestArgs

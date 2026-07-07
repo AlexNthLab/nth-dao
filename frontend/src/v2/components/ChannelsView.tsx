@@ -14,14 +14,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChat, IconPlus, IconSend, IconUserPlus } from "./Icons";
+import { SignaturePanel } from "./SignaturePanel";
 import { useToast } from "./Toast";
 import { useLang } from "../i18n";
 import { relativeTimeShort } from "../utils/time";
 import {
-  createChannel, fetchAgents, joinChannel, listChannelMessages,
+  createChannel, fetchAgents, fetchReceiptDetail, joinChannel, listChannelMessages,
   listChannels, postChannelMessage,
 } from "../api";
-import type { AgentEntry, Channel, ChannelMessage } from "../types-v2";
+import type { AgentEntry, Channel, ChannelMessage, ReceiptDetail } from "../types-v2";
 
 const ME = "admin";  // 当前人类用户(与后端发消息的默认 sender 一致)
 
@@ -29,7 +30,7 @@ const DEFAULT_AGENT_REPLY_WAIT_MS = 30_000;
 const AGENT_REPLY_WAIT_MS_BY_KIND: Record<string, number> = {
   mock: 30_000,
   codex: 100_000,
-  hermes: 180_000,
+  hermes: 330_000,
   "claude-code": 130_000,
 };
 
@@ -39,6 +40,19 @@ export function agentReplyWaitMs(agents: AgentEntry[]): number {
     DEFAULT_AGENT_REPLY_WAIT_MS,
     ...agents.map((a) => AGENT_REPLY_WAIT_MS_BY_KIND[a.kind || ""] ?? DEFAULT_AGENT_REPLY_WAIT_MS),
   );
+}
+
+function shortId(value = "", head = 18, tail = 8): string {
+  if (!value) return "—";
+  return value.length <= head + tail + 1
+    ? value
+    : `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+function formatMsTime(value?: number): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : "—";
 }
 
 export function ChannelsView() {
@@ -55,6 +69,9 @@ export function ChannelsView() {
   const [joinDid, setJoinDid] = useState("");
   const [awaiting, setAwaiting] = useState(false);
   const [awaitTimedOut, setAwaitTimedOut] = useState(false);
+  const [selectedReceipt, setSelectedReceipt] = useState<ReceiptDetail | null>(null);
+  const [receiptLoadingId, setReceiptLoadingId] = useState("");
+  const [receiptError, setReceiptError] = useState("");
   const awaitTimer = useRef<number | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
 
@@ -116,6 +133,9 @@ export function ChannelsView() {
     if (!selectedId) { setMessages([]); return; }
     setAwaiting(false);
     setAwaitTimedOut(false);  // 切频道清掉上一个频道的等待态
+    setSelectedReceipt(null);
+    setReceiptError("");
+    setReceiptLoadingId("");
     let cancelled = false;
     const cid = selectedId;
     async function loadMsgs() {
@@ -224,6 +244,22 @@ export function ChannelsView() {
     }
   }
 
+  async function openReceipt(receiptId: string) {
+    setReceiptLoadingId(receiptId);
+    setReceiptError("");
+    try {
+      const receipt = await fetchReceiptDetail(receiptId);
+      setSelectedReceipt(receipt);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSelectedReceipt(null);
+      setReceiptError(msg);
+      toast.push(`${t("读取 receipt 失败", "Receipt load failed")}: ${msg}`, "error");
+    } finally {
+      setReceiptLoadingId("");
+    }
+  }
+
   const joinable = agents.filter(
     (a) => a.did && !(selected?.member_ids ?? []).includes(a.did),
   );
@@ -324,6 +360,20 @@ export function ChannelsView() {
                       <div className="chat-col">
                         {showName && <div className="chat-name">{senderLabel(m.sender_id)}</div>}
                         <div className="chat-bubble">{m.body}</div>
+                        {m.nth_receipt_id && (
+                          <button
+                            type="button"
+                            className="chat-receipt chat-receipt-button"
+                            onClick={() => void openReceipt(m.nth_receipt_id || "")}
+                            disabled={receiptLoadingId === m.nth_receipt_id}
+                            title={t(
+                              "此 agent 回复已绑定签名 receipt",
+                              "This agent reply is linked to a signed receipt",
+                            )}
+                          >
+                            {receiptLoadingId === m.nth_receipt_id ? "…" : "✓"} receipt {m.nth_receipt_id.slice(0, 12)}…
+                          </button>
+                        )}
                         <span className="chat-time">{relativeTimeShort(m.created_at)}</span>
                       </div>
                     </div>
@@ -439,6 +489,132 @@ export function ChannelsView() {
                   </p>
                 )}
               </div>
+
+              {selectedReceipt ? (
+                <>
+                  <div className="detail-section">
+                    <div className="detail-section-label">
+                      {t("Receipt 摘要", "Receipt summary")}
+                    </div>
+                    <div className="detail-row">
+                      <span className="key">{t("验证状态", "Verify")}</span>
+                      <span className="value">
+                        <span
+                          className={`pill ${selectedReceipt.verification.verified ? "ok" : "bad"}`}
+                          style={{ fontSize: 10 }}
+                        >
+                          {selectedReceipt.verification.verified
+                            ? t("已验证", "verified")
+                            : t("失败", "failed")}
+                        </span>
+                      </span>
+                    </div>
+                    {!selectedReceipt.verification.verified && (
+                      <div className="detail-row">
+                        <span className="key">{t("原因", "Reason")}</span>
+                        <span className="value truncate">
+                          {selectedReceipt.verification.reason || "—"}
+                        </span>
+                      </div>
+                    )}
+                    <div className="detail-row">
+                      <span className="key">{t("Signer DID", "Signer DID")}</span>
+                      <span className="value truncate" title={selectedReceipt.summary.signer_did}>
+                        {shortId(selectedReceipt.summary.signer_did)}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="key">{t("Goal", "Goal")}</span>
+                      <span className="value truncate">
+                        {selectedReceipt.summary.goal_id || "—"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="key">{t("Receipt", "Receipt")}</span>
+                      <span className="value truncate" title={selectedReceipt.summary.receipt_id}>
+                        {shortId(selectedReceipt.summary.receipt_id)}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="key">{t("Hash", "Hash")}</span>
+                      <span className="value truncate" title={selectedReceipt.summary.content_hash}>
+                        {shortId(selectedReceipt.summary.content_hash)}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="key">{t("授权", "Auth")}</span>
+                      <span className="value">
+                        {selectedReceipt.summary.cap_scope.present
+                          ? t("cap_token", "cap_token")
+                          : t("无", "none")}
+                      </span>
+                    </div>
+                    {selectedReceipt.summary.cap_scope.present && (
+                      <>
+                        <div className="detail-row">
+                          <span className="key">{t("Token", "Token")}</span>
+                          <span className="value truncate" title={selectedReceipt.summary.cap_scope.token_id}>
+                            {shortId(selectedReceipt.summary.cap_scope.token_id || "")}
+                          </span>
+                        </div>
+                        <div className="detail-row">
+                          <span className="key">{t("Scope", "Scope")}</span>
+                          <span className="value truncate">
+                            {selectedReceipt.summary.cap_scope.scope_task_id
+                              || selectedReceipt.summary.cap_scope.scope_dao
+                              || t("未限定", "unscoped")}
+                          </span>
+                        </div>
+                        <div className="detail-row">
+                          <span className="key">{t("能力", "Caps")}</span>
+                          <span className="value" style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                            {(selectedReceipt.summary.cap_scope.capabilities || []).map((cap) => (
+                              <span key={cap} className="pill dim" style={{ fontSize: 10 }}>
+                                {cap}
+                              </span>
+                            ))}
+                          </span>
+                        </div>
+                        <div className="detail-row">
+                          <span className="key">{t("模型", "Models")}</span>
+                          <span className="value truncate">
+                            {selectedReceipt.summary.cap_scope.scope_model_allowlist === null
+                              || selectedReceipt.summary.cap_scope.scope_model_allowlist === undefined
+                              ? t("默认策略", "default policy")
+                              : selectedReceipt.summary.cap_scope.scope_model_allowlist.length
+                                ? selectedReceipt.summary.cap_scope.scope_model_allowlist.join(", ")
+                                : t("禁止覆盖", "no override")}
+                          </span>
+                        </div>
+                        <div className="detail-row">
+                          <span className="key">{t("过期", "Expires")}</span>
+                          <span className="value">
+                            {formatMsTime(selectedReceipt.summary.cap_scope.not_after)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <SignaturePanel
+                    value={selectedReceipt.receipt}
+                    title={t("原始签名 receipt", "Raw signed receipt")}
+                  />
+                </>
+              ) : (
+                <div className="detail-section">
+                  <div className="detail-section-label">
+                    {t("签名 receipt", "Signed receipts")}
+                  </div>
+                  <p className="muted" style={{ fontSize: 12 }}>
+                    {receiptError
+                      ? `${t("读取失败", "Load failed")}: ${receiptError}`
+                      : t(
+                        "点击 agent 回复下方的 receipt 标记查看原始签名材料。",
+                        "Click a receipt marker under an agent reply to inspect the raw signed material.",
+                      )}
+                  </p>
+                </div>
+              )}
             </>
           ) : (
             <p className="muted">{t("选择一个频道查看成员。", "Select a channel to see members.")}</p>

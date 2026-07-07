@@ -73,9 +73,11 @@ last in the routing table.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -87,6 +89,34 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Read a bounded float from the environment."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("%s=%r is not a valid number; using %.1f", name, raw, default)
+        return default
+    if value != value:
+        logger.warning("%s is NaN; using %.1f", name, default)
+        return default
+    if value < minimum:
+        logger.warning("%s=%.1f is below %.1f; clamping", name, value, minimum)
+        return minimum
+    if value > maximum:
+        logger.warning("%s=%.1f is above %.1f; clamping", name, value, maximum)
+        return maximum
+    return value
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1235,6 +1265,77 @@ def _map_receipt(path: Path) -> Optional[Dict[str, Any]]:
     }
 
 
+def _receipt_cap_scope_summary(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a compact UI-safe view of the receipt's authorizing scope."""
+    def _int_or_zero(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    cap = receipt.get("authorizing_cap_token")
+    if not isinstance(cap, dict):
+        return {"present": False}
+    capabilities = cap.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        capabilities = []
+    scope_model_allowlist = cap.get("scope_model_allowlist")
+    if not isinstance(scope_model_allowlist, list):
+        scope_model_allowlist = None
+    return {
+        "present": True,
+        "token_id": str(cap.get("token_id", "") or ""),
+        "issuer_did": str(cap.get("issuer_did", "") or ""),
+        "subject_did": str(cap.get("subject_did", "") or ""),
+        "capabilities": [str(c) for c in capabilities],
+        "scope_task_id": str(cap.get("scope_task_id", "") or ""),
+        "scope_dao": str(cap.get("scope_dao", "") or ""),
+        "scope_model_allowlist": (
+            [str(m) for m in scope_model_allowlist]
+            if scope_model_allowlist is not None else None
+        ),
+        "not_before": _int_or_zero(cap.get("not_before")),
+        "not_after": _int_or_zero(cap.get("not_after")),
+    }
+
+
+def _receipt_detail_to_wire(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the console inspection envelope for a raw signed receipt."""
+    verified = False
+    reason = ""
+    try:
+        from nth_dao.execution_receipt import verify_receipt
+        verified = bool(verify_receipt(receipt))
+        if not verified:
+            reason = "receipt signature/content/cap-token verification failed"
+    except Exception as exc:  # noqa: BLE001
+        reason = _redact_local_paths(
+            f"receipt verification raised {type(exc).__name__}: {exc}"
+        )
+
+    summary = {
+        "receipt_id": str(
+            receipt.get("receipt_id", "") or receipt.get("id", "") or ""
+        ),
+        "signer_did": str(receipt.get("signer_did", "") or ""),
+        "goal_id": str(receipt.get("goal_id", "") or ""),
+        "issued_at": str(receipt.get("issued_at", "") or ""),
+        "content_hash": str(receipt.get("content_hash", "") or ""),
+        "prev_content_hash": str(receipt.get("prev_content_hash", "") or ""),
+        "kind": str(receipt.get("kind", "") or ""),
+        "cap_scope": _receipt_cap_scope_summary(receipt),
+    }
+    return {
+        "receipt": receipt,
+        "summary": summary,
+        "verification": {
+            "verified": verified,
+            "status": "verified" if verified else "failed",
+            "reason": reason,
+        },
+    }
+
+
 def _map_cap_token(path: Path) -> Optional[Dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return {
@@ -1670,6 +1771,37 @@ def _verified_spine_events(request: Request) -> Optional[list]:
     return events
 
 
+_MARKET_LISTING_TYPE_FIELD = "__nth_listing_type"
+_MARKET_LISTING_TYPES = {"task", "service", "product"}
+
+
+def _normalize_market_listing_type(value: Any) -> str:
+    listing_type = str(value or "task").strip().lower()
+    if not listing_type:
+        return "task"
+    if listing_type not in _MARKET_LISTING_TYPES:
+        raise ValueError("listing_type must be task, service, or product")
+    return listing_type
+
+
+def _market_announcement_listing_type(ann: Any) -> str:
+    schema = getattr(ann, "input_schema", {}) or {}
+    if isinstance(schema, dict):
+        raw = schema.get(_MARKET_LISTING_TYPE_FIELD, schema.get("listing_type", "task"))
+    else:
+        raw = "task"
+    try:
+        return _normalize_market_listing_type(raw)
+    except ValueError:
+        return "task"
+
+
+def _market_announcement_to_wire(ann: Any) -> Dict[str, Any]:
+    data = ann.to_dict()
+    data["listing_type"] = _market_announcement_listing_type(ann)
+    return data
+
+
 def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
     """本地开放公告列表(Phase 2d:**可切事实源**)。
 
@@ -1696,7 +1828,7 @@ def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
                 for ann in proj.open():
                     if not passes(ann):
                         continue
-                    d = ann.to_dict()
+                    d = _market_announcement_to_wire(ann)
                     d["claimed"] = False
                     spine_local.append(d)
                 spine_local.sort(key=lambda d: -(d.get("published_at_ms") or 0))
@@ -1721,7 +1853,7 @@ def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
             continue
         if not passes(ann):
             continue
-        d = ann.to_dict()
+        d = _market_announcement_to_wire(ann)
         d["claimed"] = False
         local.append(d)
     local.reverse()   # 新→老
@@ -1735,6 +1867,24 @@ def _state_receipts_store(request: Request) -> Optional[Any]:
         return request.app.state.nth.receipts
     except AttributeError:
         return None
+
+
+def _require_console_bearer_for_sensitive_read(request: Request) -> None:
+    """Gate sensitive GET payloads that include raw private-console data.
+
+    Most ``/api/v2`` GET routes are intentionally anonymous summaries so the
+    local dashboard can boot without a login ceremony. Raw receipts are not a
+    summary: they may embed authorizing cap_token material. Require the local
+    console Bearer token here even when the global middleware bypasses GETs.
+    """
+    expected = str(getattr(request.app.state, "nth_console_token", "") or "")
+    supplied = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    if not expected or not supplied.startswith(prefix):
+        raise HTTPException(status_code=401, detail="missing or invalid console token")
+    token = supplied[len(prefix):].strip()
+    if not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="missing or invalid console token")
 
 
 
@@ -2555,7 +2705,7 @@ def _persist_agent_response_receipt(
     agent_id: str,
     expected_did: str,
     content: Any,
-) -> None:
+) -> Optional[Dict[str, str]]:
     """Persist a signed receipt carried in a successful agent response.
 
     Child stdout events are still useful, but they are not a reliable
@@ -2564,7 +2714,7 @@ def _persist_agent_response_receipt(
     be verified and on disk before the HTTP response is handed back to
     the UI.
     """
-    _persist_agent_response_receipt_to_store(
+    return _persist_agent_response_receipt_to_store(
         _state_receipts_store(request),
         agent_id,
         expected_did,
@@ -2577,7 +2727,7 @@ def _persist_agent_response_receipt_to_store(
     agent_id: str,
     expected_did: str,
     content: Any,
-) -> None:
+) -> Optional[Dict[str, str]]:
     """Verify and persist a receipt from an agent response.
 
     This store-level helper lets background channel dispatch reuse the
@@ -2585,13 +2735,13 @@ def _persist_agent_response_receipt_to_store(
     FastAPI Request object as the persistence authority.
     """
     if not isinstance(content, dict):
-        return
+        return None
     result = content.get("result")
     if not isinstance(result, dict):
-        return
+        return None
     receipt = result.get("receipt")
     if receipt is None:
-        return
+        return None
     if not isinstance(receipt, dict):
         raise HTTPException(
             status_code=502,
@@ -2609,9 +2759,11 @@ def _persist_agent_response_receipt_to_store(
             detail="receipt store unavailable; cannot persist agent response receipt",
         )
     receipt_id = str(receipt.get("receipt_id", "") or "?")
+    content_hash = str(receipt.get("content_hash", "") or "")
     try:
         path = receipts.save(receipt)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        safe_exc = _redact_local_paths(str(exc))
         logger.exception(
             "v2_api: failed to persist response receipt for agent %s "
             "(id=%s)",
@@ -2620,7 +2772,7 @@ def _persist_agent_response_receipt_to_store(
         )
         raise HTTPException(
             status_code=500,
-            detail=f"agent response receipt could not be persisted: {exc}",
+            detail=f"agent response receipt could not be persisted: {safe_exc}",
         ) from exc
     logger.info(
         "v2_api: persisted response receipt for agent %s (id=%s, path=%s)",
@@ -2628,6 +2780,10 @@ def _persist_agent_response_receipt_to_store(
         receipt_id,
         path,
     )
+    return {
+        "nth_receipt_id": receipt_id,
+        "nth_receipt_content_hash": content_hash,
+    }
 
 
 # NOTE: prev_content_hash lookup goes through the canonical
@@ -2679,6 +2835,26 @@ _SUPERVISOR_BUILD_LOCK = threading.Lock()
 # inherit ``_A2A_DEFAULT_TIMEOUT_S`` — keeps the snappy default for
 # wire-test calls while letting ``ask`` honour its real backend cost.
 _A2A_DEFAULT_TIMEOUT_S = 2.0
+_A2A_TIMEOUT_SLACK_S = 5.0
+_A2A_MAX_FORWARD_TIMEOUT_S = _env_float(
+    "NTH_A2A_MAX_FORWARD_TIMEOUT_S",
+    360.0,
+    minimum=35.0,
+    maximum=900.0,
+)
+_HERMES_ASK_TIMEOUT_S = min(
+    _env_float(
+        "NTH_HERMES_ASK_TIMEOUT_S",
+        300.0,
+        minimum=30.0,
+        maximum=300.0,
+    ),
+    max(30.0, _A2A_MAX_FORWARD_TIMEOUT_S - _A2A_TIMEOUT_SLACK_S),
+)
+_HERMES_FORWARD_TIMEOUT_S = min(
+    _HERMES_ASK_TIMEOUT_S + _A2A_TIMEOUT_SLACK_S,
+    _A2A_MAX_FORWARD_TIMEOUT_S,
+)
 _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     "ask": 65.0,    # claude-code backend default is 60s + 5s slack
     # Phase 5.2: streaming variant gets a longer window because the
@@ -2687,26 +2863,20 @@ _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     "ask-stream": 125.0,
 }
 _A2A_BACKEND_METHOD_TIMEOUTS: Dict[Tuple[str, str], float] = {
-    # Hermes defaults to 120s internally. Without a backend-aware hub
-    # budget, browser-driven /ask calls time out at the hub after 65s
-    # while the Hermes worker is still legitimately waiting on its
-    # provider. Keep this as a minimum only; caller-supplied timeout_s
-    # may still raise it up to _A2A_MAX_FORWARD_TIMEOUT_S.
-    ("hermes", "ask"): 125.0,
-    ("hermes", "ask-stream"): 125.0,
+    # Hermes provider queues can exceed 170s in local field tests. The
+    # child adapter accepts caller timeout_s up to 300s, so the hub must
+    # keep its own forward window above that backend cutoff.
+    ("hermes", "ask"): _HERMES_FORWARD_TIMEOUT_S,
+    ("hermes", "ask-stream"): _HERMES_FORWARD_TIMEOUT_S,
     # Codex CLI defaults to 90s. It can cold-start slowly, so do not
     # inherit the Claude-sized 65s floor when the supervisor knows the
     # child is a Codex agent.
     ("codex", "ask"): 95.0,
     ("codex", "ask-stream"): 125.0,
 }
-_A2A_TIMEOUT_SLACK_S = 5.0
-_A2A_MAX_FORWARD_TIMEOUT_S = 180.0
 _CHANNEL_DISPATCH_DEFAULT_ASK_TIMEOUT_S = 120.0
 _CHANNEL_DISPATCH_ASK_TIMEOUTS: Dict[str, float] = {
-    # Hermes/DeepSeek often queues longer than 120s in real local tests.
-    # Keep below _A2A_MAX_FORWARD_TIMEOUT_S after proxy slack is added.
-    "hermes": 170.0,
+    "hermes": _HERMES_ASK_TIMEOUT_S,
     "codex": 120.0,
     "claude-code": 120.0,
     "mock": 30.0,
@@ -3116,6 +3286,7 @@ class AnnounceTaskBody(_Model):
     """POST /api/v2/market/announce 请求体:往任务市场发一条公告。"""
     title: str = Field(..., description="任务标题(必填)。")
     description: str = Field(default="", description="任务详述。")
+    listing_type: str = Field(default="task")
     capability_set: List[str] = Field(
         default_factory=list,
         description="认领方需具备的能力(空=无能力门槛,任意 agent 可认领)。",
@@ -3496,6 +3667,28 @@ class ChannelMessageBody(BaseModel):
     body: str
 
 
+def _channel_message_to_wire(message: Any) -> Dict[str, Any]:
+    """Project stored channel messages into the v2 UI contract.
+
+    The storage model keeps receipt linkage inside ``metadata`` so the
+    append-only message shape stays stable. The UI should not have to know
+    that internal nesting, so the v2 projection exposes the common receipt
+    fields at top level while preserving the original metadata for audit
+    inspection and future clients.
+    """
+    data = message.to_dict()
+    meta = data.get("metadata")
+    if not isinstance(meta, dict):
+        return data
+    receipt_id = meta.get("nth_receipt_id")
+    receipt_hash = meta.get("nth_receipt_content_hash")
+    if receipt_id:
+        data.setdefault("nth_receipt_id", str(receipt_id))
+    if receipt_hash:
+        data.setdefault("nth_receipt_content_hash", str(receipt_hash))
+    return data
+
+
 class JoinChannelBody(BaseModel):
     """把一个 agent 加进频道成员的入参。"""
 
@@ -3515,6 +3708,13 @@ class FederatedClaimBody(BaseModel):
 
     announcement_id: str
     agent_did: str
+
+
+class FederationPeerBody(BaseModel):
+    """Operator-managed seed peer for task federation discovery."""
+
+    peer_url: str
+    action: str = "add"
 
 
 class DisputeStatementBody(BaseModel):
@@ -3612,6 +3812,21 @@ def _channel_dispatch_clear_error(channel_id: str, did: str) -> None:
         _CHANNEL_DISPATCH_ERROR_UNTIL.pop(key, None)
 
 
+def _redact_local_paths(text: str) -> str:
+    """Remove local filesystem paths before returning text to the UI."""
+    home = str(Path.home())
+    if home:
+        text = re.sub(
+            re.escape(home) + r"(?:[\\/][^\s'\"<>]+)*",
+            "<local-path>",
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = re.sub(r"[A-Za-z]:\\[^\s'\"<>]+", "<local-path>", text)
+    text = re.sub(r"/(?:Users|home)/[^\s'\"<>]+", "<local-path>", text)
+    return text
+
+
 def _channel_dispatch_public_error(exc: Exception) -> str:
     """Build the human-facing channel error without subprocess log spam."""
     text = str(exc).strip()
@@ -3620,10 +3835,43 @@ def _channel_dispatch_public_error(exc: Exception) -> str:
             text = text.split(marker, 1)[0].strip()
             break
     text = " ".join(text.split())
+    text = _redact_local_paths(text)
+    if text.startswith("backend-timeout:"):
+        message = f"agent error: {text}"
+        return message[:417] + "..." if len(message) > 420 else message
     message = f"agent error: {type(exc).__name__}: {text}"
     if len(message) > 420:
         message = message[:417] + "..."
     return message
+
+
+def _a2a_http_error_message(status_code: int, content: Any) -> str:
+    """Return a compact public message for a child A2A HTTP failure."""
+    if isinstance(content, dict):
+        error = content.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code") or f"http-{status_code}")
+            message = str(error.get("message") or "").strip()
+            if code == "backend-timeout":
+                for marker in (" Tail:", "\nTail:", "\r\nTail:", "Tail:"):
+                    if marker in message:
+                        message = message.split(marker, 1)[0].strip()
+                        break
+                message = " ".join(message.split())
+                hint = (
+                    "Hermes may still be queued. Try again, set "
+                    "NTH_HERMES_ASK_TIMEOUT_S up to 300, or configure a "
+                    "faster Hermes model."
+                )
+                return f"backend-timeout: {message or hint}. {hint}"
+            if message:
+                return f"a2a ask HTTP {status_code}: {code}: {message}"
+            return f"a2a ask HTTP {status_code}: {code}"
+    blob = (
+        json.dumps(content, ensure_ascii=False)
+        if isinstance(content, dict) else str(content)
+    )
+    return f"a2a ask HTTP {status_code}: {blob[:1000]}"
 
 
 def _channel_dispatch_try_begin(channel_id: str, did: str) -> bool:
@@ -3717,19 +3965,25 @@ def _channel_ask_and_reply(
                     time.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
                     continue
                 raise RuntimeError(
-                    f"a2a ask HTTP {exc.code}: {blob[:1000]}"
+                    _a2a_http_error_message(exc.code, content)
                 ) from exc
         reply = ""
+        reply_metadata: Dict[str, Any] = {}
         if isinstance(content, dict):
-            _persist_agent_response_receipt_to_store(
+            receipt_meta = _persist_agent_response_receipt_to_store(
                 receipts_store, agent_id or did, did, content,
             )
+            if receipt_meta:
+                reply_metadata.update(receipt_meta)
             result = content.get("result")
             if isinstance(result, dict):
                 reply = str(result.get("response") or "")
         reply = reply.strip()
         if reply:
-            groups.post_message(channel_id, sender_id=did, body=reply)
+            groups.post_message(
+                channel_id, sender_id=did, body=reply,
+                metadata=reply_metadata or None,
+            )
             _channel_dispatch_clear_error(channel_id, did)
     except Exception as exc:  # noqa: BLE001
         logger.warning("channel agent dispatch failed for %s: %s", did, exc)
@@ -3840,6 +4094,79 @@ _FED_POLLER_LOCK = threading.Lock()
 _FED_DIGEST_PAGE = 500
 
 
+def _fed_peers_file(ws: Optional[Path]) -> Optional[Path]:
+    if ws is None:
+        return None
+    return ws / "federation" / "peers.json"
+
+
+def _normalize_configured_fed_peer(url: str) -> str:
+    """Validate and normalize an operator-configured federation seed URL.
+
+    Seed peers are explicit operator input, so local/LAN http URLs are allowed
+    for development and two-PC testing. Automatically gossiped peers remain
+    restricted by market_federation_poll._is_safe_gossip_url before use.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    raw = str(url or "").strip()
+    if not raw:
+        raise ValueError("peer_url is required")
+    try:
+        parsed = urlsplit(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("peer_url is not a valid URL") from exc
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("peer_url must start with http:// or https://")
+    if not parsed.hostname:
+        raise ValueError("peer_url must include a host")
+    if parsed.username or parsed.password:
+        raise ValueError("peer_url must not include credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("peer_url must not include query or fragment")
+    path = parsed.path.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+def _read_fed_peer_file(ws: Optional[Path]) -> List[str]:
+    pf = _fed_peers_file(ws)
+    if pf is None or not pf.exists():
+        return []
+    try:
+        data = json.loads(pf.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(data, list):
+        return []
+    out: List[str] = []
+    for item in data:
+        try:
+            out.append(_normalize_configured_fed_peer(str(item)))
+        except ValueError:
+            continue
+    return out
+
+
+def _write_fed_peer_file(ws: Optional[Path], peers: List[str]) -> None:
+    pf = _fed_peers_file(ws)
+    if pf is None:
+        raise RuntimeError("workspace unavailable")
+    normalized: List[str] = []
+    seen: set = set()
+    for peer in peers:
+        p = _normalize_configured_fed_peer(peer)
+        if p not in seen:
+            seen.add(p)
+            normalized.append(p)
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    tmp = pf.with_suffix(pf.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, pf)
+
+
 def _read_fed_peers(ws: Optional[Path]) -> List[str]:
     """联邦 peer 列表(去重保序):NTH_FED_PEERS(逗号分隔)+ 可选
     ``<ws>/federation/peers.json``(字符串数组)。各 peer 是对端 hub 的
@@ -3848,21 +4175,17 @@ def _read_fed_peers(ws: Optional[Path]) -> List[str]:
         p.strip() for p in os.environ.get("NTH_FED_PEERS", "").split(",")
         if p.strip()
     ]
-    if ws is not None:
-        pf = ws / "federation" / "peers.json"
-        if pf.exists():
-            try:
-                data = json.loads(pf.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    peers += [str(p).strip() for p in data if str(p).strip()]
-            except Exception:  # noqa: BLE001
-                pass
+    peers += _read_fed_peer_file(ws)
     seen: set = set()
     out: List[str] = []
     for p in peers:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
+        try:
+            normalized = _normalize_configured_fed_peer(p)
+        except ValueError:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
     return out
 
 
@@ -3887,11 +4210,70 @@ def _state_market_fed_cache(request: Request):
                 interval = 20.0
             start_poller(lambda: _read_fed_peers(ws), cache, interval_s=interval)
             state.market_fed_cache = cache
+            state.market_fed_poller_started = True
             logger.info(
                 "nth market federation poller started (%d peers, %.0fs)",
                 len(_read_fed_peers(ws)), interval,
             )
     return cache
+
+
+def _ensure_market_fed_cache_for_update(request: Request):
+    """Create the federation cache and start the poller after peer edits."""
+    state = request.app.state
+    with _FED_POLLER_LOCK:
+        cache = getattr(state, "market_fed_cache", None)
+        if cache is None:
+            from .market_federation_poll import FederationCache
+            cache = FederationCache()
+            state.market_fed_cache = cache
+        peers = _read_fed_peers(_state_workspace(request))
+        if peers and not getattr(state, "market_fed_poller_started", False):
+            from .market_federation_poll import start_poller
+            try:
+                interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
+            except ValueError:
+                interval = 20.0
+            start_poller(
+                lambda: _read_fed_peers(_state_workspace(request)),
+                cache,
+                interval_s=interval,
+            )
+            state.market_fed_poller_started = True
+    return cache
+
+
+def _market_fed_status(request: Request) -> Dict[str, Any]:
+    ws = _state_workspace(request)
+    cache = getattr(request.app.state, "market_fed_cache", None)
+    status = (
+        cache.status()
+        if cache is not None and hasattr(cache, "status")
+        else {
+            "cached_announcements": 0,
+            "last_refresh_ms": 0,
+            "last_error": "",
+            "last_peer_count": 0,
+        }
+    )
+    peers = _read_fed_peers(ws)
+    env_peers: List[str] = []
+    for item in os.environ.get("NTH_FED_PEERS", "").split(","):
+        if not item.strip():
+            continue
+        try:
+            env_peers.append(_normalize_configured_fed_peer(item))
+        except ValueError:
+            continue
+    return {
+        "peers": peers,
+        "file_peers": _read_fed_peer_file(ws),
+        "env_peers": env_peers,
+        "poller_started": bool(
+            getattr(request.app.state, "market_fed_poller_started", False)
+        ),
+        **status,
+    }
 
 
 def register_v2_routes(app: FastAPI) -> None:
@@ -3974,7 +4356,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="channel not found")
         capped = min(max(limit, 1), 500)
         return [
-            m.to_dict()
+            _channel_message_to_wire(m)
             for m in g.list_messages(channel_id, actor_id=actor_id, limit=capped)
         ]
 
@@ -4002,7 +4384,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=str(exc))
         # P2:人类消息→派发给频道里可驱动的 agent 成员→回帖(后台、防环)。
         _maybe_dispatch_to_channel_agents(request, channel_id, msg)
-        return msg.to_dict()
+        return _channel_message_to_wire(msg)
 
     @app.post("/api/v2/channels/{channel_id}/join")
     def v2_channel_join(
@@ -4254,6 +4636,20 @@ def register_v2_routes(app: FastAPI) -> None:
         live = _read_receipts_from_disk(_state_workspace(request))
         return live if live else _seed_receipts()
 
+    @app.get("/api/v2/receipts/{receipt_id}")
+    def v2_receipt_detail(receipt_id: str, request: Request) -> Dict[str, Any]:
+        """Return the raw signed receipt material for UI inspection."""
+        _require_console_bearer_for_sensitive_read(request)
+        receipts = _state_receipts_store(request)
+        if receipts is None:
+            raise HTTPException(status_code=503, detail="receipt store unavailable")
+        receipt = receipts.load(receipt_id)
+        if receipt is None:
+            raise HTTPException(status_code=404, detail="receipt not found")
+        if not isinstance(receipt, dict):
+            raise HTTPException(status_code=500, detail="receipt store returned invalid data")
+        return _receipt_detail_to_wire(receipt)
+
     @app.get("/api/v2/rules")
     def v2_rules() -> List[Dict[str, Any]]:
         # No disk source yet — rules editor is Phase 2.
@@ -4264,6 +4660,7 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request,
         context: str = "",
         capability: str = "",
+        listing_type: str = "",
         min_reward: int = 0,
         q: str = "",
     ) -> List[Dict[str, Any]]:
@@ -4289,6 +4686,13 @@ def register_v2_routes(app: FastAPI) -> None:
             return []
         want_cap = normalize_capability(capability) if capability.strip() else ""
         want_ctx = context.strip()
+        try:
+            want_listing = (
+                _normalize_market_listing_type(listing_type)
+                if listing_type.strip() else ""
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         ql = q.strip().lower()
         # 自审修复:MarketFeed/ClaimStore 的构造会 mkdir。读端点(且匿名)
         # 不该有文件系统副作用——否则任何一次只读 GET 都会在从不用市场的
@@ -4303,6 +4707,8 @@ def register_v2_routes(app: FastAPI) -> None:
                 have = {normalize_capability(c) for c in ann.capability_set}
                 if want_cap not in have:
                     return False
+            if want_listing and _market_announcement_listing_type(ann) != want_listing:
+                return False
             if min_reward and ann.reward_minor < min_reward:
                 return False
             if ql and ql not in ann.title.lower() and ql not in ann.description.lower():
@@ -4324,7 +4730,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 ann = entry["ann"]
                 if not _passes(ann):
                     continue
-                d = ann.to_dict()
+                d = _market_announcement_to_wire(ann)
                 d["claimed"] = False
                 d["federated"] = True
                 d["source_peer"] = entry.get("source", "")
@@ -4449,6 +4855,10 @@ def register_v2_routes(app: FastAPI) -> None:
         # 输入上限(对抗审查补):公告会被签名并追加进 append-only feed
         # (近似账本、无内置清理),不设限则一条超大 description/能力表就是
         # 永久膨胀。在落盘前于 HTTP 边界封顶,给清晰 400。
+        try:
+            listing_type = _normalize_market_listing_type(body.listing_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         if len(body.title) > 200:
             raise HTTPException(status_code=400, detail="title too long (max 200)")
         if len(body.description) > 4000:
@@ -4485,6 +4895,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 title=body.title.strip(),
                 capability_set=list(body.capability_set or []),
                 context=body.context or "general",
+                input_schema={_MARKET_LISTING_TYPE_FIELD: listing_type},
                 reward_minor=int(body.reward_minor),
                 reward_asset=body.reward_asset or "credit",
                 mission_id=body.mission_id or "",
@@ -4574,6 +4985,71 @@ def register_v2_routes(app: FastAPI) -> None:
         任务真伪不靠这个 —— 发现到的 peer 仍被直连 + 双层验签。
         """
         return {"peers": _read_fed_peers(_state_workspace(request))}
+
+    @app.get("/api/v2/market/federation/status")
+    def v2_market_fed_status(request: Request) -> Dict[str, Any]:
+        """Operator-facing federation discovery status."""
+        if _read_fed_peers(_state_workspace(request)):
+            _state_market_fed_cache(request)
+        return _market_fed_status(request)
+
+    @app.post("/api/v2/market/federation/peers")
+    def v2_market_fed_peer_update(
+        body: FederationPeerBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Add or remove an operator-managed seed peer URL."""
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            peer = _normalize_configured_fed_peer(body.peer_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        action = (body.action or "add").strip().lower()
+        file_peers = _read_fed_peer_file(ws)
+        if action == "add":
+            if peer not in file_peers:
+                file_peers.append(peer)
+        elif action == "remove":
+            file_peers = [p for p in file_peers if p != peer]
+        else:
+            raise HTTPException(status_code=400, detail="action must be add or remove")
+        try:
+            _write_fed_peer_file(ws, file_peers)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        cache = _ensure_market_fed_cache_for_update(request)
+        if not _read_fed_peers(ws):
+            cache.replace_all({}, peer_count=0)
+        status = _market_fed_status(request)
+        status["updated"] = True
+        status["peer_url"] = peer
+        status["action"] = action
+        return status
+
+    @app.post("/api/v2/market/federation/refresh")
+    def v2_market_fed_refresh(request: Request) -> Dict[str, Any]:
+        """Synchronously pull configured federation peers once."""
+        peers = _read_fed_peers(_state_workspace(request))
+        cache = _ensure_market_fed_cache_for_update(request)
+        if not peers:
+            cache.replace_all({}, peer_count=0)
+            status = _market_fed_status(request)
+            status["refreshed"] = True
+            return status
+        from .market_federation_poll import federate_once
+        try:
+            entries = federate_once(peers)
+            cache.replace_all(entries, peer_count=len(peers))
+        except Exception as exc:  # noqa: BLE001
+            cache.mark_error(str(exc), peer_count=len(peers))
+            raise HTTPException(
+                status_code=502,
+                detail=f"federation refresh failed: {exc}",
+            )
+        status = _market_fed_status(request)
+        status["refreshed"] = True
+        return status
 
     @app.post("/api/v2/market/{announcement_id}/claim-foreign")
     def v2_market_claim_foreign(

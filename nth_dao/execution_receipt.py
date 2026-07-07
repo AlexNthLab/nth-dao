@@ -773,6 +773,7 @@ class ReceiptStore:
             raise ValueError(
                 f"receipt_id must be alphanumeric (or dash); got {rid!r}"
             )
+        self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / (rid + self.SUFFIX)
         tmp = path.with_suffix(self.SUFFIX + ".tmp")
         tmp.write_text(

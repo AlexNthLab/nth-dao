@@ -1066,6 +1066,23 @@ select option {
   margin: 2px 13px 0;
 }
 .chat-row.out .chat-receipt { text-align: right; }
+.chat-receipt-button {
+  display: block;
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.chat-receipt-button:hover {
+  color: var(--fg-secondary);
+  text-decoration: underline;
+}
+.chat-receipt-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+.chat-row.out .chat-receipt-button { margin-left: auto; }
 
 /* 系统/摘要:居中胶囊,像 iMessage 的日期分隔与状态行。 */
 .chat-system {

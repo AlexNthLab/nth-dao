@@ -78,6 +78,35 @@ def test_market_open_merges_federated_from_peer(tmp_path: Path) -> None:
     assert fed[0]["claimed"] is False
 
 
+def test_market_open_merges_federated_product_listing_from_peer(
+    tmp_path: Path,
+) -> None:
+    b = TestClient(create_app(tmp_path / "b", require_console_auth=False))
+    aid = b.post(
+        "/api/v2/market/announce",
+        json={
+            "title": "remote DAO service pack",
+            "listing_type": "service",
+            "capability_set": ["debug"],
+            "reward_minor": 500,
+        },
+    ).json()["announcement_id"]
+
+    a_app = create_app(tmp_path / "a", require_console_auth=False)
+    a = TestClient(a_app)
+    entries = federate_once(["https://peer-b.example"], _http_get_via(b))
+    cache = FederationCache()
+    cache.replace_all(entries)
+    a_app.state.market_fed_cache = cache
+
+    rows = a.get("/api/v2/market/open", params={"listing_type": "service"}).json()
+    hit = next((x for x in rows if x.get("announcement_id") == aid), None)
+    assert hit is not None
+    assert hit["federated"] is True
+    assert hit["listing_type"] == "service"
+    assert hit["source_peer"] == "https://peer-b.example"
+
+
 def test_digest_pagination_covers_whole_feed(tmp_path: Path, monkeypatch) -> None:
     # FED-1 审查修复:digest serve 侧封顶 + 拉方翻页。把每页设 2、发 5 条,
     # 翻页须覆盖全部(否则只会拿到前 2 条)。

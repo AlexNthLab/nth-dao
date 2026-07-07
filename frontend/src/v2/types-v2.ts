@@ -227,6 +227,38 @@ export interface ReceiptSummary {
   principal_user_did?: string;
 }
 
+export interface ReceiptCapScopeSummary {
+  present: boolean;
+  token_id?: string;
+  issuer_did?: string;
+  subject_did?: string;
+  capabilities?: string[];
+  scope_task_id?: string;
+  scope_dao?: string;
+  scope_model_allowlist?: string[] | null;
+  not_before?: number;
+  not_after?: number;
+}
+
+export interface ReceiptDetail {
+  receipt: Record<string, unknown>;
+  summary: {
+    receipt_id: string;
+    signer_did: string;
+    goal_id: string;
+    issued_at: string;
+    content_hash: string;
+    prev_content_hash: string;
+    kind: string;
+    cap_scope: ReceiptCapScopeSummary;
+  };
+  verification: {
+    verified: boolean;
+    status: "verified" | "failed" | string;
+    reason: string;
+  };
+}
+
 /** Cap_token row for the Delegate panel. */
 export interface CapTokenSummary {
   token_id: string;
@@ -302,6 +334,9 @@ export interface ChannelMessage {
   body: string;
   kind: string;
   created_at: string;
+  metadata?: Record<string, unknown>;
+  nth_receipt_id?: string;
+  nth_receipt_content_hash?: string;
 }
 
 /** 任务广场公告(/api/v2/market/open 返回的一行)。发现态:可认领的活。 */
@@ -309,7 +344,9 @@ export interface TaskAnnouncement {
   announcement_id: string;
   publisher_did: string;
   title: string;
+  listing_type?: "task" | "service" | "product";
   description?: string;
+  input_schema?: Record<string, unknown>;
   capability_set: string[];
   context: string;
   reward_minor: number;
@@ -330,9 +367,25 @@ export interface TaskCategory {
   count: number;
 }
 
+export interface FederationStatus {
+  peers: string[];
+  file_peers: string[];
+  env_peers: string[];
+  poller_started: boolean;
+  cached_announcements: number;
+  last_refresh_ms: number;
+  last_error: string;
+  last_peer_count: number;
+  refreshed?: boolean;
+  updated?: boolean;
+  peer_url?: string;
+  action?: string;
+}
+
 /** 发布任务的请求体(POST /api/v2/market/announce)。 */
 export interface AnnounceTaskInput {
   title: string;
+  listing_type?: "task" | "service" | "product";
   description?: string;
   capability_set?: string[];
   reward_minor?: number;

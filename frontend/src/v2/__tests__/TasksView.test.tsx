@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "../components/Toast";
 import { LangProvider } from "../i18n";
@@ -22,12 +22,35 @@ vi.mock("../api", () => ({
   listTaskCategories: vi.fn().mockResolvedValue([
     { context: "code_review", count: 1 },
   ]),
+  getFederationStatus: vi.fn().mockResolvedValue({
+    peers: [],
+    file_peers: [],
+    env_peers: [],
+    poller_started: false,
+    cached_announcements: 0,
+    last_refresh_ms: 0,
+    last_error: "",
+    last_peer_count: 0,
+  }),
+  refreshFederation: vi.fn().mockResolvedValue({
+    peers: [],
+    file_peers: [],
+    env_peers: [],
+    poller_started: false,
+    cached_announcements: 0,
+    last_refresh_ms: 0,
+    last_error: "",
+    last_peer_count: 0,
+    refreshed: true,
+  }),
+  updateFederationPeer: vi.fn(),
   announceTask: vi.fn(),
   fetchAgents: vi.fn().mockResolvedValue([]),
   claimTask: vi.fn(),
+  claimFederatedTask: vi.fn(),
 }));
 
-import { claimTask, fetchAgents } from "../api";
+import { claimTask, fetchAgents, refreshFederation, updateFederationPeer } from "../api";
 import { TasksView } from "../components/TasksView";
 
 afterEach(() => {
@@ -98,5 +121,53 @@ describe("TasksView", () => {
     expect(await screen.findByText(/执行视图未完全写入/)).toBeTruthy();
     expect(await screen.findByText(/Mission 执行视图写入失败/)).toBeTruthy();
     expect(await screen.findByText(/Blackboard 协作现场写入失败/)).toBeTruthy();
+  });
+
+  it("allows adding a federation seed peer from the Tasks sidebar", async () => {
+    vi.mocked(updateFederationPeer).mockResolvedValueOnce({
+      peers: ["http://192.168.1.20:8080"],
+      file_peers: ["http://192.168.1.20:8080"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 0,
+      last_refresh_ms: 0,
+      last_error: "",
+      last_peer_count: 1,
+      updated: true,
+      peer_url: "http://192.168.1.20:8080",
+      action: "add",
+    });
+    vi.mocked(refreshFederation).mockResolvedValueOnce({
+      peers: ["http://192.168.1.20:8080"],
+      file_peers: ["http://192.168.1.20:8080"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 1,
+      last_refresh_ms: 123,
+      last_error: "",
+      last_peer_count: 1,
+      refreshed: true,
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("http://192.168.1.20:8080"), {
+      target: { value: "http://192.168.1.20:8080" },
+    });
+    fireEvent.click(screen.getByText("Add"));
+
+    await waitFor(() => {
+      expect(updateFederationPeer).toHaveBeenCalledWith(
+        "http://192.168.1.20:8080",
+        "add",
+      );
+    });
+    expect(refreshFederation).toHaveBeenCalled();
   });
 });

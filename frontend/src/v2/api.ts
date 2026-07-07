@@ -33,7 +33,9 @@ import type {
   Decision,
   HandoffDetail,
   IdentityHeader,
+  FederationStatus,
   MissionSummary,
+  ReceiptDetail,
   ProcessCard,
   ReceiptSummary,
   Rule,
@@ -227,6 +229,22 @@ export async function createProcess(input: {
 }
 export const fetchReceipts      = (s?: AbortSignal) =>
   getJson<ReceiptSummary[]>("/receipts", s);
+
+export async function fetchReceiptDetail(
+  receiptId: string,
+  signal?: AbortSignal,
+): Promise<ReceiptDetail> {
+  const path = `/receipts/${encodeURIComponent(receiptId)}`;
+  const res = await fetch(`${BASE}${path}`, {
+    signal,
+    headers: { Accept: "application/json", ...authHeader() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    throw new Error(`GET ${path} → HTTP ${res.status}`);
+  }
+  return (await res.json()) as ReceiptDetail;
+}
 export const fetchRules         = (s?: AbortSignal) =>
   getJson<Rule[]>("/rules", s);
 export const fetchAgents        = (s?: AbortSignal) =>
@@ -513,6 +531,7 @@ export async function askAgentStream(
   signal?: AbortSignal,
   onStatus?: (status: string) => void,
   idleTimeoutMs = 120_000,
+  backendTimeoutS?: number,
 ): Promise<AskAgentResult> {
   const maxWarmupAttempts = 6;
   const warmupDelayMs = 750;
@@ -565,13 +584,17 @@ export async function askAgentStream(
       let backend: string | undefined;
       let model: string | undefined;
       try {
+        const body: Record<string, unknown> = { prompt };
+        if (typeof backendTimeoutS === "number" && Number.isFinite(backendTimeoutS)) {
+          body.timeout_s = backendTimeoutS;
+        }
         const res = await fetch(
           `${BASE}/agents/${encodeURIComponent(did)}/ask-stream`,
           {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeader() },
-            body: JSON.stringify({ prompt }),
+            body: JSON.stringify(body),
             signal: ctl.signal,
           },
         );
@@ -695,6 +718,7 @@ export async function listOpenTasks(
   filters: {
     context?: string;
     capability?: string;
+    listingType?: "task" | "service" | "product" | "";
     minReward?: number;
     q?: string;
   } = {},
@@ -703,6 +727,7 @@ export async function listOpenTasks(
   const p = new URLSearchParams();
   if (filters.context) p.set("context", filters.context);
   if (filters.capability) p.set("capability", filters.capability);
+  if (filters.listingType) p.set("listing_type", filters.listingType);
   if (filters.minReward) p.set("min_reward", String(filters.minReward));
   if (filters.q) p.set("q", filters.q);
   const qs = p.toString();
@@ -717,6 +742,26 @@ export async function listTaskCategories(
   signal?: AbortSignal,
 ): Promise<TaskCategory[]> {
   return getJson<TaskCategory[]>("/market/categories", signal);
+}
+
+export async function getFederationStatus(
+  signal?: AbortSignal,
+): Promise<FederationStatus> {
+  return getJson<FederationStatus>("/market/federation/status", signal);
+}
+
+export async function updateFederationPeer(
+  peerUrl: string,
+  action: "add" | "remove" = "add",
+): Promise<FederationStatus> {
+  return postJson<FederationStatus>("/market/federation/peers", {
+    peer_url: peerUrl,
+    action,
+  });
+}
+
+export async function refreshFederation(): Promise<FederationStatus> {
+  return postJson<FederationStatus>("/market/federation/refresh");
 }
 
 // ── Phase 4c/5:审计 / 争议 / 治理(消费 spine 投影端点)─────────────────

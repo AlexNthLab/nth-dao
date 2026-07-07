@@ -252,14 +252,40 @@ class FederationCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._last_refresh_ms = 0
+        self._last_error = ""
+        self._last_peer_count = 0
 
-    def replace_all(self, entries: Dict[str, Dict[str, Any]]) -> None:
+    def replace_all(
+        self,
+        entries: Dict[str, Dict[str, Any]],
+        *,
+        peer_count: int = 0,
+    ) -> None:
         with self._lock:
             self._data = entries
+            self._last_refresh_ms = now_ms()
+            self._last_error = ""
+            self._last_peer_count = max(0, int(peer_count or 0))
+
+    def mark_error(self, error: str, *, peer_count: int = 0) -> None:
+        with self._lock:
+            self._last_refresh_ms = now_ms()
+            self._last_error = str(error or "")[:500]
+            self._last_peer_count = max(0, int(peer_count or 0))
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             return dict(self._data)
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "cached_announcements": len(self._data),
+                "last_refresh_ms": self._last_refresh_ms,
+                "last_error": self._last_error,
+                "last_peer_count": self._last_peer_count,
+            }
 
 
 def start_poller(
@@ -276,8 +302,17 @@ def start_poller(
             try:
                 peers = [p for p in get_peers() if p]
                 if peers:
-                    cache.replace_all(federate_once(peers, http_get))
+                    cache.replace_all(
+                        federate_once(peers, http_get),
+                        peer_count=len(peers),
+                    )
+                else:
+                    cache.replace_all({}, peer_count=0)
             except Exception as exc:  # noqa: BLE001
+                try:
+                    cache.mark_error(str(exc), peer_count=len(get_peers()))
+                except Exception:  # noqa: BLE001
+                    pass
                 logger.warning("fed poller cycle failed: %s", exc)
             time.sleep(interval_s)
 

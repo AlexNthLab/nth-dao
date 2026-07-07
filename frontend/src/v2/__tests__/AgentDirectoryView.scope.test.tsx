@@ -14,8 +14,8 @@
  *     refactors should be free to change without breaking tests).
  */
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDirectoryView } from "../components/AgentDirectoryView";
 import { LangProvider } from "../i18n";
 import type { AgentEntry } from "../types-v2";
@@ -42,6 +42,10 @@ const noopProps = {
   onScanLan: () => undefined,
   onIssueCap: () => undefined,
 };
+
+afterEach(() => {
+  cleanup();
+});
 
 describe("AgentDirectoryView — Phase G scope badge", () => {
   it("renders no scope pill when scope_model_allowlist is absent", () => {
@@ -226,4 +230,35 @@ it("surfaces Hermes warmup status while an agent task is starting", async () => 
   await waitFor(() => {
     expect(screen.getByText("Hermes online.")).toBeTruthy();
   });
+});
+
+it("keeps agent task backend failures visible in the work panel", async () => {
+  const onAskAgent = vi.fn(async () => {
+    throw new Error(
+      "agent error: backend-failed - codex CLI usage limit reached",
+    );
+  });
+
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkCodexQuota", { kind: "codex", label: "Codex" })]}
+        {...noopProps}
+        onAskAgent={onAskAgent}
+      />
+    </LangProvider>,
+  );
+
+  fireEvent.change(screen.getByPlaceholderText(/派一个任务|Assign a task/), {
+    target: { value: "say hello" },
+  });
+  const runButton = screen.getByRole("button", { name: /运行|Run/ });
+  fireEvent.click(runButton);
+
+  await waitFor(() => {
+    expect(onAskAgent).toHaveBeenCalled();
+  });
+  expect(
+    await screen.findByText(/codex CLI usage limit reached/),
+  ).toBeTruthy();
 });

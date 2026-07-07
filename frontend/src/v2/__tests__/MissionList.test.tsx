@@ -15,6 +15,7 @@ const capsuleHash =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 beforeEach(() => {
+  vi.useRealTimers();
   localStorage.setItem("nth.v2.lang", "en");
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,

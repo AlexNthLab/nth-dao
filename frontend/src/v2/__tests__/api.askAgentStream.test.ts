@@ -28,7 +28,8 @@ function streamFrom(chunks: string[]): Response {
 }
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("askAgentStream", () => {
@@ -97,5 +98,25 @@ describe("askAgentStream", () => {
     await askAgentStream("did:key:zX", "hi", () => {}, undefined, (s) => statuses.push(s));
     expect(statuses).toContain("streaming");
     expect(statuses).toContain("done");
+  });
+
+  it("passes backend timeout_s when caller supplies a budget", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(streamFrom([
+      'data: {"done":true}\n\n',
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await askAgentStream(
+      "did:key:zX",
+      "hi",
+      () => {},
+      undefined,
+      undefined,
+      330_000,
+      300,
+    );
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({ prompt: "hi", timeout_s: 300 });
   });
 });
