@@ -40,6 +40,12 @@ export interface MissionListProps {
   onCreate?: (draft: NewMissionDraft) => void;
   /** Optional hook to activate a planning mission. */
   onActivate?: (id: string) => void;
+  /** Optional hook to run one step through its assigned local agent. */
+  onRunStep?: (
+    missionId: string,
+    stepId: string,
+    agentDid?: string,
+  ) => void | Promise<void>;
   /** Agents the user can pick as driver; populates the form's
    *  dropdown. Pass mockAgents in v1; /api/agents/list in v1.x. */
   driverOptions?: AgentEntry[];
@@ -288,7 +294,7 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
 }
 
 export function MissionList({
-  missions, onCreate, onActivate, driverOptions, focusId, onFocusConsumed,
+  missions, onCreate, onActivate, onRunStep, driverOptions, focusId, onFocusConsumed,
   onNavigate,
 }: MissionListProps) {
   const { t } = useLang();
@@ -326,12 +332,21 @@ export function MissionList({
     ...timelineEvents.map((event) => event.process_id),
   ]);
   const receiptIds = uniqueNonEmpty(timelineEvents.map((event) => event.receipt_id));
+  const liveAgentDirectoryPresent = (driverOptions ?? []).some((agent) => (
+    agent.supervised || agent.alive !== undefined || agent.a2a_port !== undefined
+  ));
+  const liveA2ADids = new Set(
+    (driverOptions ?? [])
+      .filter((agent) => agent.alive === true && Boolean(agent.a2a_port))
+      .map((agent) => agent.did),
+  );
   const [handoffDetails, setHandoffDetails] = useState<Record<string, HandoffDetail>>({});
   const [handoffDetailsStatus, setHandoffDetailsStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [handoffDetailsError, setHandoffDetailsError] = useState("");
   const [copiedPacketKey, setCopiedPacketKey] = useState("");
+  const [runningStepKey, setRunningStepKey] = useState("");
 
   useEffect(() => {
     if (!selected?.id || handoffEvents.length === 0) {
@@ -389,6 +404,23 @@ export function MissionList({
         err instanceof Error ? err.message : "Clipboard write failed.",
       );
     }
+  }
+
+  async function runStep(stepId: string, agentDid?: string | null): Promise<void> {
+    if (!selected?.id || !onRunStep) return;
+    const key = `${selected.id}:${stepId}`;
+    if (runningStepKey) return;
+    setRunningStepKey(key);
+    try {
+      await onRunStep(selected.id, stepId, agentDid || undefined);
+    } finally {
+      setRunningStepKey("");
+    }
+  }
+
+  function canRunAgent(agentDid?: string | null): boolean {
+    if (!agentDid) return false;
+    return !liveAgentDirectoryPresent || liveA2ADids.has(agentDid);
   }
 
   return (
@@ -549,10 +581,9 @@ export function MissionList({
                       <button
                         type="button"
                         className="btn btn-primary"
-                        disabled={m.steps_total === 0}
                         title={
                           m.steps_total === 0
-                            ? t("Add steps before starting (an empty mission has nothing to do)", "Add steps before starting (an empty mission has nothing to do)")
+                            ? t("Start will create the first execution step from the mission goal", "Start will create the first execution step from the mission goal")
                             : t("Start executing this mission (planning -> active)", "Start executing this mission (planning -> active)")
                         }
                         onClick={(e) => {
@@ -567,7 +598,7 @@ export function MissionList({
                           className="muted"
                           style={{ fontSize: 11, marginLeft: 8 }}
                         >
-                          {t("No steps - can't start", "No steps - can't start")}
+                          {t("Will create first step", "Will create first step")}
                         </span>
                       )}
                     </div>
@@ -989,6 +1020,34 @@ export function MissionList({
                             <span>{t("Notes", "Notes")}: {step.notes_count}</span>
                           )}
                         </div>
+                        {onRunStep
+                          && ["todo", "claimed", "active", "blocked", "needs_review", "handed_off"].includes(step.status)
+                          && canRunAgent(step.assignee || selected.driver_did) && (
+                          <div style={{ marginTop: 10 }}>
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              disabled={Boolean(runningStepKey)}
+                              onClick={() => runStep(step.id, step.assignee || selected.driver_did)}
+                              title={t(
+                                "Run this step through its assigned local A2A agent",
+                                "Run this step through its assigned local A2A agent",
+                              )}
+                            >
+                              {runningStepKey === `${selected.id}:${step.id}`
+                                ? t("Running...", "Running...")
+                                : t("Run agent", "Run agent")}
+                            </button>
+                          </div>
+                        )}
+                        {onRunStep
+                          && ["todo", "claimed", "active", "blocked", "needs_review", "handed_off"].includes(step.status)
+                          && (step.assignee || selected.driver_did)
+                          && !canRunAgent(step.assignee || selected.driver_did) && (
+                          <p className="muted" style={{ fontSize: 11, margin: "10px 0 0" }}>
+                            {t("Assigned agent is not online on this node.", "Assigned agent is not online on this node.")}
+                          </p>
+                        )}
                       </div>
                     ))}
                   </div>

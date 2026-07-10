@@ -87,6 +87,36 @@ def test_card_pubkey_hex_is_64_hex_chars(client):
     assert all(c in "0123456789abcdefABCDEF" for c in pk)
 
 
+def test_card_advertises_federation_directory(client):
+    """A discovered node must tell peers where to pull signed feeds."""
+    body = client.get("/.well-known/nth-dao/identity.json").json()
+    fed = body.get("federation")
+    assert isinstance(fed, dict)
+    assert fed["protocol"] == "nth-dao-federation-v1"
+    assert fed["enabled"] is True
+    assert fed["peer_url"].startswith("http://testserver")
+    assert fed["market"]["digest_url"].endswith("/api/v2/market/federation/digest")
+    assert fed["market"]["pull_url"].endswith("/api/v2/market/federation/pull")
+    assert fed["market"]["peers_url"].endswith("/api/v2/market/federation/peers")
+    assert body["base_url"] == fed["peer_url"]
+
+
+def test_lan_public_base_requires_explicit_remote_bind(monkeypatch):
+    import nth_dao.web as web_mod
+
+    monkeypatch.delenv("NTH_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("NTH_FEDERATION_BASE_URL", raising=False)
+    monkeypatch.delenv("NTH_LAN_BASE_URL", raising=False)
+    monkeypatch.setenv("NTH_HOST", "0.0.0.0")
+    monkeypatch.delenv("NTH_ALLOW_REMOTE_BIND", raising=False)
+
+    assert web_mod._configured_public_base_url() == ""
+
+    monkeypatch.setenv("NTH_ALLOW_REMOTE_BIND", "1")
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", "https://dao.example/root/")
+    assert web_mod._configured_public_base_url() == "https://dao.example/root"
+
+
 # ===== signature integrity =====
 
 

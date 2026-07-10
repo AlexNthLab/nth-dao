@@ -93,6 +93,21 @@ def test_dispatch_try_begin_blocks_duplicate_inflight_calls() -> None:
             _v2._CHANNEL_DISPATCH_IN_FLIGHT.clear()
 
 
+def test_channel_dispatch_kind_allowlist_is_env_driven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web import v2_api as _v2
+
+    monkeypatch.delenv("NTH_CHANNEL_AGENT_KINDS", raising=False)
+    assert _v2._channel_dispatch_kind_allowed("hermes") is True
+
+    monkeypatch.setenv("NTH_CHANNEL_AGENT_KINDS", "codex,mock")
+    assert _v2._channel_dispatch_kind_allowed("codex") is True
+    assert _v2._channel_dispatch_kind_allowed("mock") is True
+    assert _v2._channel_dispatch_kind_allowed("hermes") is False
+    assert _v2._channel_dispatch_kind_allowed("") is False
+
+
 def test_channel_agent_listens_and_replies(tmp_path: Path) -> None:
     app = create_app(tmp_path, require_console_auth=False)
     client = TestClient(app)

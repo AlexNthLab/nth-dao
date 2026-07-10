@@ -924,7 +924,7 @@ class _ClaudeCliAskBackend(_AskBackend):
                         # Keep reading until EOF so we don't drop the final
                         # line emitted just before the process exits.
                         continue
-            except BaseException as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: no cover - defensive
                 errors.append(exc)
             finally:
                 done.set()
@@ -1542,8 +1542,11 @@ class _CodexCliAskBackend(_AskBackend):
             # display: Codex prints long startup banners before the real
             # actionable error (e.g. usage limit) near the end. The child may
             # be a Windows Node shim, so decode bytes with a locale fallback.
-            err_full = self._decode_cli_output(completed.stderr).strip()
-            err = err_full[-4096:]
+            stderr_full = self._decode_cli_output(completed.stderr).strip()
+            stdout_full = self._decode_cli_output(completed.stdout).strip()
+            parts = [part for part in (stderr_full, stdout_full) if part]
+            err_full = "\n".join(parts).strip()
+            err = err_full[-4096:] if err_full else "(no stdout/stderr captured)"
             if self._looks_like_node_missing_error(err_full):
                 raise RuntimeError(
                     "codex CLI npm shim could not start because Node.js is "
@@ -1606,8 +1609,9 @@ class _HermesAskBackend(_AskBackend):
 
     Auth is delegated to Hermes itself via ``~/.hermes/config.yaml``
     and ``auth.json``. The default provider/model is DeepSeek
-    ``deepseek-v4-pro``. Operators may subclass to allow explicit model
-    overrides for other Hermes-configured aliases.
+    ``deepseek-v4-pro`` unless the operator sets ``NTH_HERMES_MODEL``.
+    Operators may subclass to allow explicit model overrides for other
+    Hermes-configured aliases.
 
     ``AIAgent.chat()`` has no timeout parameter. Hermes has its own
     HTTP retry/timeout behavior, and this adapter adds a hard outer
@@ -1628,14 +1632,20 @@ class _HermesAskBackend(_AskBackend):
     # that ``AIAgent(model='deepseek/deepseek-v4-pro')`` is forwarded
     # as a literal model string and rejected by DeepSeek. The provider
     # prefix belongs in Hermes config parsing, not the AIAgent model
-    # argument. For third-party packages, measured behavior wins over
-    # guessed API shape.
+    # argument. ``NTH_HERMES_MODEL`` lets operators route to a faster
+    # Hermes-configured alias without granting remote peers arbitrary
+    # model override power through params['model'].
     DEFAULT_MODEL = "deepseek-v4-pro"
 
     # Align prompt cap with other backends to bound hostile context use.
     MAX_PROMPT_CHARS = 32 * 1024
 
     _IMPORT_LOCK = threading.RLock()
+
+    @classmethod
+    def default_model(cls) -> str:
+        raw = os.environ.get("NTH_HERMES_MODEL", "").strip()
+        return raw or cls.DEFAULT_MODEL
 
     @staticmethod
     def _is_run_agent_missing(exc: ImportError) -> bool:
@@ -1743,7 +1753,7 @@ class _HermesAskBackend(_AskBackend):
             self._check_model_allowed(explicit_model)
             model = explicit_model
         else:
-            model = self.DEFAULT_MODEL
+            model = self.default_model()
 
         try:
             self._prepare_import_path()
@@ -2206,14 +2216,21 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             "label": "Hermes",
             "ready": hermes_ready,
             "available": hermes_pkg,
+            "runtime": "provider-unverified" if hermes_ready else "missing-profile",
+            "model": _HermesAskBackend.default_model(),
             "detail": (
-                "hermes-agent package and local profile detected."
+                "hermes-agent package and local profile detected; provider "
+                "responsiveness is not verified until a live ask succeeds."
                 if hermes_ready else
                 "hermes-agent is importable, but no local Hermes profile was found."
                 if hermes_pkg else
                 "Install hermes-agent and configure its local profile."
             ),
-            "warning": "Hermes runs in-process; slow providers can hold a worker until the timeout fires.",
+            "warning": (
+                "Hermes runs in-process; slow providers can hold a worker "
+                "until the timeout fires. Set NTH_HERMES_MODEL to a faster "
+                "Hermes-configured alias when the default model queues."
+            ),
         },
     }
 

@@ -406,6 +406,62 @@ def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
         c.post(f"/api/v2/agents/{agent_id}/stop")
 
 
+def test_hub_ask_rotates_expired_supervised_agent_cap_token(
+    tmp_path: Path,
+) -> None:
+    """Persistent agents must not stay alive but undrivable after TTL expiry."""
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    app = create_app(workspace=tmp_path, require_console_auth=False)
+    c = TestClient(app)
+    r = c.post("/api/v2/agents/spawn", json={
+        "kind": "mock", "label": "expired-cap",
+        "capabilities": ["a2a:message_send"],
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    did = body["did"]
+    agent_id = body["agent_id"]
+    old_token_id = body["cap_token_id"]
+    store = app.state.nth.cap_tokens
+    expired = store.get(old_token_id)
+    assert isinstance(expired, dict)
+    expired["not_after"] = 0
+    store.record(expired)
+
+    try:
+        agents = c.get("/api/v2/agents")
+        assert agents.status_code == 200, agents.text
+        entry = next(a for a in agents.json() if a["did"] == did)
+        assert entry["has_active_cap"] is False
+
+        ok = None
+        for _ in range(12):
+            ask = c.post(f"/api/v2/agents/{did}/ask", json={"prompt": "hello"})
+            if ask.status_code == 200 and "not-yet-authorized" not in ask.text:
+                ok = ask
+                break
+            time.sleep(0.5)
+        assert ok is not None, "hub /ask should refresh an expired cap_token"
+        result = ok.json()["result"]
+        assert result["backend"] == "mock"
+        assert "hello" in result["response"]
+
+        records = app.state.v2_supervisor.list_agents()
+        record = next(x for x in records if x.did == did)
+        assert record.cap_token_id != old_token_id
+        refreshed = store.get(record.cap_token_id)
+        assert isinstance(refreshed, dict)
+        assert refreshed["subject_did"] == did
+
+        agents_after = c.get("/api/v2/agents")
+        entry_after = next(a for a in agents_after.json() if a["did"] == did)
+        assert entry_after["has_active_cap"] is True
+    finally:
+        c.post(f"/api/v2/agents/{agent_id}/stop")
+
+
 
 def test_response_receipt_must_match_invoked_agent_did(tmp_path: Path) -> None:
     """Adversarial audit guard: a successful agent response may carry
@@ -4073,6 +4129,50 @@ def test_codex_backend_translates_usage_limit_from_stderr_tail(
 # ─── Phase 5.4b: Hermes in-process backend ──────────────────────
 
 
+def test_codex_backend_includes_stdout_when_stderr_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some Codex builds print fatal errors to stdout while stderr is empty."""
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = "fatal: profile missing; run codex login"
+        stderr = ""
+
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "codex-test-binary",
+    )
+
+    with pytest.raises(RuntimeError, match="codex login") as exc_info:
+        backend.ask({"prompt": "hi"}, timeout_s=30.0)
+    assert "run codex login" in str(exc_info.value)
+
+
+def test_codex_backend_reports_empty_error_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_k: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(
+        backend, "_resolve_binary", lambda: "codex-test-binary",
+    )
+
+    with pytest.raises(RuntimeError, match="no stdout/stderr captured"):
+        backend.ask({"prompt": "hi"}, timeout_s=30.0)
+
+
 def test_resolve_ask_backend_picks_hermes_for_kind_hermes() -> None:
     """Phase 5.4b: ``_resolve_ask_backend("hermes")`` returns the
     Hermes backend regardless of ANTHROPIC_API_KEY (Hermes reads
@@ -4317,6 +4417,36 @@ def test_hermes_backend_returns_response_via_fake_agent(
     assert init["skip_memory"] is True
     assert init["skip_context_files"] is True
     assert init["quiet_mode"] is True
+
+
+def test_hermes_backend_uses_operator_default_model_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    captured: dict = {}
+
+    class _FakeAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured["model"] = kwargs.get("model")
+
+        def chat(self, _message: str) -> str:
+            return "ok"
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _FakeAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+    monkeypatch.setenv("NTH_HERMES_MODEL", "fast-local")
+
+    out = _HermesAskBackend().ask({"prompt": "hi"}, timeout_s=10.0)
+
+    assert captured["model"] == "fast-local"
+    assert out["model"] == "fast-local"
 
 
 def test_hermes_backend_honors_model_override_via_subclass_allowlist(
@@ -5367,6 +5497,7 @@ def test_hub_injected_ask_uses_backend_specific_timeout_floor(
     from nth_dao.web import create_app
     from nth_dao.web.agent_supervisor import AgentRecord
     from nth_dao.web import v2_api as _v2
+    from nth_dao.did_key import encode_ed25519_did_key
 
     app = create_app(
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
@@ -5374,7 +5505,7 @@ def test_hub_injected_ask_uses_backend_specific_timeout_floor(
     )
     sup = AgentSupervisor(InMemoryRunner())
     app.state.v2_supervisor = sup
-    target_did = "did:test-hermes-injected-ask-probe"
+    target_did = encode_ed25519_did_key(os.urandom(32))
     token_id = "tok-hermes-ask"
     app.state.nth.cap_tokens.record({
         "kind": "nth-cap-token-v1",
@@ -6589,3 +6720,53 @@ def test_spawn_ceiling_zero_means_unlimited():
     for i in range(6):
         sup.spawn(kind="mock", label=f"x{i}")
     assert len(sup.list_agents()) == 6
+
+
+def test_env_auto_agents_spawn_once_and_join_startup_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web import create_app
+    from nth_dao.web import agent_supervisor as supervisor_mod
+
+    monkeypatch.setenv("NTH_AUTO_AGENTS", "mock,mock")
+    monkeypatch.setenv("NTH_AUTO_AGENT_JOIN_CHANNELS", "general")
+    monkeypatch.setenv("NTH_AUTO_AGENT_JOIN_KINDS", "mock")
+    monkeypatch.setenv("NTH_AUTO_AGENT_PERSIST", "0")
+
+    def fake_build_default_supervisor(**kwargs: object) -> AgentSupervisor:
+        return AgentSupervisor(
+            InMemoryRunner(),
+            cap_token_dir=kwargs.get("cap_token_dir"),  # type: ignore[arg-type]
+            receipt_persistor=kwargs.get("receipt_persistor"),  # type: ignore[arg-type]
+            decision_raiser=kwargs.get("decision_raiser"),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        supervisor_mod,
+        "build_default_supervisor",
+        fake_build_default_supervisor,
+    )
+
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    first = client.get("/api/v2/agents")
+    assert first.status_code == 200, first.text
+    auto_agents = [
+        agent for agent in first.json()
+        if agent.get("label") == "auto-mock"
+    ]
+    assert len(auto_agents) == 1
+    assert auto_agents[0]["has_active_cap"] is True
+
+    general = client.get("/api/v2/channels/general")
+    assert general.status_code == 200, general.text
+    assert auto_agents[0]["did"] in general.json()["member_ids"]
+
+    second = client.get("/api/v2/agents")
+    assert second.status_code == 200, second.text
+    assert len([
+        agent for agent in second.json()
+        if agent.get("label") == "auto-mock"
+    ]) == 1

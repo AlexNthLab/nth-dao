@@ -44,13 +44,33 @@ vi.mock("../api", () => ({
     refreshed: true,
   }),
   updateFederationPeer: vi.fn(),
+  discoverFederationPeers: vi.fn().mockResolvedValue({
+    peers: [],
+    file_peers: [],
+    env_peers: [],
+    poller_started: false,
+    cached_announcements: 0,
+    last_refresh_ms: 0,
+    last_error: "",
+    last_peer_count: 0,
+    discovered: true,
+    imported_peers: [],
+    skipped_peers: [],
+    discovery_errors: [],
+  }),
   announceTask: vi.fn(),
   fetchAgents: vi.fn().mockResolvedValue([]),
   claimTask: vi.fn(),
   claimFederatedTask: vi.fn(),
 }));
 
-import { claimTask, fetchAgents, refreshFederation, updateFederationPeer } from "../api";
+import {
+  claimTask,
+  discoverFederationPeers,
+  fetchAgents,
+  refreshFederation,
+  updateFederationPeer,
+} from "../api";
 import { TasksView } from "../components/TasksView";
 
 afterEach(() => {
@@ -169,5 +189,42 @@ describe("TasksView", () => {
       );
     });
     expect(refreshFederation).toHaveBeenCalled();
+  });
+
+  it("discovers nearby DAO federation peers from the Tasks sidebar", async () => {
+    vi.mocked(discoverFederationPeers).mockResolvedValueOnce({
+      peers: ["http://192.168.1.20:8080"],
+      file_peers: ["http://192.168.1.20:8080"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 1,
+      last_refresh_ms: 123,
+      last_error: "",
+      last_peer_count: 1,
+      discovered: true,
+      imported_peers: ["http://192.168.1.20:8080"],
+      skipped_peers: [],
+      discovery_errors: [],
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    fireEvent.click(screen.getByText("Discover nearby DAOs"));
+
+    await waitFor(() => {
+      expect(discoverFederationPeers).toHaveBeenCalledWith({
+        actorId: "admin",
+        timeoutSeconds: 2,
+        add: true,
+        refresh: true,
+      });
+    });
+    expect(await screen.findByText(/Imported 1 verified DAO peer/)).toBeTruthy();
   });
 });

@@ -156,8 +156,207 @@ def test_mission_activate_rejects_empty_and_missing(tmp_path: Path) -> None:
     # 不存在 → 404。
     assert client.post("/api/v2/missions/nope/activate").status_code == 404
     # 0 步的 mission 不能启动 → 409。
-    mid = client.post("/api/v2/missions", json={"title": "empty"}).json()["id"]
-    assert client.post(f"/api/v2/missions/{mid}/activate").status_code == 409
+    missing = client.post("/api/v2/missions/nope/activate")
+    assert missing.status_code == 404
+
+
+def test_mission_activate_bootstraps_empty_mission(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    mid = client.post(
+        "/api/v2/missions",
+        json={
+            "title": "MUMO deBUG",
+            "goal": "scan the project and produce a debug plan",
+            "driver": "mock runner",
+            "driver_did": "did:key:zDriverABC",
+        },
+    ).json()["id"]
+
+    first = client.post(f"/api/v2/missions/{mid}/activate")
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["status"] == "active"
+    assert body["steps_total"] == 1
+    assert body["steps_in_progress"] == 1
+    assert body["current_step_status"] == "claimed"
+    assert body["steps"][0]["assignee"] == "did:key:zDriverABC"
+    assert body["steps"][0]["description"] == "scan the project and produce a debug plan"
+    assert any(e["label"] == "Step bootstrapped from mission goal" for e in body["timeline"])
+
+    second = client.post(f"/api/v2/missions/{mid}/activate")
+    assert second.status_code == 200, second.text
+    assert second.json()["steps_total"] == 1
+    boot_payloads = _mission_event_payloads(app, "mission.step.bootstrapped", mid)
+    assert len(boot_payloads) == 1
+
+
+def test_mission_step_run_executes_via_supervised_agent(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    spawned = client.post(
+        "/api/v2/agents/spawn",
+        json={
+            "kind": "mock",
+            "label": "mission-runner",
+            "capabilities": ["a2a:message_send"],
+        },
+    )
+    assert spawned.status_code == 201, spawned.text
+    agent = spawned.json()
+    did = agent["did"]
+    agent_id = agent["agent_id"]
+    try:
+        created = client.post(
+            "/api/v2/missions",
+            json={
+                "title": "Run one step",
+                "goal": "prove Mission can advance",
+                "driver": "mission-runner",
+                "driver_did": did,
+                "steps": [{"description": "say DONE_OK"}],
+            },
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        mid = body["id"]
+        sid = body["steps"][0]["id"]
+
+        activated = client.post(f"/api/v2/missions/{mid}/activate")
+        assert activated.status_code == 200, activated.text
+
+        ran = client.post(
+            f"/api/v2/missions/{mid}/steps/{sid}/run",
+            json={"prompt": "Reply with DONE_OK for the mission execution test."},
+        )
+        assert ran.status_code == 200, ran.text
+        summary = ran.json()
+        assert summary["status"] == "completed"
+        assert summary["steps_done"] == 1
+        assert summary["steps"][0]["status"] == "done"
+        assert any(e["label"] == "Step completed by agent" for e in summary["timeline"])
+
+        completed_payloads = _mission_event_payloads(app, "mission.step.completed", mid)
+        assert len(completed_payloads) == 1
+        payload = completed_payloads[0]
+        assert payload["step_id"] == sid
+        assert payload["agent_did"] == did
+        assert payload["agent_response_receipt_id"]
+        _assert_receipt_for_event(app, payload, "mission.step.completed", mid)
+
+        stored = app.state.nth.missions.get(mid)
+        assert stored is not None
+        step = stored.get_step(sid)
+        assert step is not None
+        assert step.output["receipt_id"] == payload["agent_response_receipt_id"]
+        assert "DONE_OK" in step.output["content"]
+        agent_receipt = app.state.nth.receipts.load(step.output["receipt_id"])
+        assert agent_receipt is not None
+        assert verify_receipt(agent_receipt)
+    finally:
+        client.post(f"/api/v2/agents/{agent_id}/stop")
+
+
+def test_mission_step_run_rotates_expired_agent_cap_token(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    spawned = client.post(
+        "/api/v2/agents/spawn",
+        json={
+            "kind": "mock",
+            "label": "mission-expired-cap",
+            "capabilities": ["a2a:message_send"],
+        },
+    )
+    assert spawned.status_code == 201, spawned.text
+    agent = spawned.json()
+    did = agent["did"]
+    agent_id = agent["agent_id"]
+    old_token_id = agent["cap_token_id"]
+    expired = app.state.nth.cap_tokens.get(old_token_id)
+    assert isinstance(expired, dict)
+    expired["not_after"] = 0
+    app.state.nth.cap_tokens.record(expired)
+
+    try:
+        created = client.post(
+            "/api/v2/missions",
+            json={
+                "title": "Run with expired cap",
+                "goal": "prove mission run rotates token",
+                "driver": "mission-expired-cap",
+                "driver_did": did,
+                "steps": [{"description": "say ROTATED_OK"}],
+            },
+        )
+        assert created.status_code == 200, created.text
+        mid = created.json()["id"]
+        sid = created.json()["steps"][0]["id"]
+        activated = client.post(f"/api/v2/missions/{mid}/activate")
+        assert activated.status_code == 200, activated.text
+
+        ran = client.post(
+            f"/api/v2/missions/{mid}/steps/{sid}/run",
+            json={"prompt": "Reply with ROTATED_OK."},
+        )
+        assert ran.status_code == 200, ran.text
+        step = ran.json()["steps"][0]
+        assert step["status"] == "done"
+        stored = app.state.nth.missions.get(mid)
+        assert stored is not None
+        stored_step = stored.get_step(sid)
+        assert stored_step is not None
+        assert "ROTATED_OK" in stored_step.output["content"]
+
+        record = next(x for x in app.state.v2_supervisor.list_agents() if x.did == did)
+        assert record.cap_token_id != old_token_id
+    finally:
+        client.post(f"/api/v2/agents/{agent_id}/stop")
+
+
+def test_mission_step_run_blocks_on_malformed_agent_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+
+    async def fake_drive(*_args, **_kwargs):
+        return 200, {"result": {"backend": "mock"}}, object(), {
+            "nth_receipt_id": "agent-r1",
+            "nth_receipt_content_hash": "sha256:abc",
+        }
+
+    import nth_dao.web.v2_api as v2_api
+
+    monkeypatch.setattr(v2_api, "_drive_supervised_agent_ask", fake_drive)
+    created = client.post(
+        "/api/v2/missions",
+        json={
+            "title": "Malformed run",
+            "goal": "show failure",
+            "driver_did": "did:key:zMalformedAgent",
+            "steps": [{"description": "return malformed"}],
+        },
+    )
+    assert created.status_code == 200, created.text
+    mid = created.json()["id"]
+    sid = created.json()["steps"][0]["id"]
+
+    ran = client.post(f"/api/v2/missions/{mid}/steps/{sid}/run", json={})
+    assert ran.status_code == 502, ran.text
+    stored = app.state.nth.missions.get(mid)
+    assert stored is not None
+    step = stored.get_step(sid)
+    assert step is not None
+    assert step.status == "blocked"
+    assert any("agent response was empty" in note for note in step.notes)
+    blocked = _mission_event_payloads(app, "mission.step.blocked", mid)
+    assert len(blocked) == 1
+    assert blocked[0]["step_id"] == sid
 
 
 def test_missions_create_validates(tmp_path: Path) -> None:

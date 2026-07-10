@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   addAgentByDid,
   discoverLanAgents,
+  discoverFederationPeers,
   fetchReceiptDetail,
   getFederationStatus,
   announceTask,
@@ -213,6 +214,44 @@ describe("v2 federation API wiring", () => {
       "/api/v2/market/federation/refresh",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("discovers nearby federation peers with import enabled", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      peers: ["http://192.168.1.20:8080"],
+      file_peers: ["http://192.168.1.20:8080"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 1,
+      last_refresh_ms: 123,
+      last_error: "",
+      last_peer_count: 1,
+      discovered: true,
+      imported_peers: ["http://192.168.1.20:8080"],
+      skipped_peers: [],
+      discovery_errors: [],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const status = await discoverFederationPeers({
+      actorId: "admin",
+      timeoutSeconds: 3,
+      add: true,
+      refresh: true,
+    });
+
+    expect(status.imported_peers).toEqual(["http://192.168.1.20:8080"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/market/federation/discover",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      actor_id: "admin",
+      timeout_seconds: 3,
+      add: true,
+      refresh: true,
+    });
   });
 });
 

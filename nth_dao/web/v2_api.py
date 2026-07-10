@@ -74,15 +74,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -135,14 +139,22 @@ _OPERATOR_DID = "did:key:z6MkmRxmBi9p9ziBz2JzBwd8Y5iMzzhPXAi95MPZiLEJJqjL"
 
 MISSION_CREATED = "mission.created"
 MISSION_ACTIVATED = "mission.activated"
+MISSION_STEP_BOOTSTRAPPED = "mission.step.bootstrapped"
 MISSION_STEP_ANNOUNCED = "mission.step.announced"
 MISSION_STEP_CLAIMED = "mission.step.claimed"
+MISSION_STEP_COMPLETED = "mission.step.completed"
+MISSION_STEP_NEEDS_REVIEW = "mission.step.needs_review"
+MISSION_STEP_BLOCKED = "mission.step.blocked"
 MISSION_MARKET_CLAIM_VISIBLE = "mission.market_claim.visible"
 MISSION_EVENT_TYPES = (
     MISSION_CREATED,
     MISSION_ACTIVATED,
+    MISSION_STEP_BOOTSTRAPPED,
     MISSION_STEP_ANNOUNCED,
     MISSION_STEP_CLAIMED,
+    MISSION_STEP_COMPLETED,
+    MISSION_STEP_NEEDS_REVIEW,
+    MISSION_STEP_BLOCKED,
     MISSION_MARKET_CLAIM_VISIBLE,
 )
 
@@ -351,8 +363,15 @@ def _mission_to_summary(m: Any, request: Optional[Request] = None) -> Dict[str, 
     取第一个 TODO step 的描述;cap_token_id 取 metadata。"""
     from nth_dao.orchestration.mission import StepStatus
 
-    prog = m.progress()
     steps = list(getattr(m, "steps", []) or [])
+    prog = m.progress()
+    in_progress_statuses = {
+        StepStatus.ACTIVE.value,
+        StepStatus.CLAIMED.value,
+        StepStatus.NEEDS_REVIEW.value,
+        StepStatus.BLOCKED.value,
+    }
+    in_progress = sum(1 for s in steps if getattr(s, "status", "") in in_progress_statuses)
     nxt = next(
         (s.description for s in steps if s.status == StepStatus.TODO.value),
         None,
@@ -379,7 +398,7 @@ def _mission_to_summary(m: Any, request: Optional[Request] = None) -> Dict[str, 
         "status": m.status,
         "steps_total": prog["total"],
         "steps_done": prog["done"],
-        "steps_in_progress": prog["active"],
+        "steps_in_progress": in_progress,
         "driver_label": getattr(m, "owner", "") or "",
         "driver_did": getattr(m, "owner_did", "") or "",
         "started_at": getattr(m, "created_at", "") or "",
@@ -1550,6 +1569,13 @@ class CreateMissionBody(_Model):
     steps: List[CreateMissionStepBody] = Field(default_factory=list)
 
 
+class RunMissionStepBody(_Model):
+    """Drive one mission step through a supervised local A2A agent."""
+
+    agent_did: str = Field(default="")
+    prompt: str = Field(default="")
+
+
 class ProcessCardM(_Model):
     id: str
     title: str
@@ -1933,8 +1959,12 @@ def _mission_event_label(event_type: str) -> str:
     return {
         MISSION_CREATED: "Mission created (audited)",
         MISSION_ACTIVATED: "Mission activated",
+        MISSION_STEP_BOOTSTRAPPED: "Step bootstrapped from mission goal",
         MISSION_STEP_ANNOUNCED: "Step announced to Tasks",
         MISSION_STEP_CLAIMED: "Step claimed by agent",
+        MISSION_STEP_COMPLETED: "Step completed by agent",
+        MISSION_STEP_NEEDS_REVIEW: "Step needs review",
+        MISSION_STEP_BLOCKED: "Step blocked",
         MISSION_MARKET_CLAIM_VISIBLE: "Task claim linked to Mission",
     }.get(event_type, event_type)
 
@@ -1964,8 +1994,21 @@ def _mission_event_detail(event_type: str, payload: Dict[str, Any]) -> str:
         claimant = str(payload.get("claimant_did", "") or "")
         if claimant:
             parts.append(f"claimant {claimant[:32]}...")
+    if event_type in {
+        MISSION_STEP_COMPLETED,
+        MISSION_STEP_NEEDS_REVIEW,
+        MISSION_STEP_BLOCKED,
+    }:
+        agent = str(payload.get("agent_did", "") or "")
+        if agent:
+            parts.append(f"agent {agent[:32]}...")
+        response_preview = str(payload.get("response_preview", "") or "")
+        if response_preview:
+            parts.append(response_preview[:120])
     if payload.get("agent_claim_receipt_id"):
         parts.append(f"agent receipt {payload['agent_claim_receipt_id']}")
+    if payload.get("agent_response_receipt_id"):
+        parts.append(f"agent receipt {payload['agent_response_receipt_id']}")
     return "; ".join(parts)
 
 
@@ -2786,6 +2829,106 @@ def _persist_agent_response_receipt_to_store(
     }
 
 
+async def _drive_supervised_agent_ask(
+    request: Request,
+    did: str,
+    payload: Dict[str, Any],
+) -> Tuple[int, Any, Any, Optional[Dict[str, str]]]:
+    """Drive one live supervised agent via /a2a/ask.
+
+    This is the non-streaming core behind Mission step execution. The browser
+    never receives or forwards a child cap_token; the hub injects the stored
+    token and persists the child response receipt before returning.
+    """
+    import asyncio
+    import urllib.error
+    import urllib.request
+
+    sup = _state_supervisor(request)
+    if sup is None:
+        raise HTTPException(status_code=503, detail="agent supervisor unavailable")
+    matching = [
+        r for r in sup.list_agents()
+        if r.did == did and r.a2a_port is not None and r.alive
+    ]
+    if not matching:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no live supervised agent for did={did!r} with an a2a_port",
+        )
+    rec = matching[0]
+
+    store = _state_cap_tokens_store(request)
+    token_id = getattr(rec, "cap_token_id", None)
+    token = store.get(token_id) if (token_id and store is not None) else None
+    from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND, encode_authorization_header
+
+    if not _cap_token_usable(
+        token,
+        store,
+        required_capabilities=[CAP_A2A_MESSAGE_SEND],
+    ):
+        token = _refresh_supervised_agent_cap_token(
+            request,
+            rec,
+            previous_token=token if isinstance(token, dict) else None,
+        )
+
+    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if len(body_bytes) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="body exceeds 1MB A2A cap")
+
+    url = f"http://127.0.0.1:{rec.a2a_port}/a2a/ask"
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": str(len(body_bytes)),
+        "Authorization": f"CapToken {encode_authorization_header(token)}",
+    }
+    forward_timeout = _a2a_forward_timeout(
+        "ask", body_bytes, backend_kind=getattr(rec, "kind", None),
+    )
+
+    def _do_forward() -> Tuple[int, bytes]:
+        req = urllib.request.Request(
+            url, data=body_bytes, headers=headers, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as http_exc:
+            return http_exc.code, http_exc.read()
+
+    content: Any = {}
+    resp_status = 502
+    for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
+        try:
+            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"agent-ask proxy failed at {url}: {exc}",
+            )
+        content = _decode_or_passthrough(resp_body)
+        if resp_status == 401:
+            blob = (
+                json.dumps(content, ensure_ascii=False)
+                if isinstance(content, dict) else str(content)
+            )
+            if (
+                "not-yet-authorized" in blob
+                and attempt < _CHANNEL_DISPATCH_RETRIES
+            ):
+                await asyncio.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
+                continue
+        break
+    receipt_meta: Optional[Dict[str, str]] = None
+    if resp_status == 200:
+        receipt_meta = _persist_agent_response_receipt(
+            request, rec.agent_id, rec.did, content,
+        )
+    return resp_status, content, rec, receipt_meta
+
+
 # NOTE: prev_content_hash lookup goes through the canonical
 # ``ReceiptStore.head_content_hash(signer_did)`` method
 # (execution_receipt.py:844) which has documented tie-breaking
@@ -2881,6 +3024,20 @@ _CHANNEL_DISPATCH_ASK_TIMEOUTS: Dict[str, float] = {
     "claude-code": 120.0,
     "mock": 30.0,
 }
+
+
+def _channel_dispatch_kind_allowed(backend_kind: str | None) -> bool:
+    """Return whether a backend kind may auto-reply in channels.
+
+    Empty ``NTH_CHANNEL_AGENT_KINDS`` keeps the historical behavior: every
+    live supervised channel member may receive messages. The desktop launcher
+    narrows this to ``codex,mock`` so restored Hermes agents can stay in old
+    channels without turning every message into a 300-second provider wait.
+    """
+    allowed = {item.lower() for item in _env_csv("NTH_CHANNEL_AGENT_KINDS")}
+    if not allowed:
+        return True
+    return str(backend_kind or "").lower() in allowed
 
 
 def _channel_dispatch_ask_timeout(backend_kind: str | None) -> float:
@@ -3126,6 +3283,11 @@ def _state_supervisor(request: Request) -> Optional[Any]:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "v2_api: persistent-agent restore failed: %s", exc)
+            try:
+                _auto_prepare_supervised_agents(request, sup)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: auto-agent preparation failed: %s", exc)
     return sup
 
 
@@ -3147,6 +3309,254 @@ def _make_cap_issuer(node_identity: Any, cap_tokens_store: Any):
         return token
 
     return _issue
+
+
+def _cap_token_usable(
+    token: Any,
+    cap_tokens_store: Any,
+    *,
+    required_capabilities: List[str],
+) -> bool:
+    """Return True only when a stored cap_token is currently usable."""
+    if not isinstance(token, dict) or cap_tokens_store is None:
+        return False
+    try:
+        from nth_dao.cap_token import verify_cap_token
+
+        revoked = cap_tokens_store.revoked_set()
+        ok, _reason = verify_cap_token(
+            token,
+            revoked_ids=revoked,
+            required_capabilities=required_capabilities,
+        )
+        return bool(ok)
+    except Exception as exc:  # noqa: BLE001 - listing/proxy must stay robust
+        logger.warning("v2_api: cap_token usability check failed: %s", exc)
+        return False
+
+
+def _refresh_supervised_agent_cap_token(
+    request: Request,
+    rec: Any,
+    *,
+    previous_token: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Issue and deliver a fresh local cap_token for a supervised agent."""
+    identity = _state_node_identity(request)
+    cap_tokens_store = _state_cap_tokens_store(request)
+    sup = _state_supervisor(request)
+    if (
+        identity is None
+        or not getattr(identity, "can_sign", False)
+        or cap_tokens_store is None
+        or sup is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "cannot refresh expired agent cap_token: node signer, "
+                "cap_token store, or supervisor is unavailable"
+            ),
+        )
+
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND, CAP_NTH_RECEIPT_SIGN, KNOWN_CAPABILITIES,
+        sign_cap_token,
+    )
+
+    caps: List[str] = [CAP_NTH_RECEIPT_SIGN, CAP_A2A_MESSAGE_SEND]
+    for cap in list(getattr(rec, "capabilities", []) or []):
+        if cap in KNOWN_CAPABILITIES and cap not in caps:
+            caps.append(cap)
+
+    scope_model_allowlist = None
+    if isinstance(previous_token, dict):
+        old_scope = previous_token.get("scope_model_allowlist")
+        if isinstance(old_scope, list):
+            scope_model_allowlist = [str(item) for item in old_scope]
+
+    token = sign_cap_token(
+        issuer=identity,
+        subject_did=str(getattr(rec, "did", "") or ""),
+        capabilities=caps,
+        scope_model_allowlist=scope_model_allowlist,
+    )
+    cap_tokens_store.record(token)
+    try:
+        refreshed_id = sup.refresh_cap_token(str(rec.agent_id), token)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to deliver refreshed cap_token: {exc}",
+        ) from exc
+    if not refreshed_id:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "agent disappeared while refreshing cap_token; "
+                "reload agents and try again"
+            ),
+        )
+    logger.info(
+        "v2_api: refreshed cap_token for agent %s did=%s token_id=%s",
+        getattr(rec, "agent_id", "?"),
+        str(getattr(rec, "did", ""))[:24],
+        refreshed_id,
+    )
+    return token
+
+
+def _env_csv(name: str) -> List[str]:
+    raw = os.environ.get(name, "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _auto_prepare_supervised_agents(request: Request, sup: Any) -> None:
+    """Optionally spawn local agents and join them to startup channels.
+
+    Normal API tests and library embeds should not unexpectedly start
+    subprocesses. The desktop launcher enables this through environment
+    variables for the operator's one-click workflow.
+    """
+    kinds = _env_csv("NTH_AUTO_AGENTS")
+    if not kinds:
+        return
+    ws = _state_workspace(request)
+    node_identity = _state_node_identity(request)
+    cap_tokens_store = _state_cap_tokens_store(request)
+    if (
+        ws is None or node_identity is None
+        or not getattr(node_identity, "can_sign", False)
+        or cap_tokens_store is None
+    ):
+        logger.warning(
+            "v2_api: NTH_AUTO_AGENTS requested but signer/cap store "
+            "is unavailable; skipping auto agent preparation",
+        )
+        return
+
+    from .agent_roster import AgentRoster
+    from .dummy_agent import KNOWN_BACKEND_KINDS, backend_runtime_status
+
+    statuses = backend_runtime_status()
+    issuer = _make_cap_issuer(node_identity, cap_tokens_store)
+    persist = _env_bool("NTH_AUTO_AGENT_PERSIST", True)
+    roster = AgentRoster(ws) if persist else None
+    default_caps = ["a2a:message_send"]
+    label_prefix = os.environ.get("NTH_AUTO_AGENT_LABEL_PREFIX", "auto").strip()
+    label_prefix = label_prefix or "auto"
+
+    existing_by_kind: Dict[str, Any] = {}
+    try:
+        for rec in sup.list_agents():
+            kind = str(getattr(rec, "kind", "") or "")
+            if (
+                kind
+                and bool(getattr(rec, "alive", False))
+                and getattr(rec, "cap_token_id", None)
+            ):
+                existing_by_kind.setdefault(kind, rec)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("v2_api: could not inspect supervisor agents: %s", exc)
+
+    prepared: List[Any] = []
+    seen: set[str] = set()
+    for raw_kind in kinds:
+        kind = raw_kind.strip()
+        if not kind or kind in seen:
+            continue
+        seen.add(kind)
+        if kind not in KNOWN_BACKEND_KINDS:
+            logger.warning(
+                "v2_api: ignoring unknown NTH_AUTO_AGENTS kind %r", kind,
+            )
+            continue
+        status = statuses.get(kind, {})
+        if not status.get("ready"):
+            logger.warning(
+                "v2_api: auto agent %s not prepared because backend is "
+                "not ready: %s",
+                kind,
+                status.get("detail") or status.get("warning") or "not ready",
+            )
+            continue
+        rec = existing_by_kind.get(kind)
+        if rec is None:
+            identity_file: Optional[str] = None
+            if roster is not None:
+                identity_file = roster.allocate_identity_file()
+            try:
+                rec = sup.spawn(
+                    kind=kind,
+                    label=f"{label_prefix}-{kind}",
+                    capabilities=default_caps,
+                    cap_token_issuer=issuer,
+                    identity_file=identity_file,
+                )
+                if roster is not None and identity_file:
+                    roster.add(
+                        identity_file=identity_file,
+                        kind=rec.kind,
+                        label=rec.label,
+                        capabilities=default_caps,
+                        did=rec.did,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: auto agent %s preparation failed: %s", kind, exc,
+                )
+                continue
+        prepared.append(rec)
+
+    join_channels = _env_csv("NTH_AUTO_AGENT_JOIN_CHANNELS")
+    if not join_channels or not prepared:
+        if prepared:
+            logger.info(
+                "v2_api: prepared %d auto agent(s); no startup channel join "
+                "requested",
+                len(prepared),
+            )
+        return
+
+    join_kinds = set(_env_csv("NTH_AUTO_AGENT_JOIN_KINDS"))
+    groups = getattr(request.app.state.nth, "groups", None)
+    if groups is None:
+        logger.warning(
+            "v2_api: auto agent channel join requested but group manager "
+            "is unavailable",
+        )
+        return
+    joined = 0
+    for rec in prepared:
+        kind = str(getattr(rec, "kind", "") or "")
+        if join_kinds and kind not in join_kinds:
+            continue
+        did = str(getattr(rec, "did", "") or "")
+        if not did:
+            continue
+        for channel_id in join_channels:
+            try:
+                groups.add_channel_member(channel_id, agent_id=did, added_by="")
+                joined += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: auto agent %s join %s failed: %s",
+                    did[:24],
+                    channel_id,
+                    exc,
+                )
+    logger.info(
+        "v2_api: prepared %d auto agent(s), joined %d channel membership(s)",
+        len(prepared),
+        joined,
+    )
 
 
 def _restore_persistent_agents(request: Request, sup: Any) -> None:
@@ -3717,6 +4127,15 @@ class FederationPeerBody(BaseModel):
     action: str = "add"
 
 
+class FederationDiscoverBody(BaseModel):
+    """Discover nearby DAO nodes and optionally import them as seed peers."""
+
+    actor_id: str = "admin"
+    timeout_seconds: float = Field(default=2.0, ge=0.5, le=6.0)
+    add: bool = True
+    refresh: bool = True
+
+
 class DisputeStatementBody(BaseModel):
     """争议声明提交体(Phase 4c):当事方**预签**的争议声明(open/evidence/resolve)。
 
@@ -4033,6 +4452,9 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
             did = getattr(rec, "did", "") or ""
             port = getattr(rec, "a2a_port", None)
             tok_id = getattr(rec, "cap_token_id", None)
+            backend_kind = getattr(rec, "kind", "") or ""
+            if not _channel_dispatch_kind_allowed(backend_kind):
+                continue
             if did not in members or not isinstance(port, int) or not tok_id:
                 continue
             try:
@@ -4049,7 +4471,7 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
                     did,
                     port,
                     getattr(rec, "agent_id", "") or "",
-                    getattr(rec, "kind", "") or "",
+                    backend_kind,
                 ))
 
         # 防环:消息作者本身就是可驱动 agent → 这是 agent 的回帖,不再派发。
@@ -4090,6 +4512,8 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
 
 
 _FED_POLLER_LOCK = threading.Lock()
+_FED_CONFIG_LOCK = threading.RLock()
+_FED_IDENTITY_INIT_LOCK = threading.Lock()
 # 单个联邦 digest 的 ref 上限(serve 侧防无界响应;超出由拉方带 since 翻页)。
 _FED_DIGEST_PAGE = 500
 
@@ -4100,6 +4524,24 @@ def _fed_peers_file(ws: Optional[Path]) -> Optional[Path]:
     return ws / "federation" / "peers.json"
 
 
+def _fed_peer_metadata_file(ws: Optional[Path]) -> Optional[Path]:
+    """Return the local cache of identity cards verified for seed peers.
+
+    ``peers.json`` remains a list of URLs for wire/backward compatibility.
+    Verification metadata lives beside it, so older callers and existing
+    workspaces do not need a schema migration.
+    """
+    if ws is None:
+        return None
+    return ws / "federation" / "peers_meta.json"
+
+
+_MAX_FED_IDENTITY_CARD_BYTES = 64 * 1024
+_MAX_FED_IDENTITY_HEX = 256
+_FED_IDENTITY_CARD_KIND = "nth-dao-identity-card-v1"
+_MAX_FED_DISCOVERY_CANDIDATES = 32
+
+
 def _normalize_configured_fed_peer(url: str) -> str:
     """Validate and normalize an operator-configured federation seed URL.
 
@@ -4107,7 +4549,7 @@ def _normalize_configured_fed_peer(url: str) -> str:
     for development and two-PC testing. Automatically gossiped peers remain
     restricted by market_federation_poll._is_safe_gossip_url before use.
     """
-    from urllib.parse import urlsplit, urlunsplit
+    from urllib.parse import urlunsplit
 
     raw = str(url or "").strip()
     if not raw:
@@ -4126,6 +4568,487 @@ def _normalize_configured_fed_peer(url: str) -> str:
         raise ValueError("peer_url must not include query or fragment")
     path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+def _federation_url_from_discovered_peer(peer: Any) -> str:
+    """Extract a dialable HTTP federation base URL from a LAN/mDNS peer.
+
+    Identity discovery and market federation are adjacent but not identical:
+    a peer can publish a DID without publishing an HTTP endpoint reachable by
+    this node. We import only explicit HTTP(S) URLs and never guess ports from
+    source_addr, because UDP discovery ports are not HTTP service ports.
+    """
+    metadata = getattr(peer, "metadata", {}) or {}
+    if isinstance(metadata, dict):
+        for key in ("federation_url", "http_url", "api_url", "base_url"):
+            try:
+                return _normalize_configured_fed_peer(str(metadata.get(key, "")))
+            except ValueError:
+                continue
+    try:
+        return _normalize_configured_fed_peer(str(getattr(peer, "ws_url", "") or ""))
+    except ValueError:
+        return ""
+
+
+def _is_safe_discovered_federation_url(url: str) -> bool:
+    """Reject obvious self/metadata targets before an identity-card fetch.
+
+    LAN discovery intentionally permits RFC1918 addresses, but a peer record
+    must not make this process call its own loopback or an unspecified socket.
+    Operator-configured seed peers use the separate, explicit-input path and
+    are deliberately allowed to target local development services.
+    """
+    try:
+        parsed = urlsplit(url)
+    except Exception:  # noqa: BLE001
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if not host or host == "localhost":
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (
+        address.is_loopback
+        or address.is_unspecified
+        or address.is_multicast
+        or address.is_link_local
+    )
+
+
+class _RejectFederationRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not follow identity-card redirects during discovery preflight."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_federation_identity_card(
+    url: str,
+    timeout_seconds: float,
+    resolved_ip: str = "",
+) -> bytes:
+    """Fetch a bounded identity card without following redirects."""
+    if resolved_ip:
+        from .market_federation_poll import _urllib_get_bytes_pinned
+        return _urllib_get_bytes_pinned(
+            url,
+            resolved_ip,
+            timeout_s=timeout_seconds,
+            max_bytes=_MAX_FED_IDENTITY_CARD_BYTES,
+        )
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(_RejectFederationRedirect())
+    with opener.open(request, timeout=timeout_seconds) as response:  # noqa: S310
+        body = response.read(_MAX_FED_IDENTITY_CARD_BYTES + 1)
+    if len(body) > _MAX_FED_IDENTITY_CARD_BYTES:
+        raise ValueError("identity card exceeds 64 KiB limit")
+    return body
+
+
+def _verify_federation_identity_card(
+    peer_url: str,
+    card: Any,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """Verify a peer's signed identity card and bind it to ``peer_url``.
+
+    This is an authenticity/self-consistency check, not a governance trust
+    decision. It proves that the HTTP endpoint controls the Ed25519 key named
+    in the card and that the card advertises the same federation URL. Trust
+    roots, endorsements, and membership policy remain separate concerns.
+    """
+    try:
+        normalized_peer = _normalize_configured_fed_peer(peer_url)
+    except ValueError as exc:
+        return None, str(exc)
+    if not isinstance(card, dict):
+        return None, "identity card must be a JSON object"
+    if card.get("kind") != _FED_IDENTITY_CARD_KIND:
+        return None, "unsupported identity card kind"
+
+    pubkey_hex = card.get("pubkey_hex")
+    did = card.get("did")
+    signature_hex = card.get("sig")
+    if (
+        not isinstance(pubkey_hex, str)
+        or len(pubkey_hex) != 64
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", pubkey_hex)
+    ):
+        return None, "identity card pubkey_hex is not an Ed25519 key"
+    if (
+        not isinstance(did, str)
+        or len(did) > _MAX_FED_IDENTITY_HEX
+    ):
+        return None, "identity card did is missing or too long"
+    if (
+        not isinstance(signature_hex, str)
+        or len(signature_hex) != 128
+        or not re.fullmatch(r"[0-9a-fA-F]{128}", signature_hex)
+    ):
+        return None, "identity card signature is malformed"
+
+    try:
+        from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
+        if not is_did_key(did):
+            return None, "identity card did is not a did:key Ed25519 identifier"
+        did_pubkey_hex = decode_ed25519_did_key_hex(did)
+        if not hmac.compare_digest(did_pubkey_hex.lower(), pubkey_hex.lower()):
+            return None, "identity card did does not match pubkey_hex"
+
+        from nth_dao.identity import canonical_json
+        from nacl.signing import VerifyKey
+
+        unsigned = dict(card)
+        unsigned.pop("sig", None)
+        VerifyKey(bytes.fromhex(pubkey_hex)).verify(
+            canonical_json(unsigned), bytes.fromhex(signature_hex),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, f"identity card signature verification failed: {exc}"
+
+    federation = card.get("federation")
+    if not isinstance(federation, dict):
+        return None, "identity card has no federation directory"
+    if federation.get("protocol") != "nth-dao-federation-v1":
+        return None, "unsupported federation protocol"
+    if federation.get("enabled") is not True:
+        return None, "peer federation is not enabled"
+    try:
+        claimed_peer = _normalize_configured_fed_peer(
+            str(federation.get("peer_url") or "")
+        )
+    except ValueError:
+        return None, "identity card federation.peer_url is invalid"
+    if claimed_peer != normalized_peer:
+        return None, "identity card federation.peer_url does not match discovery"
+    if "base_url" in card:
+        try:
+            card_base = _normalize_configured_fed_peer(str(card["base_url"]))
+        except ValueError:
+            return None, "identity card base_url is invalid"
+        if card_base != normalized_peer:
+            return None, "identity card base_url does not match discovery"
+
+    return {
+        "peer_url": normalized_peer,
+        "identity_url": f"{normalized_peer}/.well-known/nth-dao/identity.json",
+        "did": did,
+        "pubkey_hex": pubkey_hex.lower(),
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "card_kind": _FED_IDENTITY_CARD_KIND,
+        "federation_protocol": "nth-dao-federation-v1",
+    }, ""
+
+
+def _fetch_and_verify_federation_identity(
+    peer_url: str,
+    *,
+    timeout_seconds: float,
+    expected_did: str = "",
+    resolved_ip: str = "",
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """Fetch and verify the signed card published by one discovered peer."""
+    try:
+        normalized_peer = _normalize_configured_fed_peer(peer_url)
+        card_url = f"{normalized_peer}/.well-known/nth-dao/identity.json"
+        if resolved_ip:
+            raw = _open_federation_identity_card(
+                card_url, timeout_seconds, resolved_ip,
+            )
+        else:
+            raw = _open_federation_identity_card(card_url, timeout_seconds)
+        card = json.loads(raw.decode("utf-8"))
+    except (OSError, urllib.error.URLError, TimeoutError, UnicodeError,
+            json.JSONDecodeError, ValueError) as exc:
+        return None, f"identity card fetch failed: {type(exc).__name__}: {exc}"
+    metadata, error = _verify_federation_identity_card(normalized_peer, card)
+    if metadata is not None and expected_did:
+        if not hmac.compare_digest(
+            str(metadata.get("did") or ""), str(expected_did).strip(),
+        ):
+            return None, "identity card did does not match discovery record"
+    return metadata, error
+
+
+_FED_GOSSIP_IDENTITY_SUCCESS_TTL_S = 300.0
+_FED_GOSSIP_IDENTITY_FAILURE_TTL_S = 30.0
+_FED_GOSSIP_IDENTITY_CACHE_MAX = 256
+_FEDERATION_CYCLE_BUDGET_DEFAULT_S = 30.0
+
+
+def _market_fed_cycle_budget_s() -> float:
+    return _env_float(
+        "NTH_FED_CYCLE_BUDGET_S",
+        _FEDERATION_CYCLE_BUDGET_DEFAULT_S,
+        minimum=5.0,
+        maximum=120.0,
+    )
+
+
+def _market_fed_gossip_identity_verifier(
+    request: Request,
+) -> Callable[[str], bool]:
+    """Return a bounded-TTL verifier for URLs learned through gossip."""
+    state = request.app.state
+    with _FED_IDENTITY_INIT_LOCK:
+        cache = getattr(state, "market_fed_identity_cache", None)
+        if cache is None:
+            cache = {}
+            state.market_fed_identity_cache = cache
+        lock = getattr(state, "market_fed_identity_cache_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            state.market_fed_identity_cache_lock = lock
+        inflight = getattr(state, "market_fed_identity_inflight", None)
+        if inflight is None:
+            inflight = {}
+            state.market_fed_identity_inflight = inflight
+
+    def verify(peer_url: str, resolved_ip: str = "") -> bool:
+        try:
+            normalized = _normalize_configured_fed_peer(peer_url)
+        except ValueError:
+            return False
+        if not resolved_ip:
+            try:
+                parsed = urlsplit(normalized)
+                if parsed.scheme == "https":
+                    from .market_federation_poll import _resolve_safe_gossip_ip
+                    resolved_ip = _resolve_safe_gossip_ip(normalized) or ""
+                    if not resolved_ip:
+                        return False
+            except (TypeError, ValueError):
+                return False
+        now = time.monotonic()
+        timeout = _env_float(
+            "NTH_FED_IDENTITY_TIMEOUT_S",
+            2.0,
+            minimum=0.5,
+            maximum=3.0,
+        )
+        with lock:
+            cached = cache.get(normalized)
+            if cached is not None and cached["expires_at"] > now:
+                return bool(cached["ok"])
+            event = inflight.get(normalized)
+            owner = event is None
+            if owner:
+                event = threading.Event()
+                inflight[normalized] = event
+
+        if not owner:
+            assert event is not None
+            event.wait(timeout + 0.25)
+            with lock:
+                cached = cache.get(normalized)
+                return bool(
+                    cached is not None
+                    and cached["expires_at"] > time.monotonic()
+                    and cached["ok"]
+                )
+
+        assert event is not None
+        try:
+            try:
+                metadata, error = _fetch_and_verify_federation_identity(
+                    normalized,
+                    timeout_seconds=timeout,
+                    resolved_ip=resolved_ip,
+                )
+            except Exception as exc:  # noqa: BLE001
+                metadata = None
+                error = f"{type(exc).__name__}: {exc}"
+            ok = metadata is not None
+            if not ok:
+                logger.warning(
+                    "fed: rejected gossip peer identity %s: %s", normalized, error,
+                )
+            with lock:
+                cache[normalized] = {
+                    "ok": ok,
+                    "expires_at": now + (
+                        _FED_GOSSIP_IDENTITY_SUCCESS_TTL_S
+                        if ok else _FED_GOSSIP_IDENTITY_FAILURE_TTL_S
+                    ),
+                }
+                if len(cache) > _FED_GOSSIP_IDENTITY_CACHE_MAX:
+                    oldest = min(
+                        cache,
+                        key=lambda key: cache[key]["expires_at"],
+                    )
+                    cache.pop(oldest, None)
+            return ok
+        finally:
+            with lock:
+                inflight.pop(normalized, None)
+                event.set()
+
+    return verify
+
+
+def _read_fed_peer_metadata(ws: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    mf = _fed_peer_metadata_file(ws)
+    if mf is None or not mf.exists():
+        return {}
+    try:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for raw_url, raw_meta in data.items():
+        if not isinstance(raw_url, str) or not isinstance(raw_meta, dict):
+            continue
+        try:
+            peer_url = _normalize_configured_fed_peer(raw_url)
+        except ValueError:
+            continue
+        meta = {
+            key: value for key, value in raw_meta.items()
+            if key in {
+                "peer_url", "identity_url", "did", "pubkey_hex",
+                "verified_at", "card_kind", "federation_protocol",
+            }
+            and isinstance(value, str)
+            and len(value) <= _MAX_FED_IDENTITY_HEX * 4
+        }
+        if meta.get("peer_url") == peer_url and meta.get("did"):
+            out[peer_url] = meta
+    return out
+
+
+def _write_fed_peer_metadata(
+    ws: Optional[Path], metadata: Dict[str, Dict[str, Any]],
+) -> None:
+    mf = _fed_peer_metadata_file(ws)
+    if mf is None:
+        raise RuntimeError("workspace unavailable")
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw_url, raw_meta in metadata.items():
+        try:
+            peer_url = _normalize_configured_fed_peer(raw_url)
+        except ValueError:
+            continue
+        if not isinstance(raw_meta, dict):
+            continue
+        item = {
+            key: value for key, value in raw_meta.items()
+            if key in {
+                "peer_url", "identity_url", "did", "pubkey_hex",
+                "verified_at", "card_kind", "federation_protocol",
+            }
+            and isinstance(value, str)
+            and len(value) <= _MAX_FED_IDENTITY_HEX * 4
+        }
+        if item.get("peer_url") == peer_url and item.get("did"):
+            normalized[peer_url] = item
+    mf.parent.mkdir(parents=True, exist_ok=True)
+    tmp = mf.with_suffix(mf.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, mf)
+
+
+def _discovered_peer_to_wire(peer: Any) -> Dict[str, Any]:
+    metadata = getattr(peer, "metadata", {}) or {}
+    return {
+        "agent_id": str(getattr(peer, "agent_id", "") or ""),
+        "label": str(getattr(peer, "label", "") or ""),
+        "did": str(getattr(peer, "did", "") or ""),
+        "capabilities": list(getattr(peer, "capabilities", []) or []),
+        "groups": list(getattr(peer, "groups", []) or []),
+        "ws_url": str(getattr(peer, "ws_url", "") or ""),
+        "source_addr": str(getattr(peer, "source_addr", "") or ""),
+        "federation_peer_url": _federation_url_from_discovered_peer(peer),
+        "metadata": dict(metadata) if isinstance(metadata, dict) else {},
+    }
+
+
+def _require_federation_actor(request: Request, actor_id: str) -> None:
+    actor = str(actor_id or "").strip()
+    if not actor:
+        raise HTTPException(status_code=400, detail="actor_id is required")
+    membership = getattr(request.app.state.nth, "membership", None)
+    if membership is None:
+        raise HTTPException(status_code=503, detail="membership unavailable")
+    try:
+        role = membership.load_config().role_for(actor)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=403, detail="actor is not a team member") from exc
+    role_value = getattr(role, "value", str(role or ""))
+    if role_value == "guest":
+        raise HTTPException(status_code=403, detail="actor is not a team member")
+
+
+def _discover_market_federation_peers(
+    request: Request,
+    *,
+    actor_id: str,
+    timeout_seconds: float,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Run local discovery backends and return peer rows plus soft errors."""
+    peers: List[Any] = []
+    errors: List[str] = []
+    identity = _state_node_identity(request)
+    pubkey_hex = (
+        getattr(identity, "pubkey_hex", "") if identity is not None else ""
+    ) or ""
+    did = identity.as_did() if identity is not None and hasattr(identity, "as_did") else ""
+    psk = os.environ.get("NTH_DISCOVERY_PSK", "").strip()
+
+    try:
+        from nth_dao.discovery import LANDiscovery
+        lan = LANDiscovery(
+            agent_id=actor_id,
+            pubkey_hex=pubkey_hex,
+            did=did,
+            psk=psk,
+        )
+        peers.extend(lan.discover(timeout=timeout_seconds))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"udp:{type(exc).__name__}:{exc}")
+
+    try:
+        from nth_dao.discovery import MDNSDiscovery, mdns_available
+        if MDNSDiscovery is not None and mdns_available():
+            mdns = MDNSDiscovery(agent_id=actor_id, pubkey_hex=pubkey_hex, did=did)
+            peers.extend(mdns.discover(timeout=timeout_seconds))
+    except ImportError as exc:
+        errors.append(f"mdns:unavailable:{exc}")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"mdns:{type(exc).__name__}:{exc}")
+
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for peer in peers:
+        row = _discovered_peer_to_wire(peer)
+        key = (
+            row["federation_peer_url"]
+            or row["did"]
+            or row["source_addr"]
+            or row["agent_id"]
+        )
+        if not key or key in by_key:
+            continue
+        by_key[key] = row
+    rows = list(by_key.values())
+    if len(rows) > _MAX_FED_DISCOVERY_CANDIDATES:
+        errors.append(
+            "discovery:candidate limit reached "
+            f"({_MAX_FED_DISCOVERY_CANDIDATES})"
+        )
+        rows = rows[:_MAX_FED_DISCOVERY_CANDIDATES]
+    return rows, errors
 
 
 def _read_fed_peer_file(ws: Optional[Path]) -> List[str]:
@@ -4208,7 +5131,14 @@ def _state_market_fed_cache(request: Request):
                 interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
             except ValueError:
                 interval = 20.0
-            start_poller(lambda: _read_fed_peers(ws), cache, interval_s=interval)
+            start_poller(
+                lambda: _read_fed_peers(ws),
+                cache,
+                interval_s=interval,
+                verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
+                verify_seed_peer=_market_fed_gossip_identity_verifier(request),
+                max_duration_s=_market_fed_cycle_budget_s(),
+            )
             state.market_fed_cache = cache
             state.market_fed_poller_started = True
             logger.info(
@@ -4238,6 +5168,9 @@ def _ensure_market_fed_cache_for_update(request: Request):
                 lambda: _read_fed_peers(_state_workspace(request)),
                 cache,
                 interval_s=interval,
+                verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
+                verify_seed_peer=_market_fed_gossip_identity_verifier(request),
+                max_duration_s=_market_fed_cycle_budget_s(),
             )
             state.market_fed_poller_started = True
     return cache
@@ -4269,6 +5202,15 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
         "peers": peers,
         "file_peers": _read_fed_peer_file(ws),
         "env_peers": env_peers,
+        "verified_peers": {
+            peer_url: {
+                "did": str(meta.get("did") or ""),
+                "pubkey_prefix": str(meta.get("pubkey_hex") or "")[:16],
+                "verified_at": str(meta.get("verified_at") or ""),
+                "identity_url": str(meta.get("identity_url") or ""),
+            }
+            for peer_url, meta in _read_fed_peer_metadata(ws).items()
+        },
         "poller_started": bool(
             getattr(request.app.state, "market_fed_poller_started", False)
         ),
@@ -4543,37 +5485,82 @@ def register_v2_routes(app: FastAPI) -> None:
         移出 planning。空 mission(0 步)不能启动——没活可干。已 active 则
         幂等返回;终态(completed/failed/cancelled)拒。落盘持久。
         """
-        from nth_dao.orchestration.mission import MissionStatus
+        from nth_dao.orchestration.mission import MissionStatus, MissionStep, StepStatus
+        from nth_dao.util.io import InterProcessLock, safe_id
 
         store = getattr(request.app.state.nth, "missions", None)
         if store is None:
             raise HTTPException(status_code=503, detail="mission store unavailable")
-        m = store.get(mission_id)
-        if m is None:
-            raise HTTPException(status_code=404, detail="mission not found")
-        if m.status == MissionStatus.ACTIVE.value:
-            return _mission_to_summary(m, request)  # 幂等
-        if not m.steps:
-            raise HTTPException(
-                status_code=409,
-                detail="mission has no steps; add steps before activating",
-            )
-        if m.status not in (
-            MissionStatus.PLANNING.value, MissionStatus.PAUSED.value,
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"mission is '{m.status}'; only planning/paused can "
-                    f"be activated"
-                ),
-            )
-        m.status = MissionStatus.ACTIVE.value
+        created_bootstrap_step: Optional[str] = None
+        assigned_bootstrap_step = False
+        lock_root = Path(getattr(store, "root", Path("missions")))
+        lock_path = lock_root / f".activate-{safe_id(mission_id)}"
         try:
-            store.save(m)
+            with InterProcessLock(lock_path):
+                m = store.get(mission_id)
+                if m is None:
+                    raise HTTPException(status_code=404, detail="mission not found")
+                if m.status == MissionStatus.ACTIVE.value:
+                    return _mission_to_summary(m, request)  # idempotent
+                if m.status not in (
+                    MissionStatus.PLANNING.value, MissionStatus.PAUSED.value,
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"mission is '{m.status}'; only planning/paused can "
+                            f"be activated"
+                        ),
+                    )
+                if not m.steps:
+                    basis = (getattr(m, "goal", "") or getattr(m, "title", "")).strip()
+                    description = basis[:500] or "Initial mission work"
+                    digest = hashlib.sha256(
+                        f"{m.id}\n{description}".encode("utf-8")
+                    ).hexdigest()[:8]
+                    step = MissionStep(
+                        id=f"boot{digest}",
+                        description=description,
+                    )
+                    driver_did = str(getattr(m, "owner_did", "") or "").strip()
+                    if driver_did:
+                        step.status = StepStatus.CLAIMED.value
+                        step.assignee = driver_did
+                        step.add_note(
+                            "bootstrap step assigned to mission driver",
+                            "system",
+                        )
+                        assigned_bootstrap_step = True
+                    m.steps.append(step)
+                    created_bootstrap_step = step.id
+                m.status = MissionStatus.ACTIVE.value
+                store.save(m)
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, HTTPException):
+                raise
             logger.exception("v2_mission_activate: save failed: %s", exc)
             raise HTTPException(status_code=500, detail=f"activate failed: {exc}")
+        if created_bootstrap_step:
+            _emit_mission_evidence(request, MISSION_STEP_BOOTSTRAPPED, {
+                "mission_id": m.id,
+                "step_id": created_bootstrap_step,
+                "step_status": (
+                    StepStatus.CLAIMED.value
+                    if assigned_bootstrap_step else StepStatus.TODO.value
+                ),
+                "driver_did": getattr(m, "owner_did", "") or "",
+                "status": m.status,
+                "bootstrap": True,
+            })
+            if assigned_bootstrap_step:
+                _emit_mission_evidence(request, MISSION_STEP_CLAIMED, {
+                    "mission_id": m.id,
+                    "step_id": created_bootstrap_step,
+                    "step_status": StepStatus.CLAIMED.value,
+                    "claimant_did": getattr(m, "owner_did", "") or "",
+                    "status": m.status,
+                    "bootstrap": True,
+                })
         _emit_mission_evidence(request, MISSION_ACTIVATED, {
             "mission_id": m.id,
             "status": m.status,
@@ -4582,6 +5569,311 @@ def register_v2_routes(app: FastAPI) -> None:
             "steps_total": len(getattr(m, "steps", []) or []),
         })
         return _mission_to_summary(m, request)
+
+    @app.post(
+        "/api/v2/missions/{mission_id}/steps/{step_id}/run",
+        response_model=MissionSummaryM,
+    )
+    async def v2_mission_step_run(
+        mission_id: str,
+        step_id: str,
+        body: RunMissionStepBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Run one Mission step through its assigned local A2A agent.
+
+        The step execution contract is deliberately modest:
+          * todo/handed_off/blocked steps are atomically claimed first;
+          * claimed/active/needs_review steps may only be run by their
+            current assignee (or by the mission driver when unassigned);
+          * a successful agent response must carry a verifiable receipt before
+            the step can become done;
+          * backend failures become a visible blocked state instead of a
+            silent no-op.
+        """
+        from nth_dao.orchestration.mission import StepStatus
+        from nth_dao.orchestration.mission_store import (
+            ClaimConflict,
+            MissionNotFound,
+            StepNotFound,
+        )
+
+        store = getattr(request.app.state.nth, "missions", None)
+        if store is None:
+            raise HTTPException(status_code=503, detail="mission store unavailable")
+        mission = store.get(mission_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="mission not found")
+        step = mission.get_step(step_id)
+        if step is None:
+            raise HTTPException(status_code=404, detail="step not found")
+
+        agent_did = (
+            body.agent_did.strip()
+            or str(getattr(step, "assignee", "") or "").strip()
+            or str(getattr(mission, "owner_did", "") or "").strip()
+        )
+        if not agent_did:
+            raise HTTPException(
+                status_code=409,
+                detail="step has no assigned agent; pick a live agent first",
+            )
+        if step.assignee and step.assignee != agent_did:
+            raise HTTPException(
+                status_code=409,
+                detail=f"step is assigned to {step.assignee}, not {agent_did}",
+            )
+
+        claim_event = False
+        try:
+            if step.status in {
+                StepStatus.TODO.value,
+                StepStatus.HANDED_OFF.value,
+                StepStatus.BLOCKED.value,
+            }:
+                store.try_claim(
+                    mission_id=mission_id,
+                    step_id=step_id,
+                    agent_id=agent_did,
+                    capabilities=None,
+                )
+                claim_event = True
+            elif step.status in {
+                StepStatus.CLAIMED.value,
+                StepStatus.NEEDS_REVIEW.value,
+            }:
+                store.update_step(
+                    mission_id=mission_id,
+                    step_id=step_id,
+                    status=StepStatus.ACTIVE.value,
+                    assignee=agent_did,
+                    note="agent run started",
+                    note_author=agent_did,
+                    expect_status=step.status,
+                    expect_assignee_in=[agent_did, ""],
+                )
+            elif step.status == StepStatus.ACTIVE.value:
+                store.update_step(
+                    mission_id=mission_id,
+                    step_id=step_id,
+                    note="agent run retried",
+                    note_author=agent_did,
+                    expect_status=StepStatus.ACTIVE.value,
+                    expect_assignee_in=[agent_did],
+                )
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"step is '{step.status}' and cannot be run",
+                )
+        except (MissionNotFound, StepNotFound) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ClaimConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        if claim_event:
+            _emit_mission_evidence(request, MISSION_STEP_CLAIMED, {
+                "mission_id": mission_id,
+                "step_id": step_id,
+                "step_status": StepStatus.ACTIVE.value,
+                "claimant_did": agent_did,
+                "status": StepStatus.ACTIVE.value,
+            })
+
+        latest = store.get(mission_id)
+        active_step = latest.get_step(step_id) if latest is not None else None
+        if latest is None or active_step is None:
+            raise HTTPException(status_code=404, detail="step disappeared")
+        prompt = body.prompt.strip()
+        if not prompt:
+            prompt = (
+                "You are executing one NTH DAO Mission step.\n"
+                f"Mission: {latest.title}\n"
+                f"Goal: {latest.goal}\n"
+                f"Step: {active_step.description}\n\n"
+                "Return a concise result, include what you checked, and name "
+                "any remaining risk."
+            )
+        if len(prompt) > 20000:
+            raise HTTPException(status_code=413, detail="prompt too large")
+
+        def mark_step_blocked(error_text: str) -> None:
+            try:
+                store.update_step(
+                    mission_id=mission_id,
+                    step_id=step_id,
+                    status=StepStatus.BLOCKED.value,
+                    note=f"agent run failed: {error_text[:240]}",
+                    note_author=agent_did,
+                    expect_assignee_in=[agent_did],
+                )
+            except (ClaimConflict, OSError, RuntimeError, TypeError, ValueError) as update_exc:
+                logger.warning(
+                    "mission step failure visibility update failed for %s/%s: %s",
+                    mission_id,
+                    step_id,
+                    update_exc,
+                )
+            _emit_mission_evidence(request, MISSION_STEP_BLOCKED, {
+                "mission_id": mission_id,
+                "step_id": step_id,
+                "step_status": StepStatus.BLOCKED.value,
+                "agent_did": agent_did,
+                "status": StepStatus.BLOCKED.value,
+                "response_preview": error_text[:240],
+            })
+
+        try:
+            resp_status, content, _rec, receipt_meta = await _drive_supervised_agent_ask(
+                request,
+                agent_did,
+                {"prompt": prompt},
+            )
+        except HTTPException as exc:
+            error_text = str(exc.detail)
+            try:
+                store.update_step(
+                    mission_id=mission_id,
+                    step_id=step_id,
+                    status=StepStatus.BLOCKED.value,
+                    note=f"agent run failed: {error_text[:240]}",
+                    note_author=agent_did,
+                    expect_assignee_in=[agent_did],
+                )
+            except (ClaimConflict, OSError, RuntimeError, TypeError, ValueError) as update_exc:
+                logger.warning(
+                    "mission step failure visibility update failed for %s/%s: %s",
+                    mission_id,
+                    step_id,
+                    update_exc,
+                )
+            _emit_mission_evidence(request, MISSION_STEP_BLOCKED, {
+                "mission_id": mission_id,
+                "step_id": step_id,
+                "step_status": StepStatus.BLOCKED.value,
+                "agent_did": agent_did,
+                "status": StepStatus.BLOCKED.value,
+                "response_preview": error_text[:240],
+            })
+            raise
+
+        if resp_status != 200:
+            error_text = _a2a_http_error_message(resp_status, content)
+            try:
+                store.update_step(
+                    mission_id=mission_id,
+                    step_id=step_id,
+                    status=StepStatus.BLOCKED.value,
+                    note=f"agent run failed: {error_text[:240]}",
+                    note_author=agent_did,
+                    expect_assignee_in=[agent_did],
+                )
+            except (ClaimConflict, OSError, RuntimeError, TypeError, ValueError) as update_exc:
+                logger.warning(
+                    "mission step failure visibility update failed for %s/%s: %s",
+                    mission_id,
+                    step_id,
+                    update_exc,
+                )
+            _emit_mission_evidence(request, MISSION_STEP_BLOCKED, {
+                "mission_id": mission_id,
+                "step_id": step_id,
+                "step_status": StepStatus.BLOCKED.value,
+                "agent_did": agent_did,
+                "status": StepStatus.BLOCKED.value,
+                "response_preview": error_text[:240],
+            })
+            raise HTTPException(status_code=502, detail=error_text)
+
+        if not receipt_meta:
+            error_text = "agent response carried no verifiable receipt"
+            store.update_step(
+                mission_id=mission_id,
+                step_id=step_id,
+                status=StepStatus.BLOCKED.value,
+                note=error_text,
+                note_author=agent_did,
+                expect_assignee_in=[agent_did],
+            )
+            _emit_mission_evidence(request, MISSION_STEP_BLOCKED, {
+                "mission_id": mission_id,
+                "step_id": step_id,
+                "step_status": StepStatus.BLOCKED.value,
+                "agent_did": agent_did,
+                "status": StepStatus.BLOCKED.value,
+                "response_preview": error_text,
+            })
+            raise HTTPException(status_code=502, detail=error_text)
+
+        result = content.get("result") if isinstance(content, dict) else None
+        if not isinstance(result, dict):
+            mark_step_blocked("agent response missing result")
+            raise HTTPException(status_code=502, detail="agent response missing result")
+        response_text = str(result.get("response") or "").strip()
+        if not response_text:
+            mark_step_blocked("agent response was empty")
+            raise HTTPException(status_code=502, detail="agent response was empty")
+        stored_response = response_text[:20000]
+        output = {
+            "content": stored_response,
+            "response_truncated": len(response_text) > len(stored_response),
+            "backend": str(result.get("backend") or ""),
+            "model": str(result.get("model") or ""),
+            "receipt_id": receipt_meta.get("nth_receipt_id", ""),
+            "receipt_content_hash": receipt_meta.get("nth_receipt_content_hash", ""),
+        }
+
+        current = store.get_step(mission_id, step_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="step disappeared")
+        ok, reason = current.evaluate(output)
+        if ok:
+            status = StepStatus.DONE.value
+            note = "agent run completed"
+            event_type = MISSION_STEP_COMPLETED
+            review_trail = None
+        else:
+            status = StepStatus.NEEDS_REVIEW.value
+            note = f"acceptance failed: {reason}"
+            event_type = MISSION_STEP_NEEDS_REVIEW
+            review_trail = {
+                "ts": datetime.now().isoformat(),
+                "by": agent_did,
+                "output": output,
+                "reason": reason,
+            }
+
+        try:
+            store.update_step(
+                mission_id=mission_id,
+                step_id=step_id,
+                status=status,
+                output=output,
+                note=note,
+                note_author=agent_did,
+                expect_assignee_in=[agent_did],
+                append_review_trail=review_trail,
+            )
+        except ClaimConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        _emit_mission_evidence(request, event_type, {
+            "mission_id": mission_id,
+            "step_id": step_id,
+            "step_status": status,
+            "agent_did": agent_did,
+            "status": status,
+            "agent_response_receipt_id": receipt_meta.get("nth_receipt_id", ""),
+            "agent_response_receipt_hash": receipt_meta.get(
+                "nth_receipt_content_hash", ""
+            ),
+            "response_preview": response_text[:240],
+            "acceptance_reason": reason,
+        })
+        refreshed = store.get(mission_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="mission disappeared")
+        return _mission_to_summary(refreshed, request)
 
     @app.get("/api/v2/processes", response_model=List[ProcessCardM])
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
@@ -5006,18 +6298,27 @@ def register_v2_routes(app: FastAPI) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         action = (body.action or "add").strip().lower()
-        file_peers = _read_fed_peer_file(ws)
-        if action == "add":
-            if peer not in file_peers:
-                file_peers.append(peer)
-        elif action == "remove":
-            file_peers = [p for p in file_peers if p != peer]
-        else:
-            raise HTTPException(status_code=400, detail="action must be add or remove")
-        try:
-            _write_fed_peer_file(ws, file_peers)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        with _FED_CONFIG_LOCK:
+            file_peers = _read_fed_peer_file(ws)
+            if action == "add":
+                if peer not in file_peers:
+                    file_peers.append(peer)
+            elif action == "remove":
+                file_peers = [p for p in file_peers if p != peer]
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="action must be add or remove",
+                )
+            try:
+                _write_fed_peer_file(ws, file_peers)
+                if action == "remove":
+                    metadata = _read_fed_peer_metadata(ws)
+                    if peer in metadata:
+                        metadata.pop(peer, None)
+                        _write_fed_peer_metadata(ws, metadata)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
         cache = _ensure_market_fed_cache_for_update(request)
         if not _read_fed_peers(ws):
             cache.replace_all({}, peer_count=0)
@@ -5025,6 +6326,113 @@ def register_v2_routes(app: FastAPI) -> None:
         status["updated"] = True
         status["peer_url"] = peer
         status["action"] = action
+        return status
+
+    @app.post("/api/v2/market/federation/discover")
+    def v2_market_fed_discover(
+        body: FederationDiscoverBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Discover nearby DAO nodes and import their market federation URLs.
+
+        This bridges identity discovery (LAN/mDNS Agent/DID records) to market
+        federation (HTTP digest + pull). Only peers that publish an explicit
+        HTTP(S) federation URL and pass signed identity-card preflight are
+        imported; DID-only or unverifiable peers remain visible in
+        ``discovered_peers`` but are skipped for task/product federation.
+        """
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        actor_id = body.actor_id.strip()
+        _require_federation_actor(request, actor_id)
+
+        discovered, errors = _discover_market_federation_peers(
+            request,
+            actor_id=actor_id,
+            timeout_seconds=float(body.timeout_seconds),
+        )
+        urls: List[str] = []
+        verified_rows: List[Dict[str, Any]] = []
+        skipped_rows: List[Dict[str, Any]] = []
+        verified_metadata: Dict[str, Dict[str, Any]] = {}
+        for discovered_row in discovered:
+            row = dict(discovered_row)
+            url = str(row.get("federation_peer_url") or "")
+            if not url:
+                row["identity_verified"] = False
+                row["identity_error"] = "peer did not advertise an HTTP federation URL"
+                skipped_rows.append(row)
+                continue
+            if not _is_safe_discovered_federation_url(url):
+                row["identity_verified"] = False
+                row["identity_error"] = (
+                    "discovered federation URL targets a local or invalid address"
+                )
+                skipped_rows.append(row)
+                continue
+            identity_meta, identity_error = _fetch_and_verify_federation_identity(
+                url,
+                timeout_seconds=min(float(body.timeout_seconds), 3.0),
+                expected_did=str(row.get("did") or ""),
+            )
+            if identity_meta is None:
+                row["identity_verified"] = False
+                row["identity_error"] = identity_error
+                skipped_rows.append(row)
+                continue
+            row["identity_verified"] = True
+            row["identity_url"] = identity_meta["identity_url"]
+            row["peer_did"] = identity_meta["did"]
+            row["pubkey_prefix"] = identity_meta["pubkey_hex"][:16]
+            verified_rows.append(row)
+            verified_metadata[url] = identity_meta
+            if url not in urls:
+                urls.append(url)
+
+        imported: List[str] = []
+        if body.add and (urls or verified_rows):
+            with _FED_CONFIG_LOCK:
+                file_peers = _read_fed_peer_file(ws)
+                merged = list(file_peers)
+                for url in urls:
+                    if url not in merged:
+                        merged.append(url)
+                        imported.append(url)
+                metadata = _read_fed_peer_metadata(ws)
+                metadata.update(verified_metadata)
+                try:
+                    if imported:
+                        _write_fed_peer_file(ws, merged)
+                    if metadata != _read_fed_peer_metadata(ws):
+                        _write_fed_peer_metadata(ws, metadata)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise HTTPException(status_code=500, detail=str(exc))
+
+        cache = _ensure_market_fed_cache_for_update(request)
+        if body.refresh and _read_fed_peers(ws):
+            from .market_federation_poll import federate_once
+            peers = _read_fed_peers(ws)
+            try:
+                entries = federate_once(
+                    peers,
+                    verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
+                    verify_seed_peer=_market_fed_gossip_identity_verifier(request),
+                    max_duration_s=_market_fed_cycle_budget_s(),
+                )
+                cache.replace_all(entries, peer_count=len(peers))
+            except Exception as exc:  # noqa: BLE001
+                cache.mark_error(str(exc), peer_count=len(peers))
+
+        status = _market_fed_status(request)
+        status["discovered"] = True
+        status["discovered_peers"] = verified_rows + skipped_rows
+        status["imported_peers"] = imported
+        status["skipped_peers"] = skipped_rows
+        status["discovery_errors"] = errors
+        status["identity_verified_peers"] = [
+            row["federation_peer_url"] for row in verified_rows
+            if row.get("identity_verified")
+        ]
         return status
 
     @app.post("/api/v2/market/federation/refresh")
@@ -5039,7 +6447,12 @@ def register_v2_routes(app: FastAPI) -> None:
             return status
         from .market_federation_poll import federate_once
         try:
-            entries = federate_once(peers)
+            entries = federate_once(
+                peers,
+                verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
+                verify_seed_peer=_market_fed_gossip_identity_verifier(request),
+                max_duration_s=_market_fed_cycle_budget_s(),
+            )
             cache.replace_all(entries, peer_count=len(peers))
         except Exception as exc:  # noqa: BLE001
             cache.mark_error(str(exc), peer_count=len(peers))
@@ -6055,6 +7468,8 @@ def register_v2_routes(app: FastAPI) -> None:
         # to keep the per-agent overhead at one ``store.get(id)``
         # dict-lookup-plus-disk-read.
         cap_tokens_store = _state_cap_tokens_store(request)
+        from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND
+
         supervised: List[Dict[str, Any]] = []
         if sup is not None:
             try:
@@ -6080,6 +7495,13 @@ def register_v2_routes(app: FastAPI) -> None:
                             entry["scope_model_allowlist"] = (
                                 tok["scope_model_allowlist"]
                             )
+                        entry["has_active_cap"] = _cap_token_usable(
+                            tok,
+                            cap_tokens_store,
+                            required_capabilities=[CAP_A2A_MESSAGE_SEND],
+                        )
+                    else:
+                        entry["has_active_cap"] = False
                     supervised.append(entry)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("v2_api: supervisor list_agents failed: %s", exc)
@@ -6584,6 +8006,27 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail=f"no live supervised agent for did={did!r} with an a2a_port",
             )
         rec = matching[0]
+        from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND
+
+        token_store = _state_cap_tokens_store(request)
+        existing_token_id = getattr(rec, "cap_token_id", None)
+        existing_token = (
+            token_store.get(existing_token_id)
+            if (existing_token_id and token_store is not None) else None
+        )
+        if not _cap_token_usable(
+            existing_token,
+            token_store,
+            required_capabilities=[CAP_A2A_MESSAGE_SEND],
+        ):
+            refreshed = _refresh_supervised_agent_cap_token(
+                request,
+                rec,
+                previous_token=(
+                    existing_token if isinstance(existing_token, dict) else None
+                ),
+            )
+            rec.cap_token_id = str(refreshed.get("token_id") or "")
 
         # 加载该 agent 自己的 cap_token 并注入（keystone）。
         token_id = getattr(rec, "cap_token_id", None)
@@ -6643,9 +8086,12 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=502,
                 detail=f"agent-ask proxy failed at {url}: {exc}",
             )
+        content = _decode_or_passthrough(resp_body)
+        if resp_status == 200:
+            _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
         return JSONResponse(
             status_code=resp_status,
-            content=_decode_or_passthrough(resp_body),
+            content=content,
         )
 
     @app.post("/api/v2/agents/{did}/ask")
@@ -6691,6 +8137,27 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=404,
                 detail=f"no live supervised agent for did={did!r}")
         rec = matching[0]
+        from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND
+
+        token_store = _state_cap_tokens_store(request)
+        existing_token_id = getattr(rec, "cap_token_id", None)
+        existing_token = (
+            token_store.get(existing_token_id)
+            if (existing_token_id and token_store is not None) else None
+        )
+        if not _cap_token_usable(
+            existing_token,
+            token_store,
+            required_capabilities=[CAP_A2A_MESSAGE_SEND],
+        ):
+            refreshed = _refresh_supervised_agent_cap_token(
+                request,
+                rec,
+                previous_token=(
+                    existing_token if isinstance(existing_token, dict) else None
+                ),
+            )
+            rec.cap_token_id = str(refreshed.get("token_id") or "")
         token_id = getattr(rec, "cap_token_id", None)
         store = _state_cap_tokens_store(request)
         token = store.get(token_id) if (token_id and store is not None) else None

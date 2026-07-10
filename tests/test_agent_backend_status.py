@@ -1,4 +1,4 @@
-﻿"""Local backend readiness endpoint for the v2 startup guide."""
+"""Local backend readiness endpoint for the v2 startup guide."""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
@@ -18,8 +18,7 @@ def test_backend_status_endpoint_lists_supported_kinds_without_paths(tmp_path):
     assert backends["mock"]["ready"] is True
 
     rendered = repr(body)
-    assert "TonyWU" not in rendered
-    assert "Users\\" not in rendered
+    assert str(tmp_path) not in rendered
     assert "ANTHROPIC_API_KEY" not in rendered
     assert "auth.json" not in rendered
 
@@ -58,6 +57,39 @@ def test_backend_status_reports_codex_runtime_without_paths(tmp_path, monkeypatc
     assert "Users" not in rendered
     assert "AppData" not in rendered
     assert "codex.cmd" not in rendered
+
+
+def test_backend_status_reports_hermes_model_without_secret_paths(
+    tmp_path, monkeypatch,
+):
+    import importlib.util
+    import nth_dao.web.dummy_agent as dummy_agent
+
+    (tmp_path / ".hermes").mkdir()
+    monkeypatch.setattr(dummy_agent.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("NTH_HERMES_MODEL", "fast-local")
+    original_find_spec = importlib.util.find_spec
+
+    class _Spec:
+        pass
+
+    def fake_find_spec(name: str):
+        if name == "run_agent":
+            return _Spec()
+        return original_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    status = dummy_agent.backend_runtime_status()["hermes"]
+
+    assert status["ready"] is True
+    assert status["runtime"] == "provider-unverified"
+    assert status["model"] == "fast-local"
+    assert "provider responsiveness is not verified" in status["detail"]
+    rendered = repr(status)
+    assert "auth.json" not in rendered
+    assert "Users" not in rendered
+    assert str(tmp_path) not in rendered
 
 
 def test_backend_status_gates_windows_claude_cli_without_conpty(

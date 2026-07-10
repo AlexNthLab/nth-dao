@@ -1093,6 +1093,35 @@ class AgentSupervisor:
                 out.append(snap)
         return out
 
+    def refresh_cap_token(
+        self, agent_id: str, token: Dict[str, Any],
+    ) -> Optional[str]:
+        """Update a live agent's cap token and redeliver it to disk.
+
+        The hub may need to rotate short-lived tokens for persistent agents
+        restored from the roster. The token must already be signed and recorded
+        by the caller; this method only updates the in-memory AgentRecord and
+        the child-visible cap_token.json file.
+        """
+        tid = token.get("token_id") if isinstance(token, dict) else None
+        subject_did = token.get("subject_did") if isinstance(token, dict) else None
+        if not isinstance(tid, str) or not tid:
+            raise ValueError("refreshed cap_token missing token_id")
+        with self._lock:
+            record = self._agents.get(agent_id)
+            if record is None:
+                return None
+            if subject_did != record.did:
+                raise ValueError(
+                    "refreshed cap_token subject_did does not match agent DID"
+                )
+            record.cap_token_id = tid
+
+        if self._cap_token_dir is not None:
+            cap_path = self._cap_token_dir / agent_id / "cap_token.json"
+            _atomic_write_json(str(cap_path), token)
+        return tid
+
     def get(self, agent_id: str) -> Optional[AgentRecord]:
         with self._lock:
             return self._agents.get(agent_id)

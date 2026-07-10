@@ -9,7 +9,7 @@
  */
 import { useEffect, useState } from "react";
 import {
-  announceTask, claimFederatedTask, claimTask, fetchAgents, getFederationStatus,
+  announceTask, claimFederatedTask, claimTask, discoverFederationPeers, fetchAgents, getFederationStatus,
   listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
 } from "../api";
 import { IconBriefcase } from "./Icons";
@@ -297,6 +297,64 @@ export function TasksView() {
     }
   }
 
+  async function handleFederationDiscover() {
+    if (fedBusy) return;
+    setFedBusy(true);
+    try {
+      const status = await discoverFederationPeers({
+        actorId: "admin",
+        timeoutSeconds: 2,
+        add: true,
+        refresh: true,
+      });
+      setFedStatus(status);
+      setReloadKey((k) => k + 1);
+      const imported = status.imported_peers?.length ?? 0;
+      const skipped = status.skipped_peers?.length ?? 0;
+      const verified = status.identity_verified_peers?.length ?? 0;
+      const errors = status.discovery_errors?.length ?? 0;
+      if (imported > 0) {
+        toast.push(
+          t(
+            `Imported ${imported} verified DAO peer${imported === 1 ? "" : "s"}`,
+            `Imported ${imported} verified DAO peer${imported === 1 ? "" : "s"}`,
+          ),
+          "success",
+        );
+      } else if (verified > 0) {
+        toast.push(
+          t(
+            `${verified} nearby DAO peer${verified === 1 ? "" : "s"} verified; already imported`,
+            `${verified} nearby DAO peer${verified === 1 ? "" : "s"} verified; already imported`,
+          ),
+          "info",
+        );
+      } else if (skipped > 0) {
+        toast.push(
+          t(
+            "Nearby nodes found, but none passed identity/federation verification",
+            "Nearby nodes found, but none passed identity/federation verification",
+          ),
+          "warn",
+        );
+      } else {
+        toast.push(
+          errors > 0
+            ? t("Discovery finished with backend warnings", "Discovery finished with backend warnings")
+            : t("No nearby DAO peers found", "No nearby DAO peers found"),
+          errors > 0 ? "warn" : "info",
+        );
+      }
+    } catch (e) {
+      toast.push(
+        `${t("Federation discovery failed", "Federation discovery failed")}:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setFedBusy(false);
+    }
+  }
+
   async function handleFederationPeerSubmit(e: React.FormEvent) {
     e.preventDefault();
     const peer = fedPeerUrl.trim();
@@ -482,12 +540,39 @@ export function TasksView() {
             >
               {fedBusy ? t("Syncing...", "Syncing...") : t("Refresh federation", "Refresh federation")}
             </button>
+            <button
+              className="btn btn-ghost"
+              disabled={fedBusy}
+              onClick={() => void handleFederationDiscover()}
+              style={{ fontSize: 11, justifyContent: "center" }}
+              title={t(
+                "Scan LAN/mDNS for DAO nodes that publish HTTP federation URLs",
+                "Scan LAN/mDNS for DAO nodes that publish HTTP federation URLs",
+              )}
+            >
+              {fedBusy ? t("Scanning...", "Scanning...") : t("Discover nearby DAOs", "Discover nearby DAOs")}
+            </button>
             <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.5 }}>
               {t("Peers", "Peers")}: {fedStatus?.peers.length ?? 0}
               {" · "}
               {t("last", "last")}: {formatFederationRefresh(fedStatus?.last_refresh_ms ?? 0)}
               {fedStatus?.poller_started ? " · poller on" : ""}
             </div>
+            {fedStatus?.imported_peers?.length ? (
+              <div style={{ fontSize: 10, color: "var(--accent)", lineHeight: 1.4 }}>
+                {t("Imported", "Imported")}: {fedStatus.imported_peers.length}
+              </div>
+            ) : null}
+            {fedStatus?.identity_verified_peers?.length ? (
+              <div style={{ fontSize: 10, color: "var(--accent)", lineHeight: 1.4 }}>
+                {t("Identity verified", "Identity verified")}: {fedStatus.identity_verified_peers.length}
+              </div>
+            ) : null}
+            {fedStatus?.skipped_peers?.length ? (
+              <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
+                {t("Peers not imported", "Peers not imported")}: {fedStatus.skipped_peers.length}
+              </div>
+            ) : null}
             {fedStatus?.last_error && (
               <div style={{ fontSize: 10, color: "var(--danger)", lineHeight: 1.4 }}>
                 {fedStatus.last_error}

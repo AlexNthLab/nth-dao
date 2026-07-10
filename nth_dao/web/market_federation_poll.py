@@ -13,10 +13,12 @@ federation.py docstring),跨 DAO 认领是后续的事。
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -37,13 +39,81 @@ _PULL_BATCH = 100   # 一次 pull 的 id 上限(serve 侧封顶 200,这里留余
 _MAX_DIGEST_PAGES = 50   # digest 翻页安全上限(防恶意 peer 永不收敛)
 _MAX_GOSSIP_PEERS = 64   # 一轮 BFS 最多访问多少 peer(传递发现的安全上限)
 _HTTP_TIMEOUT_S = 8.0
+_MAX_GOSSIP_PEER_LIST = 64
+_MAX_HTTP_JSON_BYTES = 512 * 1024
 
 
 def _urllib_get_json(url: str) -> Any:
     req = urllib.request.Request(
         url, headers={"Accept": "application/json"}, method="GET")
     with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:  # noqa: S310
-        return json.loads(resp.read().decode("utf-8"))
+        body = resp.read(_MAX_HTTP_JSON_BYTES + 1)
+    if len(body) > _MAX_HTTP_JSON_BYTES:
+        raise ValueError(f"HTTP response exceeds {_MAX_HTTP_JSON_BYTES} bytes")
+    return json.loads(body.decode("utf-8"))
+
+
+def _urllib_get_bytes_pinned(
+    url: str,
+    resolved_ip: str,
+    *,
+    timeout_s: float = _HTTP_TIMEOUT_S,
+    max_bytes: int = _MAX_HTTP_JSON_BYTES,
+) -> bytes:
+    """GET over a previously validated IP while preserving Host/SNI."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("pinned HTTP fetch requires an absolute HTTP(S) URL")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("URL contains an invalid port") from exc
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    host_header = parsed.hostname
+    if ":" in host_header and not host_header.startswith("["):
+        host_header = f"[{host_header}]"
+    if port not in {80, 443}:
+        host_header = f"{host_header}:{port}"
+
+    sock = socket.create_connection((resolved_ip, port), timeout=timeout_s)
+    try:
+        if parsed.scheme == "https":
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(sock, server_hostname=parsed.hostname)
+        request = (
+            f"GET {target} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            "Accept: application/json\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        sock.sendall(request)
+        response = http.client.HTTPResponse(sock)
+        response.begin()
+        if response.status < 200 or response.status >= 300:
+            raise urllib.error.HTTPError(
+                url,
+                response.status,
+                response.reason,
+                response.headers,
+                None,
+            )
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ValueError(f"HTTP response exceeds {max_bytes} bytes")
+        return body
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _urllib_get_json_pinned(url: str, resolved_ip: str) -> Any:
+    return json.loads(
+        _urllib_get_bytes_pinned(url, resolved_ip).decode("utf-8")
+    )
 
 
 def _collect_ids_via_digest(
@@ -138,7 +208,10 @@ def fetch_peer_list(
     if isinstance(raw, dict):
         peers = raw.get("peers")
         if isinstance(peers, list):
-            return [p for p in peers if isinstance(p, str) and p.strip()]
+            return [
+                p for p in peers
+                if isinstance(p, str) and p.strip()
+            ][:_MAX_GOSSIP_PEER_LIST]
     return []
 
 
@@ -197,6 +270,58 @@ def _is_safe_gossip_url(
     return True
 
 
+def _resolve_safe_gossip_ip(
+    url: str, *, resolve: Callable[..., list] = socket.getaddrinfo,
+) -> Optional[str]:
+    """Return one validated public IP for a gossip URL.
+
+    The caller must use this IP for the subsequent socket connection. A
+    boolean-only DNS check followed by a hostname connection is vulnerable
+    to DNS rebinding.
+    """
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https":
+            return None
+        host = (parsed.hostname or "").lower()
+        if not host or host == "localhost" or host.endswith(".local"):
+            return None
+        ip = ipaddress.ip_address(host)
+        return host if not _ip_is_internal(ip) else None
+    except ValueError:
+        pass
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        infos = resolve(host, None)
+    except Exception:  # noqa: BLE001
+        return None
+    if not infos:
+        return None
+    resolved: List[str] = []
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError, TypeError):
+            return None
+        if _ip_is_internal(address):
+            return None
+        resolved.append(str(address))
+    return resolved[0] if resolved else None
+
+
+def _gossip_host_key(url: str) -> Optional[tuple[str, str, int]]:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return parsed.scheme, parsed.hostname.lower(), port
+    except (TypeError, ValueError):
+        return None
+
+
 def federate_once(
     peers: List[str],
     http_get: HttpGetJson = _urllib_get_json,
@@ -204,6 +329,9 @@ def federate_once(
     now_ms_override: int = 0,
     max_peers: int = _MAX_GOSSIP_PEERS,
     resolve: Callable[..., list] = socket.getaddrinfo,
+    verify_gossip_peer: Optional[Callable[[str, str], bool]] = None,
+    verify_seed_peer: Optional[Callable[[str], bool]] = None,
+    max_duration_s: float = 0.0,
 ) -> Dict[str, Dict[str, Any]]:
     """对 peer 图做 **BFS 传递发现**:从 seed 出发,拉每个 peer 的任务 + 它的
     peer 列表(gossip 成员),把新 peer 入队继续展开,直到无新 peer 或撞
@@ -213,17 +341,55 @@ def federate_once(
     seen 去重 + max_peers 上限 → 防环、防恶意 peer 把图撑爆。
     """
     now = now_ms_override or now_ms()
+    deadline = (
+        time.monotonic() + max_duration_s
+        if max_duration_s and max_duration_s > 0
+        else None
+    )
+
+    def within_budget() -> bool:
+        return deadline is None or time.monotonic() < deadline
+
     merged: Dict[str, Dict[str, Any]] = {}
     seen: set = set()
     queue: List[str] = list(dict.fromkeys(
         p.rstrip("/") for p in peers if p and p.strip()))
-    while queue and len(seen) < max_peers:
+    seed_peers = set(queue)
+    pinned_ips: Dict[tuple[str, str, int], str] = {}
+
+    def federation_http_get(url: str) -> Any:
+        key = _gossip_host_key(url)
+        resolved_ip = pinned_ips.get(key) if key is not None else None
+        if resolved_ip and http_get is _urllib_get_json:
+            return _urllib_get_json_pinned(url, resolved_ip)
+        return http_get(url)
+
+    def gossip_peer_allowed(url: str, resolved_ip: str) -> bool:
+        if verify_gossip_peer is None:
+            return True
+        try:
+            return bool(verify_gossip_peer(url, resolved_ip))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fed: gossip identity preflight failed %s: %s", url, exc)
+            return False
+
+    while queue and len(seen) < max_peers and within_budget():
         peer = queue.pop(0)
         if peer in seen:
             continue
         seen.add(peer)
+        if peer in seed_peers and verify_seed_peer is not None:
+            try:
+                if not verify_seed_peer(peer):
+                    logger.warning("fed: rejected configured seed identity %s", peer)
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "fed: configured seed preflight failed %s: %s", peer, exc,
+                )
+                continue
         # 任务:直连该 peer 拉全文 + 验签。
-        for ann in pull_from_peer(peer, http_get):
+        for ann in pull_from_peer(peer, federation_http_get):
             if ann.announcement_id in merged:
                 continue
             if ann.is_expired(now_ms_override=now):
@@ -231,13 +397,27 @@ def federate_once(
             merged[ann.announcement_id] = {"ann": ann, "source": peer}
         # gossip:学这个 peer 的 peer 列表 → 传递发现下一跳。
         # 发现到的是不可信网络数据 → 必须过 SSRF 公网校验才入队。
-        for p in fetch_peer_list(peer, http_get):
+        candidates_considered = 0
+        for p in fetch_peer_list(peer, federation_http_get):
+            if not within_budget():
+                break
+            if (
+                len(seen) + len(queue) + candidates_considered
+                >= max_peers
+            ):
+                break
+            candidates_considered += 1
             nxt = p.rstrip("/")
+            resolved_ip = _resolve_safe_gossip_ip(nxt, resolve=resolve)
             if (
                 nxt and nxt not in seen and nxt not in queue
-                and _is_safe_gossip_url(nxt, resolve=resolve)
                 and len(seen) + len(queue) < max_peers
+                and resolved_ip is not None
+                and gossip_peer_allowed(nxt, resolved_ip)
             ):
+                key = _gossip_host_key(nxt)
+                if key is not None:
+                    pinned_ips[key] = resolved_ip
                 queue.append(nxt)
     return merged
 
@@ -294,6 +474,9 @@ def start_poller(
     *,
     interval_s: float = 20.0,
     http_get: HttpGetJson = _urllib_get_json,
+    verify_gossip_peer: Optional[Callable[[str, str], bool]] = None,
+    verify_seed_peer: Optional[Callable[[str], bool]] = None,
+    max_duration_s: float = 30.0,
 ) -> threading.Thread:
     """起后台 poller:周期性 federate_once → 刷新 cache。daemon,整体 try 兜底。"""
 
@@ -303,7 +486,13 @@ def start_poller(
                 peers = [p for p in get_peers() if p]
                 if peers:
                     cache.replace_all(
-                        federate_once(peers, http_get),
+                        federate_once(
+                            peers,
+                            http_get,
+                            verify_gossip_peer=verify_gossip_peer,
+                            verify_seed_peer=verify_seed_peer,
+                            max_duration_s=max_duration_s,
+                        ),
                         peer_count=len(peers),
                     )
                 else:

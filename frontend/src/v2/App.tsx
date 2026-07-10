@@ -28,7 +28,7 @@ import {
   discoverLanAgents, fetchAgents, fetchBackendStatus, fetchCapTokens, fetchIdentity,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
-  resolveDecisionApi, spawnAgent, stopAgent, summarizeAgent,
+  resolveDecisionApi, runMissionStep, spawnAgent, stopAgent, summarizeAgent,
 } from "./api";
 import type { BackendStatus } from "./api";
 import { loadChat, saveChat } from "./chatStore";
@@ -1004,6 +1004,7 @@ function AppInner() {
     try {
       const updated = await activateMission(id);
       setMissions((prev) => prev.map((m) => (m.id === id ? updated : m)));
+      toast.push(t("Mission 已进入执行视图", "Mission moved into execution"), "success");
     } catch (e) {
       toast.push(
         `${t("启动 mission 失败", "Failed to start mission")}:${e instanceof Error ? e.message : String(e)}`,
@@ -1014,6 +1015,29 @@ function AppInner() {
   /** New process — persists to the live Blackboard. The returned
    *  ProcessCard has the real Blackboard id and timestamp, so refresh
    *  and agent context see the same work item. */
+  async function handleRunMissionStep(
+    missionId: string,
+    stepId: string,
+    agentDid?: string,
+  ) {
+    try {
+      const updated = await runMissionStep(missionId, stepId, { agentDid });
+      setMissions((prev) => prev.map((m) => (m.id === missionId ? updated : m)));
+      toast.push(t("Step 执行完成，Receipt 已写入", "Step completed; receipt persisted"), "success");
+    } catch (e) {
+      try {
+        const refreshed = await fetchMissions();
+        setMissions(refreshed);
+      } catch {
+        // Preserve the original execution error as the visible failure.
+      }
+      toast.push(
+        `${t("Step 执行失败", "Step run failed")}:${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
+  }
+
   async function handleCreateProcess(draft: NewProcessDraft): Promise<boolean> {
     try {
       const created = await createProcess({
@@ -1068,6 +1092,7 @@ function AppInner() {
         missions={missions}
         onCreate={handleCreateMission}
         onActivate={handleActivateMission}
+        onRunStep={handleRunMissionStep}
         driverOptions={agents}
         focusId={focusMissionId}
         onFocusConsumed={() => setFocusMissionId(null)}

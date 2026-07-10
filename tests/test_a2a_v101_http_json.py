@@ -1,4 +1,4 @@
-﻿"""A2A v1.0.1 HTTP+JSON conformance smoke tests."""
+"""A2A v1.0.1 HTTP+JSON conformance smoke tests."""
 from __future__ import annotations
 
 import pytest

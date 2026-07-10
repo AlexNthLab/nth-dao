@@ -175,3 +175,161 @@ def test_is_safe_gossip_url_unit() -> None:
     assert not ok("https://192.168.1.1/", resolve=_resolve_never)
     assert not ok("https://[::1]/", resolve=_resolve_never)   # ipv6 loopback
     assert not ok("not a url at all", resolve=_resolve_never)
+
+
+def test_gossip_identity_preflight_can_drop_unverified_peer(monkeypatch) -> None:
+    import nth_dao.web.market_federation_poll as poll
+
+    monkeypatch.setattr(poll, "pull_from_peer", lambda peer, http_get: [])
+    monkeypatch.setattr(
+        poll,
+        "fetch_peer_list",
+        lambda peer, http_get: [C_URL] if peer == B_URL else [],
+    )
+    checked: list[str] = []
+
+    entries = poll.federate_once(
+        [B_URL],
+        lambda _url: {},
+        resolve=_resolve_public,
+        verify_gossip_peer=lambda url, resolved_ip: checked.append(url) or False,
+    )
+
+    assert entries == {}
+    assert checked == [C_URL]
+
+
+def test_gossip_candidate_limit_precedes_identity_preflight(monkeypatch) -> None:
+    import nth_dao.web.market_federation_poll as poll
+
+    candidates = [f"https://node-{idx}.example" for idx in range(100)]
+    monkeypatch.setattr(poll, "pull_from_peer", lambda peer, http_get: [])
+    monkeypatch.setattr(
+        poll,
+        "fetch_peer_list",
+        lambda peer, http_get: candidates if peer == B_URL else [],
+    )
+    checked: list[str] = []
+
+    poll.federate_once(
+        [B_URL],
+        lambda _url: {},
+        resolve=_resolve_public,
+        max_peers=2,
+        verify_gossip_peer=lambda url, resolved_ip: checked.append(url) or False,
+    )
+
+    assert len(checked) == 1
+
+
+def test_gossip_cycle_obeys_total_time_budget(monkeypatch) -> None:
+    import time
+    import nth_dao.web.market_federation_poll as poll
+
+    candidates = [f"https://node-{idx}.example" for idx in range(10)]
+    monkeypatch.setattr(poll, "pull_from_peer", lambda peer, http_get: [])
+    monkeypatch.setattr(
+        poll,
+        "fetch_peer_list",
+        lambda peer, http_get: candidates if peer == B_URL else [],
+    )
+    checked: list[str] = []
+
+    def slow_reject(url: str, resolved_ip: str) -> bool:
+        checked.append(url)
+        time.sleep(0.01)
+        return False
+
+    started = time.monotonic()
+    entries = poll.federate_once(
+        [B_URL],
+        lambda _url: {},
+        resolve=_resolve_public,
+        verify_gossip_peer=slow_reject,
+        max_duration_s=0.001,
+    )
+
+    assert entries == {}
+    assert len(checked) <= 1
+    assert time.monotonic() - started < 0.2
+
+
+def test_gossip_market_fetch_uses_resolved_ip(monkeypatch) -> None:
+    import nth_dao.web.market_federation_poll as poll
+
+    pinned_calls: list[tuple[str, str]] = []
+
+    def pinned_json(url: str, resolved_ip: str):
+        pinned_calls.append((url, resolved_ip))
+        return {}
+
+    monkeypatch.setattr(poll, "_urllib_get_json_pinned", pinned_json)
+    monkeypatch.setattr(
+        poll,
+        "pull_from_peer",
+        lambda peer, http_get: (
+            http_get(f"{C_URL}/api/v2/market/federation/digest")
+            if peer == C_URL else {}
+        ) and [],
+    )
+    monkeypatch.setattr(
+        poll,
+        "fetch_peer_list",
+        lambda peer, http_get: [C_URL] if peer == B_URL else [],
+    )
+
+    entries = poll.federate_once(
+        [B_URL],
+        resolve=_resolve_public,
+        verify_gossip_peer=lambda url, resolved_ip: True,
+    )
+
+    assert entries == {}
+    assert pinned_calls == [
+        (f"{C_URL}/api/v2/market/federation/digest", "93.184.216.34")
+    ]
+
+
+def test_gossip_identity_preflight_failure_is_fail_closed(monkeypatch) -> None:
+    import nth_dao.web.market_federation_poll as poll
+
+    monkeypatch.setattr(poll, "pull_from_peer", lambda peer, http_get: [])
+    monkeypatch.setattr(
+        poll,
+        "fetch_peer_list",
+        lambda peer, http_get: [C_URL] if peer == B_URL else [],
+    )
+
+    def unavailable(_url: str, _resolved_ip: str) -> bool:
+        raise RuntimeError("identity service unavailable")
+
+    entries = poll.federate_once(
+        [B_URL],
+        lambda _url: {},
+        resolve=_resolve_public,
+        verify_gossip_peer=unavailable,
+    )
+
+    assert entries == {}
+
+
+def test_configured_seed_identity_preflight_can_fail_closed(monkeypatch) -> None:
+    import nth_dao.web.market_federation_poll as poll
+
+    pulled: list[str] = []
+
+    def pull(peer, http_get):
+        pulled.append(peer)
+        return []
+
+    monkeypatch.setattr(poll, "pull_from_peer", pull)
+    monkeypatch.setattr(poll, "fetch_peer_list", lambda peer, http_get: [])
+
+    entries = poll.federate_once(
+        [B_URL],
+        lambda _url: {},
+        verify_seed_peer=lambda _url: False,
+    )
+
+    assert entries == {}
+    assert pulled == []

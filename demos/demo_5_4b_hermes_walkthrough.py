@@ -1,4 +1,4 @@
-﻿"""Live Hermes walk-through through the NTH DAO hub.
+"""Live Hermes walk-through through the NTH DAO hub.
 
 This demo starts the web hub in-process with a temporary workspace, spawns a
 ``kind=hermes`` supervised agent, reads the issued cap_token from disk, and

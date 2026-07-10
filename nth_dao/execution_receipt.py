@@ -47,7 +47,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -59,6 +58,7 @@ from nth_dao.b64u import b64u_decode, b64u_encode
 from nth_dao.canonical_json import canonical_json
 from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
 from nth_dao.identity import _NACL_AVAILABLE
+from nth_dao.util import InterProcessLock, atomic_write_json
 
 try:
     from nacl.signing import VerifyKey as _VerifyKey
@@ -735,9 +735,10 @@ def verify_receipt_chain(receipts: List[Dict[str, Any]]) -> bool:
 class ReceiptStore:
     """File-backed receipt store at ``<workspace>/team_receipts/``.
 
-    Each receipt is written atomically as ``{receipt_id}.json`` via
-    write-temp + rename (POSIX guarantees atomicity for same-FS
-    renames; Windows ``os.replace`` provides the same).
+    Each receipt is written atomically as ``{receipt_id}.json`` via a
+    unique same-directory temp file + rename. Unique temp names matter on
+    Windows because two concurrent retries for the same ``receipt_id`` can
+    otherwise collide on ``{receipt_id}.json.tmp``.
 
     The store is intentionally a flat directory rather than a date-
     sharded tree — for the volumes NTH DAO sees (chat-scale, not
@@ -755,9 +756,9 @@ class ReceiptStore:
     def save(self, receipt: Dict[str, Any]) -> Path:
         """Persist a signed receipt. Returns the final file path.
 
-        Atomic: writes to ``{id}.json.tmp`` then ``os.replace``. A
-        crash mid-write leaves either the old file (or no file) and
-        a possibly-orphaned ``.tmp`` that's easy to spot.
+        Atomic: writes through ``nth_dao.util.atomic_write_json``. A crash
+        mid-write leaves either the old file (or no file) and a uniquely
+        named orphaned ``.tmp`` that's easy to spot.
         """
         rid = str(receipt.get("receipt_id", "") or "")
         if not rid:
@@ -775,12 +776,8 @@ class ReceiptStore:
             )
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / (rid + self.SUFFIX)
-        tmp = path.with_suffix(self.SUFFIX + ".tmp")
-        tmp.write_text(
-            json.dumps(receipt, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(str(tmp), str(path))
+        with InterProcessLock(path, timeout=10.0):
+            atomic_write_json(path, receipt, ensure_ascii=False, indent=2)
         return path
 
     def load(self, receipt_id: str) -> Optional[Dict[str, Any]]:

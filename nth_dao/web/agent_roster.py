@@ -1,4 +1,4 @@
-﻿"""Persistent supervised-agent roster for the local web hub.
+"""Persistent supervised-agent roster for the local web hub.
 
 The roster is private runtime state, not project source. Each row describes
 one locally spawned agent and points to that agent's Ed25519 identity file.

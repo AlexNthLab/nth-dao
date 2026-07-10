@@ -380,6 +380,37 @@ export interface FederationStatus {
   updated?: boolean;
   peer_url?: string;
   action?: string;
+  verified_peers?: Record<string, FederationVerifiedPeer>;
+  discovered?: boolean;
+  identity_verified_peers?: string[];
+  discovered_peers?: FederationDiscoveredPeer[];
+  imported_peers?: string[];
+  skipped_peers?: FederationDiscoveredPeer[];
+  discovery_errors?: string[];
+}
+
+export interface FederationDiscoveredPeer {
+  agent_id: string;
+  label?: string;
+  did?: string;
+  capabilities?: string[];
+  groups?: string[];
+  ws_url?: string;
+  source_addr?: string;
+  federation_peer_url?: string;
+  metadata?: Record<string, unknown>;
+  identity_verified?: boolean;
+  identity_url?: string;
+  peer_did?: string;
+  pubkey_prefix?: string;
+  identity_error?: string;
+}
+
+export interface FederationVerifiedPeer {
+  did: string;
+  pubkey_prefix: string;
+  verified_at: string;
+  identity_url: string;
 }
 
 /** 发布任务的请求体(POST /api/v2/market/announce)。 */

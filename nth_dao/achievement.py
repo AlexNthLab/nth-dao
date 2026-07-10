@@ -1,4 +1,4 @@
-﻿"""AchievementCredential reducer 鈥?fold AgentLedger events into monthly W3C VCs.
+"""AchievementCredential reducer 鈥?fold AgentLedger events into monthly W3C VCs.
 
 The AgentLedger is append-only and per-event granular. For sharing, sync, and
 external verification we want a coarser portable summary:

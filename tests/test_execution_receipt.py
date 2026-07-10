@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -397,6 +398,24 @@ def test_store_save_is_atomic_no_tmp_lingers(tmp_path):
     receipt = sign_receipt([e], ident)
     store.save(receipt)
     # After a successful save, no .tmp file should remain
+    leftover = list((tmp_path / "team_receipts").glob("*.tmp"))
+    assert not leftover, f"orphaned .tmp files: {leftover}"
+
+
+def test_store_concurrent_same_receipt_id_does_not_collide_on_tmp(tmp_path):
+    store = ReceiptStore(tmp_path)
+    ident = AgentIdentity.generate(label="atomic-race")
+    e = TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)
+    receipt = sign_receipt([e], ident, receipt_id="same-receipt-id")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(lambda _i: store.save(receipt), range(16)))
+
+    assert len(set(paths)) == 1
+    assert paths[0].exists()
+    loaded = store.load("same-receipt-id")
+    assert loaded is not None
+    assert verify_receipt(loaded) is True
     leftover = list((tmp_path / "team_receipts").glob("*.tmp"))
     assert not leftover, f"orphaned .tmp files: {leftover}"
 

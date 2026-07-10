@@ -13,10 +13,12 @@ import os
 import hmac
 import json
 import secrets
+import socket
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, List, Optional, TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 # R-60 (2026-06-08): forward-reference ContactRecord for the
 # _resolve_member_identity return type. The contact_book module is
@@ -219,6 +221,85 @@ def _warn_if_workspace_inside_git_tree(root: Path) -> None:
 # (operator clicking Refresh) and reduces amplification potential to a
 # negligible level.
 _lan_discover_limiter = RateLimiter(max_per_window=5, window_seconds=60.0)
+
+
+def _local_lan_ip() -> str:
+    """Best-effort LAN address for opt-in federation advertisements."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
+def _clean_public_base_url(raw: str) -> str:
+    value = str(raw or "").strip().rstrip("/")
+    if not value:
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return ""
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")).rstrip("/")
+
+
+def _configured_public_base_url() -> str:
+    """Return an explicitly configured or safely derivable HTTP base URL.
+
+    Cross-machine federation needs a URL another node can dial. We never
+    infer that from loopback, because advertising ``http://127.0.0.1`` over
+    mDNS would point every peer back to itself.
+    """
+    for name in (
+        "NTH_PUBLIC_BASE_URL",
+        "NTH_FEDERATION_BASE_URL",
+        "NTH_LAN_BASE_URL",
+    ):
+        cleaned = _clean_public_base_url(os.environ.get(name, ""))
+        if cleaned:
+            return cleaned
+
+    host = os.environ.get("NTH_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return ""
+    if os.environ.get("NTH_ALLOW_REMOTE_BIND", "").strip() != "1":
+        return ""
+    port = os.environ.get("NTH_PORT", "8080").strip() or "8080"
+    if host in {"0.0.0.0", "::"}:
+        host = _local_lan_ip()
+    if not host:
+        return ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return _clean_public_base_url(f"http://{host}:{port}")
+
+
+def _federation_directory(base_url: str) -> dict[str, Any]:
+    base = _clean_public_base_url(base_url)
+    if not base:
+        return {"protocol": "nth-dao-federation-v1", "enabled": False}
+    return {
+        "protocol": "nth-dao-federation-v1",
+        "enabled": True,
+        "peer_url": base,
+        "market": {
+            "open_url": f"{base}/api/v2/market/open",
+            "digest_url": f"{base}/api/v2/market/federation/digest",
+            "pull_url": f"{base}/api/v2/market/federation/pull",
+            "peers_url": f"{base}/api/v2/market/federation/peers",
+            "claim_foreign_url": f"{base}/api/v2/market/{{announcement_id}}/claim-foreign",
+        },
+        "social": {
+            "pull_url": f"{base}/api/v2/social/federation/pull",
+        },
+    }
 
 
 def _console_token_path() -> Path:
@@ -826,6 +907,10 @@ def create_app(
         # The card content. Order is significant for canonical_json
         # but we don't enforce key order here - the signing helper
         # does it for us by sorting keys.
+        # Prefer the operator-advertised public/LAN base so the signed card
+        # binds the same URL that LAN/mDNS discovery publishes. Falling back
+        # to the request host keeps local development and TestClient stable.
+        base_url = _configured_public_base_url() or str(request.base_url).rstrip("/")
         card: dict[str, Any] = {
             "kind": "nth-dao-identity-card-v1",
             "agent_id": DEFAULT_ADMIN_ID,
@@ -856,10 +941,14 @@ def create_app(
             # to disk and later parses it without the original base
             # URL context (no way to recover the host); absolute URL
             # remains resolvable in every consumer state.
-            "a2a_card_url": (
-                str(request.base_url).rstrip("/")
-                + "/.well-known/agent.json"
-            ),
+            "a2a_card_url": f"{base_url}/.well-known/agent.json",
+            # Federation directory: the public, unauthenticated endpoints a
+            # peer needs to pull this DAO's signed task/product/service feed.
+            # Discovery sources (LAN/mDNS/DNS/seed peer gossip) should point
+            # at ``federation.peer_url`` and let the digest/full-announcement
+            # signatures decide what is trustworthy.
+            "base_url": base_url,
+            "federation": _federation_directory(base_url),
         }
         # Sign the card so a remote consumer who already has our
         # pubkey can verify they're talking to the right node.
@@ -2165,6 +2254,16 @@ def create_app(
             timeout=min(max(0.5, payload.timeout_seconds), 6.0),
             wanted_capabilities=payload.wanted_capabilities or None,
         )
+
+        def _peer_federation_url(peer: Any) -> str:
+            metadata = getattr(peer, "metadata", {}) or {}
+            if isinstance(metadata, dict):
+                for key in ("federation_url", "http_url", "api_url", "base_url"):
+                    cleaned = _clean_public_base_url(str(metadata.get(key, "")))
+                    if cleaned:
+                        return cleaned
+            return _clean_public_base_url(getattr(peer, "ws_url", "") or "")
+
         # LAN DID publish: surface each peer's did:key + a stable
         # 16-hex pubkey_prefix to the caller so the dashboard can
         # render "found DID X" without an extra fetch.
@@ -2181,6 +2280,8 @@ def create_app(
                     "did": getattr(p, "did", "") or "",
                     "source_addr": p.source_addr,
                     "rtt_ms": p.rtt_ms,
+                    "metadata": dict(getattr(p, "metadata", {}) or {}),
+                    "federation_peer_url": _peer_federation_url(p),
                 }
                 for p in peers
             ],
@@ -3033,14 +3134,31 @@ def _bootstrap(state: WebState) -> None:
                     advertised_label = custom_label[:60]
                 else:
                     advertised_label = "NTH DAO node"
+                federation_base_url = _configured_public_base_url()
+                federation_metadata = {}
+                if federation_base_url:
+                    federation_metadata = {
+                        "http_url": federation_base_url,
+                        "federation_url": federation_base_url,
+                        "agent_card_url": (
+                            f"{federation_base_url}/.well-known/agent.json"
+                        ),
+                    }
+                else:
+                    logger.info(
+                        "LAN DID publish has no HTTP federation URL; set "
+                        "NTH_PUBLIC_BASE_URL or bind with NTH_HOST + "
+                        "NTH_ALLOW_REMOTE_BIND=1 for cross-PC task discovery",
+                    )
                 responder = MDNSDiscovery(
                     agent_id=node_network_id,
                     label=advertised_label,
-                    capabilities=[],
+                    capabilities=["nth-dao", "nth-dao-federation"],
                     groups=["home"],
-                    ws_url="",   # operator points peers at the HTTP API
+                    ws_url=federation_base_url,
                     pubkey_hex=node_pk,
                     did=node_did,
+                    metadata=federation_metadata,
                 )
                 responder.start()
                 state.mdns_responder = responder

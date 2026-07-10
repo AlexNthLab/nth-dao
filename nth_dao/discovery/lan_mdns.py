@@ -1,4 +1,4 @@
-﻿"""MDNSDiscovery — mDNS/Bonjour backend for "people nearby".
+"""MDNSDiscovery — mDNS/Bonjour backend for "people nearby".
 
 The plain UDP `LANDiscovery` is great where every peer is on the same
 broadcast domain and broadcast traffic is allowed. Modern networks

@@ -191,6 +191,20 @@ export async function activateMission(id: string): Promise<MissionSummary> {
   );
 }
 
+export async function runMissionStep(
+  missionId: string,
+  stepId: string,
+  input?: { agentDid?: string; prompt?: string },
+): Promise<MissionSummary> {
+  return postJson<MissionSummary>(
+    `/missions/${encodeURIComponent(missionId)}/steps/${encodeURIComponent(stepId)}/run`,
+    {
+      agent_did: input?.agentDid ?? "",
+      prompt: input?.prompt ?? "",
+    },
+  );
+}
+
 /** 真正创建一个 mission(落后端 store)。steps 是描述列表,每条转成
  *  {description, required_capabilities}。返回真实(非 m-local-)的 summary。 */
 export async function createMission(input: {
@@ -762,6 +776,20 @@ export async function updateFederationPeer(
 
 export async function refreshFederation(): Promise<FederationStatus> {
   return postJson<FederationStatus>("/market/federation/refresh");
+}
+
+export async function discoverFederationPeers(input: {
+  actorId?: string;
+  timeoutSeconds?: number;
+  add?: boolean;
+  refresh?: boolean;
+} = {}): Promise<FederationStatus> {
+  return postJson<FederationStatus>("/market/federation/discover", {
+    actor_id: input.actorId ?? "admin",
+    timeout_seconds: input.timeoutSeconds ?? 2,
+    add: input.add ?? true,
+    refresh: input.refresh ?? true,
+  });
 }
 
 // ── Phase 4c/5:审计 / 争议 / 治理(消费 spine 投影端点)─────────────────

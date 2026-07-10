@@ -266,4 +266,57 @@ describe("MissionList", () => {
     expect(screen.queryByText("64. step 64")).toBeNull();
     expect(screen.getByText(/6 more step\(s\) hidden/)).toBeTruthy();
   });
+
+  it("lets an empty planning mission start so the backend can bootstrap a first step", () => {
+    const onActivate = vi.fn();
+    render(
+      <LangProvider>
+        <MissionList
+          missions={[{
+            ...mission,
+            id: "m-empty",
+            status: "planning",
+            steps_total: 0,
+            steps_done: 0,
+            steps_in_progress: 0,
+            current_action: undefined,
+            current_step_id: null,
+            current_step_status: null,
+            steps: [],
+            timeline: [],
+          }]}
+          onActivate={onActivate}
+        />
+      </LangProvider>,
+    );
+
+    const start = screen.getByRole("button", { name: "Start" }) as HTMLButtonElement;
+    expect(start.disabled).toBe(false);
+    fireEvent.click(start);
+    expect(onActivate).toHaveBeenCalledWith("m-empty");
+    expect(screen.getByText("Will create first step")).toBeTruthy();
+  });
+
+  it("runs a claimed step through the mission workbench", async () => {
+    let resolveRun: () => void = () => {};
+    const runPromise = new Promise<void>((resolve) => {
+      resolveRun = resolve;
+    });
+    const onRunStep = vi.fn().mockReturnValue(runPromise);
+    render(
+      <LangProvider>
+        <MissionList missions={[mission]} onRunStep={onRunStep} />
+      </LangProvider>,
+    );
+
+    const run = screen.getAllByRole("button", { name: "Run agent" })[0];
+    fireEvent.click(run);
+    expect(onRunStep).toHaveBeenCalledWith(
+      "m-vis-1",
+      "s1",
+      "did:key:zCodexLocal",
+    );
+    expect(await screen.findByText("Running...")).toBeTruthy();
+    resolveRun();
+  });
 });

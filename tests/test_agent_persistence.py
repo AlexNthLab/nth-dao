@@ -1,4 +1,4 @@
-﻿"""Persistent supervised-agent identities and roster behavior."""
+"""Persistent supervised-agent identities and roster behavior."""
 from __future__ import annotations
 
 from pathlib import Path
