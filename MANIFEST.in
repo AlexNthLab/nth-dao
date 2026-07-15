@@ -1,6 +1,6 @@
 # MANIFEST.in controls what goes into sdist (source distribution)
 #
-# wheel distribution is controlled by [tool.setuptools.packages] +
+# wheel distribution is controlled by [tool.setuptools.packages.find] +
 # [tool.setuptools.package-data] in pyproject.toml.
 
 include LICENSE

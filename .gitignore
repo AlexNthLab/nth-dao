@@ -71,6 +71,17 @@ market_claims/
 
 # Frontend dependencies
 frontend/node_modules/
+node_modules/
+
+# AgentLink durable runtime state (responses and delivery metadata)
+agent_links/
+**/agent_links/
+
+# Local diagnostic/build caches
+tmp-status-debug/
+/scan_agent_pro.py
+/scan_report.txt
+/codex_fix_*.ps1
 
 # Auto-generated EvoLoop skills (demo artifacts — not committed by default)
 skills/registry/fix_*.md

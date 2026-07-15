@@ -65,32 +65,22 @@ nth-status = "nth_dao.cli.status:main"
 nth-metrics = "nth_dao.cli.metrics:main"
 
 [tool.setuptools]
-packages = [
-    "nth_dao",
-    "nth_dao.a2a",
-    "nth_dao.cli",
-    "nth_dao.conformance",
-    "nth_dao.discovery",
-    "nth_dao.mandate",
-    "nth_dao.orchestration",
-    "nth_dao.util",
-    "nth_dao.web",
-    "nth_dao.web.static",
-    "nth_dao.web.static.assets",
-    "team_layer",
-    "team_layer.backends",
-    "team_layer.blackboard",
-    "team_layer.compression",
-    "team_layer.evolution",
-    "team_layer.git_sync",
-    "team_layer.memory_providers",
-]
+# Package membership comes from importable packages, not a manually maintained
+# list. Keeping this declarative prevents newly added protocol layers from
+# silently disappearing from wheels.
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nth_dao*", "team_layer*"]
+exclude = ["tests*", "examples*"]
+namespaces = false
 
 # Optional package data: include INTEGRATION_GUIDE inside nth_dao/
 [tool.setuptools.package-data]
-"nth_dao" = ["INTEGRATION_GUIDE.md", "*.toml"]
+"nth_dao" = ["INTEGRATION_GUIDE.md"]
 "nth_dao.conformance" = ["vectors.json"]
-"nth_dao.web" = ["static/index.html", "static/assets/*"]
+"nth_dao.web" = ["static/*.html", "static/*.svg", "static/assets/*"]
 
 [tool.setuptools.exclude-package-data]
 "*" = [".gitignore", ".gitkeep", "__pycache__/*", "*.pyc"]
