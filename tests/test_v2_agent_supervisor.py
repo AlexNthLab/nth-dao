@@ -38,10 +38,18 @@ import json
 import os
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+def _lifespan_client(app, request: pytest.FixtureRequest) -> TestClient:
+    """Enter app lifespan and guarantee teardown even after an assertion."""
+    stack = ExitStack()
+    request.addfinalizer(stack.close)
+    return stack.enter_context(TestClient(app))
 
 from nth_dao.web.agent_supervisor import (
     AgentSupervisor,
@@ -402,6 +410,11 @@ def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
         assert persisted.exists(), "hub /ask must persist the response receipt deterministically"
         persisted_body = json.loads(persisted.read_text(encoding="utf-8"))
         assert persisted_body["receipt_id"] == receipt_id
+        record = next(
+            item for item in app.state.v2_supervisor.list_agents()
+            if item.did == did
+        )
+        assert record.provider_state == "ready"
     finally:
         c.post(f"/api/v2/agents/{agent_id}/stop")
 
@@ -1064,7 +1077,11 @@ def test_build_a2a_ask_receipt_carries_resolved_model() -> None:
         backend_name="claude-code",
         token=token,
         agent_did=signer.as_did(),
-        params={"prompt": "ping", "model": "claude-sonnet-4-6"},
+        params={
+            "prompt": "ping",
+            "model": "claude-sonnet-4-6",
+            "agent_link_job_id": "link-job-1",
+        },
         result=result,
         started_at_ms=1_000_000,
         ended_at_ms=1_005_000,
@@ -1096,6 +1113,7 @@ def test_build_a2a_ask_receipt_carries_resolved_model() -> None:
     assert payload["output_tokens"] == 1
     assert payload["stop_reason"] == "end_turn"
     assert payload["cap_token_id"] == "tok-123"
+    assert payload["agent_link_job_id"] == "link-job-1"
     assert payload["elapsed_ms"] == 5_000
 
 
@@ -1129,6 +1147,7 @@ def test_build_a2a_ask_receipt_handles_backend_without_model_key() -> None:
     assert payload["resolved_model"] == ""
     assert payload["input_tokens"] == 0
     assert payload["output_tokens"] == 0
+    assert "agent_link_job_id" not in payload
 
 
 def test_build_a2a_ask_receipt_supports_ask_stream_method() -> None:
@@ -1317,6 +1336,7 @@ def test_v2_receipt_persistor_drops_when_receipts_store_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    request: pytest.FixtureRequest,
 ) -> None:
     """H-1 fix (review round Phase 3c R1): when the v2_api receipt
     persistor closure runs but ``state.nth.receipts`` has been
@@ -1772,7 +1792,7 @@ def test_spawn_skips_file_write_when_no_cap_token_dir(
     )
 
 
-def test_subprocess_runner_passes_cap_token_file_arg() -> None:
+def test_subprocess_runner_passes_cap_token_file_arg(tmp_path: Path) -> None:
     """Phase 3c: when cap_token_file_path is provided, the
     SubprocessRunner constructs a Popen cmd line that includes
     ``--cap-token-file <path>``. Asserted via Popen monkeypatch
@@ -1786,7 +1806,7 @@ def test_subprocess_runner_passes_cap_token_file_arg() -> None:
     triggers. """
     import unittest.mock as mock
 
-    runner = SubprocessRunner(handshake_timeout=0.5)
+    runner = SubprocessRunner(workspace=tmp_path, handshake_timeout=0.5)
     captured: list[list[str]] = []
 
     class _FakeProc:
@@ -1805,16 +1825,150 @@ def test_subprocess_runner_passes_cap_token_file_arg() -> None:
     with mock.patch("subprocess.Popen", side_effect=fake_popen):
         # The handshake will time out (no stdout reader to set the
         # event) but that's fine — we only care about the cmd line.
+        cap_token_file = tmp_path / "sandbox" / "agents" / "aid-001" / "cap_token.json"
         pid, did = runner.start(
             "aid-001", "mock",
-            cap_token_file_path="/tmp/some/cap_token.json",
+            cap_token_file_path=str(cap_token_file),
         )
 
     assert captured, "Popen wasn't called"
     cmd = captured[0]
     assert "--cap-token-file" in cmd
     idx = cmd.index("--cap-token-file")
-    assert cmd[idx + 1] == "/tmp/some/cap_token.json"
+    assert cmd[idx + 1] == str(cap_token_file)
+    assert "--exec-workdir" in cmd
+    exec_idx = cmd.index("--exec-workdir")
+    assert Path(cmd[exec_idx + 1]) == cap_token_file.resolve().parent
+
+
+def test_dummy_agent_rejects_exec_workdir_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    from nth_dao.web.dummy_agent import main
+
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    with pytest.raises(SystemExit) as exc_info:
+        main([
+            "--id", "sandbox-escape",
+            "--kind", "mock",
+            "--workspace", str(workspace),
+            "--exec-workdir", str(outside),
+        ])
+    assert exc_info.value.code == 2
+    assert not outside.exists()
+
+
+def test_subprocess_runner_uses_valid_operator_project_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import unittest.mock as mock
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("NTH_AGENT_WORKDIR", str(project))
+    runner = SubprocessRunner(workspace=tmp_path, handshake_timeout=0.01)
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        pid = 99998
+        stdout = None
+        stderr = None
+        def poll(self) -> int | None: return None
+        def terminate(self) -> None: pass
+        def kill(self) -> None: pass
+        def wait(self, timeout: float = 0) -> int: return 0
+
+    def fake_popen(cmd: list[str], **_kwargs: object) -> _FakeProc:
+        captured.append(list(cmd))
+        return _FakeProc()
+
+    with mock.patch("subprocess.Popen", side_effect=fake_popen):
+        runner.start("aid-project", "mock")
+
+    cmd = captured[0]
+    assert "--project-workdir" in cmd
+    assert Path(cmd[cmd.index("--project-workdir") + 1]) == project.resolve()
+    assert "--exec-workdir" not in cmd
+    assert cmd[cmd.index("--work-access") + 1] == "workspace-write"
+
+
+def test_subprocess_runner_honors_per_agent_read_only_scope(
+    tmp_path: Path,
+) -> None:
+    import unittest.mock as mock
+    from nth_dao.web.agent_supervisor import WorkScope
+
+    project = tmp_path / "readonly-project"
+    project.mkdir()
+    runner = SubprocessRunner(workspace=tmp_path, handshake_timeout=0.01)
+    runner.configure_work_scope(
+        "aid-readonly",
+        WorkScope(root=str(project.resolve()), access="read-only"),
+    )
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        pid = 99997
+        stdout = None
+        stderr = None
+        def poll(self) -> int | None: return None
+        def terminate(self) -> None: pass
+        def kill(self) -> None: pass
+        def wait(self, timeout: float = 0) -> int: return 0
+
+    def fake_popen(cmd: list[str], **_kwargs: object) -> _FakeProc:
+        captured.append(list(cmd))
+        return _FakeProc()
+
+    with mock.patch("subprocess.Popen", side_effect=fake_popen):
+        runner.start("aid-readonly", "codex")
+
+    cmd = captured[0]
+    assert Path(cmd[cmd.index("--project-workdir") + 1]) == project.resolve()
+    assert cmd[cmd.index("--work-access") + 1] == "read-only"
+
+
+def test_writable_work_scope_lease_rejects_concurrent_agent(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from nth_dao.web.agent_supervisor import WorkScope
+    from nth_dao.web.v2_api import WorkScopeBusy, _work_scope_lease
+
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "hub"
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(
+            nth=SimpleNamespace(workspace=workspace),
+        )),
+    )
+    record = SimpleNamespace(work_scope=WorkScope(
+        root=str(project.resolve()), access="workspace-write",
+    ))
+
+    with _work_scope_lease(request, record):
+        with pytest.raises(WorkScopeBusy, match="already executing"):
+            with _work_scope_lease(request, record):
+                pass
+
+    read_only = SimpleNamespace(work_scope=WorkScope(
+        root=str(project.resolve()), access="read-only",
+    ))
+    with _work_scope_lease(request, read_only):
+        with _work_scope_lease(request, read_only):
+            pass
+
+
+def test_subprocess_runner_rejects_missing_operator_project_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NTH_AGENT_WORKDIR", str(tmp_path / "missing"))
+    runner = SubprocessRunner(workspace=tmp_path, handshake_timeout=0.01)
+
+    with pytest.raises(RuntimeError, match="NTH_AGENT_WORKDIR"):
+        runner.start("aid-missing", "mock")
 
 
 def test_receipt_persistor_called_on_receipt_signed_event() -> None:
@@ -2037,6 +2191,7 @@ def test_decision_raised_without_dict_payload_logs_warning(
 def test_v2_decision_raiser_works_before_decisions_endpoint_touched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Live walk-through bug regression (2026-06-11): the
     decision_raiser closure must lazy-build v2_decisions_store on
@@ -2084,6 +2239,7 @@ def test_v2_decision_raiser_works_before_decisions_endpoint_touched(
 def test_v2_decision_raiser_assigns_id_and_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Phase 3d end-to-end: when a child raises a decision (no id,
     no source), the v2_api closure assigns both and inserts into
@@ -2136,6 +2292,7 @@ def test_v2_decision_raiser_assigns_id_and_source(
 def test_v2_decision_raiser_overwrites_child_attribution_claims(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """H-1 fix (review round Phase 3d R1): a child that emits a
     decision claiming to be a different DID must NOT have that
@@ -2151,7 +2308,7 @@ def test_v2_decision_raiser_overwrites_child_attribution_claims(
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
         require_console_auth=False,
     )
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
     client.get("/api/v2/agents")
     client.get("/api/v2/decisions")
     sup = app.state.v2_supervisor
@@ -3076,6 +3233,16 @@ def test_claude_code_backend_rejects_oversized_prompt() -> None:
         _ClaudeCliAskBackend().ask({"prompt": big}, timeout_s=1.0)
 
 
+def test_claude_cli_read_only_scope_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.dummy_agent import _ClaudeCliAskBackend
+
+    monkeypatch.setenv("NTH_AGENT_WORK_ACCESS", "read-only")
+    with pytest.raises(RuntimeError, match="OS-enforced read-only"):
+        _ClaudeCliAskBackend().ask({"prompt": "inspect the project"}, timeout_s=1.0)
+
+
 def test_anthropic_sdk_backend_rejects_empty_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3575,22 +3742,20 @@ def test_codex_backend_blocks_flag_injection_via_prompt(
     """CO-1 fix (review round Phase 5.4 R1): a peer with a valid
     cap_token used to be able to override the backend's model
     (or any future safety flag) by putting the flag in the
-    prompt text. The ``--`` POSIX separator now sits between the
-    backend's argv flags and the prompt so the CLI parser treats
-    everything after as positional. Verified by capturing the
-    argv handed to subprocess.run. """
+    prompt text. The prompt now travels over stdin and argv contains only the
+    sentinel ``-``, so the CLI parser never sees prompt text as options. """
     import subprocess as _sp
     from nth_dao.web.dummy_agent import _CodexCliAskBackend
 
-    captured: list[list[str]] = []
+    captured: list[tuple[list[str], dict[str, object]]] = []
 
     class _FakeCompleted:
         returncode = 0
         stdout = "ok"
         stderr = ""
 
-    def fake_run(argv: list[str], **_kw: object) -> _FakeCompleted:
-        captured.append(list(argv))
+    def fake_run(argv: list[str], **kwargs: object) -> _FakeCompleted:
+        captured.append((list(argv), dict(kwargs)))
         return _FakeCompleted()
 
     monkeypatch.setattr(_sp, "run", fake_run)
@@ -3605,21 +3770,17 @@ def test_codex_backend_blocks_flag_injection_via_prompt(
         {"prompt": "--model gpt-3.5-turbo Tell me a joke"},
         timeout_s=30.0,
     )
-    argv = captured[0]
-    # The "--" separator must appear before the prompt token, so
-    # the model-override-looking text is positional.
-    assert "--" in argv, argv
-    sep_idx = argv.index("--")
-    # Everything after "--" should be the prompt verbatim.
-    assert argv[sep_idx + 1] == "--model gpt-3.5-turbo Tell me a joke"
+    argv, kwargs = captured[0]
+    # The model-override-looking text must never enter argv.
+    assert argv[-1] == "-"
+    assert "--model gpt-3.5-turbo Tell me a joke" not in argv
+    assert kwargs["input"] == "--model gpt-3.5-turbo Tell me a joke"
     # And there must be NO second "--model" flag injected from the
     # prompt (the only "--model" possible is the backend's own
     # before "--" — which there isn't, since the test didn't pass
     # params["model"]).
-    pre_sep = argv[:sep_idx]
-    assert "--model" not in pre_sep, (
-        f"prompt's --model leaked into argv as a flag: {pre_sep!r}"
-    )
+    assert argv.count("--model") == 1
+    assert argv[argv.index("--model") + 1] == "gpt-5.4"
 
 
 def test_codex_backend_arch_aware_arm64_path(
@@ -3701,13 +3862,14 @@ def test_codex_backend_emits_stderr_event_when_max_tokens_ignored(
     assert "4096" in err
 
 
-def test_codex_backend_timeout_message_hints_tool_use(
+def test_codex_backend_timeout_message_points_to_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CO-6 fix (review round Phase 5.4 R1): when codex hangs
-    (most likely cause: tool-use approval waiting on a closed
-    stdin), the TimeoutError message must hint at it rather than
-    just saying "didn't respond". """
+    """A silent timeout should point to provider queue/usage checks.
+
+    Supervised Codex uses approval_policy=never, so blaming interactive
+    approval without stderr evidence would be misleading.
+    """
     import subprocess as _sp
     from nth_dao.web.dummy_agent import _CodexCliAskBackend
 
@@ -3719,7 +3881,7 @@ def test_codex_backend_timeout_message_hints_tool_use(
     monkeypatch.setattr(
         backend, "_resolve_binary", lambda: "codex-test-binary",
     )
-    with pytest.raises(TimeoutError, match="tool use|approval"):
+    with pytest.raises(TimeoutError, match="provider may be queued|Codex usage"):
         backend.ask({"prompt": "hi"}, timeout_s=30.0)
 
 
@@ -4286,6 +4448,7 @@ def test_hermes_backend_prefers_run_agent_root_for_sibling_imports(
     (hermes_root / "run_agent.py").write_text(
         "from utils import MARKER\n"
         "class AIAgent:\n"
+        "    valid_tool_names = []\n"
         "    def __init__(self, **kwargs):\n"
         "        self.kwargs = kwargs\n"
         "    def chat(self, message):\n"
@@ -4324,6 +4487,66 @@ def test_hermes_backend_prefers_run_agent_root_for_sibling_imports(
             _sys.modules.pop("utils", None)
         else:
             _sys.modules["utils"] = old_utils
+
+
+def test_hermes_backend_rejects_preloaded_foreign_run_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A concrete foreign run_agent module already in sys.modules must
+    not bypass the Hermes-root import repair."""
+    import importlib.util as _importlib_util
+    import sys as _sys
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    hermes_root = tmp_path / "hermes-preloaded"
+    foreign_root = tmp_path / "foreign-preloaded"
+    hermes_root.mkdir()
+    foreign_root.mkdir()
+    (hermes_root / "run_agent.py").write_text(
+        "class AIAgent:\n"
+        "    valid_tool_names = []\n"
+        "    def __init__(self, **kwargs):\n"
+        "        pass\n"
+        "    def chat(self, message):\n"
+        "        return 'hermes:' + message\n"
+        "    def close(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    foreign_path = foreign_root / "run_agent.py"
+    foreign_path.write_text(
+        "class AIAgent:\n"
+        "    valid_tool_names = []\n"
+        "    def __init__(self, **kwargs):\n"
+        "        pass\n"
+        "    def chat(self, message):\n"
+        "        return 'foreign:' + message\n"
+        "    def close(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+
+    old_run_agent = _sys.modules.get("run_agent")
+    old_path = list(_sys.path)
+    # The real editable Hermes install is discoverable ahead of any nested
+    # tool path; the defect is the already-loaded foreign module, not an
+    # impossible-to-identify first sys.path candidate.
+    monkeypatch.setattr(_sys, "path", [str(hermes_root), str(foreign_root), *old_path])
+    spec = _importlib_util.spec_from_file_location("run_agent", foreign_path)
+    assert spec is not None and spec.loader is not None
+    foreign_module = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(foreign_module)
+    _sys.modules["run_agent"] = foreign_module
+    try:
+        out = _HermesAskBackend().ask({"prompt": "hello"}, timeout_s=5.0)
+        assert out["response"] == "hermes:hello"
+        assert Path(_sys.modules["run_agent"].__file__).parent == hermes_root
+    finally:
+        if old_run_agent is None:
+            _sys.modules.pop("run_agent", None)
+        else:
+            _sys.modules["run_agent"] = old_run_agent
 
 
 def test_hermes_import_path_prepare_is_thread_safe(
@@ -4384,6 +4607,8 @@ def test_hermes_backend_returns_response_via_fake_agent(
     captured: dict = {}
 
     class _FakeAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **kwargs: object) -> None:
             captured["init_kwargs"] = kwargs
 
@@ -4398,7 +4623,8 @@ def test_hermes_backend_returns_response_via_fake_agent(
     fake_module.AIAgent = _FakeAgent  # type: ignore[attr-defined]
     monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
 
-    out = _HermesAskBackend().ask(
+    backend = _HermesAskBackend()
+    out = backend.ask(
         {"prompt": "hello hermes"}, timeout_s=10.0,
     )
     assert out == {
@@ -4407,9 +4633,10 @@ def test_hermes_backend_returns_response_via_fake_agent(
         # L-2 revert (5.4b R2 review): field tests showed Hermes
         # expects the bare model name here; canonical ``provider/model``
         # is forwarded literally to DeepSeek and rejected.
-        "model": "deepseek-v4-pro",
+        "model": "deepseek-v4-flash",
     }
     assert captured["prompt"] == "hello hermes"
+    backend.close()
     assert captured.get("closed") is True
     # Defaults we explicitly set in the wrapper so a stale
     # ~/.hermes/memories or context file can't pollute the ask.
@@ -4417,6 +4644,199 @@ def test_hermes_backend_returns_response_via_fake_agent(
     assert init["skip_memory"] is True
     assert init["skip_context_files"] is True
     assert init["quiet_mode"] is True
+    assert init["enabled_toolsets"] == ["safe"]
+
+
+def test_hermes_toolsets_are_operator_controlled_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    monkeypatch.setenv("NTH_HERMES_TOOLSETS", "safe,web,safe")
+    assert _HermesAskBackend.default_toolsets() == ["safe", "web"]
+    monkeypatch.setenv("NTH_HERMES_TOOLSETS", " , ")
+    assert _HermesAskBackend.default_toolsets() == ["safe"]
+
+
+def test_hermes_custom_toolsets_require_explicit_unsafe_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    monkeypatch.setenv("NTH_HERMES_TOOLSETS", "safe,terminal")
+    monkeypatch.delenv("NTH_ALLOW_UNSAFE_HERMES_TOOLS", raising=False)
+    with pytest.raises(RuntimeError, match="custom Hermes toolsets are disabled"):
+        _HermesAskBackend.checked_toolsets()
+
+    monkeypatch.setenv("NTH_ALLOW_UNSAFE_HERMES_TOOLS", "1")
+    assert _HermesAskBackend.checked_toolsets() == ["safe", "terminal"]
+
+    monkeypatch.setenv("NTH_AGENT_WORK_ACCESS", "read-only")
+    with pytest.raises(RuntimeError, match="read-only Hermes Agents"):
+        _HermesAskBackend.checked_toolsets()
+
+
+def test_hermes_safe_toolset_rejects_unreviewed_resolved_tool_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    state = {"closed": False}
+
+    class _UnsafeAgent:
+        valid_tool_names = ["web_search", "terminal"]
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            state["closed"] = True
+
+    backend = _HermesAskBackend()
+    backend._agent_class = _UnsafeAgent  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="unreviewed tools: terminal"):
+        backend._build_agent("test-model")  # type: ignore[attr-defined]
+    assert state["closed"] is True
+
+
+def test_hermes_safe_toolset_fails_when_resolved_tools_are_not_inspectable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    state = {"closed": False}
+
+    class _OpaqueAgent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            state["closed"] = True
+
+    backend = _HermesAskBackend()
+    backend._agent_class = _OpaqueAgent  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="could not inspect valid_tool_names"):
+        backend._build_agent("test-model")  # type: ignore[attr-defined]
+    assert state["closed"] is True
+
+
+def test_hermes_backend_isolates_requests_when_reset_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    state = {"init": 0, "calls": 0, "closed": 0}
+
+    class _ReusableAgent:
+        valid_tool_names: list[str] = []
+
+        def __init__(self, **_kwargs: object) -> None:
+            state["init"] += 1
+
+        def chat(self, _message: str) -> str:
+            state["calls"] += 1
+            return f"reply-{state['calls']}"
+
+        def close(self) -> None:
+            state["closed"] += 1
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _ReusableAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    backend = _HermesAskBackend()
+    assert backend.ask({"prompt": "one"}, timeout_s=2.0)["response"] == "reply-1"
+    assert backend.ask({"prompt": "two"}, timeout_s=2.0)["response"] == "reply-2"
+    # The fake agent has no documented reset hook, so the adapter must rebuild
+    # rather than risk carrying the first request's in-memory conversation
+    # into the second request.
+    assert state == {"init": 2, "calls": 2, "closed": 1}
+    backend.close()
+    assert state["closed"] == 2
+
+
+def test_hermes_backend_rejects_overlap_while_provider_call_is_uncancellable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys as _sys
+    import threading as _threading
+    import time as _time
+    import types as _types
+    from nth_dao.web.dummy_agent import BackendBusyError, _HermesAskBackend
+
+    started = _threading.Event()
+    release = _threading.Event()
+
+    class _BlockingAgent:
+        valid_tool_names: list[str] = []
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def chat(self, _message: str) -> str:
+            started.set()
+            release.wait(5.0)
+            return "late"
+
+        def close(self) -> None:
+            pass
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _BlockingAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    backend = _HermesAskBackend()
+    errors: list[BaseException] = []
+
+    def _first_call() -> None:
+        try:
+            backend.ask({"prompt": "slow"}, timeout_s=0.2)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = _threading.Thread(target=_first_call)
+    thread.start()
+    assert started.wait(2.0)
+    _time.sleep(0.3)
+    with pytest.raises(BackendBusyError, match="busy"):
+        backend.ask({"prompt": "overlap"}, timeout_s=1.0)
+    release.set()
+    thread.join(2.0)
+    assert len(errors) == 1 and isinstance(errors[0], TimeoutError)
+    backend.close()
+    _time.sleep(0.05)
+
+
+def test_hermes_backend_clears_busy_when_worker_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys as _sys
+    import types as _types
+    from nth_dao.web.dummy_agent import _HermesAskBackend
+
+    class _Agent:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def chat(self, _message: str) -> str:
+            return "unused"
+
+    fake_module = _types.ModuleType("run_agent")
+    fake_module.AIAgent = _Agent  # type: ignore[attr-defined]
+    monkeypatch.setitem(_sys.modules, "run_agent", fake_module)
+
+    backend = _HermesAskBackend()
+    monkeypatch.setattr(
+        backend, "_ensure_worker",
+        lambda: (_ for _ in ()).throw(RuntimeError("thread start failed")),
+    )
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        backend.ask({"prompt": "hi"}, timeout_s=1.0)
+    assert backend._busy is False  # type: ignore[attr-defined]
 
 
 def test_hermes_backend_uses_operator_default_model_from_env(
@@ -4429,6 +4849,8 @@ def test_hermes_backend_uses_operator_default_model_from_env(
     captured: dict = {}
 
     class _FakeAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **kwargs: object) -> None:
             captured["model"] = kwargs.get("model")
 
@@ -4465,6 +4887,8 @@ def test_hermes_backend_honors_model_override_via_subclass_allowlist(
     captured: dict = {}
 
     class _FakeAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **kwargs: object) -> None:
             captured["model"] = kwargs.get("model")
 
@@ -4519,6 +4943,8 @@ def test_hermes_backend_times_out_when_chat_hangs(
     from nth_dao.web.dummy_agent import _HermesAskBackend
 
     class _HangingAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **_kw: object) -> None:
             pass
 
@@ -4551,6 +4977,8 @@ def test_hermes_backend_propagates_chat_error(
     from nth_dao.web.dummy_agent import _HermesAskBackend
 
     class _AngryAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **_kw: object) -> None:
             pass
 
@@ -4584,6 +5012,8 @@ def test_hermes_backend_closes_agent_when_chat_raises(
     state: dict = {"closed": False}
 
     class _RaisingAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **_kw: object) -> None:
             pass
 
@@ -4619,6 +5049,8 @@ def test_hermes_backend_rejects_non_string_chat_response(
     from nth_dao.web.dummy_agent import _HermesAskBackend
 
     class _WeirdAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **_kw: object) -> None:
             pass
 
@@ -4649,6 +5081,8 @@ def test_hermes_backend_wraps_baseexception_without_thread_warning(
     from nth_dao.web.dummy_agent import _HermesAskBackend
 
     class _SuicidalAgent:
+        valid_tool_names: list[str] = []
+
         def __init__(self, **_kw: object) -> None:
             pass
 
@@ -4992,6 +5426,130 @@ def test_codex_backend_accepts_override_via_subclass_allowlist(
     argv = captured[0]
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "gpt-5-codex"
+
+
+def test_codex_backend_uses_operator_model_and_explicit_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> _FakeCompleted:
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        return _FakeCompleted()
+
+    monkeypatch.setenv("NTH_CODEX_MODEL", "gpt-5.4")
+    monkeypatch.setattr(_sp, "run", fake_run)
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(backend, "_resolve_binary", lambda: "codex-test-binary")
+
+    backend.ask({"prompt": "hi"}, timeout_s=180.0)
+
+    argv = captured["argv"]
+    kwargs = captured["kwargs"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--model") + 1] == "gpt-5.4"
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert isinstance(kwargs, dict)
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
+
+
+def test_codex_backend_enforces_read_only_work_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    captured: list[str] = []
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **_kwargs: object) -> _FakeCompleted:
+        captured.extend(argv)
+        return _FakeCompleted()
+
+    monkeypatch.setenv("NTH_AGENT_WORK_ACCESS", "read-only")
+    monkeypatch.setattr(_sp, "run", fake_run)
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(backend, "_resolve_binary", lambda: "codex-test-binary")
+
+    backend.ask({"prompt": "inspect only"}, timeout_s=10.0)
+
+    assert captured[captured.index("--sandbox") + 1] == "read-only"
+
+
+def test_codex_backend_uses_safe_noninteractive_defaults_and_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> _FakeCompleted:
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        return _FakeCompleted()
+
+    monkeypatch.delenv("NTH_CODEX_MODEL", raising=False)
+    monkeypatch.setattr(_sp, "run", fake_run)
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(backend, "_resolve_binary", lambda: "codex-test-binary")
+
+    backend.ask({"prompt": "inspect --dangerously-bypass-approvals"}, timeout_s=180.0)
+
+    argv = captured["argv"]
+    kwargs = captured["kwargs"]
+    assert isinstance(argv, list)
+    assert isinstance(kwargs, dict)
+    assert argv[argv.index("--model") + 1] == "gpt-5.4"
+    assert "--ephemeral" in argv
+    assert "--ignore-user-config" in argv
+    assert "approval_policy=\"never\"" in argv
+    assert argv[-1] == "-"
+    assert "inspect --dangerously-bypass-approvals" not in argv
+    assert kwargs["input"] == "inspect --dangerously-bypass-approvals"
+    assert "stdin" not in kwargs
+
+
+def test_codex_backend_classifies_cli_model_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as _sp
+    from nth_dao.web.dummy_agent import _CodexCliAskBackend
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = (
+            "The 'future-model' model requires a newer version of Codex. "
+            "Please upgrade to the latest app or CLI and try again."
+        )
+
+    monkeypatch.delenv("NTH_CODEX_MODEL", raising=False)
+    monkeypatch.setattr(_sp, "run", lambda *_a, **_kw: _FakeCompleted())
+    backend = _CodexCliAskBackend()
+    monkeypatch.setattr(backend, "_resolve_binary", lambda: "codex-test-binary")
+
+    with pytest.raises(RuntimeError, match="too old for the configured model"):
+        backend.ask({"prompt": "hi"}, timeout_s=180.0)
 
 
 def test_claude_code_backend_prefers_adjacent_exe_over_ps1(
@@ -5423,6 +5981,7 @@ def test_hub_proxy_ask_uses_per_method_timeout(
 def test_hub_proxy_ask_uses_backend_specific_timeout_floor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Hermes has a 120s backend default, so the hub must not kill a
     healthy no-timeout /ask call at the generic 65s floor."""
@@ -5469,7 +6028,7 @@ def test_hub_proxy_ask_uses_backend_specific_timeout_floor(
 
     monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
 
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
     resp = client.post(
         f"/api/v2/agents/{target_did}/a2a/ask",
         json={"prompt": "hi"},
@@ -5483,6 +6042,7 @@ def test_hub_proxy_ask_uses_backend_specific_timeout_floor(
 def test_hub_injected_ask_uses_backend_specific_timeout_floor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """The browser-facing /ask endpoint injects the agent cap_token.
 
@@ -5546,7 +6106,7 @@ def test_hub_injected_ask_uses_backend_specific_timeout_floor(
 
     monkeypatch.setattr(_ureq, "urlopen", fake_urlopen)
 
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
     resp = client.post(
         f"/api/v2/agents/{target_did}/ask",
         json={"prompt": "hi"},
@@ -5875,7 +6435,7 @@ def test_channel_dispatch_retries_not_yet_authorized(
 
         def post_message(
             self, channel_id: str, sender_id: str, body: str,
-            metadata: object = None,
+            metadata: object = None, **_kwargs: object,
         ) -> None:
             self.messages.append((channel_id, sender_id, body, metadata))
 
@@ -5921,7 +6481,12 @@ def test_channel_dispatch_retries_not_yet_authorized(
 
     assert calls == 2
     assert groups.messages == [(
-        "general", "did:key:z6MkAgent", "agent reply after warmup", None,
+        "general", "did:key:z6MkAgent", "agent reply after warmup", {
+            "channel_dispatch": True,
+            "dispatch_phase": "completed",
+            "request_message_id": "",
+            "agent_did": "did:key:z6MkAgent",
+        },
     )]
 
 
@@ -6000,6 +6565,10 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
             {
                 "nth_receipt_id": "r-channel-1",
                 "nth_receipt_content_hash": "abc123",
+                "channel_dispatch": True,
+                "dispatch_phase": "completed",
+                "request_message_id": "",
+                "agent_did": "did:key:z6MkAgent",
             },
         ),
     )
@@ -6064,12 +6633,23 @@ def test_channel_dispatch_uses_hermes_timeout_budget(
         None,
         "agent-hermes",
         "hermes",
+        "request-hermes",
+        "link-hermes",
     )
 
     assert seen_payloads[0]["timeout_s"] == 300.0
+    assert seen_payloads[0]["agent_link_job_id"] == "link-hermes"
     assert seen_timeouts == [305.0]
     assert groups.messages == [
-        ("general", "did:key:z6MkHermes", "slow hermes reply", None),
+        (
+            "general", "did:key:z6MkHermes", "slow hermes reply", {
+                "channel_dispatch": True,
+                "dispatch_phase": "completed",
+                "request_message_id": "request-hermes",
+                "agent_did": "did:key:z6MkHermes",
+                "link_job_id": "link-hermes",
+            },
+        ),
     ]
 
 
@@ -6125,7 +6705,9 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
     channel_id, sender_id, body, metadata = groups.messages[0]
     assert channel_id == "general"
     assert sender_id == "did:key:z6MkCodex"
-    assert metadata is None
+    assert isinstance(metadata, dict)
+    assert metadata["dispatch_phase"] == "failed"
+    assert metadata["status_source"] == "hub"
     assert "agent error" in body
     assert "a2a ask HTTP 502" in body
     assert "backend-failed" in body
@@ -6653,12 +7235,15 @@ def test_subprocess_runner_cap_token_file_round_trip(
         pytest.skip("subprocess could not start (CI sandboxing?)")
     try:
         # Atomic-write the cap_token to where the child is polling.
-        cap_token = {
-            "token_id": "tok-smoke-001",
-            "subject_did": did,
-            "capabilities": ["nth:receipt_sign"],
-            "issuer_did": "did:key:zFakeIssuerForSmoke",
-        }
+        from nth_dao.cap_token import sign_cap_token
+        from nth_dao.identity import AgentIdentity
+
+        cap_token = sign_cap_token(
+            issuer=AgentIdentity.generate(label="smoke-issuer"),
+            subject_did=did,
+            capabilities=["nth:receipt_sign"],
+            token_id="tok-smoke-001",
+        )
         tmp = cap_token_path.with_suffix(".json.tmp")
         tmp.write_text(_json.dumps(cap_token), encoding="utf-8")
         os.replace(str(tmp), str(cap_token_path))
@@ -6725,6 +7310,7 @@ def test_spawn_ceiling_zero_means_unlimited():
 def test_env_auto_agents_spawn_once_and_join_startup_channel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     from nth_dao.web import create_app
     from nth_dao.web import agent_supervisor as supervisor_mod
@@ -6749,7 +7335,7 @@ def test_env_auto_agents_spawn_once_and_join_startup_channel(
     )
 
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
 
     first = client.get("/api/v2/agents")
     assert first.status_code == 200, first.text
@@ -6770,3 +7356,341 @@ def test_env_auto_agents_spawn_once_and_join_startup_channel(
         agent for agent in second.json()
         if agent.get("label") == "auto-mock"
     ]) == 1
+
+
+def test_supervisor_tracks_a2a_readiness_events() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    sup = AgentSupervisor(InMemoryRunner())
+    rec = AgentRecord(
+        agent_id="ready-probe",
+        kind="mock",
+        label="ready-probe",
+        did="did:key:z6MkReadyProbe",
+        capabilities=["a2a:message_send"],
+        started_at="now",
+        last_seen="now",
+        a2a_port=4567,
+        cap_token_id="tok-1",
+        a2a_ready=False,
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+
+    sup.on_event(rec.agent_id, {
+        "event": "agent_ready", "cap_token_id": "tok-1",
+    })
+    assert sup.get(rec.agent_id).a2a_ready is True  # type: ignore[union-attr]
+    assert sup.get(rec.agent_id).to_agent_entry()["a2a_ready"] is True  # type: ignore[union-attr]
+
+    sup.on_event(rec.agent_id, {
+        "event": "agent_not_ready", "reason": "cap-token-invalid",
+    })
+    assert sup.get(rec.agent_id).a2a_ready is False  # type: ignore[union-attr]
+
+
+def test_supervisor_ignores_ready_event_for_rotated_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A delayed stdout event for the previous cap token must not
+    re-enable routing after the supervisor has started a rotation."""
+    import logging
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    sup = AgentSupervisor(InMemoryRunner())
+    rec = AgentRecord(
+        agent_id="rotating-agent",
+        kind="mock",
+        label="rotating-agent",
+        did="did:key:z6MkRotating",
+        capabilities=["a2a:message_send"],
+        started_at="now",
+        last_seen="now",
+        a2a_port=43123,
+        cap_token_id="token-new",
+        a2a_ready=False,
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+
+    with caplog.at_level(logging.WARNING):
+        sup.on_event(rec.agent_id, {
+            "event": "agent_ready",
+            "agent_id": rec.agent_id,
+            "cap_token_id": "token-old",
+        })
+    assert sup.get(rec.agent_id).a2a_ready is False  # type: ignore[union-attr]
+    assert any(
+        "ignoring stale ready event" in r.getMessage()
+        for r in caplog.records
+    )
+
+    sup.on_event(rec.agent_id, {
+        "event": "agent_ready",
+        "agent_id": rec.agent_id,
+        "cap_token_id": "token-new",
+    })
+    assert sup.get(rec.agent_id).a2a_ready is True  # type: ignore[union-attr]
+
+
+def test_supervisor_tracks_provider_state_separately() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    sup = AgentSupervisor(InMemoryRunner())
+    rec = AgentRecord(
+        agent_id="provider-state",
+        kind="hermes",
+        label="provider-state",
+        did="did:key:z6MkProviderState",
+        capabilities=[],
+        started_at="now",
+        last_seen="now",
+        a2a_port=4568,
+        a2a_ready=True,
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+    assert rec.provider_state == "unknown"
+    assert sup.mark_provider_state(rec.agent_id, "degraded") is True
+    snapshot = sup.list_agents()[0]
+    assert snapshot.provider_state == "degraded"
+    assert snapshot.to_agent_entry()["provider_state"] == "degraded"
+    assert sup.mark_provider_state(rec.agent_id, "ready") is True
+    assert sup.get(rec.agent_id).provider_state == "ready"  # type: ignore[union-attr]
+
+
+def test_cap_token_marker_ignores_mtime_for_identical_content(
+    tmp_path: Path,
+) -> None:
+    import os
+    from nth_dao.web.dummy_agent import _cap_token_file_marker
+
+    path = tmp_path / "cap_token.json"
+    path.write_bytes(b'{"token_id":"same"}')
+    first = _cap_token_file_marker(str(path))
+    assert first is not None
+    mtime = path.stat().st_mtime_ns
+    os.utime(path, ns=(mtime + 1_000_000_000, mtime + 1_000_000_000))
+    second = _cap_token_file_marker(str(path))
+    assert second == first
+    path.write_bytes(b'{"token_id":"other"}')
+    assert _cap_token_file_marker(str(path)) != second
+
+
+def test_hermes_child_bypasses_proxy_for_loopback(monkeypatch) -> None:
+    import os
+
+    from nth_dao.web.dummy_agent import _ensure_local_proxy_bypass
+
+    monkeypatch.setenv("NO_PROXY", "example.test,127.0.0.1")
+
+    _ensure_local_proxy_bypass()
+
+    value = os.environ["NO_PROXY"]
+    assert "example.test" in value
+    assert value.lower().count("127.0.0.1") == 1
+    assert "localhost" in value
+    assert "::1" in value
+    assert os.environ["no_proxy"] == value
+
+
+def test_hermes_child_preserves_wildcard_proxy_bypass(monkeypatch) -> None:
+    import os
+
+    from nth_dao.web.dummy_agent import _ensure_local_proxy_bypass
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+
+    _ensure_local_proxy_bypass()
+
+    assert os.environ["NO_PROXY"] == "*"
+    assert os.environ["no_proxy"] == "*"
+
+
+def test_hermes_child_forces_embedded_logging_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.dummy_agent import _configure_child_runtime
+
+    monkeypatch.setenv("NTH_DAO_EMBEDDED_HERMES_LOGGING", "0")
+    _configure_child_runtime("hermes")
+    assert os.environ["NTH_DAO_EMBEDDED_HERMES_LOGGING"] == "1"
+
+    # Non-Hermes children do not rewrite an operator's unrelated setting.
+    monkeypatch.setenv("NTH_DAO_EMBEDDED_HERMES_LOGGING", "0")
+    _configure_child_runtime("mock")
+    assert os.environ["NTH_DAO_EMBEDDED_HERMES_LOGGING"] == "0"
+
+
+def test_hermes_child_detaches_shared_file_handlers(monkeypatch, tmp_path) -> None:
+    import logging
+
+    from nth_dao.web.dummy_agent import (
+        _disable_embedded_hermes_file_logging,
+    )
+
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+
+    class _FakeFileHandler(logging.Handler):
+        def __init__(self, path: Path) -> None:
+            super().__init__()
+            self.baseFilename = str(path)
+
+    shared = _FakeFileHandler(tmp_path / "logs" / "agent.log")
+    unrelated = logging.StreamHandler()
+    monkeypatch.setattr(root, "handlers", [shared, unrelated])
+    try:
+        assert _disable_embedded_hermes_file_logging() == 1
+        assert unrelated in root.handlers
+        assert shared not in root.handlers
+    finally:
+        root.handlers[:] = original_handlers
+
+
+def test_hermes_child_logging_setup_is_process_local(monkeypatch, tmp_path) -> None:
+    import hermes_logging
+    import logging
+
+    from nth_dao.web.dummy_agent import _patch_embedded_hermes_logging
+
+    original_setup = hermes_logging.setup_logging
+    original_handlers = list(logging.getLogger().handlers)
+    monkeypatch.delattr(hermes_logging, "_nth_dao_embedded_logging", raising=False)
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    try:
+        _patch_embedded_hermes_logging()
+        assert hermes_logging.setup_logging is not original_setup
+        result = hermes_logging.setup_logging(hermes_home=tmp_path)
+        assert result == tmp_path / "logs"
+        assert any(
+            isinstance(handler, logging.NullHandler)
+            for handler in logging.getLogger().handlers
+        )
+    finally:
+        logging.getLogger().handlers[:] = original_handlers
+
+
+def test_supervisor_projects_dead_agent_as_not_a2a_ready() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    runner = InMemoryRunner()
+    sup = AgentSupervisor(runner)
+    rec = AgentRecord(
+        agent_id="dead-ready",
+        kind="mock",
+        label="dead-ready",
+        did="did:key:z6MkDeadReady",
+        capabilities=[],
+        started_at="now",
+        last_seen="now",
+        a2a_port=4569,
+        a2a_ready=True,
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+    runner._alive[rec.agent_id] = False  # type: ignore[attr-defined]
+    snapshot = sup.list_agents()[0]
+    assert snapshot.alive is False
+    assert snapshot.a2a_ready is False
+
+
+def test_token_rotation_resets_degraded_provider_state() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    runner = InMemoryRunner()
+    sup = AgentSupervisor(runner, cap_token_dir=None)
+    rec = AgentRecord(
+        agent_id="rotate-provider",
+        kind="hermes",
+        label="rotate-provider",
+        did="did:key:z6MkRotateProvider",
+        capabilities=[],
+        started_at="now",
+        last_seen="now",
+        a2a_port=4570,
+        cap_token_id="old-token",
+        a2a_ready=True,
+        provider_state="degraded",
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+    assert sup.refresh_cap_token(
+        rec.agent_id,
+        {"token_id": "new-token", "subject_did": rec.did},
+    ) == "new-token"
+    current = sup.get(rec.agent_id)
+    assert current.a2a_ready is False  # type: ignore[union-attr]
+    assert current.provider_state == "unknown"  # type: ignore[union-attr]
+
+
+def test_subprocess_cap_token_rotation_updates_readiness(
+    tmp_path: Path,
+) -> None:
+    import json as _json
+    import os
+    import uuid
+
+    from nth_dao.cap_token import sign_cap_token
+    from nth_dao.identity import AgentIdentity
+
+    events: list[dict] = []
+    runner = SubprocessRunner(
+        on_event=lambda _id, event: events.append(event),
+        handshake_timeout=_SMOKE_TIMEOUT,
+    )
+    agent_id = f"rotation-{uuid.uuid4().hex[:10]}"
+    cap_token_path = tmp_path / "cap_token.json"
+    pid, did = runner.start(
+        agent_id, kind="mock", cap_token_file_path=str(cap_token_path),
+    )
+    if pid is None:
+        pytest.skip("subprocess could not start (CI sandboxing?)")
+
+    issuer = AgentIdentity.generate(label="rotation-issuer")
+
+    def write_token(token: dict) -> None:
+        tmp = cap_token_path.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(token), encoding="utf-8")
+        os.replace(str(tmp), str(cap_token_path))
+
+    def wait_for(event_name: str, token_id: str = "") -> dict:
+        deadline = time.time() + _SMOKE_TIMEOUT
+        while time.time() < deadline:
+            for event in events:
+                if event.get("event") != event_name:
+                    continue
+                if token_id and event.get("cap_token_id") != token_id:
+                    continue
+                return event
+            time.sleep(0.05)
+        raise AssertionError(
+            f"did not see {event_name}/{token_id}; "
+            f"events={[e.get('event') for e in events]!r}"
+        )
+
+    try:
+        token1 = sign_cap_token(
+            issuer=issuer, subject_did=did,
+            capabilities=["a2a:message_send"], token_id="tok-rotation-1",
+        )
+        write_token(token1)
+        wait_for("agent_ready", "tok-rotation-1")
+
+        token2 = sign_cap_token(
+            issuer=issuer, subject_did=did,
+            capabilities=["a2a:message_send"], token_id="tok-rotation-0002",
+        )
+        write_token(token2)
+        wait_for("agent_ready", "tok-rotation-0002")
+
+        cap_token_path.unlink()
+        wait_for("agent_not_ready")
+    finally:
+        runner.stop(agent_id)

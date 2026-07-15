@@ -37,6 +37,15 @@ from .base import (
 )
 
 
+def _decode_process_output(value: object) -> str:
+    """Decode CLI output without inheriting the Windows console codec."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value or "")
+
+
 class HermesBackend(AgentBackend):
     """Hermes Agent subprocess """
 
@@ -44,8 +53,9 @@ class HermesBackend(AgentBackend):
 
     #  Hermes
     HERMES_ENTRYPOINTS = [
-        ["hermes"],                       #  PATH
-        [sys.executable, "-m", "hermes"], # python -m hermes
+        ["hermes"],                                    #  PATH
+        [sys.executable, "-m", "hermes_cli.main"],     # python -m hermes_cli.main (Windows compat)
+        [sys.executable, "-m", "hermes"],              # python -m hermes
     ]
 
     def __init__(
@@ -78,7 +88,7 @@ class HermesBackend(AgentBackend):
                 capture_output=True,
                 timeout=5,
             )
-            stdout = (result.stdout or b"").decode("utf-8", errors="replace")
+            stdout = _decode_process_output(result.stdout)
             return result.returncode == 0 and "ok" in stdout
         except Exception:
             return False
@@ -105,10 +115,13 @@ class HermesBackend(AgentBackend):
                     "hermes CLI not in PATH and `import hermes` failed"
                 ),
             )
+        # Resolve .CMD shim on Windows (shutil.which returns the full path)
+        cli = shutil.which("hermes")
         try:
             result = subprocess.run(
-                ["hermes", "--version"],
-                capture_output=True, text=True, timeout=timeout,
+                [cli, "--version"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=timeout,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             return PreflightResult(
@@ -118,14 +131,16 @@ class HermesBackend(AgentBackend):
                 detail=f"hermes --version {type(exc).__name__}: {exc}",
             )
         ok = result.returncode == 0
+        stdout = _decode_process_output(result.stdout)
+        stderr = _decode_process_output(result.stderr)
         return PreflightResult(
             ok=ok, backend_id=self.backend_id,
             checked_at=datetime.now(timezone.utc).isoformat(),
             duration_ms=int((time.monotonic() - t0) * 1000),
-            detail="" if ok else (result.stderr or result.stdout).strip()[:200],
+            detail="" if ok else (stderr or stdout).strip()[:200],
             structured={
                 "returncode": result.returncode,
-                "stdout_head": result.stdout[:500],
+                "stdout_head": stdout[:500],
             },
         )
 
@@ -138,7 +153,6 @@ class HermesBackend(AgentBackend):
                 result = subprocess.run(
                     cmd + ["--help"],
                     capture_output=True,
-                    text=True,
                     timeout=10,
                 )
                 if result.returncode == 0:

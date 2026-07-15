@@ -56,11 +56,15 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.server
+import importlib.machinery
 import importlib.util
 import json
 import locale
+import logging
 import os
+import queue
 import re
 import signal
 import socketserver
@@ -72,6 +76,15 @@ from typing import Any, ClassVar, Dict, FrozenSet, Iterator, Optional, Tuple
 
 
 _STOP = False
+# Hermes' embedded runtime replaces ``sys.stdout``/``sys.stderr`` during
+# AIAgent construction. Keep the supervisor protocol attached to the streams
+# inherited at process start so the heartbeat thread cannot deadlock with
+# Hermes' safe-stdio wrapper. These are frozen by ``main()`` immediately
+# before the child starts its runtime. When helpers are called in-process
+# (for example under pytest), the current streams remain observable.
+_EVENT_STDOUT: Any = None
+_EVENT_STDERR: Any = None
+logger = logging.getLogger("nth_dao.web.dummy_agent")
 
 
 def _request_stop(_signum: int, _frame: object) -> None:
@@ -98,10 +111,131 @@ def _env_float(
     return max(minimum, min(maximum, value))
 
 
+def _ensure_local_proxy_bypass() -> None:
+    """Keep localhost health checks out of an operator's HTTP proxy.
+
+    Hermes may probe local browser/CDP endpoints while constructing an
+    ``AIAgent``.  On Windows, a configured proxy can otherwise receive
+    requests for ``127.0.0.1`` and turn a refused local connection into
+    repeated proxy timeouts.  Preserve the operator's existing bypass list
+    and add only the loopback hosts required by the child-local A2A surface.
+    """
+    hosts = ("127.0.0.1", "localhost", "::1")
+    values = {
+        key: os.environ.get(key, "")
+        for key in ("NO_PROXY", "no_proxy")
+    }
+    if any(value.strip() == "*" for value in values.values()):
+        return
+
+    merged = []
+    seen = set()
+    for raw in values.values():
+        for item in raw.replace(";", ",").split(","):
+            token = item.strip()
+            folded = token.lower()
+            if token and folded not in seen:
+                merged.append(token)
+                seen.add(folded)
+    for host in hosts:
+        if host.lower() not in seen:
+            merged.append(host)
+            seen.add(host.lower())
+
+    value = ",".join(merged)
+    # Keep both spellings in sync.  Requests honours either one, while
+    # Windows environment lookup is case-insensitive.
+    os.environ["NO_PROXY"] = value
+    os.environ["no_proxy"] = value
+
+
+def _configure_child_runtime(kind: str) -> None:
+    """Apply invariants required before resolving a child backend."""
+    if kind == "hermes":
+        # This is a child-runtime invariant, not an operator override.
+        # Inherited ``0`` would re-enable Hermes' shared rotating files and
+        # recreate the Windows multi-process log-rotation failure.
+        os.environ["NTH_DAO_EMBEDDED_HERMES_LOGGING"] = "1"
+    _ensure_local_proxy_bypass()
+
+
+def _disable_embedded_hermes_file_logging() -> int:
+    """Detach Hermes' rotating file handlers in an embedded child.
+
+    Multiple supervised Hermes children share the operator's Hermes profile.
+    They must not concurrently rotate the same ``agent.log`` and
+    ``errors.log`` files: Windows holds the file open across processes and
+    the resulting logging traceback can fill the child's stderr pipe while
+    the provider call is starting. NTH already drains structured child
+    diagnostics, so discard only handlers targeting Hermes' conventional log
+    filenames and leave unrelated application handlers untouched.
+    """
+    import logging
+
+    root = logging.getLogger()
+    hermes_log_names = {"agent.log", "errors.log", "gateway.log"}
+    removed = 0
+    for handler in list(root.handlers):
+        base_filename = getattr(handler, "baseFilename", "")
+        if not base_filename:
+            continue
+        try:
+            path = Path(str(base_filename)).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path.parent.name != "logs" or path.name not in hermes_log_names:
+            continue
+        root.removeHandler(handler)
+        try:
+            handler.close()
+        except (OSError, RuntimeError):
+            pass
+        removed += 1
+
+    if removed and not root.handlers:
+        root.addHandler(logging.NullHandler())
+    return removed
+
+
+def _patch_embedded_hermes_logging() -> None:
+    """Prevent Hermes ``AIAgent`` construction from adding shared files.
+
+    Hermes calls ``setup_logging`` from inside ``AIAgent.__init__``, after
+    ``run_agent`` has been imported and immediately before provider
+    resolution. Removing handlers after construction is therefore too late.
+    This process-local shim keeps the normal Hermes module and credentials
+    intact while making its embedded logging setup a no-op with a
+    ``NullHandler`` fallback.
+    """
+    import logging
+
+    import hermes_logging  # type: ignore[import-not-found]
+
+    if getattr(hermes_logging, "_nth_dao_embedded_logging", False):
+        return
+
+    _disable_embedded_hermes_file_logging()
+
+    def _embedded_setup_logging(*_args: Any, **_kwargs: Any) -> Path:
+        root = logging.getLogger()
+        _disable_embedded_hermes_file_logging()
+        if not root.handlers:
+            root.addHandler(logging.NullHandler())
+        home = _kwargs.get("hermes_home") or (Path.home() / ".hermes")
+        return Path(home) / "logs"
+
+    hermes_logging.setup_logging = _embedded_setup_logging
+    hermes_logging._nth_dao_embedded_logging = True
+
+
 def _print_event(**fields: object) -> None:
     """Emit one NDJSON event line to stdout. Flushes so the
     supervisor's reader thread sees the line promptly. """
-    print(json.dumps(fields, ensure_ascii=False), flush=True)
+    print(
+        json.dumps(fields, ensure_ascii=False),
+        file=_EVENT_STDOUT if _EVENT_STDOUT is not None else sys.stdout,
+        flush=True,
+    )
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -142,7 +276,8 @@ def _print_error(**fields: object) -> None:
     API. """
     print(
         json.dumps(fields, ensure_ascii=False),
-        file=sys.stderr, flush=True,
+        file=_EVENT_STDERR if _EVENT_STDERR is not None else sys.stderr,
+        flush=True,
     )
 
 
@@ -165,6 +300,10 @@ class _CapTokenHolder:
     def set(self, token: Dict[str, Any]) -> None:
         with self._lock:
             self._token = dict(token)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._token = None
 
     def get(self) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -373,6 +512,10 @@ class _AskBackend:
         # SSE consumer doesn't see the same content twice.
         meta = {k: v for k, v in result.items() if k != "response"}
         yield "done", meta
+
+
+class BackendBusyError(RuntimeError):
+    """The backend already has an uncancellable provider call in flight."""
 
 
 class _MockAskBackend(_AskBackend):
@@ -993,6 +1136,15 @@ class _ClaudeCliAskBackend(_AskBackend):
         if isinstance(explicit_model, str) and explicit_model.strip():
             self._check_model_allowed(explicit_model.strip())
 
+        if os.environ.get(
+            "NTH_AGENT_WORK_ACCESS", "workspace-write",
+        ).strip().lower() == "read-only":
+            raise RuntimeError(
+                "Claude Code CLI cannot provide an OS-enforced read-only "
+                "workspace boundary; use the Anthropic SDK backend or Codex "
+                "read-only mode for this Agent"
+            )
+
         binary = self._resolve_binary()
         if not binary:
             raise RuntimeError(
@@ -1160,13 +1312,103 @@ class _CodexCliAskBackend(_AskBackend):
     they switch to ``codex login`` rather than hunt through the
     subprocess output.
 
-    Model selection: codex picks its own default (``gpt-5.5``
-    at v0.137.0); we forward ``params["model"]`` via
-    ``--model <name>`` when present, otherwise let codex choose. """
+    Model selection: ``NTH_CODEX_MODEL`` is an operator-controlled override
+    that isolates NTH DAO from an incompatible model in the user's global
+    Codex config. A caller-supplied ``params["model"]`` still requires the
+    explicit model allowlist. """
 
     name = "codex"
-    DEFAULT_TIMEOUT_S = 90.0  # Codex is slower than Claude SDK
+    DEFAULT_TIMEOUT_S = _env_float(
+        "NTH_CODEX_ASK_TIMEOUT_S",
+        240.0,
+        minimum=60.0,
+        maximum=300.0,
+    )
     DEFAULT_MAX_TOKENS = 0    # codex doesn't take max_tokens on CLI
+    # Pin NTH DAO to a CLI-compatible model instead of inheriting a possibly
+    # newer model from the operator's interactive Codex config. Operators can
+    # still override this explicitly with NTH_CODEX_MODEL.
+    DEFAULT_MODEL = "gpt-5.4"
+    _PREFLIGHT_TTL_S = 300.0
+    _preflight_lock = threading.Lock()
+    _preflight_cache: Dict[str, tuple[float, bool, str, str]] = {}
+
+    @classmethod
+    def _cli_contract_preflight(cls, path: str) -> tuple[bool, str, str]:
+        """Verify that the installed CLI supports supervised exec flags."""
+
+        import subprocess as _sp
+
+        cache_key = os.path.normcase(str(path))
+        now = time.monotonic()
+        with cls._preflight_lock:
+            cached = cls._preflight_cache.get(cache_key)
+            if cached is not None and now - cached[0] < cls._PREFLIGHT_TTL_S:
+                return cached[1], cached[2], cached[3]
+        creation_flags = (
+            getattr(_sp, "CREATE_NO_WINDOW", 0)
+            if sys.platform.startswith("win") else 0
+        )
+        try:
+            version_result = _sp.run(
+                [path, "--version"],
+                stdin=_sp.DEVNULL,
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=8.0,
+                check=False,
+                creationflags=creation_flags,
+                env=cls._subprocess_env(),
+            )
+            help_result = _sp.run(
+                [path, "exec", "--help"],
+                stdin=_sp.DEVNULL,
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=8.0,
+                check=False,
+                creationflags=creation_flags,
+                env=cls._subprocess_env(),
+            )
+            version = (version_result.stdout or version_result.stderr).strip()[:120]
+            help_text = f"{help_result.stdout}\n{help_result.stderr}"
+            required = (
+                "--ignore-user-config",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "--ephemeral",
+            )
+            missing = [flag for flag in required if flag not in help_text]
+            ok = (
+                version_result.returncode == 0
+                and help_result.returncode == 0
+                and not missing
+            )
+            reason = (
+                ""
+                if ok else
+                "installed Codex CLI does not support required supervised exec flags"
+                if missing else
+                "installed Codex CLI failed its non-interactive help/version probe"
+            )
+        except (OSError, _sp.TimeoutExpired):
+            ok = False
+            reason = "installed Codex CLI could not complete a bounded preflight"
+            version = ""
+        with cls._preflight_lock:
+            cls._preflight_cache[cache_key] = (now, ok, reason, version)
+        return ok, reason, version
+
+    @classmethod
+    def _clear_preflight_cache(cls) -> None:
+        with cls._preflight_lock:
+            cls._preflight_cache.clear()
 
     @staticmethod
     def _decode_cli_output(value: Any) -> str:
@@ -1428,7 +1670,31 @@ class _CodexCliAskBackend(_AskBackend):
             )
 
         binary = self._resolve_binary()
-        argv = [binary, "exec", "--skip-git-repo-check"]
+        work_access = os.environ.get(
+            "NTH_AGENT_WORK_ACCESS", "workspace-write",
+        ).strip().lower()
+        if work_access not in {"read-only", "workspace-write"}:
+            raise RuntimeError("invalid supervised Agent work access policy")
+        argv = [
+            binary,
+            "exec",
+            # Keep OAuth/API authentication from CODEX_HOME, but do not load
+            # interactive plugins, MCP servers, or model/reasoning overrides.
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            # Override any permissive global Codex setting. The child process
+            # runs from its per-agent sandbox, so workspace-write is confined
+            # to that directory rather than the NTH DAO source checkout.
+            "--sandbox",
+            work_access,
+            # A supervised Agent has no interactive approval channel. Fail
+            # closed instead of waiting for consent that cannot be provided.
+            "-c",
+            'approval_policy="never"',
+            # Hub calls are independent jobs and should not pollute the
+            # operator's interactive Codex session history.
+            "--ephemeral",
+        ]
         # Optional model override — codex accepts ``--model <name>``.
         # Phase 6a: apply the allowlist before invoking the CLI. When
         # MODEL_ALLOWLIST is None (the default for Codex), every
@@ -1440,17 +1706,12 @@ class _CodexCliAskBackend(_AskBackend):
             stripped = model_override.strip()
             self._check_model_allowed(stripped)
             argv.extend(["--model", stripped])
-        # CO-1 fix (review round Phase 5.4 R1): POSIX-style ``--``
-        # separator BEFORE the prompt so anything inside the prompt
-        # (e.g. ``--model gpt-3.5-turbo`` or a future
-        # ``--dangerously-bypass-approvals``) is treated as a
-        # positional argument by the CLI parser, NOT as another
-        # flag override. Without this a peer with a valid
-        # cap_token could inject flags via the prompt text and
-        # override our model / budget / safety settings. Verified
-        # exploitable on codex-cli v0.137.0.
-        argv.append("--")
-        argv.append(prompt)
+        else:
+            operator_model = os.environ.get("NTH_CODEX_MODEL", "").strip()
+            argv.extend(["--model", operator_model or self.DEFAULT_MODEL])
+        # Read untrusted prompt text from stdin so it is absent from process
+        # listings and can never be parsed as another CLI flag.
+        argv.append("-")
 
         # CREATE_NO_WINDOW (Windows-only) to suppress console flash;
         # same pattern as the Claude CLI backend (M-2 fix).
@@ -1461,9 +1722,11 @@ class _CodexCliAskBackend(_AskBackend):
         try:
             completed = _sp.run(
                 argv,
-                stdin=_sp.DEVNULL,
+                input=prompt,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 # 2026-06-13 field-test fix: decode UTF-8 explicitly.
                 # ``text=True`` uses the platform locale (GBK on many
                 # Chinese Windows hosts), which can crash on non-ASCII
@@ -1510,13 +1773,12 @@ class _CodexCliAskBackend(_AskBackend):
                 for k in ("approve", "approval", "waiting for", "y/n")
             )
             tight_budget = exc.timeout < 15.0
-            hints: List[str] = []
+            hints: list[str] = []
             if saw_approval:
                 hints.append(
                     "child stderr mentions approval — codex is "
-                    "blocked waiting for interactive consent that "
-                    "our stdin=/dev/null can't supply. Try a "
-                    "no-tool prompt or use kind=anthropic/hermes."
+                    "blocked despite approval_policy=never. Check the installed "
+                    "Codex version and local policy overrides."
                 )
             if tight_budget:
                 hints.append(
@@ -1526,10 +1788,9 @@ class _CodexCliAskBackend(_AskBackend):
                 )
             if not hints:
                 hints.append(
-                    "if the prompt would trigger tool use, codex "
-                    "may be waiting for interactive approval; "
-                    "stdin is /dev/null here. Try a no-tool "
-                    "prompt or use kind=anthropic/hermes."
+                    "the provider may be queued or the requested work may exceed "
+                    "the timeout. Check Codex usage and retry with a larger "
+                    "timeout_s."
                 )
             raise TimeoutError(
                 f"codex CLI did not respond within "
@@ -1566,6 +1827,12 @@ class _CodexCliAskBackend(_AskBackend):
                     "credits, or wait for the reset window shown by Codex CLI. "
                     f"Tail: {err}"
                 )
+            if "requires a newer version of codex" in err_lower:
+                raise RuntimeError(
+                    "codex CLI is too old for the configured model. Upgrade "
+                    "Codex or set NTH_CODEX_MODEL to a model supported by the "
+                    "installed CLI."
+                )
             if "401" in err_full or "not logged in" in err_lower \
                     or "please run codex login" in err_lower:
                 raise RuntimeError(
@@ -1598,18 +1865,17 @@ class _HermesAskBackend(_AskBackend):
         operator machine, so importing ``run_agent`` is cheap except for
         the first ``AIAgent`` construction/config/provider load.
 
-    Each ``ask`` creates a fresh ``AIAgent``:
-      * State isolation: each prompt gets a clean conversation history.
-      * No shared instance lock is needed; concurrent calls cannot
-        corrupt one another's agent state.
-      * Cost: construction can add roughly 30 seconds. This is
-        acceptable for demos/single-operator use; production should
-        reuse an agent, call ``reset_session_state()``, and serialize
-        ``chat()`` behind a lock.
+    One backend instance owns one daemon worker and one reusable
+    ``AIAgent``. Calls are serialized because Hermes does not promise that
+    one agent instance is thread-safe. A timed-out provider call cannot be
+    cancelled by ``AIAgent.chat``; the worker therefore remains marked busy
+    until that call actually returns, preventing a second request from
+    piling onto the provider queue. Failed or timed-out sessions are closed
+    and rebuilt for the next request.
 
     Auth is delegated to Hermes itself via ``~/.hermes/config.yaml``
     and ``auth.json``. The default provider/model is DeepSeek
-    ``deepseek-v4-pro`` unless the operator sets ``NTH_HERMES_MODEL``.
+    ``deepseek-v4-flash`` unless the operator sets ``NTH_HERMES_MODEL``.
     Operators may subclass to allow explicit model overrides for other
     Hermes-configured aliases.
 
@@ -1628,24 +1894,250 @@ class _HermesAskBackend(_AskBackend):
         maximum=300.0,
     )
 
-    # Default model: bare ``deepseek-v4-pro``. Field testing showed
+    # Default model: bare ``deepseek-v4-flash``. The pro endpoint can remain
+    # queued beyond the 300s AgentLink budget, while flash completes the same
+    # one-shot probe reliably. Local collaboration values bounded latency over
+    # maximum single-call capability; operators can opt back into pro through
+    # NTH_HERMES_MODEL.
+    #
+    # Field testing also showed
     # that ``AIAgent(model='deepseek/deepseek-v4-pro')`` is forwarded
     # as a literal model string and rejected by DeepSeek. The provider
     # prefix belongs in Hermes config parsing, not the AIAgent model
     # argument. ``NTH_HERMES_MODEL`` lets operators route to a faster
     # Hermes-configured alias without granting remote peers arbitrary
     # model override power through params['model'].
-    DEFAULT_MODEL = "deepseek-v4-pro"
+    DEFAULT_MODEL = "deepseek-v4-flash"
 
     # Align prompt cap with other backends to bound hostile context use.
     MAX_PROMPT_CHARS = 32 * 1024
 
+    # This is an exact post-resolution allowlist, not a trust decision based
+    # on Hermes' toolset label. A future Hermes release may expand ``safe``;
+    # NTH DAO must review that expansion before exposing it to channel input.
+    SAFE_RESOLVED_TOOL_NAMES = frozenset(
+        {
+            "image_generate",
+            "vision_analyze",
+            "web_extract",
+            "web_search",
+        }
+    )
+    UNSAFE_TOOLS_ENV = "NTH_ALLOW_UNSAFE_HERMES_TOOLS"
+
     _IMPORT_LOCK = threading.RLock()
+
+    def __init__(self) -> None:
+        self._jobs: "queue.Queue[object]" = queue.Queue(maxsize=1)
+        self._state_lock = threading.Lock()
+        self._busy = False
+        self._closed = False
+        self._worker: Optional[threading.Thread] = None
+        self._agent: Any = None
+        self._agent_model = ""
+        self._agent_class: Any = None
+
+    @staticmethod
+    def _debug_phase(phase: str, *, model: str = "") -> None:
+        if os.environ.get("NTH_HERMES_DEBUG_PHASES") != "1":
+            return
+        _print_error(
+            event="hermes_backend_phase",
+            phase=phase,
+            model=model,
+        )
+
+    def _load_agent_class(self) -> Any:
+        if self._agent_class is not None:
+            return self._agent_class
+        try:
+            self._prepare_import_path()
+            from run_agent import AIAgent  # type: ignore[import-not-found]
+            if os.environ.get("NTH_DAO_EMBEDDED_HERMES_LOGGING") == "1":
+                _patch_embedded_hermes_logging()
+        except ImportError as exc:
+            self._raise_import_error(exc)
+        self._agent_class = AIAgent
+        return AIAgent
+
+    def _build_agent(self, model: str) -> Any:
+        agent_class = self._load_agent_class()
+        toolsets = self.checked_toolsets()
+        agent = agent_class(
+            model=model,
+            enabled_toolsets=toolsets,
+            quiet_mode=True,
+            verbose_logging=False,
+            skip_memory=True,
+            skip_context_files=True,
+        )
+        try:
+            self._verify_resolved_tools(agent, toolsets)
+        except Exception:
+            close = getattr(agent, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - preserve policy failure
+                    pass
+            raise
+        return agent
+
+    def _close_agent(self) -> None:
+        agent = self._agent
+        self._agent = None
+        self._agent_model = ""
+        if agent is not None:
+            try:
+                agent.close()
+            except Exception:  # noqa: BLE001 - cleanup must not kill worker
+                pass
+
+    def _prepare_agent_for_prompt(self, model: str) -> None:
+        """Guarantee that one ask cannot inherit another ask's context.
+
+        Hermes implementations may expose a documented session reset. When
+        they do, use it to avoid an unnecessary cold start. If they do not,
+        rebuild the agent instead of guessing that ``skip_memory`` also clears
+        the in-memory conversation history.
+        """
+        if self._agent is None or self._agent_model != model:
+            self._close_agent()
+            self._agent = self._build_agent(model)
+            self._agent_model = model
+            return
+        reset = getattr(self._agent, "reset_session_state", None)
+        if callable(reset):
+            try:
+                reset()
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._debug_phase("session_reset_failed", model=model)
+                logger.warning("Hermes session reset failed; rebuilding agent: %s", exc)
+        self._close_agent()
+        self._agent = self._build_agent(model)
+        self._agent_model = model
+
+    def _worker_loop(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            prompt, model, done, result_box = job
+            keep_agent = True
+            try:
+                self._debug_phase("build_start", model=model)
+                self._prepare_agent_for_prompt(model)
+                self._debug_phase("build_done", model=model)
+                self._debug_phase("chat_start", model=model)
+                response = self._agent.chat(prompt)
+                self._debug_phase("chat_done", model=model)
+                if not isinstance(response, str):
+                    raise RuntimeError(
+                        "hermes AIAgent.chat() returned a non-string value: "
+                        f"{type(response).__name__}"
+                    )
+                result_box["response"] = response
+            except BaseException as exc:  # noqa: BLE001 - normalize exits
+                self._debug_phase(
+                    "error",
+                    model=model,
+                )
+                keep_agent = False
+                if isinstance(exc, Exception):
+                    result_box["error"] = exc
+                else:
+                    err = RuntimeError(
+                        "hermes worker exited with "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    err.__cause__ = exc
+                    result_box["error"] = err
+            finally:
+                if result_box.get("timed_out") or not keep_agent or self._closed:
+                    self._close_agent()
+                with self._state_lock:
+                    self._busy = False
+                done.set()
+
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="hermes-agent-worker",
+            daemon=True,
+        )
+        self._worker.start()
 
     @classmethod
     def default_model(cls) -> str:
         raw = os.environ.get("NTH_HERMES_MODEL", "").strip()
         return raw or cls.DEFAULT_MODEL
+
+    @staticmethod
+    def default_toolsets() -> list[str]:
+        raw = os.environ.get("NTH_HERMES_TOOLSETS", "safe")
+        values = list(dict.fromkeys(
+            item.strip() for item in raw.split(",") if item.strip()
+        ))
+        # Empty configuration must fail closed rather than restore Hermes'
+        # unrestricted default tool catalogue.
+        return values or ["safe"]
+
+    @classmethod
+    def unsafe_tools_enabled(cls) -> bool:
+        return os.environ.get(cls.UNSAFE_TOOLS_ENV, "").strip() == "1"
+
+    @classmethod
+    def checked_toolsets(cls) -> list[str]:
+        toolsets = cls.default_toolsets()
+        work_access = os.environ.get(
+            "NTH_AGENT_WORK_ACCESS", "workspace-write",
+        ).strip().lower()
+        if work_access == "read-only" and toolsets != ["safe"]:
+            raise RuntimeError(
+                "read-only Hermes Agents cannot enable custom toolsets; "
+                "use the reviewed 'safe' toolset or spawn a workspace-write Agent"
+            )
+        if toolsets == ["safe"] or cls.unsafe_tools_enabled():
+            return toolsets
+        raise RuntimeError(
+            "custom Hermes toolsets are disabled for NTH DAO channel asks; "
+            f"set {cls.UNSAFE_TOOLS_ENV}=1 only after reviewing the resolved "
+            "tools and accepting in-process file/terminal risk"
+        )
+
+    @classmethod
+    def _verify_resolved_tools(cls, agent: Any, toolsets: list[str]) -> None:
+        # A custom catalogue is an explicit operator trust decision. The
+        # status endpoint reports it as unsafe; the exact safe contract below
+        # intentionally does not pretend to constrain that mode.
+        if toolsets != ["safe"]:
+            return
+        try:
+            raw_names = getattr(agent, "valid_tool_names")
+        except (AttributeError, RuntimeError) as exc:
+            raise RuntimeError(
+                "Hermes safe tool policy could not inspect valid_tool_names"
+            ) from exc
+        if isinstance(raw_names, (str, bytes)) or not isinstance(
+            raw_names, (list, tuple, set, frozenset)
+        ):
+            raise RuntimeError(
+                "Hermes safe tool policy requires valid_tool_names to be a sequence"
+            )
+        if any(not isinstance(name, str) or not name.strip() for name in raw_names):
+            raise RuntimeError(
+                "Hermes safe tool policy received an invalid resolved tool name"
+            )
+        resolved = {name.strip() for name in raw_names}
+        unexpected = sorted(resolved - cls.SAFE_RESOLVED_TOOL_NAMES)
+        if unexpected:
+            raise RuntimeError(
+                "Hermes safe toolset resolved unreviewed tools: "
+                + ", ".join(unexpected)
+            )
 
     @staticmethod
     def _is_run_agent_missing(exc: ImportError) -> bool:
@@ -1679,8 +2171,33 @@ class _HermesAskBackend(_AskBackend):
         module even after ``sys.path`` is fixed.
         """
         with cls._IMPORT_LOCK:
-            if "run_agent" in sys.modules:
-                return
+            loaded = sys.modules.get("run_agent")
+            if loaded is not None:
+                # A foreign module can be imported before this adapter gets
+                # a chance to repair sys.path.  Only trust a preloaded module
+                # when its file is the same module PathFinder would select;
+                # synthetic modules without a file are retained for tests and
+                # embedding shims.
+                loaded_origin = getattr(loaded, "__file__", None)
+                if not loaded_origin:
+                    return
+                try:
+                    discovered = importlib.machinery.PathFinder.find_spec(
+                        "run_agent", sys.path,
+                    )
+                except (ImportError, ValueError):
+                    discovered = None
+                discovered_origin = getattr(discovered, "origin", None)
+                if (
+                    discovered_origin
+                    and os.path.normcase(os.path.abspath(str(loaded_origin)))
+                    == os.path.normcase(os.path.abspath(str(discovered_origin)))
+                ):
+                    return
+                # Continue below after evicting a concrete foreign module;
+                # the normal import then resolves the module from the root
+                # selected by the repaired sys.path.
+                sys.modules.pop("run_agent", None)
             try:
                 spec = importlib.util.find_spec("run_agent")
             except (ImportError, ValueError) as exc:
@@ -1755,70 +2272,46 @@ class _HermesAskBackend(_AskBackend):
         else:
             model = self.default_model()
 
-        try:
-            self._prepare_import_path()
-            from run_agent import AIAgent  # type: ignore[import-not-found]
-        except ImportError as exc:
-            self._raise_import_error(exc)
-
-        # Run in a daemon worker so this adapter can enforce an outer
-        # timeout; AIAgent.chat() has no timeout argument.
-        result_box: Dict[str, Any] = {}
-
-        def _worker() -> None:
-            agent = None
-            try:
-                agent = AIAgent(
-                    model=model,
-                    quiet_mode=True,
-                    verbose_logging=False,
-                    skip_memory=True,
-                    skip_context_files=True,
+        # Resolve/import before claiming the slot so an installation error
+        # does not strand the backend in a permanently busy state.
+        self._load_agent_class()
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("hermes backend is closed")
+            if self._busy:
+                raise BackendBusyError(
+                    "hermes backend is busy with an earlier provider call; "
+                    "wait for it to finish or restart the supervised agent"
                 )
-                response = agent.chat(prompt)
-                if not isinstance(response, str):
-                    result_box["error"] = RuntimeError(
-                        "hermes AIAgent.chat() returned a non-string value: "
-                        f"{type(response).__name__}"
-                    )
-                    return
-                result_box["response"] = response
-            except BaseException as exc:  # noqa: BLE001
-                # AIAgent may raise SystemExit/KeyboardInterrupt from inside
-                # its own stack. If that escapes the worker thread, pytest and
-                # production logs see an unhandled thread exception while the
-                # HTTP caller gets an empty or misleading response. Convert it
-                # into a normal RuntimeError that the main thread can raise.
-                if isinstance(exc, Exception):
-                    result_box["error"] = exc
-                else:
-                    err = RuntimeError(
-                        "hermes worker exited with "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    err.__cause__ = exc
-                    result_box["error"] = err
-            finally:
-                if agent is not None:
-                    try:
-                        agent.close()
-                    except Exception:  # noqa: BLE001 — best-effort
-                        pass
+            self._busy = True
 
-        worker = threading.Thread(
-            target=_worker, name="hermes-ask", daemon=True,
-        )
-        worker.start()
-        worker.join(timeout=timeout_s)
-        if worker.is_alive():
+        done = threading.Event()
+        result_box: Dict[str, Any] = {}
+        try:
+            self._ensure_worker()
+        except BaseException:
+            with self._state_lock:
+                self._busy = False
+            raise
+        try:
+            self._jobs.put_nowait((prompt, model, done, result_box))
+        except queue.Full:
+            with self._state_lock:
+                self._busy = False
+            raise BackendBusyError(
+                "hermes backend queue is full; retry after the active call"
+            )
+
+        if not done.wait(timeout_s):
+            result_box["timed_out"] = True
             # The worker is still waiting on provider I/O. Give up and
             # let the daemon thread die with the process; the next ask
-            # creates a fresh AIAgent instead of reusing this instance.
             raise TimeoutError(
                 f"hermes AIAgent.chat did not respond within "
                 f"{timeout_s:.1f}s for prompt[{len(prompt)}]. "
-                "The remote provider may be queued; increase timeout_s "
-                "or use a faster model configured in ~/.hermes/auth.json."
+                "The remote provider may be queued; the agent is held busy "
+                "until that call ends. Use a faster Hermes model or restart "
+                "the supervised agent."
             )
 
         err = result_box.get("error")
@@ -1839,6 +2332,21 @@ class _HermesAskBackend(_AskBackend):
             "backend": self.name,
             "model": model,
         }
+
+    def close(self) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            busy = self._busy
+        # The worker is daemonized because provider I/O has no cancellation
+        # API. It closes the agent after an active call returns.
+        if not busy:
+            self._close_agent()
+        try:
+            self._jobs.put_nowait(None)
+        except queue.Full:
+            pass
 
 
 def _safe_str(v: Any) -> str:
@@ -1933,10 +2441,16 @@ def _build_a2a_ask_receipt(
     Pure function — extracted from the handler so it's unit-testable
     without bringing up an HTTP socket.
     """
+    def _debug_receipt_phase(phase: str) -> None:
+        if os.environ.get("NTH_HERMES_DEBUG_PHASES") == "1":
+            _print_error(event="hermes_receipt_phase", phase=phase)
+
+    _debug_receipt_phase("import_start")
     try:
         from nth_dao.execution_receipt import TimelineEntry, sign_receipt
     except ImportError:
         return None, "crypto-unavailable"
+    _debug_receipt_phase("import_done")
 
     requested_model = ""
     explicit = params.get("model")
@@ -1954,7 +2468,11 @@ def _build_a2a_ask_receipt(
     # the response they received.
     import hashlib as _hashlib
     _prompt_s = _safe_str(params.get("prompt"))
-    _response_s = _safe_str(result.get("response"))
+    # AgentLink and channel delivery expose the user-facing response after
+    # trimming transport whitespace. Hash the same canonical value so a
+    # crash-recovery reconciliation does not reject a valid receipt merely
+    # because an LLM added a trailing newline.
+    _response_s = _safe_str(result.get("response")).strip()
     payload = {
         "method": method,
         "backend": backend_name,
@@ -1972,6 +2490,9 @@ def _build_a2a_ask_receipt(
         "request_sha256": _hashlib.sha256(_prompt_s.encode("utf-8")).hexdigest(),
         "response_sha256": _hashlib.sha256(_response_s.encode("utf-8")).hexdigest(),
     }
+    agent_link_job_id = _safe_str(params.get("agent_link_job_id"))
+    if agent_link_job_id:
+        payload["agent_link_job_id"] = agent_link_job_id
     timeline = [
         TimelineEntry(
             timestamp=int(ended_at_ms),
@@ -1980,11 +2501,13 @@ def _build_a2a_ask_receipt(
         ),
     ]
     try:
+        _debug_receipt_phase("sign_start")
         receipt = sign_receipt(
             timeline, identity,
             goal_id=f"a2a:{method}",
             authorizing_cap_token=signing_cap_token,
         )
+        _debug_receipt_phase("sign_done")
     except Exception as exc:  # noqa: BLE001 — best-effort
         return None, f"sign-failed:{type(exc).__name__}"
     return receipt, ""
@@ -2081,6 +2604,8 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
     )
     codex_error = ""
     codex_runtime = "missing"
+    codex_contract_ok = False
+    codex_version = ""
     try:
         codex_binary = _CodexCliAskBackend()._resolve_binary()
         codex_cli = True
@@ -2089,18 +2614,22 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             if _CodexCliAskBackend._looks_like_node_shim(codex_binary)
             else "native"
         )
+        codex_contract_ok, codex_error, codex_version = (
+            _CodexCliAskBackend._cli_contract_preflight(codex_binary)
+        )
     except RuntimeError as exc:
         codex_cli = False
         codex_error = str(exc)
     codex_profile = (home / ".codex").exists()
     hermes_pkg = importlib.util.find_spec("run_agent") is not None
     hermes_profile = (home / ".hermes").exists()
+    hermes_unsafe_tools = _HermesAskBackend.unsafe_tools_enabled()
 
     claude_ready = (anthropic_key and anthropic_pkg) or claude_cli_ready
-    codex_ready = codex_cli and codex_profile
+    codex_ready = codex_cli and codex_profile and codex_contract_ok
     hermes_ready = hermes_pkg and hermes_profile
 
-    return {
+    statuses = {
         "mock": {
             "kind": "mock",
             "label": "Mock",
@@ -2192,11 +2721,14 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             "ready": codex_ready,
             "available": codex_cli,
             "runtime": codex_runtime,
+            "version": codex_version,
             "detail": (
                 "Codex native executable and local profile detected."
                 if codex_ready and codex_runtime == "native" else
                 "Codex npm shim, Node runtime, and local profile detected."
                 if codex_ready else
+                codex_error
+                if codex_cli and not codex_contract_ok else
                 "Codex CLI detected, but no local profile was found; run codex login."
                 if codex_cli else
                 codex_error
@@ -2208,7 +2740,8 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 "NTH_DAO_NODE to node.exe or its directory, or install a "
                 "native vendored codex.exe."
                 if codex_runtime == "node-shim" else
-                "Prompts that require tool approval may time out in non-interactive A2A calls."
+                "Supervised calls use isolated non-interactive settings. "
+                "Provider retries may run until NTH_CODEX_ASK_TIMEOUT_S."
             ),
         },
         "hermes": {
@@ -2218,6 +2751,11 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
             "available": hermes_pkg,
             "runtime": "provider-unverified" if hermes_ready else "missing-profile",
             "model": _HermesAskBackend.default_model(),
+            "toolsets": _HermesAskBackend.default_toolsets(),
+            "tool_policy": (
+                "operator-unsafe" if hermes_unsafe_tools else "safe-verified-on-start"
+            ),
+            "unsafe_tools_enabled": hermes_unsafe_tools,
             "detail": (
                 "hermes-agent package and local profile detected; provider "
                 "responsiveness is not verified until a live ask succeeds."
@@ -2227,12 +2765,21 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 "Install hermes-agent and configure its local profile."
             ),
             "warning": (
-                "Hermes runs in-process; slow providers can hold a worker "
-                "until the timeout fires. Set NTH_HERMES_MODEL to a faster "
-                "Hermes-configured alias when the default model queues."
+                "Unsafe Hermes toolsets are enabled. Hermes runs in-process, "
+                "so file or terminal tools are not an OS sandbox."
+                if hermes_unsafe_tools else
+                "Hermes runs in-process; the resolved safe tool list is "
+                "verified when the agent starts. Slow providers can hold a "
+                "worker until the timeout fires."
             ),
         },
     }
+    for kind, status in statuses.items():
+        transport_ready = bool(status.get("ready"))
+        status["transport_ready"] = transport_ready
+        status["provider_verified"] = kind == "mock"
+        status["provider_state"] = "ready" if kind == "mock" else "unverified"
+    return statuses
 
 # Phase 3g/4 debt R1: per-connection socket idle timeout on the
 # A2A handler. Bounds slowloris-style attacks where a peer opens a
@@ -2484,6 +3031,9 @@ def _start_a2a_server(
                     result = ask_backend.ask(
                         params, timeout_s=effective,
                     )
+                except BackendBusyError as exc:
+                    self._json_error(429, "backend-busy", str(exc))
+                    return
                 except TimeoutError as exc:
                     self._json_error(
                         504, "backend-timeout", str(exc),
@@ -2501,6 +3051,9 @@ def _start_a2a_server(
                     )
                     return
                 ended_at_ms = int(time.time() * 1000)
+                debug_phase = getattr(ask_backend, "_debug_phase", None)
+                if callable(debug_phase):
+                    debug_phase("receipt_start", model=str(result.get("model") or ""))
 
                 # Phase D: sign + emit a per-ask audit receipt.
                 # Best-effort: a signing failure logs but doesn't
@@ -2538,6 +3091,8 @@ def _start_a2a_server(
                             method=method,
                             reason=sign_reason,
                         )
+                if callable(debug_phase):
+                    debug_phase("receipt_done", model=str(result.get("model") or ""))
 
                 response = {"result": {
                     "method": method,
@@ -2691,6 +3246,10 @@ def _start_a2a_server(
                     "(echo, ask, ask-stream, claim, claim-sign)",
                 )
                 return
+            if method == "ask" and callable(
+                getattr(ask_backend, "_debug_phase", None),
+            ):
+                ask_backend._debug_phase("respond_start")
             self._respond(
                 200,
                 json.dumps(response, ensure_ascii=False).encode("utf-8"),
@@ -2861,6 +3420,14 @@ def _start_a2a_server(
             # if the socket is dead the write_event silently
             # returns False (BrokenPipeError shielded inside) and
             # we fall out anyway. Best-effort terminal write.
+            except BackendBusyError as exc:
+                stream_ok = False
+                write_event({
+                    "error": {
+                        "code": "backend-busy",
+                        "message": str(exc),
+                    },
+                })
             except TimeoutError as exc:
                 stream_ok = False
                 write_event({
@@ -2988,6 +3555,21 @@ def _try_load_cap_token(path: str) -> Optional[Dict[str, Any]]:
     return data
 
 
+def _cap_token_file_marker(path: str) -> Optional[Tuple[int, str]]:
+    """Return a content marker for an atomic token-file replacement.
+
+    mtime is intentionally excluded: rewriting identical token bytes should
+    not generate duplicate ready events or attestation receipts.
+    """
+    try:
+        file_path = Path(path)
+        stat = file_path.stat()
+        digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return int(stat.st_size), digest
+
+
 def _sign_attestation_receipt(
     *,
     identity: Any,  # AgentIdentity — typed Any to avoid early import
@@ -3085,6 +3667,30 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--exec-workdir",
+        type=str,
+        default="",
+        help=(
+            "Per-agent execution sandbox. Provider CLIs inherit this as "
+            "their working directory; it must live below workspace/sandbox/agents."
+        ),
+    )
+    parser.add_argument(
+        "--project-workdir",
+        type=str,
+        default="",
+        help=(
+            "Operator-selected project directory for provider CLI execution. "
+            "It must be an absolute, existing directory."
+        ),
+    )
+    parser.add_argument(
+        "--work-access",
+        choices=("read-only", "workspace-write"),
+        default="workspace-write",
+        help="Provider filesystem policy inside the selected work directory.",
+    )
+    parser.add_argument(
         "--identity-file",
         type=str,
         default="",
@@ -3096,6 +3702,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    os.environ["NTH_AGENT_WORK_ACCESS"] = args.work_access
     # L-2 fix (2026-06-11): reject non-positive heartbeat — the
     # downstream max(0.1, heartbeat) would silently clamp to 100ms
     # and produce 10 events/sec, swamping the hub's log.
@@ -3103,6 +3710,40 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"--heartbeat must be > 0 seconds; got {args.heartbeat}"
         )
+
+    if args.exec_workdir and args.project_workdir:
+        parser.error("--exec-workdir and --project-workdir are mutually exclusive")
+
+    if args.project_workdir:
+        raw_project = Path(args.project_workdir).expanduser()
+        if not raw_project.is_absolute():
+            parser.error("--project-workdir must be an absolute path")
+        try:
+            project_workdir = raw_project.resolve(strict=True)
+            if not project_workdir.is_dir():
+                parser.error("--project-workdir must be an existing directory")
+            os.chdir(project_workdir)
+        except OSError as exc:
+            parser.error(f"could not enter --project-workdir: {exc}")
+    elif args.exec_workdir:
+        exec_workdir = Path(args.exec_workdir).resolve()
+        if args.workspace:
+            allowed_root = (
+                Path(args.workspace).resolve() / "sandbox" / "agents"
+            )
+            if not exec_workdir.is_relative_to(allowed_root):
+                parser.error(
+                    "--exec-workdir must be inside workspace/sandbox/agents"
+                )
+        try:
+            exec_workdir.mkdir(parents=True, exist_ok=True)
+            os.chdir(exec_workdir)
+        except OSError as exc:
+            parser.error(f"could not enter --exec-workdir: {exc}")
+
+    global _EVENT_STDOUT, _EVENT_STDERR
+    _EVENT_STDOUT = sys.stdout
+    _EVENT_STDERR = sys.stderr
 
     # Phase 3b: generate an Ed25519 keypair so the hub can register
     # this agent under its W3C did:key. The supervisor blocks on
@@ -3168,6 +3809,7 @@ def main(argv: list[str] | None = None) -> int:
     cap_token_holder = _CapTokenHolder()
     # Phase 4: resolve the ask backend from kind. Unknown kinds
     # fall back to mock (with a structured stderr event).
+    _configure_child_runtime(args.kind)
     ask_backend = _resolve_ask_backend(args.kind)
 
     # Phase 3c: open the A2A surface BEFORE emitting agent_started
@@ -3231,6 +3873,7 @@ def main(argv: list[str] | None = None) -> int:
     _print_event(**agent_started)
 
     cap_token_loaded = False
+    cap_token_marker: Optional[Tuple[int, str]] = None
     cap_token_path: str = (args.cap_token_file or "").strip()
     while not _STOP:
         _print_event(
@@ -3238,14 +3881,31 @@ def main(argv: list[str] | None = None) -> int:
             agent_id=args.id,
             ts=int(time.time() * 1000),
         )
-        # Phase 3c: poll for the cap_token file. Once loaded we
-        # never re-load — re-issuance is a future-phase concern
-        # (cap_tokens are revocable, not mutable: a new token gets
-        # a new token_id).
-        if cap_token_path and not cap_token_loaded:
+        # Poll for atomic token-file replacement and revoke the in-memory
+        # Token replacement is checked on every heartbeat.
+        # bearer when the file disappears or fails verification.
+        current_marker = (
+            _cap_token_file_marker(cap_token_path) if cap_token_path else None
+        )
+        if cap_token_path and (
+            not cap_token_loaded or current_marker != cap_token_marker
+        ):
+            cap_token_marker = current_marker
             token = _try_load_cap_token(cap_token_path)
             if token is None:
-                pass  # not yet — try next tick
+                if cap_token_loaded:
+                    cap_token_loaded = False
+                    cap_token_holder.clear()
+                    _print_error(
+                        event="cap_token_unavailable",
+                        agent_id=args.id,
+                        detail="cap_token file disappeared or is invalid",
+                    )
+                    _print_event(
+                        event="agent_not_ready",
+                        agent_id=args.id,
+                        reason="cap-token-unavailable",
+                    )
             elif token.get("subject_did") != did:
                 # M-1 fix (review round Phase 3c R2): defense in
                 # depth. The supervisor controls the file path so
@@ -3258,6 +3918,7 @@ def main(argv: list[str] | None = None) -> int:
                 # loaded so we don't spin re-reading the same
                 # mismatched file.
                 cap_token_loaded = True
+                cap_token_holder.clear()
                 _print_error(
                     event="cap_token_subject_mismatch",
                     agent_id=args.id,
@@ -3265,12 +3926,44 @@ def main(argv: list[str] | None = None) -> int:
                     actual_subject_did=str(token.get("subject_did", "")),
                     token_id=str(token.get("token_id", "")),
                 )
+                _print_event(
+                    event="agent_not_ready",
+                    agent_id=args.id,
+                    reason="cap-token-subject-mismatch",
+                )
             else:
+                try:
+                    from nth_dao.cap_token import verify_cap_token
+
+                    token_ok, token_reason = verify_cap_token(token)
+                except ImportError as exc:
+                    token_ok, token_reason = False, f"crypto-unavailable: {exc}"
+                if not token_ok:
+                    cap_token_loaded = True
+                    cap_token_holder.clear()
+                    _print_error(
+                        event="cap_token_invalid",
+                        agent_id=args.id,
+                        token_id=str(token.get("token_id", "")),
+                        reason=str(token_reason or "verify-failed"),
+                    )
+                    _print_event(
+                        event="agent_not_ready",
+                        agent_id=args.id,
+                        reason="cap-token-invalid",
+                    )
+                    continue
                 cap_token_loaded = True
                 # Phase 3e: hand the token to the A2A auth slot so
                 # incoming requests with peer cap_tokens issued by
                 # the same hub start being honored.
                 cap_token_holder.set(token)
+                _print_event(
+                    event="agent_ready",
+                    agent_id=args.id,
+                    a2a_port=a2a_port,
+                    cap_token_id=str(token.get("token_id", "")),
+                )
                 receipt = _sign_attestation_receipt(
                     identity=identity,
                     agent_id=args.id,
@@ -3332,6 +4025,16 @@ def main(argv: list[str] | None = None) -> int:
         deadline = time.time() + max(0.1, args.heartbeat)
         while not _STOP and time.time() < deadline:
             time.sleep(0.1)
+
+    close_backend = getattr(ask_backend, "close", None)
+    if callable(close_backend):
+        close_backend()
+    if _server is not None:
+        try:
+            _server.shutdown()
+            _server.server_close()
+        except OSError:
+            pass
 
     _print_event(
         event="agent_stopping",

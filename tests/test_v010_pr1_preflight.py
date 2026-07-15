@@ -29,6 +29,7 @@ These tests pin:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -225,6 +226,54 @@ def test_PR1_codex_preflight_missing_binary(monkeypatch):
     result = CodexBackend().preflight_check()
     assert result.ok is False
     assert "not in PATH" in result.detail
+
+
+def test_PR1_codex_send_turn_timeout_kills_process_and_removes_output(
+    monkeypatch,
+    tmp_path,
+):
+    from team_layer.backends import codex as codex_module
+    from team_layer.backends.base import SessionConfig
+
+    output_path = tmp_path / "codex-output.txt"
+
+    def fake_mkstemp(*_args, **_kwargs):
+        return os.open(output_path, os.O_CREAT | os.O_RDWR), str(output_path)
+
+    class HangingProcess:
+        returncode = None
+
+        def __init__(self):
+            self.killed = False
+            self.communicate_calls = 0
+
+        def communicate(self, timeout=None):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            return b"", b""
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    process = HangingProcess()
+    monkeypatch.setattr(codex_module.shutil, "which", lambda _name: "codex")
+    monkeypatch.setattr(codex_module.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(codex_module.subprocess, "Popen", lambda *_a, **_kw: process)
+
+    backend = codex_module.CodexBackend()
+    backend.start_session(SessionConfig(
+        session_id="timeout-test",
+        goal="verify timeout",
+        timeout=1,
+    ))
+    result = backend.send_turn("hang")
+
+    assert result.finish_reason == "timeout"
+    assert process.killed is True
+    assert process.communicate_calls == 2
+    assert not output_path.exists()
 
 
 # =====================================================================

@@ -38,6 +38,15 @@ from .base import (
 )
 
 
+def _decode_process_output(value: object) -> str:
+    """Decode CLI output without inheriting the Windows console codec."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value or "")
+
+
 class ClaudeCodeBackend(AgentBackend):
     """Claude Code CLI """
 
@@ -96,7 +105,8 @@ class ClaudeCodeBackend(AgentBackend):
         try:
             result = subprocess.run(
                 [cli, "auth", "status"],
-                capture_output=True, text=True, timeout=timeout,
+                stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=timeout,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             return PreflightResult(
@@ -105,8 +115,10 @@ class ClaudeCodeBackend(AgentBackend):
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 detail=f"claude auth status {type(exc).__name__}: {exc}",
             )
+        stdout = _decode_process_output(result.stdout)
+        stderr = _decode_process_output(result.stderr)
         ok = result.returncode == 0
-        detail = "" if ok else (result.stderr or result.stdout).strip()[:200]
+        detail = "" if ok else (stderr or stdout).strip()[:200]
         return PreflightResult(
             ok=ok, backend_id=self.backend_id,
             checked_at=datetime.now(timezone.utc).isoformat(),
@@ -114,7 +126,7 @@ class ClaudeCodeBackend(AgentBackend):
             detail=detail,
             structured={
                 "returncode": result.returncode,
-                "stdout_head": result.stdout[:500],
+                "stdout_head": stdout[:500],
             },
         )
 

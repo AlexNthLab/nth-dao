@@ -86,6 +86,67 @@ def _default_max_live_agents() -> int:
         return 32
 
 
+@dataclass(frozen=True)
+class WorkScope:
+    """Private execution boundary assigned to one supervised Agent."""
+
+    root: str = ""
+    access: str = "workspace-write"
+    revision: str = ""
+
+    @property
+    def scope_id(self) -> str:
+        if not self.root:
+            return "agent-sandbox"
+        import hashlib
+
+        return hashlib.sha256(self.root.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_work_scope(
+    project_workdir: Optional[str] = None,
+    work_access: str = "workspace-write",
+) -> WorkScope:
+    """Validate and snapshot an operator-selected project boundary."""
+
+    access = str(work_access or "workspace-write").strip().lower()
+    if access not in {"read-only", "workspace-write"}:
+        raise ValueError("work_access must be 'read-only' or 'workspace-write'")
+    raw = (
+        str(project_workdir).strip()
+        if project_workdir is not None
+        else os.environ.get("NTH_AGENT_WORKDIR", "").strip()
+    )
+    if not raw:
+        return WorkScope(access=access)
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("project_workdir must be an absolute path")
+    try:
+        root = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"project_workdir is not accessible: {candidate}") from exc
+    if not root.is_dir():
+        raise ValueError("project_workdir must name an existing directory")
+    revision = ""
+    if (root / ".git").exists():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=2.0,
+                check=False,
+            )
+            if result.returncode == 0:
+                revision = result.stdout.strip()[:64]
+        except (OSError, subprocess.TimeoutExpired):
+            revision = ""
+    return WorkScope(root=str(root), access=access, revision=revision)
+
+
 class AgentCapacityExceeded(RuntimeError):
     """spawn 时存活 agent 数已达上限。端点应映射为 HTTP 429。"""
 
@@ -122,6 +183,17 @@ class AgentRecord:
     # server exists. The hub's A2A proxy uses this to route a
     # request to the child.
     a2a_port: Optional[int] = None
+    # Transport is not routable until the child has loaded and verified its
+    # own cap_token. InMemoryRunner keeps the compatibility default because
+    # it has no child transport handshake.
+    a2a_ready: bool = True
+    # Provider execution is intentionally separate from transport readiness.
+    # ``unknown`` allows the first real call to probe the provider; a failed
+    # provider call changes this to ``degraded`` so every channel does not
+    # repeat a 300-second timeout against the same backend.
+    provider_state: str = "unknown"
+    provider_checked_at: str = ""
+    work_scope: WorkScope = field(default_factory=WorkScope)
 
     def to_agent_entry(self) -> Dict[str, Any]:
         """Translate to the dict shape /api/v2/agents returns.
@@ -147,6 +219,12 @@ class AgentRecord:
             # Phase 3d: surface the A2A port so the v2 console can
             # show a "reachable on :PORT" badge / call the proxy.
             "a2a_port": self.a2a_port,
+            "a2a_ready": self.a2a_ready,
+            "provider_state": self.provider_state,
+            "provider_checked_at": self.provider_checked_at,
+            "work_scope_id": self.work_scope.scope_id,
+            "work_access": self.work_scope.access,
+            "work_revision": self.work_scope.revision,
         }
 
 
@@ -358,6 +436,13 @@ class SubprocessRunner:
         self._handshake_timeout = handshake_timeout
         self._on_event = on_event
         self._lock = threading.Lock()
+        self._work_scopes: Dict[str, WorkScope] = {}
+
+    def configure_work_scope(self, agent_id: str, scope: WorkScope) -> None:
+        """Stage one validated scope for the next start of ``agent_id``."""
+
+        with self._lock:
+            self._work_scopes[str(agent_id)] = scope
 
     def start(
         self,
@@ -387,6 +472,38 @@ class SubprocessRunner:
         if self._workspace is not None:
             # 切片B:共享 workspace,让子 agent 的 claim 方法够到市场文件。
             cmd.extend(["--workspace", str(self._workspace)])
+        with self._lock:
+            scope = self._work_scopes.pop(agent_id, None)
+        if scope is None:
+            try:
+                scope = resolve_work_scope()
+            except ValueError as exc:
+                raise RuntimeError(f"NTH_AGENT_WORKDIR is invalid: {exc}") from exc
+        project_workdir = Path(scope.root) if scope.root else None
+        if project_workdir is not None:
+            cmd.extend(["--project-workdir", str(project_workdir)])
+        cmd.extend(["--work-access", scope.access])
+
+        exec_workdir: Optional[Path] = None
+        if project_workdir is None:
+            if cap_token_file_path:
+                exec_workdir = Path(cap_token_file_path).resolve().parent
+            elif self._workspace is not None:
+                exec_workdir = (
+                    Path(self._workspace).resolve()
+                    / "sandbox" / "agents" / str(agent_id)
+                )
+        if exec_workdir is not None:
+            try:
+                exec_workdir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "agent_supervisor: could not create exec sandbox for %s: %s",
+                    agent_id,
+                    exc,
+                )
+                return None, ""
+            cmd.extend(["--exec-workdir", str(exec_workdir)])
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -736,6 +853,7 @@ class AgentSupervisor:
         capabilities: Optional[List[str]] = None,
         cap_token_issuer: Optional[CapTokenIssuer] = None,
         identity_file: Optional[str] = None,
+        work_scope: Optional[WorkScope] = None,
     ) -> AgentRecord:
         """Spawn a new supervised agent.
 
@@ -774,6 +892,7 @@ class AgentSupervisor:
                     f"(raise NTH_MAX_LIVE_AGENTS to allow more)"
                 )
 
+        scope = work_scope or resolve_work_scope()
         agent_id = uuid.uuid4().hex
         # Phase 3b note (race): the reader thread starts inside
         # runner.start() and emits on_event(agent_started) before
@@ -809,6 +928,9 @@ class AgentSupervisor:
             agent_dir.mkdir(parents=True, exist_ok=True)
             cap_token_file_path = str(agent_dir / "cap_token.json")
 
+        configure_scope = getattr(self._runner, "configure_work_scope", None)
+        if callable(configure_scope):
+            configure_scope(agent_id, scope)
         pid, did = self._runner.start(
             agent_id, kind,
             cap_token_file_path=cap_token_file_path,
@@ -939,6 +1061,8 @@ class AgentSupervisor:
                 pid=pid,
                 cap_token_id=cap_token_id,
                 a2a_port=a2a_port,
+                a2a_ready=False if a2a_port is not None else True,
+                work_scope=scope,
             )
             with self._lock:
                 self._agents[agent_id] = record
@@ -1089,6 +1213,13 @@ class AgentSupervisor:
                     alive=alive_map.get(current.agent_id, False),
                     cap_token_id=current.cap_token_id,
                     a2a_port=current.a2a_port,
+                    a2a_ready=(
+                        current.a2a_ready
+                        and alive_map.get(current.agent_id, False)
+                    ),
+                    provider_state=current.provider_state,
+                    provider_checked_at=current.provider_checked_at,
+                    work_scope=current.work_scope,
                 )
                 out.append(snap)
         return out
@@ -1116,6 +1247,14 @@ class AgentSupervisor:
                     "refreshed cap_token subject_did does not match agent DID"
                 )
             record.cap_token_id = tid
+            # The child must acknowledge the new file before the transport is
+            # advertised as ready again. This closes the rotation race where
+            # the hub switched tokens but the child still held the old one.
+            record.a2a_ready = False if record.a2a_port is not None else True
+            # A new authorization epoch gets one fresh provider probe. Do not
+            # carry a previous model timeout across an explicit rotation.
+            record.provider_state = "unknown"
+            record.provider_checked_at = ""
 
         if self._cap_token_dir is not None:
             cap_path = self._cap_token_dir / agent_id / "cap_token.json"
@@ -1125,6 +1264,19 @@ class AgentSupervisor:
     def get(self, agent_id: str) -> Optional[AgentRecord]:
         with self._lock:
             return self._agents.get(agent_id)
+
+    def mark_provider_state(self, agent_id: str, state: str) -> bool:
+        """Record provider execution health independently of A2A transport."""
+        normalized = str(state or "").strip().lower()
+        if normalized not in {"unknown", "ready", "degraded"}:
+            raise ValueError(f"invalid provider state: {state!r}")
+        with self._lock:
+            record = self._agents.get(agent_id)
+            if record is None:
+                return False
+            record.provider_state = normalized
+            record.provider_checked_at = _now_iso()
+            return True
 
     def on_event(self, agent_id: str, event: Dict[str, Any]) -> None:
         """Callback bound to SubprocessRunner so heartbeats from
@@ -1167,6 +1319,43 @@ class AgentSupervisor:
                 )
         elif kind == "agent_stopping":
             logger.info("agent_supervisor: %s reported stopping", agent_id)
+        elif kind == "agent_ready":
+            event_token_id = event.get("cap_token_id")
+            with self._lock:
+                record = self._agents.get(agent_id)
+                if record is None:
+                    return
+                # A token rotation can race with the stdout reader. An old
+                # ready event must never re-enable routing for the newly
+                # issued token while the child still holds the old one.
+                if (
+                    record.a2a_port is not None
+                    and event_token_id != record.cap_token_id
+                ):
+                    logger.warning(
+                        "agent_supervisor: ignoring stale ready event for %s "
+                        "(event token=%r, current token=%r)",
+                        agent_id,
+                        event_token_id,
+                        record.cap_token_id,
+                    )
+                    return
+                record.a2a_ready = True
+                record.last_seen = _now_iso()
+            logger.info(
+                "agent_supervisor: %s A2A transport ready (cap_token=%s)",
+                agent_id, event_token_id or "",
+            )
+        elif kind == "agent_not_ready":
+            with self._lock:
+                record = self._agents.get(agent_id)
+                if record is not None:
+                    record.a2a_ready = False
+                    record.last_seen = _now_iso()
+            logger.warning(
+                "agent_supervisor: %s A2A transport not ready: %s",
+                agent_id, event.get("reason", "unknown"),
+            )
         elif kind == "decision_raised":
             # Phase 3d: child is asking the operator to act on
             # something. Validate shape, then forward to the

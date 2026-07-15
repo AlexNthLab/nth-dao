@@ -15,8 +15,15 @@ import json
 import os
 import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from nth_dao.util import InterProcessLock
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class AgentRoster:
@@ -96,6 +103,31 @@ class AgentRoster:
         """Return all persisted agent specs, in file order."""
         return self._load()
 
+    def migrate_legacy_slots(self) -> List[Dict[str, Any]]:
+        """Add explicit slot lifecycle and disable hidden legacy duplicates."""
+
+        with InterProcessLock(self._path):
+            items = self._load()
+            legacy_by_kind: Dict[str, List[int]] = {}
+            changed = False
+            for index, item in enumerate(items):
+                if not item.get("slot_id"):
+                    legacy_by_kind.setdefault(str(item.get("kind", "mock")), []).append(index)
+                    item["slot_id"] = uuid.uuid4().hex
+                    item["enabled"] = item.get("enabled", True) is not False
+                    item["updated_at"] = _now()
+                    changed = True
+            for indices in legacy_by_kind.values():
+                for index in indices[:-1]:
+                    if items[index].get("enabled", True):
+                        items[index]["enabled"] = False
+                        items[index]["disabled_at"] = _now()
+                        items[index]["disabled_reason"] = "legacy-kind-dedup-migration"
+                        changed = True
+            if changed:
+                self._save(items)
+            return items
+
     def allocate_identity_file(self) -> str:
         """Allocate the private identity path for a new persistent agent."""
         self._id_dir.mkdir(parents=True, exist_ok=True)
@@ -105,32 +137,70 @@ class AgentRoster:
     def add(
         self, *, identity_file: str, kind: str, label: str,
         capabilities: Optional[List[str]], did: str,
+        project_workdir: str = "", work_access: str = "workspace-write",
+        work_revision: str = "",
     ) -> None:
         """Register a persistent agent, deduplicated by identity file."""
         if not self.is_owned_identity_file(identity_file):
             raise ValueError(
                 "persistent agent identity_file must live under agents/identities"
             )
-        items = [x for x in self._load() if x.get("identity_file") != identity_file]
-        items.append({
-            "identity_file": identity_file,
-            "kind": kind,
-            "label": label,
-            "capabilities": list(capabilities or []),
-            "did": did,
-        })
-        self._save(items)
+        with InterProcessLock(self._path):
+            existing = next(
+                (x for x in self._load() if x.get("identity_file") == identity_file),
+                None,
+            )
+            items = [
+                x for x in self._load() if x.get("identity_file") != identity_file
+            ]
+            items.append({
+                "slot_id": str((existing or {}).get("slot_id") or uuid.uuid4().hex),
+                "identity_file": identity_file,
+                "kind": kind,
+                "label": label,
+                "capabilities": list(capabilities or []),
+                "did": did,
+                "project_workdir": str(project_workdir or ""),
+                "work_access": str(work_access or "workspace-write"),
+                "work_revision": str(work_revision or ""),
+                "enabled": True,
+                "created_at": str((existing or {}).get("created_at") or _now()),
+                "updated_at": _now(),
+            })
+            self._save(items)
+
+    def disable_by_did(
+        self, did: str, *, reason: str = "operator-stop",
+    ) -> Optional[Dict[str, Any]]:
+        """Disable one persistent slot without deleting identity material."""
+
+        with InterProcessLock(self._path):
+            items = self._load()
+            disabled: Optional[Dict[str, Any]] = None
+            for item in items:
+                if item.get("did") != did or item.get("enabled", True) is False:
+                    continue
+                item["enabled"] = False
+                item["disabled_at"] = _now()
+                item["disabled_reason"] = str(reason or "operator-stop")[:200]
+                item["updated_at"] = item["disabled_at"]
+                disabled = dict(item)
+                break
+            if disabled is not None:
+                self._save(items)
+            return disabled
 
     def remove_by_did(self, did: str) -> Optional[Dict[str, Any]]:
         """Remove one persistent row by DID and return it for audit/cleanup."""
-        items = self._load()
-        removed: Optional[Dict[str, Any]] = None
-        kept: List[Dict[str, Any]] = []
-        for x in items:
-            if removed is None and x.get("did") == did:
-                removed = x
-            else:
-                kept.append(x)
-        if removed is not None:
-            self._save(kept)
-        return removed
+        with InterProcessLock(self._path):
+            items = self._load()
+            removed: Optional[Dict[str, Any]] = None
+            kept: List[Dict[str, Any]] = []
+            for x in items:
+                if removed is None and x.get("did") == did:
+                    removed = x
+                else:
+                    kept.append(x)
+            if removed is not None:
+                self._save(kept)
+            return removed

@@ -359,6 +359,23 @@ def test_mission_step_run_blocks_on_malformed_agent_response(
     assert blocked[0]["step_id"] == sid
 
 
+def test_backend_timeout_policy_covers_mission_and_preserves_override() -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    assert v2_api._with_backend_ask_timeout(
+        {"prompt": "mission"}, "codex",
+    ) == {
+        "prompt": "mission",
+        "timeout_s": v2_api._CODEX_ASK_TIMEOUT_S,
+    }
+    assert v2_api._with_backend_ask_timeout(
+        {"prompt": "mission", "timeout_s": 75.0}, "codex",
+    )["timeout_s"] == 75.0
+    assert v2_api._with_backend_ask_timeout(
+        {"prompt": "mission"}, "hermes",
+    )["timeout_s"] == v2_api._HERMES_ASK_TIMEOUT_S
+
+
 def test_missions_create_validates(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path, require_console_auth=False))
     assert client.post(

@@ -36,6 +36,15 @@ from .base import (
 )
 
 
+def _decode_process_output(value: object) -> str:
+    """Decode CLI output without inheriting the Windows console codec."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value or "")
+
+
 class CodexBackend(AgentBackend):
     """OpenAI Codex CLI """
 
@@ -74,10 +83,17 @@ class CodexBackend(AgentBackend):
                 detail=f"codex CLI {self.cli_name!r} not in PATH",
             )
         try:
+            cli = shutil.which(self.cli_name) or self.cli_name
             result = subprocess.run(
-                [self.cli_name, "exec", "echo OK"],
-                capture_output=True, text=True, timeout=timeout,
+                [cli, "exec", "--skip-git-repo-check", "echo OK"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=timeout,
             )
+            # Decode UTF-8 explicitly (text=True uses the platform locale,
+            # commonly GBK on Chinese Windows). Test doubles and wrappers may
+            # already return text, so the boundary accepts both forms.
+            stdout = _decode_process_output(result.stdout)
+            stderr = _decode_process_output(result.stderr)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             return PreflightResult(
                 ok=False, backend_id=self.backend_id,
@@ -85,8 +101,8 @@ class CodexBackend(AgentBackend):
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 detail=f"codex exec {type(exc).__name__}: {exc}",
             )
-        ok = result.returncode == 0 and "OK" in result.stdout
-        detail = "" if ok else (result.stderr or result.stdout).strip()[:200]
+        ok = result.returncode == 0 and "OK" in stdout
+        detail = "" if ok else (stderr or stdout).strip()[:200]
         return PreflightResult(
             ok=ok, backend_id=self.backend_id,
             checked_at=datetime.now(timezone.utc).isoformat(),
@@ -130,80 +146,81 @@ class CodexBackend(AgentBackend):
         cwd = str(self._session_config.workdir) if self._session_config.workdir else None
 
         try:
-            #  Popen + binary read hermes.py  Python 3.14 Windows
-            #  UTF-8 locale  subprocess.run reader thread  UnicodeDecodeError
-            popen = subprocess.Popen(
-                args + [full_prompt],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=cwd,
-            )
             try:
-                stdout_bytes = popen.stdout.read()
-                stderr_bytes = popen.stderr.read()
-                popen.wait(timeout=self._session_config.timeout)
-            finally:
+                # Keep pipes in binary mode and decode after ``communicate``;
+                # this avoids Windows locale failures while preserving a real
+                # timeout. Calling ``read`` before ``wait(timeout=...)`` would
+                # block forever on a hung CLI and make the timeout ineffective.
+                popen = subprocess.Popen(
+                    args + [full_prompt],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    cwd=cwd,
+                )
                 try:
-                    popen.stdout.close()
-                    popen.stderr.close()
-                except Exception:
-                    pass
-            returncode = popen.returncode
-            stdout = (stdout_bytes or b"").decode("utf-8", errors="replace")
-            stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
-        except subprocess.TimeoutExpired:
-            latency = self._track_turn_end(start, TokenUsage())
-            return TurnResponse(
-                content="",
-                finish_reason="timeout",
-                latency_seconds=latency,
-                error=f"codex timed out after {self._session_config.timeout}s",
-            )
-        except Exception as e:
-            latency = self._track_turn_end(start, TokenUsage())
-            return TurnResponse(
-                content="",
-                finish_reason="error",
-                latency_seconds=latency,
-                error=f"{type(e).__name__}: {e}",
-            )
+                    stdout_raw, stderr_raw = popen.communicate(
+                        timeout=self._session_config.timeout,
+                    )
+                except subprocess.TimeoutExpired:
+                    popen.kill()
+                    popen.communicate()
+                    raise
+                returncode = popen.returncode
+                stdout = _decode_process_output(stdout_raw)
+                stderr = _decode_process_output(stderr_raw)
+            except subprocess.TimeoutExpired:
+                latency = self._track_turn_end(start, TokenUsage())
+                return TurnResponse(
+                    content="",
+                    finish_reason="timeout",
+                    latency_seconds=latency,
+                    error=f"codex timed out after {self._session_config.timeout}s",
+                )
+            except Exception as e:
+                latency = self._track_turn_end(start, TokenUsage())
+                return TurnResponse(
+                    content="",
+                    finish_reason="error",
+                    latency_seconds=latency,
+                    error=f"{type(e).__name__}: {e}",
+                )
 
-        # -o 文件里是干净的最终消息；取不到回落 stdout。
-        content = ""
-        try:
-            with open(out_path, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read().strip()
-        except OSError:
+            # -o contains the clean final message; fall back to stdout.
             content = ""
+            try:
+                with open(out_path, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read().strip()
+            except OSError:
+                content = ""
+            if not content:
+                content = stdout.strip()
+
+            usage = TokenUsage()  # codex exec text mode does not report usage
+            latency = self._track_turn_end(start, usage)
+
+            if returncode != 0:
+                return TurnResponse(
+                    content=content,
+                    finish_reason="error",
+                    usage=usage,
+                    latency_seconds=latency,
+                    error=f"codex exit {returncode}: {stderr[:300]}",
+                )
+
+            return TurnResponse(
+                content=content,
+                finish_reason="stop",
+                usage=usage,
+                latency_seconds=latency,
+                metadata={"backend": self.backend_id},
+            )
         finally:
             try:
                 os.unlink(out_path)
             except OSError:
                 pass
-        if not content:
-            content = (stdout or "").strip()
-
-        usage = TokenUsage()  # codex exec 文本模式不回 token 计数
-        latency = self._track_turn_end(start, usage)
-
-        if returncode != 0:
-            return TurnResponse(
-                content=content,
-                finish_reason="error",
-                usage=usage,
-                latency_seconds=latency,
-                error=f"codex exit {returncode}: {stderr[:300]}",
-            )
-
-        return TurnResponse(
-            content=content,
-            finish_reason="stop",
-            usage=usage,
-            latency_seconds=latency,
-            metadata={"backend": self.backend_id},
-        )
 
     def end_session(self) -> SessionSummary:
         return self._build_summary()

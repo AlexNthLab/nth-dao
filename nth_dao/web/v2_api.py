@@ -75,24 +75,57 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import inspect
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from nth_dao.util import InterProcessLock, atomic_write_json, safe_id, safe_load_json
+
 logger = logging.getLogger(__name__)
+
+
+class WorkScopeBusy(RuntimeError):
+    """Another writable Agent currently owns the same project scope."""
+
+
+@contextmanager
+def _work_scope_lease(request: Request, record: Any) -> Iterator[None]:
+    """Serialize writable Agent calls per project across hub processes."""
+
+    scope = getattr(record, "work_scope", None)
+    root = str(getattr(scope, "root", "") or "")
+    access = str(getattr(scope, "access", "") or "")
+    if not root or access != "workspace-write":
+        yield
+        return
+    workspace = _state_workspace(request)
+    if workspace is None:
+        raise WorkScopeBusy("workspace unavailable for writable work-scope lease")
+    scope_key = hashlib.sha256(root.encode("utf-8")).hexdigest()
+    lock_target = workspace / "locks" / "work_scopes" / scope_key
+    try:
+        with InterProcessLock(lock_target, timeout=0.25):
+            yield
+    except TimeoutError as exc:
+        raise WorkScopeBusy(
+            "another Agent is already executing with write access to this project"
+        ) from exc
 
 
 def _env_float(
@@ -1671,6 +1704,11 @@ class AgentEntryM(_Model):
     supervised: Optional[bool] = None
     alive: Optional[bool] = None
     kind: Optional[str] = None
+    ask_timeout_s: Optional[float] = None
+    work_scope_id: Optional[str] = None
+    work_access: Optional[str] = None
+    work_revision: Optional[str] = None
+    provider_checked_at: Optional[str] = None
     # Phase 3d (2026-06-11): the child's localhost A2A HTTP port,
     # advertised on agent_started.a2a_port and stamped by the
     # supervisor at spawn time. None when the child didn't bind
@@ -2743,6 +2781,25 @@ def _verify_agent_receipt(
         )
 
 
+def _agent_link_receipt_payload(receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the single signed ask payload used for AgentLink recovery."""
+    timeline = receipt.get("timeline")
+    if not isinstance(timeline, list):
+        raise ValueError("receipt timeline is malformed")
+    matches = [
+        entry.get("payload")
+        for entry in timeline
+        if isinstance(entry, dict)
+        and entry.get("type") == "nth.a2a_ask_executed"
+        and isinstance(entry.get("payload"), dict)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "AgentLink reconciliation requires exactly one signed ask entry"
+        )
+    return dict(matches[0])
+
+
 def _persist_agent_response_receipt(
     request: Request,
     agent_id: str,
@@ -2849,7 +2906,11 @@ async def _drive_supervised_agent_ask(
         raise HTTPException(status_code=503, detail="agent supervisor unavailable")
     matching = [
         r for r in sup.list_agents()
-        if r.did == did and r.a2a_port is not None and r.alive
+        if (
+            r.did == did
+            and r.a2a_port is not None
+            and r.alive
+        )
     ]
     if not matching:
         raise HTTPException(
@@ -2874,6 +2935,7 @@ async def _drive_supervised_agent_ask(
             previous_token=token if isinstance(token, dict) else None,
         )
 
+    payload = _with_backend_ask_timeout(payload, getattr(rec, "kind", None))
     body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if len(body_bytes) > 1024 * 1024:
         raise HTTPException(status_code=413, detail="body exceeds 1MB A2A cap")
@@ -2889,20 +2951,23 @@ async def _drive_supervised_agent_ask(
     )
 
     def _do_forward() -> Tuple[int, bytes]:
-        req = urllib.request.Request(
-            url, data=body_bytes, headers=headers, method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
-                return resp.status, resp.read()
-        except urllib.error.HTTPError as http_exc:
-            return http_exc.code, http_exc.read()
+        with _work_scope_lease(request, rec):
+            req = urllib.request.Request(
+                url, data=body_bytes, headers=headers, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as http_exc:
+                return http_exc.code, http_exc.read()
 
     content: Any = {}
     resp_status = 502
     for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
         try:
             resp_status, resp_body = await asyncio.to_thread(_do_forward)
+        except WorkScopeBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise HTTPException(
                 status_code=502,
@@ -2969,6 +3034,7 @@ def _state_blackboard(request: Request) -> Optional[Any]:
 # app.state.v2_supervisor. Cheap to allocate, lives for the
 # process lifetime, and only contended on cold start.
 _SUPERVISOR_BUILD_LOCK = threading.Lock()
+_AGENT_LINK_BUILD_LOCK = threading.Lock()
 
 
 # H-1 fix (review round Phase 4 R1): per-method proxy timeout. The
@@ -2998,6 +3064,19 @@ _HERMES_FORWARD_TIMEOUT_S = min(
     _HERMES_ASK_TIMEOUT_S + _A2A_TIMEOUT_SLACK_S,
     _A2A_MAX_FORWARD_TIMEOUT_S,
 )
+_CODEX_ASK_TIMEOUT_S = min(
+    _env_float(
+        "NTH_CODEX_ASK_TIMEOUT_S",
+        240.0,
+        minimum=60.0,
+        maximum=300.0,
+    ),
+    max(60.0, _A2A_MAX_FORWARD_TIMEOUT_S - _A2A_TIMEOUT_SLACK_S),
+)
+_CODEX_FORWARD_TIMEOUT_S = min(
+    _CODEX_ASK_TIMEOUT_S + _A2A_TIMEOUT_SLACK_S,
+    _A2A_MAX_FORWARD_TIMEOUT_S,
+)
 _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     "ask": 65.0,    # claude-code backend default is 60s + 5s slack
     # Phase 5.2: streaming variant gets a longer window because the
@@ -3014,16 +3093,36 @@ _A2A_BACKEND_METHOD_TIMEOUTS: Dict[Tuple[str, str], float] = {
     # Codex CLI defaults to 90s. It can cold-start slowly, so do not
     # inherit the Claude-sized 65s floor when the supervisor knows the
     # child is a Codex agent.
-    ("codex", "ask"): 95.0,
-    ("codex", "ask-stream"): 125.0,
+    ("codex", "ask"): _CODEX_FORWARD_TIMEOUT_S,
+    ("codex", "ask-stream"): _CODEX_FORWARD_TIMEOUT_S,
 }
 _CHANNEL_DISPATCH_DEFAULT_ASK_TIMEOUT_S = 120.0
 _CHANNEL_DISPATCH_ASK_TIMEOUTS: Dict[str, float] = {
     "hermes": _HERMES_ASK_TIMEOUT_S,
-    "codex": 120.0,
+    "codex": _CODEX_ASK_TIMEOUT_S,
     "claude-code": 120.0,
     "mock": 30.0,
 }
+
+
+def _backend_ask_timeout(backend_kind: str | None) -> float:
+    """Return the child execution timeout for one supervised backend."""
+
+    return _CHANNEL_DISPATCH_ASK_TIMEOUTS.get(
+        str(backend_kind or "").strip().lower(),
+        _CHANNEL_DISPATCH_DEFAULT_ASK_TIMEOUT_S,
+    )
+
+
+def _with_backend_ask_timeout(
+    payload: Dict[str, Any],
+    backend_kind: str | None,
+) -> Dict[str, Any]:
+    """Copy an ask payload and apply the server policy when it has no timeout."""
+
+    normalized = dict(payload)
+    normalized.setdefault("timeout_s", _backend_ask_timeout(backend_kind))
+    return normalized
 
 
 def _channel_dispatch_kind_allowed(backend_kind: str | None) -> bool:
@@ -3288,7 +3387,152 @@ def _state_supervisor(request: Request) -> Optional[Any]:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "v2_api: auto-agent preparation failed: %s", exc)
+            try:
+                recovered_dispatches = _recover_incomplete_channel_dispatches(
+                    getattr(state.nth, "groups", None),
+                )
+                if recovered_dispatches:
+                    logger.warning(
+                        "v2_api: marked %d stale channel dispatch(es) "
+                        "failed after hub restart",
+                        recovered_dispatches,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "v2_api: channel dispatch recovery failed: %s", exc,
+                )
     return sup
+
+
+def _overlay_live_backend_status(
+    statuses: Dict[str, Dict[str, Any]],
+    request: Request,
+) -> Dict[str, Dict[str, Any]]:
+    """Project a supervised provider probe onto static backend metadata.
+
+    ``backend_runtime_status`` answers whether the local transport can launch.
+    A successful supervised ask separately verifies the configured provider.
+    """
+    try:
+        supervisor = _state_supervisor(request)
+        records = supervisor.list_agents() if supervisor is not None else []
+    except (AttributeError, RuntimeError, OSError, TypeError, ValueError) as exc:
+        logger.debug("v2_api: live backend status unavailable: %s", exc)
+        return statuses
+
+    for kind, status in list(statuses.items()):
+        if not isinstance(status, dict):
+            continue
+        live = [
+            record for record in records
+            if str(getattr(record, "kind", "")) == kind
+            and bool(getattr(record, "alive", False))
+        ]
+        if not live:
+            continue
+        states = {
+            str(getattr(record, "provider_state", "unknown") or "unknown")
+            for record in live
+        }
+        checked = sorted(
+            str(getattr(record, "provider_checked_at", "") or "")
+            for record in live
+            if str(getattr(record, "provider_checked_at", "") or "")
+        )
+        projected = dict(status)
+        if "ready" in states:
+            projected.update(
+                provider_state="ready",
+                provider_verified=True,
+                last_provider_check_at=checked[-1] if checked else "",
+            )
+            if kind == "hermes":
+                projected.update(
+                    runtime="provider-verified",
+                    detail="A live supervised Hermes A2A ask succeeded.",
+                )
+        elif "degraded" in states:
+            projected.update(
+                provider_state="degraded",
+                provider_verified=False,
+                last_provider_check_at=checked[-1] if checked else "",
+            )
+            if kind == "hermes":
+                projected.update(
+                    runtime="provider-degraded",
+                    detail="A live supervised Hermes A2A ask failed or timed out.",
+                )
+        statuses[kind] = projected
+    return statuses
+
+
+def _state_agent_link(request: Request) -> Any:
+    """Return the app-scoped Bot-style AgentLink manager."""
+    state = request.app.state
+    manager = getattr(state, "agent_link_manager", None)
+    if manager is not None:
+        return manager
+    with _AGENT_LINK_BUILD_LOCK:
+        manager = getattr(state, "agent_link_manager", None)
+        if manager is None:
+            from .agent_link import AgentLinkManager, AgentLinkStore
+
+            manager = AgentLinkManager(
+                AgentLinkStore(_state_workspace(request)),
+                max_pending_per_agent=4,
+            )
+            state.agent_link_manager = manager
+    return manager
+
+
+def _agent_link_request_hash(
+    prompt: str,
+    timeout_s: Any = None,
+    *,
+    channel_id: str = "",
+    request_message_id: str = "",
+) -> str:
+    """Hash dispatch identity without persisting the prompt itself.
+
+    The idempotency key identifies a retry; this digest binds that retry to
+    the exact request context. Keeping only the digest prevents a reused key
+    from silently returning a result for a different prompt.
+    """
+    material = {
+        "prompt": str(prompt),
+        "timeout_s": timeout_s,
+        "channel_id": str(channel_id or ""),
+        "request_message_id": str(request_message_id or ""),
+    }
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _agent_link_prompt_hash(prompt: str) -> str:
+    """Return the non-reversible digest used to bind an AgentLink receipt."""
+    return hashlib.sha256(str(prompt).encode("utf-8")).hexdigest()
+
+
+def _validate_agent_link_timeout(raw: Any) -> Optional[float]:
+    """Validate the public AgentLink timeout contract before enqueueing."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise HTTPException(status_code=400, detail="timeout_s must be a number")
+    value = float(raw)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise HTTPException(status_code=400, detail="timeout_s must be finite")
+    if value < 5 or value > 300:
+        raise HTTPException(
+            status_code=400,
+            detail="timeout_s must be between 5 and 300 seconds",
+        )
+    return value
 
 
 def _make_cap_issuer(node_identity: Any, cap_tokens_store: Any):
@@ -3577,12 +3821,13 @@ def _restore_persistent_agents(request: Request, sup: Any) -> None:
         return
     from .agent_roster import AgentRoster
     roster = AgentRoster(ws)
-    entries = roster.all()
+    entries = roster.migrate_legacy_slots()
     if not entries:
         return
+    selected = [entry for entry in entries if entry.get("enabled", True) is not False]
     issuer = _make_cap_issuer(node_identity, cap_tokens_store)
     restored = 0
-    for e in entries:
+    for e in selected:
         idf = e.get("identity_file")
         if not isinstance(idf, str) or not idf:
             continue
@@ -3596,12 +3841,32 @@ def _restore_persistent_agents(request: Request, sup: Any) -> None:
         if not Path(idf).is_file():
             continue
         try:
+            from .agent_supervisor import resolve_work_scope
+
+            workdir_value = e.get("project_workdir")
+            scope = resolve_work_scope(
+                str(workdir_value) if workdir_value else None,
+                str(e.get("work_access", "workspace-write")),
+            )
+            previous_revision = str(e.get("work_revision", "") or "")
+            if (
+                previous_revision and scope.revision
+                and previous_revision != scope.revision
+            ):
+                logger.warning(
+                    "v2_api: persistent Agent work scope revision changed "
+                    "for did=%s (%s -> %s)",
+                    str(e.get("did", "?"))[:24],
+                    previous_revision[:12],
+                    scope.revision[:12],
+                )
             sup.spawn(
                 kind=str(e.get("kind", "mock")),
                 label=str(e.get("label", "")),
                 capabilities=list(e.get("capabilities") or []),
                 cap_token_issuer=issuer,
                 identity_file=idf,
+                work_scope=scope,
             )
             restored += 1
         except Exception as exc:  # noqa: BLE001
@@ -3690,6 +3955,26 @@ class SpawnAgentBody(_Model):
             "legacy ephemeral behavior."
         ),
     )
+    project_workdir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Absolute project root assigned to this Agent. null uses the "
+            "operator's NTH_AGENT_WORKDIR; an empty effective value uses an "
+            "isolated per-Agent sandbox."
+        ),
+    )
+    work_access: str = Field(
+        default="workspace-write",
+        description="Filesystem policy: read-only or workspace-write.",
+    )
+
+    @field_validator("work_access")
+    @classmethod
+    def _validate_work_access(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"read-only", "workspace-write"}:
+            raise ValueError("work_access must be read-only or workspace-write")
+        return normalized
 
 
 class AnnounceTaskBody(_Model):
@@ -4071,10 +4356,107 @@ class CreateChannelBody(BaseModel):
 
 
 class ChannelMessageBody(BaseModel):
-    """频道发消息入参。agent_id 即发送者(人类 admin 或某 agent 的 id)。"""
+    """Channel message input with optional explicit Agent recipients."""
 
     agent_id: str = "admin"
-    body: str
+    body: str = ""
+    target_agent_dids: List[str] = Field(default_factory=list, max_length=16)
+    attachment_ids: List[str] = Field(default_factory=list, max_length=8)
+    reply_to_message_id: str = Field(default="", max_length=64)
+
+    @field_validator("target_agent_dids")
+    @classmethod
+    def _validate_target_agent_dids(cls, value: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for raw in value:
+            did = str(raw).strip()
+            if not did.startswith("did:") or len(did) > 512:
+                raise ValueError("target_agent_dids must contain valid DID strings")
+            if did not in normalized:
+                normalized.append(did)
+        return normalized
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def _validate_attachment_ids(cls, value: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for raw in value:
+            attachment_id = str(raw).strip()
+            if not re.fullmatch(r"[0-9a-f]{24}", attachment_id):
+                raise ValueError("attachment_ids must contain 24-character hex ids")
+            if attachment_id not in normalized:
+                normalized.append(attachment_id)
+        return normalized
+
+
+_CHANNEL_MESSAGE_MAX_CHARS = 100_000
+_CHANNEL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _channel_attachment_dir(request: Request, channel_id: str) -> Path:
+    workspace = _state_workspace(request)
+    if workspace is None:
+        raise HTTPException(status_code=503, detail="workspace unavailable")
+    return workspace / "channel_attachments" / safe_id(channel_id)
+
+
+def _channel_attachment_paths(
+    request: Request,
+    channel_id: str,
+    attachment_id: str,
+) -> Tuple[Path, Path]:
+    root = _channel_attachment_dir(request, channel_id)
+    return root / f"{attachment_id}.bin", root / f"{attachment_id}.json"
+
+
+def _channel_attachment_public(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "attachment_id": str(record.get("attachment_id") or ""),
+        "filename": str(record.get("filename") or "attachment"),
+        "media_type": str(record.get("media_type") or "application/octet-stream"),
+        "size": int(record.get("size") or 0),
+        "sha256": str(record.get("sha256") or ""),
+        "created_at": str(record.get("created_at") or ""),
+    }
+
+
+def _load_channel_attachment(
+    request: Request,
+    channel_id: str,
+    attachment_id: str,
+) -> Optional[Dict[str, Any]]:
+    if not re.fullmatch(r"[0-9a-f]{24}", attachment_id):
+        return None
+    data_path, metadata_path = _channel_attachment_paths(
+        request, channel_id, attachment_id,
+    )
+    record = safe_load_json(metadata_path, fallback=None)
+    if not isinstance(record, dict) or not data_path.is_file():
+        return None
+    if record.get("attachment_id") != attachment_id:
+        return None
+    if record.get("channel_id") != channel_id:
+        return None
+    return record
+
+
+def _write_channel_attachment(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _channel_message_to_wire(message: Any) -> Dict[str, Any]:
@@ -4092,10 +4474,25 @@ def _channel_message_to_wire(message: Any) -> Dict[str, Any]:
         return data
     receipt_id = meta.get("nth_receipt_id")
     receipt_hash = meta.get("nth_receipt_content_hash")
+    dispatch_phase = meta.get("dispatch_phase")
+    request_message_id = meta.get("request_message_id")
+    status_source = meta.get("status_source")
     if receipt_id:
         data.setdefault("nth_receipt_id", str(receipt_id))
     if receipt_hash:
         data.setdefault("nth_receipt_content_hash", str(receipt_hash))
+    if dispatch_phase:
+        data.setdefault("dispatch_phase", str(dispatch_phase))
+    if request_message_id:
+        data.setdefault("request_message_id", str(request_message_id))
+    if status_source:
+        data.setdefault("status_source", str(status_source))
+    attachments = meta.get("attachments")
+    if isinstance(attachments, list):
+        data.setdefault(
+            "attachments",
+            [item for item in attachments if isinstance(item, dict)],
+        )
     return data
 
 
@@ -4185,9 +4582,20 @@ _CHANNEL_DISPATCH_SEM = threading.BoundedSemaphore(_CHANNEL_DISPATCH_MAX)
 _CHANNEL_DISPATCH_RETRIES = 8
 _CHANNEL_DISPATCH_RETRY_SLEEP_S = 0.25
 _CHANNEL_DISPATCH_ERROR_COOLDOWN_S = 300.0
+# A provider failure must not permanently disable routing.  Keep the longer
+# error-post cooldown separate from the short half-open window: after this
+# backoff, the next user instruction becomes a real recovery probe.
+_CHANNEL_DISPATCH_PROVIDER_RECOVERY_COOLDOWN_S = 15.0
 _CHANNEL_DISPATCH_ERROR_LOCK = threading.Lock()
 _CHANNEL_DISPATCH_ERROR_UNTIL: Dict[Tuple[str, str], float] = {}
+_CHANNEL_DISPATCH_PROVIDER_RECOVERY_UNTIL: Dict[Tuple[str, str], float] = {}
 _CHANNEL_DISPATCH_IN_FLIGHT: set[Tuple[str, str]] = set()
+_CHANNEL_DISPATCH_PHASE_RECEIVED = "received"
+_CHANNEL_DISPATCH_PHASE_PROCESSING = "processing"
+_CHANNEL_DISPATCH_PHASE_QUEUED = "queued"
+_CHANNEL_DISPATCH_PHASE_EXECUTING = "executing"
+_CHANNEL_DISPATCH_PHASE_COMPLETED = "completed"
+_CHANNEL_DISPATCH_PHASE_FAILED = "failed"
 
 
 def _channel_dispatch_error_in_cooldown(
@@ -4222,6 +4630,9 @@ def _channel_dispatch_note_error(
         if until is not None and until > ts:
             return False
         _CHANNEL_DISPATCH_ERROR_UNTIL[key] = ts + _CHANNEL_DISPATCH_ERROR_COOLDOWN_S
+        _CHANNEL_DISPATCH_PROVIDER_RECOVERY_UNTIL[key] = (
+            ts + _CHANNEL_DISPATCH_PROVIDER_RECOVERY_COOLDOWN_S
+        )
         return True
 
 
@@ -4229,6 +4640,28 @@ def _channel_dispatch_clear_error(channel_id: str, did: str) -> None:
     key = (str(channel_id), str(did))
     with _CHANNEL_DISPATCH_ERROR_LOCK:
         _CHANNEL_DISPATCH_ERROR_UNTIL.pop(key, None)
+        _CHANNEL_DISPATCH_PROVIDER_RECOVERY_UNTIL.pop(key, None)
+
+
+def _channel_dispatch_provider_recovery_in_cooldown(
+    channel_id: str, did: str, *, now: Optional[float] = None,
+) -> bool:
+    """Return True while a degraded provider is still backing off.
+
+    Once the window expires, the next channel instruction is allowed to
+    probe the provider again.  A successful probe clears the window; another
+    failure starts a fresh backoff.
+    """
+    ts = time.time() if now is None else float(now)
+    key = (str(channel_id), str(did))
+    with _CHANNEL_DISPATCH_ERROR_LOCK:
+        until = _CHANNEL_DISPATCH_PROVIDER_RECOVERY_UNTIL.get(key)
+        if until is None:
+            return False
+        if until > ts:
+            return True
+        _CHANNEL_DISPATCH_PROVIDER_RECOVERY_UNTIL.pop(key, None)
+        return False
 
 
 def _redact_local_paths(text: str) -> str:
@@ -4264,7 +4697,28 @@ def _channel_dispatch_public_error(exc: Exception) -> str:
     return message
 
 
-def _a2a_http_error_message(status_code: int, content: Any) -> str:
+def _channel_dispatch_is_provider_failure(exc: Exception) -> bool:
+    """Return True for failures that should degrade provider routing."""
+    if isinstance(exc, (TimeoutError, OSError, ConnectionError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "backend-timeout",
+            "backend-failed",
+            "provider unavailable",
+            "provider queue",
+        )
+    )
+
+
+def _a2a_http_error_message(
+    status_code: int,
+    content: Any,
+    *,
+    backend_kind: str = "",
+) -> str:
     """Return a compact public message for a child A2A HTTP failure."""
     if isinstance(content, dict):
         error = content.get("error")
@@ -4277,11 +4731,24 @@ def _a2a_http_error_message(status_code: int, content: Any) -> str:
                         message = message.split(marker, 1)[0].strip()
                         break
                 message = " ".join(message.split())
-                hint = (
-                    "Hermes may still be queued. Try again, set "
-                    "NTH_HERMES_ASK_TIMEOUT_S up to 300, or configure a "
-                    "faster Hermes model."
-                )
+                kind = str(backend_kind or "").strip().lower()
+                if kind == "hermes":
+                    hint = (
+                        "Hermes may still be queued. Try again, set "
+                        "NTH_HERMES_ASK_TIMEOUT_S up to 300, or configure a "
+                        "faster Hermes model."
+                    )
+                elif kind == "codex":
+                    hint = (
+                        "Codex may be queued or out of usage. Retry, check "
+                        "Codex usage, or set NTH_CODEX_MODEL to a model "
+                        "supported by the installed CLI."
+                    )
+                else:
+                    hint = (
+                        "The selected Agent provider may still be queued. "
+                        "Retry or configure a faster provider."
+                    )
                 return f"backend-timeout: {message or hint}. {hint}"
             if message:
                 return f"a2a ask HTTP {status_code}: {code}: {message}"
@@ -4321,6 +4788,285 @@ def _channel_dispatch_end(channel_id: str, did: str) -> None:
         _CHANNEL_DISPATCH_IN_FLIGHT.discard(key)
 
 
+def _post_channel_dispatch_status(
+    groups: Any,
+    channel_id: str,
+    did: str,
+    request_message_id: str,
+    phase: str,
+    body: str,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Persist one durable, non-streaming channel workflow status.
+
+    Statuses are ordinary channel messages, so polling clients, offline
+    readers, and the append-only audit trail observe the same lifecycle.
+    ``request_message_id`` binds every status to the user's instruction.
+    """
+    status_actor = _channel_dispatch_status_actor(groups, channel_id, fallback=did)
+    status_metadata: Dict[str, Any] = {
+        "channel_dispatch": True,
+        "dispatch_phase": phase,
+        "request_message_id": request_message_id,
+        "agent_did": did,
+        "status_source": "hub",
+        "status_actor_id": status_actor,
+    }
+    if metadata:
+        status_metadata.update(metadata)
+    try:
+        _post_channel_message(
+            groups,
+            channel_id,
+            sender_id=status_actor,
+            body=body,
+            kind="system",
+            reply_to=request_message_id,
+            metadata=status_metadata,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "channel dispatch status post failed for %s/%s (%s): %s",
+            channel_id, did, phase, exc,
+        )
+    return False
+
+
+def _channel_dispatch_status_actor(
+    groups: Any,
+    channel_id: str,
+    *,
+    fallback: str = "admin",
+) -> str:
+    """Choose a real channel principal for Hub-authored status messages."""
+    candidates: List[str] = []
+    try:
+        channel = groups.get_channel(channel_id)
+    except Exception:  # noqa: BLE001
+        channel = None
+    if channel is None:
+        # Legacy embedders may not expose get_channel(). Preserve their
+        # historical sender semantics; current GroupManager takes the safe
+        # principal path below.
+        return str(fallback or "admin")
+    if channel is not None:
+        candidates.append(str(getattr(channel, "created_by", "") or ""))
+        candidates.extend(str(item) for item in (channel.member_ids or []))
+    candidates.append("admin")
+
+    membership = getattr(groups, "membership", None)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if membership is None:
+            return candidate
+        try:
+            config = membership.load_config()
+            if (
+                not config.admin_ids
+                and not config.member_ids
+            ) or membership.has_permission(candidate, "send_messages"):
+                return candidate
+        except Exception:  # noqa: BLE001
+            continue
+    return candidates[0] if candidates and candidates[0] else "admin"
+
+
+def _post_channel_message(
+    groups: Any,
+    channel_id: str,
+    *,
+    sender_id: str,
+    body: str,
+    kind: str,
+    reply_to: str,
+    metadata: Optional[Dict[str, Any]],
+) -> None:
+    """Write a channel message across old and current GroupManager APIs.
+
+    Older embedders accept only ``metadata``. The fallback is deliberately
+    narrow: a TypeError from message validation or storage is re-raised, while
+    only an unknown keyword-argument error uses the legacy signature.
+    """
+    post_message = groups.post_message
+    try:
+        signature = inspect.signature(post_message)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        parameters = signature.parameters.values()
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        supports_current = accepts_kwargs or all(
+            name in signature.parameters
+            for name in ("kind", "reply_to", "metadata")
+        )
+        if not supports_current:
+            logger.warning(
+                "channel message API is legacy; reply_to/kind are carried "
+                "only in metadata",
+            )
+            post_message(
+                channel_id,
+                sender_id=sender_id,
+                body=body,
+                metadata=metadata,
+            )
+            return
+    try:
+        post_message(
+            channel_id,
+            sender_id=sender_id,
+            body=body,
+            kind=kind,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+    except TypeError as exc:
+        # Signature inspection can be unavailable for extension/proxy
+        # objects. Only that unknown-signature case gets the old fallback;
+        # a normal Python callable's business TypeError must propagate.
+        if signature is not None or "unexpected keyword argument" not in str(exc):
+            raise
+        groups.post_message(
+            channel_id,
+            sender_id=sender_id,
+            body=body,
+            metadata=metadata,
+        )
+
+
+def _post_channel_dispatch_not_started(
+    groups: Any,
+    channel_id: str,
+    did: str,
+    request_message_id: str,
+    reason: str,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist an accepted-but-not-started dispatch as a terminal failure."""
+    _post_channel_dispatch_status(
+        groups,
+        channel_id,
+        did,
+        request_message_id,
+        _CHANNEL_DISPATCH_PHASE_FAILED,
+        reason,
+        metadata=metadata,
+    )
+
+
+def _recover_incomplete_channel_dispatches(
+    groups: Any,
+    link_jobs: Any = (),
+) -> int:
+    """Close stale channel dispatches left by a hub restart.
+
+    The instruction itself is already durable, but the worker thread is not.
+    Replaying an arbitrary prompt after a crash could duplicate side effects,
+    so recovery fails the stale dispatch explicitly instead of guessing that
+    the remote provider did not execute it.
+    """
+    channels_dir = getattr(groups, "channels_dir", None)
+    if not isinstance(channels_dir, Path) or not channels_dir.exists():
+        return 0
+    recovered = 0
+    suffix = ".messages.jsonl"
+    channel_entries: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for path in channels_dir.glob(f"*{suffix}"):
+        channel_id = path.name[:-len(suffix)]
+        try:
+            messages = groups.list_messages(channel_id, actor_id="")
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning(
+                "channel dispatch recovery could not read %s: %s",
+                channel_id,
+                exc,
+            )
+            continue
+        by_request: Dict[str, Dict[str, Any]] = {}
+        for message in messages:
+            metadata = getattr(message, "metadata", {})
+            if not isinstance(metadata, dict) or not metadata.get("channel_dispatch"):
+                continue
+            request_id = str(metadata.get("request_message_id", "") or "")
+            if not request_id:
+                continue
+            phase = str(metadata.get("dispatch_phase", "") or "")
+            entry = by_request.setdefault(
+                request_id,
+                {"terminal": False, "pending": False, "agent_did": ""},
+            )
+            if phase in {
+                _CHANNEL_DISPATCH_PHASE_COMPLETED,
+                _CHANNEL_DISPATCH_PHASE_FAILED,
+            }:
+                entry["terminal"] = True
+            elif phase in {
+                _CHANNEL_DISPATCH_PHASE_RECEIVED,
+                _CHANNEL_DISPATCH_PHASE_PROCESSING,
+                _CHANNEL_DISPATCH_PHASE_QUEUED,
+                _CHANNEL_DISPATCH_PHASE_EXECUTING,
+            }:
+                entry["pending"] = True
+            if metadata.get("agent_did"):
+                entry["agent_did"] = str(metadata["agent_did"])
+        for request_id, entry in by_request.items():
+            channel_entries[(channel_id, request_id)] = entry
+
+        for request_id, entry in by_request.items():
+            if not entry["pending"] or entry["terminal"]:
+                continue
+            if _post_channel_dispatch_status(
+                groups,
+                channel_id,
+                str(entry["agent_did"] or "admin"),
+                request_id,
+                _CHANNEL_DISPATCH_PHASE_FAILED,
+                "Hub restarted before the agent result was recorded; "
+                "the instruction was not replayed.",
+                metadata={"recovery": "hub-restart"},
+            ):
+                recovered += 1
+                entry["terminal"] = True
+
+    for job in tuple(link_jobs or ()):
+        if str(getattr(job, "state", "")) != "delivery_unknown":
+            continue
+        channel_id = str(getattr(job, "channel_id", "") or "")
+        request_id = str(getattr(job, "request_message_id", "") or "")
+        if not channel_id or not request_id:
+            continue
+        entry = channel_entries.get((channel_id, request_id), {})
+        if entry.get("terminal"):
+            continue
+        if _post_channel_dispatch_status(
+            groups,
+            channel_id,
+            str(getattr(job, "agent_did", "") or "admin"),
+            request_id,
+            _CHANNEL_DISPATCH_PHASE_FAILED,
+            "Hub restarted before the agent result was recorded; "
+            "delivery outcome is unknown and the instruction was not replayed.",
+            metadata={
+                "recovery": "agent-link-delivery-unknown",
+                "link_job_id": str(getattr(job, "job_id", "") or ""),
+            },
+        ):
+            recovered += 1
+            channel_entries[(channel_id, request_id)] = {
+                "terminal": True,
+                "pending": False,
+                "agent_did": str(getattr(job, "agent_did", "") or ""),
+            }
+    return recovered
+
+
 def _channel_ask_and_reply(
     groups,
     auth_token,
@@ -4331,6 +5077,12 @@ def _channel_ask_and_reply(
     receipts_store: Any = None,
     agent_id: str = "",
     backend_kind: str = "",
+    request_message_id: str = "",
+    link_job_id: str = "",
+    supervisor: Any = None,
+    semaphore_acquired: bool = True,
+    request: Optional[Request] = None,
+    work_record: Any = None,
 ):
     """P2 后台:问一个 agent 的 /a2a/ask,把回复回帖到频道。best-effort。
 
@@ -4345,11 +5097,16 @@ def _channel_ask_and_reply(
 
     from nth_dao.cap_token import encode_authorization_header
 
+    outcome: Any = {"error": "agent dispatch failed"}
     try:
         body_bytes = json.dumps(
             {
                 "prompt": prompt,
                 "timeout_s": _channel_dispatch_ask_timeout(backend_kind),
+                **(
+                    {"agent_link_job_id": link_job_id}
+                    if link_job_id else {}
+                ),
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -4359,33 +5116,52 @@ def _channel_ask_and_reply(
             "Content-Length": str(len(body_bytes)),
             "Authorization": f"CapToken {encode_authorization_header(auth_token)}",
         }
-        timeout = _a2a_forward_timeout("ask", body_bytes)
+        timeout = _a2a_forward_timeout(
+            "ask", body_bytes, backend_kind=backend_kind,
+        )
         content: Any = {}
-        for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
-            req = urllib.request.Request(
-                url, data=body_bytes, headers=headers, method="POST")
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                    raw = resp.read()
-                content = _decode_or_passthrough(raw)
-                break
-            except urllib.error.HTTPError as exc:
-                raw = exc.read() if exc.fp else b""
-                content = _decode_or_passthrough(raw)
-                blob = (
-                    json.dumps(content, ensure_ascii=False)
-                    if isinstance(content, dict) else str(content)
-                )
-                if (
-                    exc.code == 401
-                    and "not-yet-authorized" in blob
-                    and attempt < _CHANNEL_DISPATCH_RETRIES
-                ):
-                    time.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
-                    continue
-                raise RuntimeError(
-                    _a2a_http_error_message(exc.code, content)
-                ) from exc
+        lease = (
+            _work_scope_lease(request, work_record)
+            if request is not None and work_record is not None
+            else nullcontext()
+        )
+        with lease:
+            _post_channel_dispatch_status(
+                groups,
+                channel_id,
+                did,
+                request_message_id,
+                _CHANNEL_DISPATCH_PHASE_EXECUTING,
+                "Hub started the Agent provider call.",
+                metadata={"link_job_id": link_job_id} if link_job_id else None,
+            )
+            for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
+                req = urllib.request.Request(
+                    url, data=body_bytes, headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                        raw = resp.read()
+                    content = _decode_or_passthrough(raw)
+                    break
+                except urllib.error.HTTPError as exc:
+                    raw = exc.read() if exc.fp else b""
+                    content = _decode_or_passthrough(raw)
+                    blob = (
+                        json.dumps(content, ensure_ascii=False)
+                        if isinstance(content, dict) else str(content)
+                    )
+                    if (
+                        exc.code == 401
+                        and "not-yet-authorized" in blob
+                        and attempt < _CHANNEL_DISPATCH_RETRIES
+                    ):
+                        time.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
+                        continue
+                    raise RuntimeError(
+                        _a2a_http_error_message(
+                            exc.code, content, backend_kind=backend_kind,
+                        )
+                    ) from exc
         reply = ""
         reply_metadata: Dict[str, Any] = {}
         if isinstance(content, dict):
@@ -4399,30 +5175,246 @@ def _channel_ask_and_reply(
                 reply = str(result.get("response") or "")
         reply = reply.strip()
         if reply:
-            groups.post_message(
-                channel_id, sender_id=did, body=reply,
+            reply_metadata.update({
+                "channel_dispatch": True,
+                "dispatch_phase": _CHANNEL_DISPATCH_PHASE_COMPLETED,
+                "request_message_id": request_message_id,
+                "agent_did": did,
+            })
+            if link_job_id:
+                reply_metadata["link_job_id"] = link_job_id
+            _post_channel_message(
+                groups,
+                channel_id,
+                sender_id=did,
+                body=reply,
+                kind="text",
+                reply_to=request_message_id,
                 metadata=reply_metadata or None,
             )
+            if supervisor is not None and agent_id:
+                try:
+                    supervisor.mark_provider_state(agent_id, "ready")
+                except Exception as state_exc:  # noqa: BLE001
+                    logger.warning(
+                        "channel provider state update failed for %s: %s",
+                        did,
+                        state_exc,
+                    )
             _channel_dispatch_clear_error(channel_id, did)
+            outcome = {
+                "response": reply,
+                "receipt_id": str(
+                    reply_metadata.get("nth_receipt_id", "") or ""
+                ),
+            }
+        else:
+            raise RuntimeError("agent returned an empty response")
     except Exception as exc:  # noqa: BLE001
         logger.warning("channel agent dispatch failed for %s: %s", did, exc)
-        if not _channel_dispatch_note_error(channel_id, did):
+        if (
+            supervisor is not None
+            and agent_id
+            and _channel_dispatch_is_provider_failure(exc)
+        ):
+            try:
+                supervisor.mark_provider_state(agent_id, "degraded")
+            except Exception as state_exc:  # noqa: BLE001
+                logger.warning(
+                    "channel provider degradation update failed for %s: %s",
+                    did,
+                    state_exc,
+                )
+        should_post_detail = _channel_dispatch_note_error(channel_id, did)
+        if not should_post_detail:
             logger.info(
                 "channel agent dispatch error suppressed during cooldown "
                 "for %s in %s", did, channel_id,
             )
-            return
-        try:
+            message = "agent failed again during the current cooldown; retry later."
+        else:
             message = _channel_dispatch_public_error(exc)
-            groups.post_message(channel_id, sender_id=did, body=message)
-        except Exception as post_exc:  # noqa: BLE001
-            logger.warning(
-                "channel agent dispatch error post failed for %s: %s",
-                did, post_exc,
-            )
+        _post_channel_dispatch_status(
+            groups,
+            channel_id,
+            did,
+            request_message_id,
+            _CHANNEL_DISPATCH_PHASE_FAILED,
+            message,
+            metadata={"link_job_id": link_job_id} if link_job_id else None,
+        )
+        outcome = {"error": message}
     finally:
-        _channel_dispatch_end(channel_id, did)
-        _CHANNEL_DISPATCH_SEM.release()  # 归还在飞配额
+        if semaphore_acquired:
+            _CHANNEL_DISPATCH_SEM.release()  # 归还在飞配额
+    return outcome
+
+
+_CHANNEL_AGENT_MENTION_TOKEN_RE = re.compile(
+    r"@(?P<agent>did:key:[A-Za-z0-9]+|[\w][\w./-]{0,127})(?=$|[\s,;:])",
+    re.IGNORECASE,
+)
+_CHANNEL_AGENT_KIND_ALIASES = {
+    "chatgpt": "codex",
+    "codex": "codex",
+    "codex/chatgpt": "codex",
+    "chatgpt/codex": "codex",
+    "claude": "claude-code",
+    "claude-code": "claude-code",
+    "hermes": "hermes",
+}
+
+
+def _channel_message_target_dids(message: Any) -> List[str]:
+    metadata = getattr(message, "metadata", None)
+    if not isinstance(metadata, dict):
+        return []
+    raw_targets = metadata.get("target_agent_dids")
+    if not isinstance(raw_targets, list):
+        return []
+    return list(dict.fromkeys(
+        str(item).strip()
+        for item in raw_targets
+        if str(item).strip().startswith("did:")
+    ))
+
+
+def _channel_message_mentions(message: Any) -> List[str]:
+    """Parse the optional routing header at the start of a message.
+
+    Mentions elsewhere are ordinary message content.  This is important for
+    programming tasks containing decorators such as ``@dataclass`` and for
+    quoted social handles.  Multiple leading recipients may be separated by
+    whitespace, punctuation, or the word ``and``.
+    """
+    body = str(getattr(message, "body", "") or "")
+    text = body.lstrip()
+    cursor = 0
+    mentions: List[str] = []
+    while cursor < len(text) and text[cursor] == "@":
+        match = _CHANNEL_AGENT_MENTION_TOKEN_RE.match(text, cursor)
+        if match is None:
+            break
+        mentions.append(match.group("agent").strip())
+        cursor = match.end()
+        separator = re.match(r"[\s,;:]+", text[cursor:])
+        if separator is None:
+            break
+        cursor += separator.end()
+        conjunction = re.match(r"and\s+(?=@)", text[cursor:], re.IGNORECASE)
+        if conjunction is not None:
+            cursor += conjunction.end()
+        if cursor >= len(text) or text[cursor] != "@":
+            break
+    return list(dict.fromkeys(mentions))
+
+
+def _channel_message_target_kind(message: Any) -> str:
+    """Return the first provider alias explicitly addressed with an at-sign."""
+    for mention in _channel_message_mentions(message):
+        kind = _CHANNEL_AGENT_KIND_ALIASES.get(mention.casefold())
+        if kind:
+            return kind
+    return ""
+
+
+def _channel_mention_key(value: str) -> str:
+    return re.sub(r"[\s_]+", "-", value.strip().casefold())
+
+
+def _channel_provider_primary_key(
+    record: Any,
+) -> Tuple[int, int, int, int, str, str]:
+    """Rank duplicate provider instances for a single alias mention.
+
+    Provider aliases such as ``@hermes`` address one primary instance.  A
+    deliberate fan-out must use ``@all`` or multiple explicit Agent mentions.
+    The ordering is deterministic so retries keep targeting the same healthy
+    process until its observable state changes.
+    """
+    provider_state = str(getattr(record, "provider_state", "unknown") or "unknown")
+    provider_rank = {"ready": 2, "unknown": 1, "degraded": 0}.get(
+        provider_state,
+        0,
+    )
+    return (
+        int(bool(getattr(record, "alive", False))),
+        int(
+            bool(getattr(record, "a2a_ready", False))
+            and isinstance(getattr(record, "a2a_port", None), int)
+        ),
+        int(bool(getattr(record, "cap_token_id", None))),
+        provider_rank,
+        str(getattr(record, "started_at", "") or ""),
+        str(getattr(record, "agent_id", "") or ""),
+    )
+
+
+def _resolve_channel_message_target_dids(
+    message: Any,
+    records: List[Any],
+    members: set,
+) -> Tuple[set, List[str], bool]:
+    """Resolve explicit metadata or mentions to channel-member DIDs.
+
+    The boolean indicates whether the message explicitly selected a target.
+    An empty DID set with targeted=True means all. Unknown mentions are
+    returned separately so dispatch fails visibly instead of widening an
+    intended private instruction to every channel Agent.
+    """
+    explicit = set(_channel_message_target_dids(message))
+    if explicit:
+        return explicit, [], True
+
+    mentions = _channel_message_mentions(message)
+    if not mentions:
+        return set(), [], False
+    if any(mention.casefold() == "all" for mention in mentions):
+        return set(), [], True
+
+    resolved: set = set()
+    unresolved: List[str] = []
+    for mention in mentions:
+        folded = mention.casefold()
+        alias_kind = _CHANNEL_AGENT_KIND_ALIASES.get(folded)
+        if alias_kind:
+            provider_matches = [
+                rec for rec in records
+                if str(getattr(rec, "did", "") or "") in members
+                and str(getattr(rec, "kind", "") or "") == alias_kind
+                and _channel_dispatch_kind_allowed(alias_kind)
+            ]
+            if provider_matches:
+                primary = max(provider_matches, key=_channel_provider_primary_key)
+                resolved.add(str(getattr(primary, "did", "") or ""))
+            else:
+                unresolved.append(mention)
+            continue
+
+        matches: set = set()
+        for rec in records:
+            did = str(getattr(rec, "did", "") or "")
+            if did not in members:
+                continue
+            kind = str(getattr(rec, "kind", "") or "")
+            if not _channel_dispatch_kind_allowed(kind):
+                continue
+            if mention.startswith("did:"):
+                if did == mention:
+                    matches.add(did)
+                continue
+            agent_id = str(getattr(rec, "agent_id", "") or "")
+            label = str(getattr(rec, "label", "") or "")
+            if _channel_mention_key(mention) in {
+                _channel_mention_key(agent_id),
+                _channel_mention_key(label),
+            }:
+                matches.add(did)
+        if matches:
+            resolved.update(matches)
+        else:
+            unresolved.append(mention)
+    return resolved, unresolved, True
 
 
 def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message) -> None:
@@ -4437,18 +5429,49 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
         # _state_supervisor)。两者 state 对象不同,别搞混。
         groups = getattr(request.app.state.nth, "groups", None)
         sup = getattr(request.app.state, "v2_supervisor", None)  # 只用已构建的
-        if groups is None or sup is None:
+        if groups is None:
             return
         channel = groups.get_channel(channel_id)
         if channel is None:
             return
+        if sup is None:
+            _post_channel_dispatch_not_started(
+                groups,
+                channel_id,
+                str(getattr(message, "sender_id", "") or "admin"),
+                str(getattr(message, "message_id", "") or ""),
+                "No online Agent is available; instruction was not started.",
+                metadata={"agent_did": ""},
+            )
+            return
         members = set(channel.member_ids or [])
         store = _state_cap_tokens_store(request)
+        records = list(sup.list_agents())
+        requested_dids, unresolved_mentions, explicitly_targeted = (
+            _resolve_channel_message_target_dids(message, records, members)
+        )
+        if unresolved_mentions:
+            rendered = ", ".join(f"@{name}" for name in unresolved_mentions)
+            _post_channel_dispatch_not_started(
+                groups,
+                channel_id,
+                str(getattr(message, "sender_id", "") or "admin"),
+                str(getattr(message, "message_id", "") or ""),
+                f"No channel Agent matches {rendered}; instruction was not started.",
+                metadata={
+                    "agent_did": "",
+                    "unresolved_mentions": unresolved_mentions,
+                },
+            )
+            return
 
         receipts_store = _state_receipts_store(request)
-        targets: List[Tuple[Any, str, int, str, str]] = []
+        targets: List[Tuple[Any, str, int, str, str, Any]] = []
         driver_dids: set = set()
-        for rec in sup.list_agents():
+        degraded_dids: List[str] = []
+        from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND
+
+        for rec in records:
             did = getattr(rec, "did", "") or ""
             port = getattr(rec, "a2a_port", None)
             tok_id = getattr(rec, "cap_token_id", None)
@@ -4457,56 +5480,227 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
                 continue
             if did not in members or not isinstance(port, int) or not tok_id:
                 continue
+            if requested_dids and did not in requested_dids:
+                continue
             try:
                 alive = bool(rec.to_agent_entry().get("alive"))
             except Exception:  # noqa: BLE001
                 alive = False
             if not alive:
                 continue
+            if not bool(getattr(rec, "a2a_ready", True)):
+                continue
+            if getattr(rec, "provider_state", "unknown") == "degraded":
+                # Circuit-breaker half-open path: do not route repeatedly
+                # during the backoff, but allow the first later instruction
+                # to probe a provider that may have recovered.
+                if _channel_dispatch_provider_recovery_in_cooldown(
+                    channel_id, did,
+                ):
+                    degraded_dids.append(did)
+                    continue
             driver_dids.add(did)
-            auth = store.get(tok_id) if store is not None else None
-            if isinstance(auth, dict):
-                targets.append((
-                    auth,
-                    did,
-                    port,
-                    getattr(rec, "agent_id", "") or "",
-                    backend_kind,
-                ))
+            try:
+                auth = store.get(tok_id) if store is not None else None
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning("channel cap_token read failed for %s: %s", did, exc)
+                continue
+            if not _cap_token_usable(
+                auth,
+                store,
+                required_capabilities=[CAP_A2A_MESSAGE_SEND],
+            ):
+                try:
+                    auth = _refresh_supervised_agent_cap_token(
+                        request,
+                        rec,
+                        previous_token=auth if isinstance(auth, dict) else None,
+                    )
+                except HTTPException as exc:
+                    logger.warning(
+                        "channel cap_token refresh failed for %s: %s",
+                        did,
+                        exc.detail,
+                    )
+                    continue
+            targets.append((
+                auth,
+                did,
+                port,
+                getattr(rec, "agent_id", "") or "",
+                backend_kind,
+                rec,
+            ))
 
         # 防环:消息作者本身就是可驱动 agent → 这是 agent 的回帖,不再派发。
         if message.sender_id in driver_dids:
             return
-
-        for auth, did, port, agent_id, backend_kind in targets:
-            if not _channel_dispatch_try_begin(channel_id, did):
-                logger.info(
-                    "channel dispatch skipped while busy/cooling for %s "
-                    "in %s", did, channel_id,
+        if targets and requested_dids:
+            ready_dids = {target[1] for target in targets}
+            for unavailable_did in sorted(requested_dids - ready_dids):
+                _post_channel_dispatch_status(
+                    groups,
+                    channel_id,
+                    unavailable_did,
+                    str(getattr(message, "message_id", "") or ""),
+                    _CHANNEL_DISPATCH_PHASE_FAILED,
+                    "Selected Agent is not ready; instruction was not started for it.",
+                    metadata={"target_agent_dids": [unavailable_did]},
                 )
-                continue
+        if not targets:
+            degraded = bool(degraded_dids)
+            target_description = (
+                "Mentioned Agent" if explicitly_targeted else "Agent"
+            )
+            _post_channel_dispatch_not_started(
+                groups,
+                channel_id,
+                str(getattr(message, "sender_id", "") or "admin"),
+                str(getattr(message, "message_id", "") or ""),
+                (
+                    "Agent provider is recovering after a previous failure; "
+                    f"retry after the {int(_CHANNEL_DISPATCH_PROVIDER_RECOVERY_COOLDOWN_S)}s "
+                    "recovery window."
+                    if degraded else
+                    f"No ready {target_description} with a usable capability token is available; "
+                    "instruction was not started."
+                ),
+                metadata={
+                    "agent_did": degraded_dids[0] if len(degraded_dids) == 1 else "",
+                    "provider_state": "degraded" if degraded else "unknown",
+                    "target_agent_dids": sorted(requested_dids),
+                    "explicitly_targeted": explicitly_targeted,
+                },
+            )
+            return
+
+        try:
+            link_manager = _state_agent_link(request)
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            logger.warning("channel AgentLink unavailable: %s", exc)
+            _post_channel_dispatch_not_started(
+                groups,
+                channel_id,
+                str(getattr(message, "sender_id", "") or "admin"),
+                str(getattr(message, "message_id", "") or ""),
+                "Agent link is unavailable; instruction was not started.",
+                metadata={"agent_did": "", "link_error": type(exc).__name__},
+            )
+            return
+
+        for auth, did, port, agent_id, backend_kind, work_record in targets:
             # 并发封顶:抢一个在飞槽位,抢不到就丢弃这条派发(不堆线程)。
             # 槽位由 _channel_ask_and_reply 的 finally 归还。
-            if not _CHANNEL_DISPATCH_SEM.acquire(blocking=False):
-                _channel_dispatch_end(channel_id, did)
+            request_message_id = str(getattr(message, "message_id", "") or "")
+            try:
+                job_ref: Dict[str, str] = {}
+
+                def run_channel_link(
+                    *,
+                    auth=auth,
+                    did=did,
+                    port=port,
+                    agent_id=agent_id,
+                    backend_kind=backend_kind,
+                    work_record=work_record,
+                    request_message_id=request_message_id,
+                    job_ref=job_ref,
+                ):
+                    if not _CHANNEL_DISPATCH_SEM.acquire(blocking=False):
+                        message_text = (
+                            "Agent capacity is full; instruction was not started."
+                        )
+                        _post_channel_dispatch_status(
+                            groups,
+                            channel_id,
+                            did,
+                            request_message_id,
+                            _CHANNEL_DISPATCH_PHASE_FAILED,
+                            message_text,
+                            metadata={"link_job_id": job_ref.get("job_id", "")},
+                        )
+                        return {"error": message_text}
+                    return _channel_ask_and_reply(
+                        groups,
+                        auth,
+                        did,
+                        port,
+                        channel_id,
+                        message.body,
+                        receipts_store,
+                        agent_id,
+                        backend_kind,
+                        request_message_id,
+                        job_ref.get("job_id", ""),
+                        sup,
+                        semaphore_acquired=True,
+                        request=request,
+                        work_record=work_record,
+                    )
+
+                link_job = link_manager.submit(
+                    agent_id=agent_id,
+                    agent_did=did,
+                    idempotency_key=request_message_id,
+                    request_hash=_agent_link_request_hash(
+                        message.body,
+                        _channel_dispatch_ask_timeout(backend_kind),
+                        channel_id=channel_id,
+                        request_message_id=request_message_id,
+                    ),
+                    prompt_sha256=_agent_link_prompt_hash(message.body),
+                    channel_id=channel_id,
+                    request_message_id=request_message_id,
+                    worker=run_channel_link,
+                    autostart=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _post_channel_dispatch_status(
+                    groups,
+                    channel_id,
+                    did,
+                    request_message_id,
+                    _CHANNEL_DISPATCH_PHASE_FAILED,
+                    "Agent inbox is unavailable; instruction was not started.",
+                    metadata={"link_error": type(exc).__name__},
+                )
                 logger.warning(
-                    "channel dispatch saturated (>=%d in flight); "
-                    "dropping reply for %s", _CHANNEL_DISPATCH_MAX, did,
+                    "channel AgentLink submission failed for %s: %s", did, exc,
                 )
                 continue
+            job_ref["job_id"] = link_job.job_id
+            _post_channel_dispatch_status(
+                groups,
+                channel_id,
+                did,
+                request_message_id,
+                _CHANNEL_DISPATCH_PHASE_QUEUED,
+                "Hub queued the instruction for this Agent.",
+                metadata={"link_job_id": link_job.job_id},
+            )
             try:
-                threading.Thread(
-                    target=_channel_ask_and_reply,
-                    args=(
-                        groups, auth, did, port, channel_id, message.body,
-                        receipts_store, agent_id, backend_kind,
-                    ),
-                    daemon=True,
-                ).start()
+                link_manager.start(did)
             except Exception as exc:  # noqa: BLE001
-                _channel_dispatch_end(channel_id, did)
-                _CHANNEL_DISPATCH_SEM.release()  # 起线程失败,立刻归还配额
-                logger.warning("channel dispatch thread start failed: %s", exc)
+                try:
+                    link_manager.store.transition(
+                        link_job.job_id,
+                        "failed",
+                        error=f"Agent inbox could not start: {type(exc).__name__}",
+                    )
+                except Exception:
+                    logger.exception(
+                        "channel AgentLink start failure could not be persisted "
+                        "for %s", did,
+                    )
+                _post_channel_dispatch_status(
+                    groups,
+                    channel_id,
+                    did,
+                    request_message_id,
+                    _CHANNEL_DISPATCH_PHASE_FAILED,
+                    "Agent inbox could not start; instruction was not processed.",
+                    metadata={"link_job_id": link_job.job_id},
+                )
     except Exception as exc:  # noqa: BLE001
         logger.warning("channel dispatch hook failed: %s", exc)
 
@@ -5235,6 +6429,33 @@ def register_v2_routes(app: FastAPI) -> None:
         return
     app.state.v2_routes_registered = True
 
+    # Load durable AgentLink state before requests arrive. The store converts
+    # interrupted accepted/processing jobs to delivery_unknown; project those
+    # outcomes back into their originating channels exactly once.
+    try:
+        from .agent_link import AgentLinkManager, AgentLinkStore
+
+        workspace = Path(app.state.nth.workspace)
+        manager = getattr(app.state, "agent_link_manager", None)
+        if manager is None:
+            manager = AgentLinkManager(
+                AgentLinkStore(workspace),
+                max_pending_per_agent=4,
+                max_jobs=1000,
+            )
+            app.state.agent_link_manager = manager
+        recovered = _recover_incomplete_channel_dispatches(
+            getattr(app.state.nth, "groups", None),
+            manager.store.all(),
+        )
+        if recovered:
+            logger.warning(
+                "v2_api: projected %d interrupted AgentLink job(s) to channels",
+                recovered,
+            )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("v2_api: AgentLink startup recovery failed: %s", exc)
+
     @app.get("/api/v2/identity")
     def v2_identity() -> Dict[str, Any]:
         return _seed_identity()
@@ -5251,7 +6472,69 @@ def register_v2_routes(app: FastAPI) -> None:
     @app.get("/api/v2/channels")
     def v2_channels(request: Request, actor_id: str = "") -> List[Dict[str, Any]]:
         """列频道。actor_id 留空时只看公开频道(私有频道需成员身份)。"""
-        return [c.to_dict() for c in _groups(request).list_channels(actor_id=actor_id)]
+        groups = _groups(request)
+        channels = groups.list_channels(actor_id=actor_id)
+        tasks_by_channel: Dict[str, List[Any]] = {}
+        try:
+            for task in groups.list_tasks():
+                if task.channel_id and task.channel_id != "general":
+                    tasks_by_channel.setdefault(task.channel_id, []).append(task)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("channel task scope projection failed: %s", exc)
+        dao_records: List[Any] = []
+        try:
+            registry = getattr(request.app.state.nth, "group_registry", None)
+            if registry is not None:
+                dao_records = sorted(
+                    registry.list_all(),
+                    key=lambda record: len(str(getattr(record, "slug", "") or "")),
+                    reverse=True,
+                )
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("channel DAO scope projection failed: %s", exc)
+
+        projected: List[Dict[str, Any]] = []
+        for channel in channels:
+            row = channel.to_dict()
+            metadata = dict(row.get("metadata") or {})
+            if not any(
+                metadata.get(key)
+                for key in ("task_id", "mission_id", "process_id")
+            ):
+                linked_tasks = tasks_by_channel.get(channel.channel_id, [])
+                if linked_tasks:
+                    task = max(
+                        linked_tasks,
+                        key=lambda item: str(
+                            getattr(item, "updated_at", "")
+                            or getattr(item, "created_at", "")
+                        ),
+                    )
+                    metadata["task_id"] = str(getattr(task, "task_id", "") or "")
+                    metadata["task_label"] = str(getattr(task, "title", "") or "")
+            if not any(metadata.get(key) for key in ("dao_id", "scope_dao")):
+                matched_record = next(
+                    (
+                        record for record in dao_records
+                        if channel.channel_id.startswith(
+                            f"dao-{getattr(record, 'slug', '')}-"
+                        )
+                    ),
+                    None,
+                )
+                if matched_record is not None:
+                    metadata["dao_id"] = str(
+                        getattr(matched_record, "slug", "") or ""
+                    )
+                    metadata["dao_label"] = str(
+                        getattr(matched_record, "display_name", "") or ""
+                    )
+                else:
+                    metadata["dao_id"] = "home"
+                    metadata["dao_label"] = "NTH DAO"
+            row["metadata"] = metadata
+            projected.append(row)
+        return projected
 
     @app.post("/api/v2/channels")
     def v2_channel_create(
@@ -5275,6 +6558,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 name=name,
                 created_by=body.created_by.strip() or "admin",
                 topic=body.topic.strip(),
+                metadata={"dao_id": "home", "dao_label": "NTH DAO"},
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
@@ -5289,17 +6573,116 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="channel not found")
         return ch.to_dict()
 
+    @app.post("/api/v2/channels/{channel_id}/attachments")
+    async def v2_channel_attachment_upload(
+        channel_id: str,
+        request: Request,
+        filename: str = "",
+        actor_id: str = "admin",
+    ) -> Dict[str, Any]:
+        groups = _groups(request)
+        channel = groups.get_channel(channel_id)
+        if channel is None:
+            raise HTTPException(status_code=404, detail="channel not found")
+        actor = actor_id.strip() or "admin"
+        if actor not in set(channel.member_ids or []):
+            raise HTTPException(status_code=403, detail="actor must be a channel member")
+        declared_length = request.headers.get("content-length", "").strip()
+        if declared_length:
+            try:
+                if int(declared_length) > _CHANNEL_ATTACHMENT_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="attachment exceeds 25 MB")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="invalid content-length")
+        content = bytearray()
+        async for chunk in request.stream():
+            content.extend(chunk)
+            if len(content) > _CHANNEL_ATTACHMENT_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="attachment exceeds 25 MB")
+
+        raw_filename = filename.strip() or request.headers.get("x-filename", "").strip()
+        normalized_filename = Path(raw_filename.replace("\\", "/")).name
+        normalized_filename = "".join(
+            character for character in normalized_filename
+            if ord(character) >= 32 and character not in {"\x7f"}
+        ).strip()
+        if not normalized_filename:
+            normalized_filename = "attachment"
+        normalized_filename = normalized_filename[:180]
+        attachment_id = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
+        data_path, metadata_path = _channel_attachment_paths(
+            request, channel_id, attachment_id,
+        )
+        content_bytes = bytes(content)
+        record = {
+            "attachment_id": attachment_id,
+            "channel_id": channel_id,
+            "filename": normalized_filename,
+            "media_type": (
+                request.headers.get("content-type", "application/octet-stream")
+                or "application/octet-stream"
+            )[:200],
+            "size": len(content_bytes),
+            "sha256": hashlib.sha256(content_bytes).hexdigest(),
+            "uploaded_by": actor,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _write_channel_attachment(data_path, content_bytes)
+        atomic_write_json(metadata_path, record)
+        return _channel_attachment_public(record)
+
+    @app.get("/api/v2/channels/{channel_id}/attachments/{attachment_id}")
+    def v2_channel_attachment_download(
+        channel_id: str,
+        attachment_id: str,
+        request: Request,
+        actor_id: str = "admin",
+    ) -> FileResponse:
+        groups = _groups(request)
+        channel = groups.get_channel(channel_id)
+        if channel is None:
+            raise HTTPException(status_code=404, detail="channel not found")
+        actor = actor_id.strip() or "admin"
+        if actor not in set(channel.member_ids or []):
+            raise HTTPException(status_code=403, detail="actor must be a channel member")
+        record = _load_channel_attachment(request, channel_id, attachment_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="attachment not found")
+        data_path, _ = _channel_attachment_paths(request, channel_id, attachment_id)
+        return FileResponse(
+            data_path,
+            media_type=str(record.get("media_type") or "application/octet-stream"),
+            filename=str(record.get("filename") or "attachment"),
+        )
+
     @app.get("/api/v2/channels/{channel_id}/messages")
     def v2_channel_messages(
-        channel_id: str, request: Request, actor_id: str = "", limit: int = 100,
+        channel_id: str,
+        request: Request,
+        actor_id: str = "",
+        limit: int = 100,
+        before_message_id: str = "",
     ) -> List[Dict[str, Any]]:
         g = _groups(request)
         if g.get_channel(channel_id) is None:
             raise HTTPException(status_code=404, detail="channel not found")
         capped = min(max(limit, 1), 500)
+        messages = g.list_messages(channel_id, actor_id=actor_id)
+        if before_message_id:
+            try:
+                end = next(
+                    index for index, item in enumerate(messages)
+                    if item.message_id == before_message_id
+                )
+            except StopIteration:
+                raise HTTPException(
+                    status_code=404,
+                    detail="before_message_id not found in channel",
+                )
+            messages = messages[:end]
         return [
             _channel_message_to_wire(m)
-            for m in g.list_messages(channel_id, actor_id=actor_id, limit=capped)
+            for m in messages[-capped:]
         ]
 
     @app.post("/api/v2/channels/{channel_id}/messages")
@@ -5312,20 +6695,69 @@ def register_v2_routes(app: FastAPI) -> None:
         只对人类作者的消息触发,不对 agent 回帖再触发)。
         """
         text = body.body.strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="body must not be empty")
-        if len(text) > 4000:
-            raise HTTPException(status_code=400, detail="body too long (max 4000)")
+        if not text and not body.attachment_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="body or attachment_ids must be provided",
+            )
+        if len(text) > _CHANNEL_MESSAGE_MAX_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"body too long (max {_CHANNEL_MESSAGE_MAX_CHARS})",
+            )
+        groups = _groups(request)
+        channel = groups.get_channel(channel_id)
+        if channel is None:
+            raise HTTPException(status_code=404, detail="channel not found")
+        target_agent_dids = list(body.target_agent_dids)
+        if target_agent_dids:
+            non_members = sorted(
+                set(target_agent_dids) - set(channel.member_ids or []),
+            )
+            if non_members:
+                raise HTTPException(
+                    status_code=403,
+                    detail="target Agent must be a member of this channel",
+                )
+        reply_to = body.reply_to_message_id.strip()
+        if reply_to:
+            known_message_ids = {
+                item.message_id for item in groups.list_messages(channel_id, actor_id="")
+            }
+            if reply_to not in known_message_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail="reply_to_message_id does not belong to this channel",
+                )
+        attachments: List[Dict[str, Any]] = []
+        for attachment_id in body.attachment_ids:
+            record = _load_channel_attachment(request, channel_id, attachment_id)
+            if record is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"attachment {attachment_id!r} does not belong to this channel",
+                )
+            attachments.append(_channel_attachment_public(record))
+        message_metadata: Dict[str, Any] = {}
+        if target_agent_dids:
+            message_metadata["target_agent_dids"] = target_agent_dids
+        if attachments:
+            message_metadata["attachments"] = attachments
         try:
-            msg = _groups(request).post_message(
-                channel_id, sender_id=body.agent_id.strip() or "admin", body=text,
+            msg = groups.post_message(
+                channel_id,
+                sender_id=body.agent_id.strip() or "admin",
+                body=text,
+                reply_to=reply_to,
+                metadata=message_metadata or None,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         # P2:人类消息→派发给频道里可驱动的 agent 成员→回帖(后台、防环)。
-        _maybe_dispatch_to_channel_agents(request, channel_id, msg)
+        if text:
+            _maybe_dispatch_to_channel_agents(request, channel_id, msg)
         return _channel_message_to_wire(msg)
 
     @app.post("/api/v2/channels/{channel_id}/join")
@@ -5758,7 +7190,11 @@ def register_v2_routes(app: FastAPI) -> None:
             raise
 
         if resp_status != 200:
-            error_text = _a2a_http_error_message(resp_status, content)
+            error_text = _a2a_http_error_message(
+                resp_status,
+                content,
+                backend_kind=str(getattr(_rec, "kind", "") or ""),
+            )
             try:
                 store.update_step(
                     mission_id=mission_id,
@@ -7126,7 +8562,11 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="agent supervisor unavailable")
         matching = [
             r for r in sup.list_agents()
-            if r.did == body.agent_did and r.a2a_port is not None and r.alive
+            if (
+                r.did == body.agent_did
+                and r.a2a_port is not None
+                and r.alive
+            )
         ]
         if not matching:
             raise HTTPException(
@@ -7237,7 +8677,8 @@ def register_v2_routes(app: FastAPI) -> None:
         matching = [
             r for r in sup.list_agents()
             if r.did == body.agent_did
-            and r.a2a_port is not None and r.alive
+            and r.a2a_port is not None
+            and r.alive
         ]
         if not matching:
             raise HTTPException(
@@ -7475,6 +8916,7 @@ def register_v2_routes(app: FastAPI) -> None:
             try:
                 for rec in sup.list_agents():
                     entry = rec.to_agent_entry()
+                    entry["ask_timeout_s"] = _backend_ask_timeout(rec.kind)
                     # Phase G: try to surface the agent's cap_token
                     # scope_model_allowlist into the listing. Failures
                     # are swallowed (store missing, token deleted, etc.)
@@ -7514,10 +8956,262 @@ def register_v2_routes(app: FastAPI) -> None:
         return merged
 
     @app.get("/api/v2/agents/backends/status")
-    def v2_agent_backend_status() -> Dict[str, Any]:
+    def v2_agent_backend_status(request: Request) -> Dict[str, Any]:
         """Return local backend readiness without exposing secrets or paths."""
         from nth_dao.web.dummy_agent import backend_runtime_status
-        return {"backends": backend_runtime_status()}
+        statuses = {
+            kind: {
+                **status,
+                "ask_timeout_s": _backend_ask_timeout(kind),
+            }
+            for kind, status in backend_runtime_status().items()
+        }
+        return {"backends": _overlay_live_backend_status(statuses, request)}
+
+    @app.post("/api/v2/agents/{did}/link", status_code=202)
+    async def v2_agent_link_submit(did: str, request: Request) -> Dict[str, Any]:
+        """Submit a Bot-style asynchronous request to one supervised agent."""
+        import asyncio
+
+        # This endpoint makes the Hub spend delegated Agent authority. Do not
+        # let an anonymous caller or a narrowly-scoped CapToken turn it into
+        # an implicit confused-deputy action.
+        _require_console_bearer_for_sensitive_read(request)
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="body must be JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise HTTPException(status_code=400, detail="prompt is required")
+        if len(prompt.encode("utf-8")) > 1024 * 1024:
+            raise HTTPException(status_code=413, detail="prompt exceeds 1MB cap")
+
+        supervisor = _state_supervisor(request)
+        if supervisor is None:
+            raise HTTPException(status_code=503, detail="agent supervisor unavailable")
+        records = [
+            record for record in supervisor.list_agents()
+            if (
+                record.did == did
+                and record.a2a_port is not None
+                and record.alive
+            )
+        ]
+        if not records:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no live supervised agent for did={did!r}",
+            )
+        record = records[0]
+        idempotency_key = str(payload.get("idempotency_key", "") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(
+                status_code=400,
+                detail="idempotency_key is required for AgentLink requests",
+            )
+        if len(idempotency_key) > 200:
+            raise HTTPException(status_code=400, detail="idempotency_key is too long")
+        worker_payload = {"prompt": prompt}
+        if "timeout_s" in payload:
+            timeout_s = _validate_agent_link_timeout(payload["timeout_s"])
+            worker_payload["timeout_s"] = timeout_s
+        request_hash = _agent_link_request_hash(
+            prompt,
+            worker_payload.get("timeout_s"),
+        )
+
+        job_ref: Dict[str, str] = {}
+
+        def run_agent_link() -> Dict[str, Any]:
+            worker_payload["agent_link_job_id"] = job_ref.get("job_id", "")
+            status, content, _record, receipt_meta = asyncio.run(
+                _drive_supervised_agent_ask(request, did, worker_payload)
+            )
+            if status != 200:
+                raise RuntimeError(
+                    _a2a_http_error_message(
+                        status,
+                        content,
+                        backend_kind=str(getattr(record, "kind", "") or ""),
+                    )
+                )
+            result = content.get("result") if isinstance(content, dict) else None
+            if not isinstance(result, dict):
+                raise RuntimeError("agent returned a malformed result")
+            response = str(result.get("response", "") or "").strip()
+            if not response:
+                raise RuntimeError("agent returned an empty response")
+            return {
+                "response": response,
+                "receipt_id": str(
+                    (receipt_meta or {}).get("nth_receipt_id", "") or ""
+                ),
+            }
+
+        try:
+            job = _state_agent_link(request).submit(
+                agent_id=str(getattr(record, "agent_id", "") or ""),
+                agent_did=did,
+                worker=run_agent_link,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                prompt_sha256=_agent_link_prompt_hash(prompt),
+                autostart=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from .agent_link import (
+                AgentLinkBusy,
+                AgentLinkStoreFull,
+                IdempotencyConflict,
+            )
+
+            if isinstance(exc, AgentLinkBusy):
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            if isinstance(exc, IdempotencyConflict):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if isinstance(exc, AgentLinkStoreFull):
+                raise HTTPException(status_code=507, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=503,
+                detail=f"agent link unavailable: {type(exc).__name__}",
+            ) from exc
+        job_ref["job_id"] = job.job_id
+        try:
+            _state_agent_link(request).start(did)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                _state_agent_link(request).store.transition(
+                    job.job_id,
+                    "failed",
+                    error="AgentLink worker could not be started.",
+                )
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+                logger.exception(
+                    "failed to persist AgentLink start failure for %s",
+                    job.job_id,
+                )
+            raise HTTPException(
+                status_code=503,
+                detail=f"agent link could not start: {type(exc).__name__}",
+            ) from exc
+        return {
+            "job_id": job.job_id,
+            "agent_did": job.agent_did,
+            "state": job.state,
+        }
+
+    @app.get("/api/v2/agents/{did}/link/{job_id}")
+    def v2_agent_link_status(
+        did: str, job_id: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Read one asynchronous AgentLink job without exposing prompts."""
+        _require_console_bearer_for_sensitive_read(request)
+        job = _state_agent_link(request).get(job_id)
+        if job is None or job.agent_did != did:
+            raise HTTPException(status_code=404, detail="AgentLink job not found")
+        return job.to_dict()
+
+    @app.post("/api/v2/agents/{did}/link/{job_id}/reconcile")
+    async def v2_agent_link_reconcile(
+        did: str, job_id: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Reconcile an uncertain job from a verified signed Agent receipt.
+
+        This is deliberately a local-console operation for now. A future
+        remote transport may authenticate the same body with an agent
+        capability token, but must preserve these exact evidence checks.
+        """
+        _require_console_bearer_for_sensitive_read(request)
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="body must be JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        receipt = payload.get("receipt")
+        response = payload.get("response")
+        if not isinstance(receipt, dict):
+            raise HTTPException(status_code=400, detail="receipt must be an object")
+        if not isinstance(response, str) or not response.strip():
+            raise HTTPException(status_code=400, detail="response is required")
+        response = response.strip()
+        if len(response.encode("utf-8")) > 100_000:
+            raise HTTPException(status_code=413, detail="response exceeds 100KB cap")
+
+        manager = _state_agent_link(request)
+        job = manager.get(job_id)
+        if job is None or job.agent_did != did:
+            raise HTTPException(status_code=404, detail="AgentLink job not found")
+        if job.state not in {"delivery_unknown", "completed_unverified", "completed"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"AgentLink job is {job.state}; only uncertain or completed "
+                    "unverified jobs can be reconciled"
+                ),
+            )
+        if not job.prompt_sha256:
+            raise HTTPException(
+                status_code=409,
+                detail="AgentLink job has no prompt hash and cannot be reconciled",
+            )
+
+        try:
+            _verify_agent_receipt(
+                agent_id=job.agent_id,
+                expected_did=job.agent_did,
+                receipt=receipt,
+            )
+            receipt_payload = _agent_link_receipt_payload(receipt)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        receipt_id = str(receipt.get("receipt_id", "") or "")
+        if not receipt_id:
+            raise HTTPException(status_code=422, detail="receipt is missing receipt_id")
+        if receipt_payload.get("method") != "ask":
+            raise HTTPException(status_code=422, detail="receipt is not an ask receipt")
+        if str(receipt_payload.get("agent_link_job_id", "") or "") != job.job_id:
+            raise HTTPException(
+                status_code=422,
+                detail="receipt is not bound to this AgentLink job",
+            )
+        if str(receipt_payload.get("request_sha256", "") or "") != job.prompt_sha256:
+            raise HTTPException(
+                status_code=422,
+                detail="receipt prompt hash does not match the AgentLink job",
+            )
+        response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()
+        if str(receipt_payload.get("response_sha256", "") or "") != response_hash:
+            raise HTTPException(
+                status_code=422,
+                detail="receipt response hash does not match the supplied response",
+            )
+
+        receipts = _state_receipts_store(request)
+        if receipts is None:
+            raise HTTPException(status_code=503, detail="receipt store unavailable")
+        try:
+            reconciled = manager.reconcile_completed(
+                job_id,
+                response=response,
+                receipt_id=receipt_id,
+                persist_receipt=lambda: receipts.save(receipt),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            from .agent_link import AgentLinkConflict
+
+            if isinstance(exc, AgentLinkConflict):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            logger.exception("AgentLink reconciliation failed for %s", job_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"AgentLink reconciliation could not be persisted: {type(exc).__name__}",
+            ) from exc
+        return reconciled.to_dict()
 
     @app.post(
         "/api/v2/agents/spawn",
@@ -7641,12 +9335,16 @@ def register_v2_routes(app: FastAPI) -> None:
                 roster = AgentRoster(ws)
                 identity_file = roster.allocate_identity_file()
         try:
+            from .agent_supervisor import resolve_work_scope
+
+            scope = resolve_work_scope(body.project_workdir, body.work_access)
             record = sup.spawn(
                 kind=body.kind,
                 label=body.label,
                 capabilities=body.capabilities,
                 cap_token_issuer=_issue_cap_token,
                 identity_file=identity_file,
+                work_scope=scope,
             )
         except AgentCapacityExceeded as exc:
             # 2026-06-14 审查补:达到运行态 agent 上限。这是"暂时容量不足"
@@ -7687,7 +9385,11 @@ def register_v2_routes(app: FastAPI) -> None:
                 roster.add(
                     identity_file=identity_file, kind=record.kind,
                     label=record.label, capabilities=body.capabilities,
-                    did=record.did)
+                    did=record.did,
+                    project_workdir=record.work_scope.root,
+                    work_access=record.work_scope.access,
+                    work_revision=record.work_scope.revision,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "v2_api: agent spawned but roster persist failed: %s", exc)
@@ -7709,9 +9411,9 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """Stop a supervised agent.
 
-        Persistent agents are also removed from the private roster. Their
-        identity directory is deleted only when AgentRoster proves the path is
-        inside this workspace's owned ``agents/identities`` tree.
+        Persistent agents are disabled in the private roster. Their identity
+        material is retained for audit, recovery, or an explicit future
+        re-enable action; stopping an Agent never deletes files.
         """
         sup = _state_supervisor(request)
         if sup is None:
@@ -7734,13 +9436,10 @@ def register_v2_routes(app: FastAPI) -> None:
                 if ws is not None:
                     from .agent_roster import AgentRoster
                     roster = AgentRoster(ws)
-                    removed = roster.remove_by_did(did)
-                    idf = removed.get("identity_file") if removed else None
-                    if isinstance(idf, str):
-                        roster.cleanup_identity_dir(idf)
+                    roster.disable_by_did(did, reason="operator-stop")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "v2_api: agent stopped but roster cleanup failed: %s", exc)
+                    "v2_api: agent stopped but roster disable failed: %s", exc)
         return {"agent_id": agent_id, "stopped": True}
 
     @app.get("/api/v2/agents/{did}/ping")
@@ -7772,7 +9471,11 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         matching = [
             r for r in sup.list_agents()
-            if r.did == did and r.a2a_port is not None and r.alive
+            if (
+                r.did == did
+                and r.a2a_port is not None
+                and r.alive
+            )
         ]
         if not matching:
             raise HTTPException(
@@ -7861,7 +9564,11 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         matching = [
             r for r in sup.list_agents()
-            if r.did == did and r.a2a_port is not None and r.alive
+            if (
+                r.did == did
+                and r.a2a_port is not None
+                and r.alive
+            )
         ]
         if not matching:
             raise HTTPException(
@@ -7998,7 +9705,11 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="agent supervisor unavailable")
         matching = [
             r for r in sup.list_agents()
-            if r.did == did and r.a2a_port is not None and r.alive
+            if (
+                r.did == did
+                and r.a2a_port is not None
+                and r.alive
+            )
         ]
         if not matching:
             raise HTTPException(
@@ -8089,6 +9800,20 @@ def register_v2_routes(app: FastAPI) -> None:
         content = _decode_or_passthrough(resp_body)
         if resp_status == 200:
             _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
+            result = content.get("result") if isinstance(content, dict) else None
+            response_text = (
+                str(result.get("response") or "").strip()
+                if isinstance(result, dict) else ""
+            )
+            if response_text:
+                try:
+                    sup.mark_provider_state(rec.agent_id, "ready")
+                except Exception as state_exc:  # noqa: BLE001
+                    logger.warning(
+                        "v2_api: direct provider state update failed for %s: %s",
+                        rec.did,
+                        state_exc,
+                    )
         return JSONResponse(
             status_code=resp_status,
             content=content,
@@ -8130,7 +9855,11 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="agent supervisor unavailable")
         matching = [
             r for r in sup.list_agents()
-            if r.did == did and r.a2a_port is not None and r.alive
+            if (
+                r.did == did
+                and r.a2a_port is not None
+                and r.alive
+            )
         ]
         if not matching:
             raise HTTPException(

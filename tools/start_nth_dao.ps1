@@ -2,8 +2,15 @@ param(
     [int] $Port = 8080,
     [string] $AutoAgents = "codex,hermes,mock",
     [string] $JoinChannels = "general",
-    [string] $JoinKinds = "codex,mock",
-    [string] $ChannelAgentKinds = "codex,mock"
+    # Hermes is part of the default local team. It must be both a channel
+    # member and an allowed channel responder; otherwise the process can be
+    # healthy while every Channel dispatch silently excludes it.
+    [string] $JoinKinds = "codex,hermes,mock",
+    [string] $ChannelAgentKinds = "codex,hermes,mock",
+    [string] $CodexModel = "gpt-5.4",
+    [int] $CodexTimeoutSeconds = 240,
+    [string] $HermesModel = "deepseek-v4-flash",
+    [string] $HermesToolsets = "safe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +38,21 @@ if (-not $env:NTH_AUTO_AGENT_PERSIST) {
 }
 if (-not $env:NTH_HERMES_ASK_TIMEOUT_S) {
     $env:NTH_HERMES_ASK_TIMEOUT_S = "300"
+}
+if (-not $env:NTH_CODEX_MODEL) {
+    $env:NTH_CODEX_MODEL = $CodexModel
+}
+if (-not $env:NTH_CODEX_ASK_TIMEOUT_S) {
+    $env:NTH_CODEX_ASK_TIMEOUT_S = [string] $CodexTimeoutSeconds
+}
+if (-not $env:NTH_HERMES_MODEL) {
+    $env:NTH_HERMES_MODEL = $HermesModel
+}
+if (-not $env:NTH_HERMES_TOOLSETS) {
+    $env:NTH_HERMES_TOOLSETS = $HermesToolsets
+}
+if (-not $env:NTH_AGENT_WORKDIR) {
+    $env:NTH_AGENT_WORKDIR = $RepoRoot
 }
 
 $RuntimeDeps = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies"
@@ -100,6 +122,11 @@ $childCommands = @(
     "`$env:NTH_CHANNEL_AGENT_KINDS = $(Quote-PowerShellLiteral $env:NTH_CHANNEL_AGENT_KINDS)",
     "`$env:NTH_AUTO_AGENT_PERSIST = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENT_PERSIST)",
     "`$env:NTH_HERMES_ASK_TIMEOUT_S = $(Quote-PowerShellLiteral $env:NTH_HERMES_ASK_TIMEOUT_S)",
+    "`$env:NTH_CODEX_MODEL = $(Quote-PowerShellLiteral $env:NTH_CODEX_MODEL)",
+    "`$env:NTH_CODEX_ASK_TIMEOUT_S = $(Quote-PowerShellLiteral $env:NTH_CODEX_ASK_TIMEOUT_S)",
+    "`$env:NTH_HERMES_MODEL = $(Quote-PowerShellLiteral $env:NTH_HERMES_MODEL)",
+    "`$env:NTH_HERMES_TOOLSETS = $(Quote-PowerShellLiteral $env:NTH_HERMES_TOOLSETS)",
+    "`$env:NTH_AGENT_WORKDIR = $(Quote-PowerShellLiteral $env:NTH_AGENT_WORKDIR)",
     "`$env:NTH_DAO_NODE = $(Quote-PowerShellLiteral $env:NTH_DAO_NODE)",
     "`$env:PATH = $(Quote-PowerShellLiteral $env:PATH)",
     "Set-Location -LiteralPath $(Quote-PowerShellLiteral $RepoRoot)"

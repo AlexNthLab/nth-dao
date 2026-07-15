@@ -50,6 +50,24 @@ def test_G7_hermes_preflight_reports_nonzero_returncode_as_failure(monkeypatch):
     assert "not configured" in result.detail
 
 
+def test_G7_hermes_preflight_decodes_binary_windows_output(monkeypatch):
+    from team_layer.backends.hermes import HermesBackend
+
+    monkeypatch.setattr("shutil.which", lambda name: "C:/fake/hermes.exe")
+    fake = subprocess.CompletedProcess(
+        args=[],
+        returncode=1,
+        stdout="正常输出".encode("gbk"),
+        stderr="失败原因".encode("gbk"),
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake)
+
+    result = HermesBackend().preflight_check()
+    assert result.ok is False
+    assert isinstance(result.detail, str)
+    assert result.structured["returncode"] == 1
+
+
 def test_G7_hermes_preflight_handles_timeout(monkeypatch):
     from team_layer.backends.hermes import HermesBackend
     monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes")

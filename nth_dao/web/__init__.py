@@ -17,7 +17,7 @@ import socket
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, TYPE_CHECKING, Union
 from urllib.parse import urlsplit, urlunsplit
 
 # R-60 (2026-06-08): forward-reference ContactRecord for the
@@ -717,12 +717,33 @@ def create_app(
             logger.debug("mDNS responder stop failed: %s", exc)
         state.mdns_responder = None
 
+    def _shutdown_runtime(app_instance: FastAPI) -> None:
+        """Stop durable dispatch workers before tearing down the hub.
+
+        AgentLink must stop accepting work before supervised child processes
+        disappear. Jobs still waiting in a local queue are persisted as
+        ``delivery_unknown`` by the manager; they are never silently dropped.
+        """
+        manager = getattr(app_instance.state, "agent_link_manager", None)
+        if manager is not None:
+            try:
+                manager.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("AgentLink manager shutdown failed: %s", exc)
+        supervisor = getattr(app_instance.state, "v2_supervisor", None)
+        if supervisor is not None:
+            try:
+                supervisor.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("agent supervisor shutdown failed: %s", exc)
+        _stop_responder()
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         try:
             yield
         finally:
-            _stop_responder()
+            _shutdown_runtime(_app)
 
     app = FastAPI(
         title="NTH DAO Console",
@@ -731,7 +752,7 @@ def create_app(
         lifespan=_lifespan,
     )
 
-    _atexit.register(_stop_responder)
+    _atexit.register(_shutdown_runtime, app)
     app.state.nth = state
     app.state.nth_console_token = _load_or_create_console_token()
     app.state.nth_require_console_auth = require_console_auth
@@ -1633,7 +1654,7 @@ def create_app(
     @app.post("/api/daos/{slug}/channels")
     def dao_create_channel(slug: str, payload: ChannelPayload) -> dict[str, Any]:
         """Create a channel scoped to a DAO; channel_id auto-prefixed for groups."""
-        kind, _ = _resolve_dao(state, slug)
+        kind, record = _resolve_dao(state, slug)
         _require_admin(state, payload.actor_id)
         prefix = _dao_channel_prefix(slug if kind == "group" else "")
         bare_id = payload.channel_id or payload.name or DEFAULT_CHANNEL_ID
@@ -1645,6 +1666,14 @@ def create_app(
             channel_id=scoped_id,
             is_private=payload.is_private,
             member_ids=payload.member_ids,
+            metadata={
+                "dao_id": slug if kind == "group" else HOME_DAO_SLUG,
+                "dao_label": (
+                    str(getattr(record, "display_name", "") or slug)
+                    if kind == "group"
+                    else "NTH DAO"
+                ),
+            },
         )
         return channel.to_dict()
 
