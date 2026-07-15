@@ -12,7 +12,7 @@
  *   - 右栏:成员 + 把 agent 加进频道(从 agent 目录选)
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { IconChat, IconPlus, IconSend, IconUserPlus } from "./Icons";
 import { SignaturePanel } from "./SignaturePanel";
 import { useToast } from "./Toast";
@@ -27,9 +27,10 @@ import type { AgentEntry, Channel, ChannelMessage, ReceiptDetail } from "../type
 const ME = "admin";  // 当前人类用户(与后端发消息的默认 sender 一致)
 
 const DEFAULT_AGENT_REPLY_WAIT_MS = 30_000;
+const MESSAGE_PAGE_SIZE = 100;
 const AGENT_REPLY_WAIT_MS_BY_KIND: Record<string, number> = {
   mock: 30_000,
-  codex: 100_000,
+  codex: 195_000,
   hermes: 330_000,
   "claude-code": 130_000,
 };
@@ -40,6 +41,94 @@ export function agentReplyWaitMs(agents: AgentEntry[]): number {
     DEFAULT_AGENT_REPLY_WAIT_MS,
     ...agents.map((a) => AGENT_REPLY_WAIT_MS_BY_KIND[a.kind || ""] ?? DEFAULT_AGENT_REPLY_WAIT_MS),
   );
+}
+
+export interface ChannelGroup {
+  key: string;
+  label: string;
+  kind: "dao" | "task" | "history";
+  channels: Channel[];
+}
+
+const COLLAPSED_CHANNEL_GROUP_SIZE = 6;
+
+export function visibleGroupChannels(
+  group: ChannelGroup,
+  selectedId: string | null,
+  expanded: boolean,
+  limit = COLLAPSED_CHANNEL_GROUP_SIZE,
+): Channel[] {
+  if (expanded || group.channels.length <= limit) return group.channels;
+  const selected = group.channels.find((channel) => channel.channel_id === selectedId);
+  const recent = group.channels.slice(0, limit);
+  if (!selected || recent.some((channel) => channel.channel_id === selected.channel_id)) {
+    return recent;
+  }
+  return [selected, ...recent.slice(0, Math.max(0, limit - 1))];
+}
+
+function metadataText(
+  metadata: Channel["metadata"],
+  ...keys: string[]
+): string {
+  for (const key of keys) {
+    const value = metadata?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+export function groupChannels(channels: Channel[]): ChannelGroup[] {
+  const groups = new Map<string, ChannelGroup>();
+  for (const channel of channels) {
+    const metadata = channel.metadata;
+    const taskId = metadataText(metadata, "task_id", "mission_id", "process_id");
+    const daoId = metadataText(metadata, "dao_id", "scope_dao") || "home";
+    const isUnlinkedHomeChannel = (
+      !taskId && daoId === "home" && channel.channel_id !== "general"
+    );
+    const kind: ChannelGroup["kind"] = taskId
+      ? "task"
+      : isUnlinkedHomeChannel
+        ? "history"
+        : "dao";
+    const scopeId = taskId ? `${daoId}:${taskId}` : daoId;
+    const key = `${kind}:${scopeId}`;
+    const fallbackLabel = kind === "history"
+      ? "Unlinked channels"
+      : taskId === ""
+        ? (daoId === "home" ? "NTH DAO" : daoId)
+        : taskId;
+    const scopeLabel = kind === "history"
+      ? fallbackLabel
+      : metadataText(
+        metadata,
+        kind === "task" ? "task_label" : "dao_label",
+        kind === "task" ? "mission_label" : "scope_label",
+      ) || fallbackLabel;
+    const current = groups.get(key) ?? {
+      key,
+      kind,
+      label: kind === "history"
+        ? scopeLabel
+        : `${kind === "task" ? "Task" : "DAO"}: ${scopeLabel}`,
+      channels: [],
+    };
+    current.channels.push(channel);
+    groups.set(key, current);
+  }
+  for (const group of groups.values()) {
+    group.channels.sort((left, right) => {
+      if (left.channel_id === "general") return -1;
+      if (right.channel_id === "general") return 1;
+      return Date.parse(right.created_at || "") - Date.parse(left.created_at || "");
+    });
+  }
+  return [...groups.values()].sort((left, right) => {
+    const order = { dao: 0, task: 1, history: 2 };
+    if (left.kind !== right.kind) return order[left.kind] - order[right.kind];
+    return left.label.localeCompare(right.label);
+  });
 }
 
 function shortId(value = "", head = 18, tail = 8): string {
@@ -72,10 +161,23 @@ export function ChannelsView() {
   const [selectedReceipt, setSelectedReceipt] = useState<ReceiptDetail | null>(null);
   const [receiptLoadingId, setReceiptLoadingId] = useState("");
   const [receiptError, setReceiptError] = useState("");
+  const [hasNewerMessages, setHasNewerMessages] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  const [expandedChannelGroups, setExpandedChannelGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
   const awaitTimer = useRef<number | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottom = useRef(true);
+  const previousMessageCount = useRef(0);
+  const activeChannelId = useRef<string | null>(null);
+  const initialPageLoaded = useRef(false);
+  const pendingPrependScrollHeight = useRef<number | null>(null);
+  const lastUpdateWasPrepend = useRef(false);
 
   const selected = channels.find((c) => c.channel_id === selectedId) ?? null;
+  const channelGroups = useMemo(() => groupChannels(channels), [channels]);
   const channelAgentMembers = useMemo(
     () => {
       if (!selected) return [];
@@ -90,7 +192,7 @@ export function ChannelsView() {
     () => channelAgentMembers.filter(
       (a) => a.supervised === true
         && a.alive === true
-        && a.has_active_cap === true
+        && a.a2a_ready !== false
         && typeof a.a2a_port === "number",
     ),
     [channelAgentMembers],
@@ -131,8 +233,20 @@ export function ChannelsView() {
   // 选中频道的消息:切换即拉 + 3s 轮询。
   useEffect(() => {
     if (!selectedId) { setMessages([]); return; }
+    setMessages([]);
+    activeChannelId.current = selectedId;
+    initialPageLoaded.current = false;
+    previousMessageCount.current = 0;
+    stickToBottom.current = true;
+    setHasNewerMessages(false);
+    setHasOlderMessages(false);
+    setLoadingOlderMessages(false);
     setAwaiting(false);
     setAwaitTimedOut(false);  // 切频道清掉上一个频道的等待态
+    if (awaitTimer.current !== null) {
+      window.clearTimeout(awaitTimer.current);
+      awaitTimer.current = null;
+    }
     setSelectedReceipt(null);
     setReceiptError("");
     setReceiptLoadingId("");
@@ -140,8 +254,21 @@ export function ChannelsView() {
     const cid = selectedId;
     async function loadMsgs() {
       try {
-        const ms = await listChannelMessages(cid);
-        if (!cancelled) setMessages(ms);
+        const page = await listChannelMessages(
+          cid, undefined, "", MESSAGE_PAGE_SIZE + 1,
+        );
+        if (cancelled) return;
+        const visible = page.slice(-MESSAGE_PAGE_SIZE);
+        if (!initialPageLoaded.current) {
+          initialPageLoaded.current = true;
+          setHasOlderMessages(page.length > MESSAGE_PAGE_SIZE);
+        }
+        setMessages((current) => {
+          if (current.length === 0) return visible;
+          const known = new Set(current.map((item) => item.message_id));
+          const appended = visible.filter((item) => !known.has(item.message_id));
+          return appended.length ? [...current, ...appended] : current;
+        });
       } catch { /* 保留 */ }
     }
     loadMsgs();
@@ -151,24 +278,110 @@ export function ChannelsView() {
 
   // 收到新消息且最新一条非本人 → agent 回帖到了,撤"思考中"。
   useEffect(() => {
-    if (!awaiting) return;
     const last = messages[messages.length - 1];
-    if (last && last.sender_id !== ME) {
+    if (!last || last.sender_id === ME) return;
+    if (last.dispatch_phase === "received" || last.dispatch_phase === "processing") {
+      // Durable phase messages replace the transient typing indicator, but
+      // keep the timeout alive until a terminal result arrives.
+      setAwaiting(false);
+      return;
+    }
+    if (last.sender_id !== ME) {
       setAwaiting(false);
       setAwaitTimedOut(false);  // agent 回帖到了,不是超时
-      if (awaitTimer.current) window.clearTimeout(awaitTimer.current);
+      if (awaitTimer.current !== null) {
+        window.clearTimeout(awaitTimer.current);
+        awaitTimer.current = null;
+      }
     }
-  }, [messages, awaiting]);
+  }, [messages]);
 
-  // 自动滚到底。
+  useLayoutEffect(() => {
+    const previousHeight = pendingPrependScrollHeight.current;
+    const el = threadRef.current;
+    if (previousHeight === null || !el) return;
+    el.scrollTop += el.scrollHeight - previousHeight;
+    pendingPrependScrollHeight.current = null;
+  }, [messages]);
+
+  // Follow new messages only while the reader is already at the bottom.
   useEffect(() => {
     const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    const grew = messages.length > previousMessageCount.current;
+    previousMessageCount.current = messages.length;
+    if (!el) return;
+    if (lastUpdateWasPrepend.current) {
+      lastUpdateWasPrepend.current = false;
+      return;
+    }
+    if (!stickToBottom.current) {
+      if (grew) setHasNewerMessages(true);
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      setHasNewerMessages(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [messages, awaiting, selectedId]);
+
+  function onThreadScroll() {
+    const el = threadRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottom.current = distanceFromBottom <= 48;
+    if (stickToBottom.current) setHasNewerMessages(false);
+  }
+
+  function scrollToLatest() {
+    const el = threadRef.current;
+    if (!el) return;
+    stickToBottom.current = true;
+    el.scrollTop = el.scrollHeight;
+    setHasNewerMessages(false);
+  }
+
+  async function loadOlderMessages() {
+    const channelId = selectedId;
+    const firstMessageId = messages[0]?.message_id;
+    const el = threadRef.current;
+    if (!channelId || !firstMessageId || !el || loadingOlderMessages) return;
+    setLoadingOlderMessages(true);
+    try {
+      const page = await listChannelMessages(
+        channelId,
+        undefined,
+        firstMessageId,
+        MESSAGE_PAGE_SIZE + 1,
+      );
+      if (activeChannelId.current !== channelId) return;
+      const older = page.slice(-MESSAGE_PAGE_SIZE);
+      setHasOlderMessages(page.length > MESSAGE_PAGE_SIZE);
+      if (older.length === 0) return;
+      pendingPrependScrollHeight.current = el.scrollHeight;
+      lastUpdateWasPrepend.current = true;
+      stickToBottom.current = false;
+      setMessages((current) => {
+        const known = new Set(current.map((item) => item.message_id));
+        const prepended = older.filter((item) => !known.has(item.message_id));
+        return prepended.length ? [...prepended, ...current] : current;
+      });
+    } catch (error) {
+      toast.push(
+        error instanceof Error ? error.message : "Could not load history",
+        "error",
+      );
+    } finally {
+      if (activeChannelId.current === channelId) setLoadingOlderMessages(false);
+    }
+  }
 
   // 卸载清掉计时器。
   useEffect(() => () => {
-    if (awaitTimer.current) window.clearTimeout(awaitTimer.current);
+    if (awaitTimer.current !== null) {
+      window.clearTimeout(awaitTimer.current);
+      awaitTimer.current = null;
+    }
   }, []);
 
   function senderLabel(id: string): string {
@@ -184,23 +397,40 @@ export function ChannelsView() {
     setDraft("");
     setSending(true);
     setAwaitTimedOut(false);
+    stickToBottom.current = true;
+    setHasNewerMessages(false);
     try {
-      await postChannelMessage(selectedId, body, ME);
+      await postChannelMessage(
+        selectedId,
+        body,
+        ME,
+      );
       if (hasAgentMember) {
         setAwaiting(true);
-        if (awaitTimer.current) window.clearTimeout(awaitTimer.current);
+        if (awaitTimer.current !== null) {
+          window.clearTimeout(awaitTimer.current);
+          awaitTimer.current = null;
+        }
         // Slow backends (Hermes/Codex/Claude) can legitimately exceed
         // the old 30s UI window; use the same backend-aware budget the
         // hub uses for A2A ask forwarding.
         awaitTimer.current = window.setTimeout(() => {
+          awaitTimer.current = null;
           setAwaiting(false);
           setAwaitTimedOut(true);
         }, agentWaitMs);
       } else if (channelAgentMembers.length > 0) {
         setAwaitTimedOut(true);
       }
-      const ms = await listChannelMessages(selectedId);
-      setMessages(ms);
+      const page = await listChannelMessages(
+        selectedId, undefined, "", MESSAGE_PAGE_SIZE + 1,
+      );
+      const visible = page.slice(-MESSAGE_PAGE_SIZE);
+      setMessages((current) => {
+        const known = new Set(current.map((item) => item.message_id));
+        const appended = visible.filter((item) => !known.has(item.message_id));
+        return appended.length ? [...current, ...appended] : current;
+      });
     } catch (e) {
       setDraft(body);  // 失败回填,可重试
       toast.push(
@@ -302,7 +532,22 @@ export function ChannelsView() {
               {t("还没有频道。", "No channels yet.")}
             </p>
           )}
-          {channels.map((c) => (
+          {channelGroups.map((group) => {
+            const expanded = expandedChannelGroups.has(group.key);
+            const visibleChannels = visibleGroupChannels(group, selectedId, expanded);
+            return (
+            <details
+              className="channel-group"
+              key={group.key}
+              open={group.channels.some((channel) => channel.channel_id === selectedId)}
+            >
+              <summary className="channel-group-title">
+                <span className={`channel-group-kind ${group.kind}`}>{group.kind}</span>
+                <span className="truncate">{group.label.replace(/^(DAO|Task): /, "")}</span>
+                <span className="channel-group-count">{group.channels.length}</span>
+              </summary>
+              <div className="channel-group-list">
+                {visibleChannels.map((c) => (
             <button
               key={c.channel_id}
               className={`sidebar-item ${selectedId === c.channel_id ? "active" : ""}`}
@@ -315,7 +560,30 @@ export function ChannelsView() {
                 <span>{c.member_ids.length} {t("成员", "members")}</span>
               </div>
             </button>
-          ))}
+                ))}
+                {group.channels.length > COLLAPSED_CHANNEL_GROUP_SIZE && (
+                  <button
+                    type="button"
+                    className="channel-group-more"
+                    onClick={() => setExpandedChannelGroups((current) => {
+                      const next = new Set(current);
+                      if (next.has(group.key)) next.delete(group.key);
+                      else next.add(group.key);
+                      return next;
+                    })}
+                  >
+                    {expanded
+                      ? t("收起历史", "Hide older")
+                      : t(
+                        `显示其余 ${group.channels.length - visibleChannels.length} 个`,
+                        `Show ${group.channels.length - visibleChannels.length} older`,
+                      )}
+                  </button>
+                )}
+              </div>
+            </details>
+            );
+          })}
         </div>
       </aside>
 
@@ -340,7 +608,24 @@ export function ChannelsView() {
 
         {selected ? (
           <>
-            <div ref={threadRef} className="chat-thread" style={{ flex: 1, overflowY: "auto" }}>
+            <div
+              ref={threadRef}
+              className="chat-thread"
+              style={{ flex: 1, overflowY: "auto" }}
+              onScroll={onThreadScroll}
+            >
+              {hasOlderMessages && (
+                <button
+                  type="button"
+                  className="chat-load-older"
+                  disabled={loadingOlderMessages}
+                  onClick={() => void loadOlderMessages()}
+                >
+                  {loadingOlderMessages
+                    ? t("加载中", "Loading")
+                    : t("加载更早消息", "Load earlier messages")}
+                </button>
+              )}
               {messages.length === 0 ? (
                 <div className="main-empty" style={{ minHeight: 200 }}>
                   <div className="main-empty-icon"><IconChat size={36} /></div>
@@ -352,14 +637,41 @@ export function ChannelsView() {
                 </div>
               ) : (
                 messages.map((m, i) => {
-                  const isYou = m.sender_id === ME;
+                  const isHubStatus = m.status_source === "hub";
+                  const isYou = m.sender_id === ME && !isHubStatus;
                   const prev = messages[i - 1];
                   const showName = !isYou && (!prev || prev.sender_id !== m.sender_id);
+                  const displaySenderLabel = isHubStatus && m.sender_id === ME
+                    ? "NTH DAO Hub"
+                    : senderLabel(m.sender_id);
+                  const dispatchPhase = m.dispatch_phase;
+                  const dispatchClass = dispatchPhase && [
+                    "received", "processing", "completed", "failed",
+                  ].includes(dispatchPhase)
+                    ? ` chat-dispatch-${dispatchPhase}`
+                    : "";
+                  const dispatchLabel = dispatchPhase === "received"
+                    ? t("已收到", "Received")
+                    : dispatchPhase === "processing"
+                      ? t("处理中", "Processing")
+                      : dispatchPhase === "completed"
+                        ? t("已完成", "Completed")
+                        : dispatchPhase === "failed"
+                          ? t("失败", "Failed")
+                          : "";
                   return (
                     <div key={m.message_id} className={`chat-row ${isYou ? "out" : "in"}`}>
                       <div className="chat-col">
-                        {showName && <div className="chat-name">{senderLabel(m.sender_id)}</div>}
-                        <div className="chat-bubble">{m.body}</div>
+                        {showName && <div className="chat-name">{displaySenderLabel}</div>}
+                        <div className={`chat-bubble${dispatchClass}`}>
+                          {m.status_source === "hub" && (
+                            <span className="chat-dispatch-source-hub">Hub status</span>
+                          )}
+                          {dispatchLabel && (
+                            <span className="chat-dispatch-label">{dispatchLabel}</span>
+                          )}
+                          {m.body}
+                        </div>
                         {m.nth_receipt_id && (
                           <button
                             type="button"
@@ -399,6 +711,15 @@ export function ChannelsView() {
                   )}
                 </div>
               )}
+              {hasNewerMessages && (
+                <button
+                  type="button"
+                  className="chat-jump-latest"
+                  onClick={scrollToLatest}
+                >
+                  {t("最新消息", "Latest")}
+                </button>
+              )}
             </div>
 
             <form
@@ -413,7 +734,7 @@ export function ChannelsView() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); }
                 }}
-                placeholder={`${t("发消息到", "Message")} #${selected.name}…`}
+                placeholder={`${t("发消息到", "Message")} #${selected.name} — @all / @agent`}
               />
               <button
                 type="submit"

@@ -502,6 +502,12 @@ export function AgentDirectoryView({
                   const running = agents.some(
                     (a) => a.kind === b.kind && a.supervised && a.alive,
                   );
+                  const launchable = b.transport_ready ?? b.ready;
+                  const statusLabel = b.provider_verified
+                    ? "provider verified"
+                    : launchable
+                      ? "launchable / unverified"
+                      : "setup needed";
                   return (
                     <div
                       key={b.kind}
@@ -515,8 +521,8 @@ export function AgentDirectoryView({
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                         <strong style={{ fontSize: 13 }}>{b.label}</strong>
-                        <span className={`pill ${b.ready ? "ok" : "wait"}`} style={{ fontSize: 10 }}>
-                          {b.ready ? "ready" : "setup needed"}
+                        <span className={`pill ${b.provider_verified ? "ok" : "wait"}`} style={{ fontSize: 10 }}>
+                          {statusLabel}
                         </span>
                       </div>
                       <p className="muted" style={{ fontSize: 11, margin: "8px 0", lineHeight: 1.35 }}>
@@ -534,12 +540,15 @@ export function AgentDirectoryView({
                       )}
                       <button
                         type="button"
-                        className={b.ready ? "btn btn-primary" : "btn btn-secondary"}
-                        disabled={!onSpawnBackend || !b.ready || spawningKind === b.kind}
+                        className={launchable ? "btn btn-primary" : "btn btn-secondary"}
+                        disabled={
+                          !onSpawnBackend || !launchable || running
+                          || spawningKind === b.kind
+                        }
                         onClick={() => void handleSpawn(b.kind)}
-                        title={b.ready ? `Spawn ${b.label}` : b.detail}
+                        title={launchable ? `Spawn ${b.label}` : b.detail}
                       >
-                        {spawningKind === b.kind ? "Starting..." : running ? "Start another" : "Start"}
+                        {spawningKind === b.kind ? "Starting..." : running ? "Running" : "Start"}
                       </button>
                     </div>
                   );

@@ -324,6 +324,18 @@ export interface Channel {
   is_private: boolean;
   member_ids: string[];
   created_at: string;
+  metadata?: {
+    task_id?: string;
+    mission_id?: string;
+    process_id?: string;
+    task_label?: string;
+    mission_label?: string;
+    dao_id?: string;
+    scope_dao?: string;
+    dao_label?: string;
+    scope_label?: string;
+    [key: string]: unknown;
+  };
 }
 
 /** 频道消息(/api/v2/channels/{id}/messages 一行)。 */
@@ -337,6 +349,10 @@ export interface ChannelMessage {
   metadata?: Record<string, unknown>;
   nth_receipt_id?: string;
   nth_receipt_content_hash?: string;
+  /** Durable non-streaming channel workflow phase. */
+  dispatch_phase?: "received" | "processing" | "completed" | "failed" | string;
+  request_message_id?: string;
+  status_source?: "hub" | string;
 }
 
 /** 任务广场公告(/api/v2/market/open 返回的一行)。发现态:可认领的活。 */
@@ -465,6 +481,11 @@ export interface AgentEntry {
   /** Backend kind label the operator chose at spawn time
    *  ("mock", "claude-code", "codex", "hermes", ...). */
   kind?: string;
+  /** Effective child execution timeout selected by the hub for this backend. */
+  ask_timeout_s?: number;
+  work_scope_id?: string;
+  work_access?: "read-only" | "workspace-write" | string;
+  work_revision?: string;
   /** Supervisor-local id used for stop/restart actions. */
   agent_id?: string;
   /** Ephemeral localhost port where the child serves its A2A
@@ -472,6 +493,11 @@ export interface AgentEntry {
    *  the child failed to bind (degraded state) or for non-local
    *  agents. */
   a2a_port?: number;
+  /** True only after the child has loaded and verified its cap token. */
+  a2a_ready?: boolean;
+  /** Provider execution state; transport readiness alone is not a live model guarantee. */
+  provider_state?: "unknown" | "ready" | "degraded" | string;
+  provider_checked_at?: string;
   /** Phase G (Phase 6b cap_token scope, frontend integration):
    *  the cap_token's `scope_model_allowlist` joined into the agent
    *  listing. Wire semantics (matches the cap_token wire field):

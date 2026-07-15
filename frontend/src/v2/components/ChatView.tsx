@@ -41,6 +41,14 @@ export interface ChatViewProps {
   /** 4C:会话级"思考中"态。为 true 时在该会话底部显示三点指示器,
    *  与历史消息解耦——不靠 body 文本判断。 */
   typingByConv?: Record<string, boolean>;
+  /** Durable AgentLink lifecycle state for the selected conversation. */
+  agentLinkStatusByConv?: Record<string, string>;
+  /** Recover an uncertain AgentLink job from a signed receipt and response. */
+  onReconcileAgentLink?: (
+    convId: string,
+    receiptJson: string,
+    response: string,
+  ) => Promise<void> | void;
   onSend: (convId: string, body: string) => Promise<void> | void;
   /** Lets the parent hydrate message history when a conversation
    *  becomes active. */
@@ -63,6 +71,8 @@ export function ChatView({
   messagesByConv,
   summariesByConv,
   typingByConv,
+  agentLinkStatusByConv,
+  onReconcileAgentLink,
   onSend,
   onConversationSelect,
   focusConversationId,
@@ -84,6 +94,9 @@ export function ChatView({
   const messages = selectedId ? messagesByConv[selectedId] ?? [] : [];
   const summaries = selectedId ? summariesByConv?.[selectedId] ?? [] : [];
   const isTyping = selectedId ? !!typingByConv?.[selectedId] : false;
+  const agentLinkStatus = selectedId
+    ? agentLinkStatusByConv?.[selectedId] ?? ""
+    : "";
   // 6C:纤细头部用的展示名 + 头像首字。DM 去掉 "DM: " 前缀,频道保留 #。
   const headName = selected
     ? selected.kind === "dm"
@@ -94,6 +107,9 @@ export function ChatView({
 
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [recoveryReceipt, setRecoveryReceipt] = useState("");
+  const [recoveryResponse, setRecoveryResponse] = useState("");
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -172,6 +188,32 @@ export function ChatView({
   function handleSend(e: React.FormEvent) {
     e.preventDefault();
     void doSend();
+  }
+
+  async function handleReconcile() {
+    if (!selectedId || !onReconcileAgentLink || recoveryBusy) return;
+    if (!recoveryReceipt.trim() || !recoveryResponse.trim()) {
+      toast.push("Signed receipt and response are required.", "error");
+      return;
+    }
+    setRecoveryBusy(true);
+    try {
+      await onReconcileAgentLink(
+        selectedId,
+        recoveryReceipt,
+        recoveryResponse,
+      );
+      setRecoveryReceipt("");
+      setRecoveryResponse("");
+      toast.push("AgentLink delivery reconciled.", "success");
+    } catch (error) {
+      toast.push(
+        `Reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    } finally {
+      setRecoveryBusy(false);
+    }
   }
 
   // Last AI-agent message in the current conversation — the
@@ -366,6 +408,54 @@ export function ChatView({
                       </span>
                     </div>
                   </div>
+                </div>
+              )}
+              {agentLinkStatus && !isTyping && (
+                <div className="chat-agent-status" aria-live="polite">
+                  {agentLinkStatus === "accepted" && "Instruction accepted"}
+                  {agentLinkStatus === "processing" && "Agent processing"}
+                  {agentLinkStatus === "completed" && "Agent completed"}
+                  {agentLinkStatus === "completed_unverified" && "Agent completed (unverified)"}
+                  {agentLinkStatus === "failed" && "Agent failed"}
+                  {agentLinkStatus === "delivery_unknown" && "Delivery outcome unknown"}
+                </div>
+              )}
+              {(agentLinkStatus === "delivery_unknown" || agentLinkStatus === "completed_unverified") && onReconcileAgentLink && (
+                <div className="chat-agent-recovery">
+                  <div className="chat-agent-recovery-title">
+                    {agentLinkStatus === "completed_unverified"
+                      ? "Completion needs signed evidence"
+                      : "Delivery needs signed evidence"}
+                  </div>
+                  <p className="chat-agent-recovery-help">
+                    Paste the Agent receipt JSON and the exact response text to verify and recover this job.
+                  </p>
+                  <textarea
+                    className="chat-agent-recovery-input"
+                    aria-label="Signed agent receipt JSON"
+                    value={recoveryReceipt}
+                    onChange={(event) => setRecoveryReceipt(event.target.value)}
+                    placeholder="Signed receipt JSON"
+                    rows={4}
+                    disabled={recoveryBusy}
+                  />
+                  <textarea
+                    className="chat-agent-recovery-input"
+                    aria-label="Agent response for reconciliation"
+                    value={recoveryResponse}
+                    onChange={(event) => setRecoveryResponse(event.target.value)}
+                    placeholder="Exact agent response"
+                    rows={3}
+                    disabled={recoveryBusy}
+                  />
+                  <button
+                    type="button"
+                    className="chat-agent-recovery-button"
+                    onClick={() => void handleReconcile()}
+                    disabled={recoveryBusy || !recoveryReceipt.trim() || !recoveryResponse.trim()}
+                  >
+                    {recoveryBusy ? "Verifying…" : "Verify and reconcile"}
+                  </button>
                 </div>
               )}
             </div>

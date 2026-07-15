@@ -108,7 +108,7 @@ function authHeader(): Record<string, string> {
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     signal,
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", ...authHeader() },
     credentials: "same-origin",
   });
   if (!res.ok) {
@@ -298,9 +298,14 @@ export interface ResolveDecisionResult {
  *  + ``JSON.stringify`` when present, so the name is no longer a
  *  lie. Phase 2 endpoints don't carry a body (id is path param),
  *  but Phase 3 issue-cap / create-mission will. */
-async function postJson<T>(path: string, body?: unknown): Promise<T> {
+async function postJson<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   const init: RequestInit = {
     method: "POST",
+    signal,
     credentials: "same-origin",
     headers: body === undefined
       ? { Accept: "application/json", ...authHeader() }
@@ -417,6 +422,52 @@ export interface AskAgentResult {
   model?: string;
 }
 
+export interface AgentLinkJob {
+  job_id: string;
+  agent_id: string;
+  agent_did: string;
+  state: "accepted" | "processing" | "completed" | "completed_unverified" | "failed" | "delivery_unknown" | string;
+  created_at: string;
+  updated_at: string;
+  response?: string;
+  receipt_id?: string;
+  error?: string;
+}
+
+export const submitAgentLink = (
+  did: string,
+  prompt: string,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+  timeoutS?: number,
+) => postJson<Pick<AgentLinkJob, "job_id" | "agent_did" | "state">>(
+  `/agents/${encodeURIComponent(did)}/link`,
+  {
+    prompt,
+    idempotency_key: idempotencyKey,
+    ...(timeoutS === undefined ? {} : { timeout_s: timeoutS }),
+  },
+  signal,
+);
+
+export const getAgentLink = (did: string, jobId: string, signal?: AbortSignal) =>
+  getJson<AgentLinkJob>(
+    `/agents/${encodeURIComponent(did)}/link/${encodeURIComponent(jobId)}`,
+    signal,
+  );
+
+export const reconcileAgentLink = (
+  did: string,
+  jobId: string,
+  receipt: Record<string, unknown>,
+  response: string,
+  signal?: AbortSignal,
+) => postJson<AgentLinkJob>(
+  `/agents/${encodeURIComponent(did)}/link/${encodeURIComponent(jobId)}/reconcile`,
+  { receipt, response },
+  signal,
+);
+
 export interface BackendStatus {
   kind: string;
   label: string;
@@ -425,6 +476,12 @@ export interface BackendStatus {
   runtime?: string;
   detail: string;
   warning?: string;
+  ask_timeout_s?: number;
+  transport_ready?: boolean;
+  provider_verified?: boolean;
+  provider_state?: "unverified" | "ready" | "degraded" | string;
+  last_provider_check_at?: string;
+  version?: string;
 }
 
 export interface BackendStatusResponse {
@@ -436,6 +493,8 @@ export interface SpawnAgentRequest {
   label?: string;
   capabilities?: string[];
   persist?: boolean;
+  project_workdir?: string;
+  work_access?: "read-only" | "workspace-write";
 }
 
 export interface SpawnAgentResponse {
@@ -1038,17 +1097,29 @@ export const listChannels = (s?: AbortSignal) =>
 export const createChannel = (name: string, topic = "") =>
   postJson<Channel>("/channels", { name, topic });
 
-export const listChannelMessages = (channelId: string, s?: AbortSignal) =>
-  getJson<ChannelMessage[]>(
-    `/channels/${encodeURIComponent(channelId)}/messages`, s,
+export const listChannelMessages = (
+  channelId: string,
+  s?: AbortSignal,
+  beforeMessageId = "",
+  limit = 100,
+) => {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (beforeMessageId) query.set("before_message_id", beforeMessageId);
+  return getJson<ChannelMessage[]>(
+    `/channels/${encodeURIComponent(channelId)}/messages?${query.toString()}`,
+    s,
   );
+};
 
 export const postChannelMessage = (
-  channelId: string, body: string, agentId = "admin",
+  channelId: string,
+  body: string,
+  agentId = "admin",
+  targetAgentDids: string[] = [],
 ) =>
   postJson<ChannelMessage>(
     `/channels/${encodeURIComponent(channelId)}/messages`,
-    { agent_id: agentId, body },
+    { agent_id: agentId, body, target_agent_dids: targetAgentDids },
   );
 
 export const joinChannel = (channelId: string, agentId: string) =>

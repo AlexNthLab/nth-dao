@@ -184,6 +184,33 @@ it("renders backend startup guide and gates unavailable backends", () => {
   expect(disabledClaude.hasAttribute("disabled")).toBe(true);
 });
 
+it("does not start a duplicate local backend that is already running", () => {
+  const onSpawnBackend = vi.fn();
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkRunningHermes", { kind: "hermes" })]}
+        {...noopProps}
+        onSpawnBackend={onSpawnBackend}
+        backendStatuses={{
+          hermes: {
+            kind: "hermes",
+            label: "Hermes",
+            ready: true,
+            available: true,
+            detail: "Ready.",
+          },
+        }}
+      />
+    </LangProvider>,
+  );
+
+  const running = screen.getByRole("button", { name: "Running" });
+  expect(running.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(running);
+  expect(onSpawnBackend).not.toHaveBeenCalled();
+});
+
 it("surfaces Hermes warmup status while an agent task is starting", async () => {
   let finishAsk!: (value: { text: string; backend: string; model: string }) => void;
   const onAskAgent = vi.fn((

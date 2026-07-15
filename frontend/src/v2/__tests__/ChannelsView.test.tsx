@@ -76,7 +76,12 @@ vi.mock("../api", () => ({
   }),
 }));
 
-import { ChannelsView, agentReplyWaitMs } from "../components/ChannelsView";
+import {
+  ChannelsView,
+  agentReplyWaitMs,
+  groupChannels,
+  visibleGroupChannels,
+} from "../components/ChannelsView";
 import { fetchReceiptDetail } from "../api";
 
 beforeEach(() => {
@@ -87,6 +92,76 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("ChannelsView", () => {
+  it("groups channels by DAO and linked task metadata", () => {
+    const base = {
+      topic: "",
+      created_by: "admin",
+      is_private: false,
+      member_ids: ["admin"],
+      created_at: "2026-07-13T00:00:00Z",
+    };
+    const groups = groupChannels([
+      { ...base, channel_id: "general", name: "general", metadata: {} },
+      {
+        ...base,
+        channel_id: "debug",
+        name: "debug",
+        metadata: { task_id: "task-42", task_label: "Checkout repair" },
+      },
+      {
+        ...base,
+        channel_id: "review",
+        name: "review",
+        metadata: { task_id: "task-42", task_label: "Checkout repair" },
+      },
+      {
+        ...base,
+        channel_id: "remote",
+        name: "remote",
+        metadata: { dao_id: "dao-remote", dao_label: "Remote DAO" },
+      },
+      {
+        ...base,
+        channel_id: "scratch",
+        name: "scratch",
+        metadata: { dao_id: "home", dao_label: "NTH DAO" },
+      },
+    ]);
+
+    expect(groups.map((group) => [group.key, group.channels.length])).toEqual([
+      ["dao:home", 1],
+      ["dao:dao-remote", 1],
+      ["task:home:task-42", 2],
+      ["history:home", 1],
+    ]);
+    expect(groups[2].label).toBe("Task: Checkout repair");
+    expect(groups[3].label).toBe("Unlinked channels");
+  });
+
+  it("limits large history groups while keeping the selected channel visible", () => {
+    const group = {
+      key: "history:home",
+      label: "Unlinked channels",
+      kind: "history" as const,
+      channels: Array.from({ length: 12 }, (_, index) => ({
+        channel_id: `history-${index}`,
+        name: `history-${index}`,
+        topic: "",
+        created_by: "admin",
+        is_private: false,
+        member_ids: ["admin"],
+        created_at: `2026-07-13T00:${String(59 - index).padStart(2, "0")}:00Z`,
+        metadata: { dao_id: "home" },
+      })),
+    };
+
+    const collapsed = visibleGroupChannels(group, "history-11", false);
+    expect(collapsed).toHaveLength(6);
+    expect(collapsed[0].channel_id).toBe("history-11");
+    expect(collapsed.map((channel) => channel.channel_id)).toContain("history-0");
+    expect(visibleGroupChannels(group, "history-11", true)).toHaveLength(12);
+  });
+
   it("uses slow-backend wait budgets for model agents", () => {
     expect(agentReplyWaitMs([])).toBe(30_000);
     expect(agentReplyWaitMs([
@@ -128,7 +203,7 @@ describe("ChannelsView", () => {
         a2a_port: 2,
         kind: "codex",
       },
-    ])).toBe(100_000);
+    ])).toBe(195_000);
   });
 
   it("渲染频道、消息流、主题", async () => {

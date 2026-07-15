@@ -987,6 +987,109 @@ select option {
   flex-direction: column;
 }
 
+.channel-group {
+  border-top: 1px solid var(--border);
+}
+
+.channel-group-title {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  font-size: 11px;
+  gap: 7px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  letter-spacing: 0;
+  padding: 9px 12px 7px;
+  text-transform: none;
+}
+
+.channel-group-title::marker {
+  content: "";
+}
+
+.channel-group-title::-webkit-details-marker {
+  display: none;
+}
+
+.channel-group-kind {
+  color: var(--fg-tertiary);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.channel-group-kind.task {
+  color: var(--status-wait);
+}
+
+.channel-group-kind.history {
+  color: var(--fg-tertiary);
+}
+
+.channel-group-count {
+  color: var(--fg-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-group-list {
+  padding-bottom: 5px;
+}
+
+.channel-group-more {
+  background: transparent;
+  border: 0;
+  color: var(--fg-tertiary);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 7px 14px 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.channel-group-more:hover {
+  color: var(--fg-primary);
+  background: var(--bg-hover);
+}
+
+.chat-jump-latest {
+  align-self: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  bottom: 8px;
+  color: var(--fg-primary);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 6px 10px;
+  position: sticky;
+  z-index: 2;
+}
+
+.chat-jump-latest:hover {
+  background: var(--bg-hover);
+}
+
+.chat-load-older {
+  align-self: center;
+  background: transparent;
+  border: 0;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 7px 10px;
+}
+
+.chat-load-older:hover:not(:disabled) {
+  color: var(--fg-primary);
+  text-decoration: underline;
+}
+
+.chat-load-older:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .chat-row {
   display: flex;
   align-items: flex-end;
@@ -1039,6 +1142,30 @@ select option {
   background: var(--chat-out);
   background-image: var(--chat-out-grad);
   color: var(--chat-out-fg);
+}
+.chat-bubble.chat-dispatch-received,
+.chat-bubble.chat-dispatch-processing,
+.chat-bubble.chat-dispatch-completed,
+.chat-bubble.chat-dispatch-failed {
+  border-left: 3px solid var(--status-wait);
+}
+.chat-bubble.chat-dispatch-completed { border-left-color: var(--status-ok); }
+.chat-bubble.chat-dispatch-failed { border-left-color: var(--status-bad); }
+.chat-dispatch-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--fg-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.chat-dispatch-source-hub {
+  display: block;
+  color: var(--fg-tertiary);
+  font-size: 9px;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 /* 成组贴合:同侧相邻的边收成小圆角,一串气泡像"连"在一起。 */
 .chat-row.in.grp-top    .chat-bubble { border-top-left-radius: var(--chat-radius-tight); }
@@ -1104,6 +1231,60 @@ select option {
 
 /* 思考中:三点跳动,占位一个对方气泡。 */
 .typing-dots { display: inline-flex; gap: 4px; padding: 2px 2px; }
+.chat-agent-status {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  margin: 4px 0 8px;
+}
+.chat-agent-recovery {
+  align-self: stretch;
+  margin: 4px 16px 12px;
+  padding: 10px;
+  border: 1px solid var(--status-wait);
+  background: var(--status-wait-bg);
+  border-radius: 8px;
+}
+.chat-agent-recovery-title {
+  color: var(--fg-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.chat-agent-recovery-help {
+  color: var(--fg-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 5px 0 8px;
+}
+.chat-agent-recovery-input {
+  display: block;
+  width: 100%;
+  min-height: 54px;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 7px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-root);
+  color: var(--fg-primary);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.chat-agent-recovery-button {
+  margin-top: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--status-wait);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+.chat-agent-recovery-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
 .typing-dots span {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--fg-tertiary);

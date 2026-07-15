@@ -24,13 +24,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, activateMission, addAgentByDid, askAgentStream, createMission, createProcess,
+  a2aEchoApi, activateMission, addAgentByDid, createMission, createProcess,
   discoverLanAgents, fetchAgents, fetchBackendStatus, fetchCapTokens, fetchIdentity,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
-  resolveDecisionApi, runMissionStep, spawnAgent, stopAgent, summarizeAgent,
+  getAgentLink, reconcileAgentLink, resolveDecisionApi, runMissionStep, spawnAgent, stopAgent,
+  submitAgentLink, summarizeAgent,
 } from "./api";
-import type { BackendStatus } from "./api";
+import type { AgentLinkJob, BackendStatus } from "./api";
 import { loadChat, saveChat } from "./chatStore";
 import { loadSummaries, appendSummary } from "./summaryStore";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
@@ -123,32 +124,29 @@ function loadActiveNav(): NavId {
 /** 默认落地:Blackboard。UI 给人看,首屏先呈现当前工作状态,再让用户进入 Missions / Tasks / Channels。 */
 const DEFAULT_NAV: NavId = "blackboard";
 
-const AGENT_STREAM_IDLE_TIMEOUT_MS_BY_KIND: Record<string, number> = {
-  mock: 60_000,
-  codex: 150_000,
-  hermes: 330_000,
-  "claude-code": 160_000,
-};
-
-const AGENT_BACKEND_TIMEOUT_S_BY_KIND: Record<string, number> = {
-  mock: 30,
-  codex: 120,
-  hermes: 300,
-  "claude-code": 120,
-};
-
 function agentKindForDid(agents: AgentEntry[], did: string): string {
   return agents.find((agent) => agent.did === did)?.kind || "";
 }
 
-function agentStreamIdleTimeoutMs(agents: AgentEntry[], did: string): number {
-  const kind = agentKindForDid(agents, did);
-  return AGENT_STREAM_IDLE_TIMEOUT_MS_BY_KIND[kind] ?? 120_000;
+export function agentBackendTimeoutS(
+  agents: AgentEntry[],
+  did: string,
+): number | undefined {
+  const value = agents.find((agent) => agent.did === did)?.ask_timeout_s;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
 }
 
-function agentBackendTimeoutS(agents: AgentEntry[], did: string): number | undefined {
-  const kind = agentKindForDid(agents, did);
-  return AGENT_BACKEND_TIMEOUT_S_BY_KIND[kind];
+export function agentLinkExecutionDeadline(
+  job: Pick<AgentLinkJob, "state" | "updated_at">,
+  backendTimeoutS: number,
+  nowMs = Date.now(),
+): number | undefined {
+  if (job.state !== "processing") return undefined;
+  const updatedAtMs = Date.parse(job.updated_at);
+  const startedAtMs = Number.isFinite(updatedAtMs) ? updatedAtMs : nowMs;
+  return startedAtMs + Math.max(5, backendTimeoutS + 15) * 1000;
 }
 
 function AppInner() {
@@ -198,6 +196,12 @@ function AppInner() {
    * 历史。等待首个 token 期间在该会话底部显示三点;首 token 到达即清除,
    * 真实流式气泡接管。不持久化——刷新后不会残留"思考中"。 */
   const [typingConvs, setTypingConvs] = useState<Record<string, boolean>>({});
+  const [agentLinkStatusConvs, setAgentLinkStatusConvs] = useState<Record<string, string>>({});
+  const [agentLinkRefsByConv, setAgentLinkRefsByConv] = useState<Record<string, {
+    did: string;
+    jobId: string;
+    replyId: string;
+  }>>({});
   /* Review fix C1 (2026-06-10): conversations was previously not
    * given a setter — the bootstrap fetched the list but had no way
    * to apply it, so the Chat sidebar was permanently stuck on the
@@ -237,6 +241,12 @@ function AppInner() {
   const [focusChatConversationId, setFocusChatConversationId] =
     useState<string | null>(() => loadChat().selectedId);
   const loadedChatConversations = useRef(new Set<string>());
+  const chatLinkAbortRef = useRef<Record<string, AbortController>>({});
+  const activeChatLinkRef = useRef<Record<string, string>>({});
+
+  useEffect(() => () => {
+    Object.values(chatLinkAbortRef.current).forEach((controller) => controller.abort());
+  }, []);
 
   // Toast hook (audit M14/M15) — used by the agent-directory
   // handlers, the LAN scan, rule transitions, and the keyboard
@@ -796,7 +806,10 @@ function AppInner() {
 
     // 随机后缀防同毫秒双发撞 id(审查修复 C)。
     const replyId = `m-agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    let acc = "";
+    chatLinkAbortRef.current[convId]?.abort();
+    const linkAbort = new AbortController();
+    chatLinkAbortRef.current[convId] = linkAbort;
+    activeChatLinkRef.current[convId] = replyId;
     // 先点亮"思考中",不插占位消息。
     setTypingConvs((prev) => ({ ...prev, [convId]: true }));
     const clearTyping = () =>
@@ -833,26 +846,168 @@ function AppInner() {
           ],
         };
       });
+    let lastLinkState = "";
     try {
-      const res = await askAgentStream(
+      const backendTimeoutS = agentBackendTimeoutS(agents, agent.did) ?? 120;
+      const link = await submitAgentLink(
         agent.did,
         body,
-        (delta) => {
-          acc += delta;
-          clearTyping(); // 首 token 到达即收起三点,真实气泡接管
-          upsert(acc);
-        },
+        replyId,
         undefined,
-        undefined,
-        agentStreamIdleTimeoutMs(agents, agent.did),
-        agentBackendTimeoutS(agents, agent.did),
       );
+      setAgentLinkRefsByConv((prev) => ({
+        ...prev,
+        [convId]: { did: agent.did, jobId: link.job_id, replyId },
+      }));
+      lastLinkState = link.state;
+      if (activeChatLinkRef.current[convId] === replyId) {
+        setAgentLinkStatusConvs((prev) => ({ ...prev, [convId]: link.state }));
+      }
+      let executionDeadline: number | undefined;
+      let job = await getAgentLink(agent.did, link.job_id, linkAbort.signal);
+      while (!new Set(["completed", "completed_unverified", "failed", "delivery_unknown"]).has(job.state)) {
+        lastLinkState = job.state;
+        if (activeChatLinkRef.current[convId] === replyId) {
+          setAgentLinkStatusConvs((prev) => ({ ...prev, [convId]: job.state }));
+        }
+        executionDeadline ??= agentLinkExecutionDeadline(job, backendTimeoutS);
+        if (executionDeadline !== undefined && Date.now() >= executionDeadline) {
+          throw new Error("agent execution timed out while waiting for the result");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        job = await getAgentLink(agent.did, link.job_id, linkAbort.signal);
+      }
+      lastLinkState = job.state;
+      if (activeChatLinkRef.current[convId] === replyId) {
+        setAgentLinkStatusConvs((prev) => ({ ...prev, [convId]: job.state }));
+      }
+      if (job.state === "failed") {
+        throw new Error(job.error || "agent link failed");
+      }
+      if (job.state === "delivery_unknown") {
+        throw new Error(
+          job.error || "delivery outcome is unknown; reconcile before retrying",
+        );
+      }
       clearTyping();
-      upsert(acc || res.text || t("(空回复)", "(empty reply)"));
+      const replyText = job.response?.trim() || t("(空回复)", "(empty reply)");
+      upsert(replyText);
+      setChatMessages((prev) => {
+        const list = prev[convId] ?? [];
+        return {
+          ...prev,
+          [convId]: list.map((m) =>
+            m.message_id === replyId
+              ? { ...m, nth_receipt_id: job.receipt_id || undefined }
+              : m,
+          ),
+        };
+      });
     } catch (e) {
+      if ((e as Error)?.name === "AbortError") return;
       clearTyping();
-      upsert(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
+      if (activeChatLinkRef.current[convId] === replyId) {
+        setAgentLinkStatusConvs((prev) => ({
+          ...prev,
+          [convId]: lastLinkState === "delivery_unknown" ? "delivery_unknown" : "failed",
+        }));
+        upsert(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } finally {
+      if (chatLinkAbortRef.current[convId] === linkAbort) {
+        delete chatLinkAbortRef.current[convId];
+      }
     }
+  }
+
+  async function handleReconcileAgentLink(
+    convId: string,
+    receiptText: string,
+    responseText: string,
+  ) {
+    const ref = agentLinkRefsByConv[convId];
+    if (!ref) {
+      throw new Error("No recoverable AgentLink job is attached to this conversation");
+    }
+    let receipt: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(receiptText);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("receipt must be a JSON object");
+      }
+      receipt = parsed as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(
+        `Invalid signed receipt JSON: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const job = await reconcileAgentLink(
+      ref.did,
+      ref.jobId,
+      receipt,
+      responseText,
+    );
+    setAgentLinkStatusConvs((prev) => ({ ...prev, [convId]: job.state }));
+    setChatMessages((prev) => {
+      const list = prev[convId] ?? [];
+      return {
+        ...prev,
+        [convId]: list.map((message) =>
+          message.message_id === ref.replyId
+            ? {
+                ...message,
+                body: job.response || responseText.trim(),
+                nth_receipt_id: job.receipt_id || undefined,
+              }
+            : message,
+        ),
+      };
+    });
+  }
+
+  async function handleAgentDirectoryAsk(
+    did: string,
+    prompt: string,
+    onDelta: (delta: string) => void,
+    signal?: AbortSignal,
+    onStatus?: (status: string) => void,
+  ) {
+    const idempotencyKey = `directory-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const backendTimeoutS = agentBackendTimeoutS(agents, did) ?? 120;
+    const link = await submitAgentLink(
+      did,
+      prompt,
+      idempotencyKey,
+      signal,
+    );
+    onStatus?.(link.state);
+    let executionDeadline: number | undefined;
+    let job = await getAgentLink(did, link.job_id, signal);
+      while (!new Set(["completed", "completed_unverified", "failed", "delivery_unknown"]).has(job.state)) {
+      onStatus?.(job.state);
+      executionDeadline ??= agentLinkExecutionDeadline(job, backendTimeoutS);
+      if (executionDeadline !== undefined && Date.now() >= executionDeadline) {
+        throw new Error("agent execution timed out while waiting for the result");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      job = await getAgentLink(did, link.job_id, signal);
+    }
+    onStatus?.(job.state);
+    if (job.state === "failed" || job.state === "delivery_unknown") {
+      throw new Error(
+        job.error ||
+          (job.state === "delivery_unknown"
+            ? "delivery outcome is unknown; reconcile before retrying"
+            : "agent link failed"),
+      );
+    }
+    const text = job.response?.trim() || "(empty reply)";
+    onDelta(text);
+    onStatus?.("done");
+    return {
+      text,
+      backend: agentKindForDid(agents, did),
+    };
   }
 
   /* ── agent directory handlers (audit fix M14/M15 2026-06-10):
@@ -1135,17 +1290,7 @@ function AppInner() {
         }
         /* UI 集成（2026-06-13）：派任务 + 流式输出。hub 替操作员注入
            cap_token（浏览器无签名私钥）。 */
-        onAskAgent={(did, prompt, onDelta, signal, onStatus) =>
-          askAgentStream(
-            did,
-            prompt,
-            onDelta,
-            signal,
-            onStatus,
-            agentStreamIdleTimeoutMs(agents, did),
-            agentBackendTimeoutS(agents, did),
-          )
-        }
+        onAskAgent={handleAgentDirectoryAsk}
       />
     );
   } else if (active === "chat") {
@@ -1155,6 +1300,8 @@ function AppInner() {
         conversations={chatConversations}
         messagesByConv={chatMessages}
         typingByConv={typingConvs}
+        agentLinkStatusByConv={agentLinkStatusConvs}
+        onReconcileAgentLink={handleReconcileAgentLink}
         onSend={handleChatSend}
         onConversationSelect={handleChatConversationSelect}
         focusConversationId={focusChatConversationId}

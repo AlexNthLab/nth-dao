@@ -83,6 +83,50 @@ describe("ChatView agent integration", () => {
       );
     });
   });
+
+  it("shows durable AgentLink processing status", async () => {
+    renderChat({
+      focusConversationId: "dm-did:key:zAgent",
+      agentLinkStatusByConv: { "dm-did:key:zAgent": "processing" },
+    });
+    expect(await screen.findByText("Agent processing")).toBeTruthy();
+  });
+
+  it("keeps delivery_unknown visible and submits signed recovery evidence", async () => {
+    const onReconcileAgentLink = vi.fn().mockResolvedValue(undefined);
+    renderChat({
+      focusConversationId: "dm-did:key:zAgent",
+      agentLinkStatusByConv: { "dm-did:key:zAgent": "delivery_unknown" },
+      onReconcileAgentLink,
+    });
+    expect(await screen.findByText("Delivery outcome unknown")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Signed agent receipt JSON"), {
+      target: { value: '{"receipt_id":"r-1"}' },
+    });
+    fireEvent.change(screen.getByLabelText("Agent response for reconciliation"), {
+      target: { value: "recovered" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and reconcile" }));
+    await waitFor(() => {
+      expect(onReconcileAgentLink).toHaveBeenCalledWith(
+        "dm-did:key:zAgent",
+        '{"receipt_id":"r-1"}',
+        "recovered",
+      );
+    });
+  });
+
+  it("labels a response without a receipt as unverified", async () => {
+    const onReconcileAgentLink = vi.fn().mockResolvedValue(undefined);
+    renderChat({
+      focusConversationId: "dm-did:key:zAgent",
+      agentLinkStatusByConv: { "dm-did:key:zAgent": "completed_unverified" },
+      onReconcileAgentLink,
+    });
+    expect(await screen.findByText("Agent completed (unverified)")).toBeTruthy();
+    expect(await screen.findByText("Completion needs signed evidence")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Verify and reconcile" })).toBeTruthy();
+  });
 });
 
 describe("ChatView iMessage 风格渲染", () => {
