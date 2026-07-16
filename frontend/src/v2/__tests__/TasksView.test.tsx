@@ -65,6 +65,7 @@ vi.mock("../api", () => ({
 }));
 
 import {
+  claimFederatedTask,
   claimTask,
   discoverFederationPeers,
   fetchAgents,
@@ -141,6 +142,54 @@ describe("TasksView", () => {
     expect(await screen.findByText(/执行视图未完全写入/)).toBeTruthy();
     expect(await screen.findByText(/Mission 执行视图写入失败/)).toBeTruthy();
     expect(await screen.findByText(/Blackboard 协作现场写入失败/)).toBeTruthy();
+  });
+
+  it("uses the content-bound key when claiming a federated task", async () => {
+    const { listOpenTasks } = await import("../api");
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "shared-id",
+      federation_key: "nth-ann-sha256:abc123",
+      publisher_did: "did:key:zRemote",
+      title: "remote task",
+      capability_set: [],
+      context: "general",
+      reward_minor: 0,
+      reward_asset: "credit",
+      claimed: false,
+      federated: true,
+      source_peer: "https://remote.example",
+    }]);
+    vi.mocked(fetchAgents).mockResolvedValueOnce([{
+      did: "did:key:zWorker",
+      code: "WORKER",
+      label: "worker",
+      source: "local",
+      capabilities: [],
+      has_active_cap: true,
+      supervised: true,
+      alive: true,
+      a2a_port: 18081,
+    }]);
+    vi.mocked(claimFederatedTask).mockResolvedValueOnce({
+      status: 409,
+      body: { detail: "test stop" },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+    await screen.findByText("remote task");
+    fireEvent.click(screen.getByText("跨 DAO 认领"));
+
+    await waitFor(() => expect(claimFederatedTask).toHaveBeenCalledWith(
+      "shared-id",
+      "did:key:zWorker",
+      "nth-ann-sha256:abc123",
+    ));
   });
 
   it("allows adding a federation seed peer from the Tasks sidebar", async () => {
@@ -226,5 +275,42 @@ describe("TasksView", () => {
       });
     });
     expect(await screen.findByText(/Imported 1 verified DAO peer/)).toBeTruthy();
+  });
+
+  it("shows durable mesh peer sources and reverse discovery readiness", async () => {
+    const { getFederationStatus } = await import("../api");
+    vi.mocked(getFederationStatus).mockResolvedValueOnce({
+      peers: ["https://seed.example", "https://learned.example"],
+      seed_peers: ["https://seed.example"],
+      learned_peers: {
+        "https://learned.example": {
+          did: "did:key:zLearned",
+          pubkey_prefix: "0123456789abcdef",
+          last_verified_ms: 1,
+          expires_at_ms: 2,
+        },
+      },
+      file_peers: ["https://seed.example"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 0,
+      last_refresh_ms: 0,
+      last_error: "",
+      last_peer_count: 2,
+      public_peer_url: "https://self.example",
+      reverse_discovery_enabled: true,
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    expect(await screen.findByText(/Seeds: 1/)).toBeTruthy();
+    expect(screen.getByText(/Learned: 1/)).toBeTruthy();
+    expect(screen.getByText(/Reverse discovery: ready/)).toBeTruthy();
   });
 });

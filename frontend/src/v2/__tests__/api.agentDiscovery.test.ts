@@ -6,6 +6,7 @@ import {
   fetchReceiptDetail,
   getFederationStatus,
   announceTask,
+  claimFederatedTask,
   listOpenTasks,
   refreshFederation,
   updateFederationPeer,
@@ -138,6 +139,24 @@ describe("v2 agent discovery API wiring", () => {
 });
 
 describe("v2 federation API wiring", () => {
+  it("sends the content-bound key for federated claims", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ claimed: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await claimFederatedTask(
+      "shared-id",
+      "did:key:zWorker",
+      "nth-ann-sha256:abc123",
+    );
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      announcement_id: "shared-id",
+      federation_key: "nth-ann-sha256:abc123",
+      agent_did: "did:key:zWorker",
+    });
+  });
+
   it("loads operator federation status", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       peers: ["http://127.0.0.1:8081"],

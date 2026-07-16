@@ -996,6 +996,7 @@ export async function claimTask(
 export async function claimFederatedTask(
   announcementId: string,
   agentDid: string,
+  federationKey = "",
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(
     `${BASE}/market/federated/claim`,
@@ -1008,7 +1009,9 @@ export async function claimFederatedTask(
         ...authHeader(),
       },
       body: JSON.stringify({
-        announcement_id: announcementId, agent_did: agentDid,
+        announcement_id: announcementId,
+        federation_key: federationKey,
+        agent_did: agentDid,
       }),
     },
   );

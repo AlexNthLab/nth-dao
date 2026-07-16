@@ -358,6 +358,8 @@ export interface ChannelMessage {
 /** 任务广场公告(/api/v2/market/open 返回的一行)。发现态:可认领的活。 */
 export interface TaskAnnouncement {
   announcement_id: string;
+  /** Content-bound key used to disambiguate equal local ids across DAOs. */
+  federation_key?: string;
   publisher_did: string;
   title: string;
   listing_type?: "task" | "service" | "product";
@@ -375,6 +377,8 @@ export interface TaskAnnouncement {
   federated?: boolean;
   /** 该联邦公告来自哪个 peer hub(base URL)。 */
   source_peer?: string;
+  federation_stale?: boolean;
+  federation_verified_at_ms?: number;
 }
 
 /** 类别分面(/api/v2/market/categories)。 */
@@ -385,10 +389,13 @@ export interface TaskCategory {
 
 export interface FederationStatus {
   peers: string[];
+  seed_peers?: string[];
+  learned_peers?: Record<string, FederationLearnedPeer>;
   file_peers: string[];
   env_peers: string[];
   poller_started: boolean;
   cached_announcements: number;
+  stale_announcements?: number;
   last_refresh_ms: number;
   last_error: string;
   last_peer_count: number;
@@ -403,6 +410,15 @@ export interface FederationStatus {
   imported_peers?: string[];
   skipped_peers?: FederationDiscoveredPeer[];
   discovery_errors?: string[];
+  public_peer_url?: string;
+  reverse_discovery_enabled?: boolean;
+}
+
+export interface FederationLearnedPeer {
+  did: string;
+  pubkey_prefix: string;
+  last_verified_ms: number;
+  expires_at_ms: number;
 }
 
 export interface FederationDiscoveredPeer {

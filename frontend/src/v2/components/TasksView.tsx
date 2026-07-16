@@ -184,12 +184,13 @@ export function TasksView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
-  async function handleClaim(annId: string, federated = false) {
+  async function handleClaim(task: TaskAnnouncement) {
+    const annId = task.announcement_id;
     if (!claimAgent || claimingId) return;
     setClaimingId(annId);
     const doClaim = () =>
-      federated
-        ? claimFederatedTask(annId, claimAgent)
+      task.federated
+        ? claimFederatedTask(annId, claimAgent, task.federation_key || "")
         : claimTask(annId, claimAgent);
     try {
       let r = await doClaim();
@@ -507,8 +508,8 @@ export function TasksView() {
             <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
               {fedStatus?.peers.length
                 ? t(
-                    "Seed peers gossip other DAO task feeds. Tasks still require signed announcements and claim receipts.",
-                    "Seed peers gossip other DAO task feeds. Tasks still require signed announcements and claim receipts.",
+                    "Verified peers exchange signed DAO task feeds.",
+                    "Verified peers exchange signed DAO task feeds.",
                   )
                 : t(
                     "Add a reachable DAO URL to discover tasks beyond this workspace.",
@@ -553,10 +554,17 @@ export function TasksView() {
               {fedBusy ? t("Scanning...", "Scanning...") : t("Discover nearby DAOs", "Discover nearby DAOs")}
             </button>
             <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.5 }}>
-              {t("Peers", "Peers")}: {fedStatus?.peers.length ?? 0}
+              {t("Seeds", "Seeds")}: {fedStatus?.seed_peers?.length ?? fedStatus?.peers.length ?? 0}
+              {" · "}
+              {t("Learned", "Learned")}: {Object.keys(fedStatus?.learned_peers ?? {}).length}
               {" · "}
               {t("last", "last")}: {formatFederationRefresh(fedStatus?.last_refresh_ms ?? 0)}
               {fedStatus?.poller_started ? " · poller on" : ""}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.5 }}>
+              {t("Reverse discovery", "Reverse discovery")}: {fedStatus?.reverse_discovery_enabled
+                ? t("ready", "ready")
+                : t("local only", "local only")}
             </div>
             {fedStatus?.imported_peers?.length ? (
               <div style={{ fontSize: 10, color: "var(--accent)", lineHeight: 1.4 }}>
@@ -573,6 +581,11 @@ export function TasksView() {
                 {t("Peers not imported", "Peers not imported")}: {fedStatus.skipped_peers.length}
               </div>
             ) : null}
+            {(fedStatus?.stale_announcements ?? 0) > 0 && (
+              <div style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}>
+                {fedStatus?.stale_announcements} stale discovery hint(s) are visible but cannot be claimed.
+              </div>
+            )}
             {fedStatus?.last_error && (
               <div style={{ fontSize: 10, color: "var(--danger)", lineHeight: 1.4 }}>
                 {fedStatus.last_error}
@@ -826,6 +839,15 @@ export function TasksView() {
                         {t("联邦", "federated")}
                       </span>
                     )}
+                    {task.federation_stale && (
+                      <span
+                        className="pill dim"
+                        title="The source did not complete its latest refresh. Refresh before claiming."
+                        style={{ fontSize: 10, color: "var(--warning)" }}
+                      >
+                        stale
+                      </span>
+                    )}
                     {!task.federated && (
                       <span
                         className="pill dim"
@@ -890,7 +912,8 @@ export function TasksView() {
                     <button
                       className="btn"
                       disabled={
-                        !claimAgent || claimingId === task.announcement_id
+                        !claimAgent || task.federation_stale === true
+                        || claimingId === task.announcement_id
                       }
                       title={
                         !claimAgent
@@ -903,7 +926,7 @@ export function TasksView() {
                             : t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
                       }
                       style={{ marginLeft: "auto" }}
-                      onClick={() => void handleClaim(task.announcement_id, task.federated)}
+                      onClick={() => void handleClaim(task)}
                     >
                       {claimingId === task.announcement_id
                         ? t("认领中…", "Claiming…")
