@@ -66,6 +66,7 @@ nth_dao_web*.log
 # 任务市场 runtime 数据 + 运行日志(发布前门槛补)
 market_feed/
 market_claims/
+federation/
 *.out.log
 *.err.log
 

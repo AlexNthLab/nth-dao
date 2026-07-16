@@ -19,6 +19,7 @@ Three layers, increasing scope:
 from .agent_registry import AgentRecord, AgentRegistry
 from .peer_finder import MatchResult, PeerFinder
 from .lan import LANDiscovery, LANPeer
+from .federation_registry import LearnedPeerRecord, LearnedPeerStore
 
 # Optional mDNS backend (requires `pip install nth-dao[lan]`). We re-export
 # the names with a thin try-block so `from nth_dao.discovery import MDNSDiscovery`
@@ -39,6 +40,8 @@ __all__ = [
     "PeerFinder",
     "LANDiscovery",
     "LANPeer",
+    "LearnedPeerRecord",
+    "LearnedPeerStore",
     "MDNSDiscovery",
     "mdns_available",
 ]
