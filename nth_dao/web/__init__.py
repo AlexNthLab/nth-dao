@@ -3049,12 +3049,12 @@ def create_app(
     def frontend_fallback(path: str):
         if path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
-        # 根目录静态资源(favicon / nth-mark.svg 等):/assets 已挂载,但根级
+        # 根目录静态资源(favicon / brand images 等):/assets 已挂载,但根级
         # 文件会落到这里。仅允许"无子路径 + 白名单后缀",防目录穿越,再交给
         # FileResponse(自动推断 content-type)。否则会被 SPA 回退成 HTML,
         # favicon 拿到的就是网页而非图标。
         if "/" not in path and path.endswith(
-            (".svg", ".png", ".ico", ".webmanifest", ".txt")
+            (".svg", ".png", ".jpg", ".jpeg", ".ico", ".webmanifest", ".txt")
         ):
             candidate = STATIC_DIR / path
             if candidate.is_file():

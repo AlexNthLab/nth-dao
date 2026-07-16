@@ -54,18 +54,18 @@ def test_unknown_deep_link_falls_back_to_v2(tmp_path: Path) -> None:
     assert _is_v2(r.text)
 
 
-def test_favicon_svg_served_not_swallowed_by_spa(tmp_path: Path) -> None:
-    # 根级静态资源(logo / favicon)必须以 svg 返回,而不能被 SPA 回退成
+def test_favicon_jpeg_served_not_swallowed_by_spa(tmp_path: Path) -> None:
+    # 根级静态资源(logo / favicon)必须以 JPEG 返回,而不能被 SPA 回退成
     # HTML——否则浏览器页签图标拿到的是网页。
-    r = _client(tmp_path).get("/nth-mark.svg")
+    r = _client(tmp_path).get("/nth-dao-logo.jpg")
     assert r.status_code == 200
-    assert "image/svg+xml" in r.headers.get("content-type", "")
-    assert "<svg" in r.text and "</svg>" in r.text
+    assert "image/jpeg" in r.headers.get("content-type", "")
+    assert r.content.startswith(b"\xff\xd8\xff")
 
 
 def test_console_html_links_favicon(tmp_path: Path) -> None:
     r = _client(tmp_path).get("/")
-    assert 'rel="icon"' in r.text and "/nth-mark.svg" in r.text
+    assert 'rel="icon"' in r.text and "/nth-dao-logo.jpg" in r.text
 
 
 def test_static_root_path_traversal_guarded(tmp_path: Path) -> None:

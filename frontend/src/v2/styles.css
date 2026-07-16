@@ -253,10 +253,11 @@ select option {
   font-size: 13px;
 }
 
-/* Nᵗʰ DAO 手绘标记(替代原 "N" 徽标)。深色顶栏上用主前景色描边。 */
+/* Project-supplied JPEG logo: preserve the full artwork without distortion. */
 .topbar-logo-mark {
   flex: 0 0 auto;
-  color: var(--fg-primary);
+  object-fit: contain;
+  border-radius: 4px;
 }
 
 .topbar-identity {
