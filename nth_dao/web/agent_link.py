@@ -33,11 +33,25 @@ from nth_dao.util.io import (
 LinkWorker = Callable[[], Any]
 UNCERTAIN_STATES = frozenset({"delivery_unknown"})
 TERMINAL_STATES = frozenset({"completed", "completed_unverified", "failed"}) | UNCERTAIN_STATES
+MAX_AGENT_LINK_RESPONSE_BYTES = 100_000
 logger = logging.getLogger("nth_dao.web.agent_link")
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def bound_agent_response(
+    value: Any, *, max_bytes: int = MAX_AGENT_LINK_RESPONSE_BYTES,
+) -> Tuple[str, bool]:
+    """Return a UTF-8-safe bounded projection and an explicit truncation bit."""
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    text = str(value or "")
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
 @dataclass(frozen=True)
@@ -55,6 +69,7 @@ class LinkJob:
     request_message_id: str = ""
     error: str = ""
     response: str = ""
+    response_truncated: bool = False
     receipt_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -72,6 +87,7 @@ class LinkJob:
             "request_message_id": self.request_message_id,
             "error": self.error,
             "response": self.response,
+            "response_truncated": self.response_truncated,
             "receipt_id": self.receipt_id,
         }
 
@@ -207,6 +223,7 @@ class AgentLinkStore:
         *,
         error: str = "",
         response: str = "",
+        response_truncated: bool = False,
         receipt_id: str = "",
     ) -> LinkJob:
         if state not in {"accepted", "processing", *TERMINAL_STATES}:
@@ -224,6 +241,7 @@ class AgentLinkStore:
                         f"invalid AgentLink transition {current.state!r} -> {state!r} "
                         f"for {job_id!r}"
                     )
+                normalized_response, was_truncated = bound_agent_response(response)
                 updated = LinkJob(
                     job_id=current.job_id,
                     agent_id=current.agent_id,
@@ -237,7 +255,8 @@ class AgentLinkStore:
                     channel_id=current.channel_id,
                     request_message_id=current.request_message_id,
                     error=str(error or "")[:2000],
-                    response=str(response or "")[:100_000],
+                    response=normalized_response,
+                    response_truncated=bool(response_truncated or was_truncated),
                     receipt_id=str(receipt_id or "")[:200],
                 )
                 self._jobs[updated.job_id] = updated
@@ -258,6 +277,7 @@ class AgentLinkStore:
         if not isinstance(data, dict):
             return None
         try:
+            response, was_truncated = bound_agent_response(data.get("response", ""))
             job = LinkJob(
                 job_id=str(data["job_id"]),
                 agent_id=str(data["agent_id"]),
@@ -271,7 +291,10 @@ class AgentLinkStore:
                 channel_id=str(data.get("channel_id", "")),
                 request_message_id=str(data.get("request_message_id", "")),
                 error=str(data.get("error", "")),
-                response=str(data.get("response", "")),
+                response=response,
+                response_truncated=bool(
+                    data.get("response_truncated", False) or was_truncated
+                ),
                 receipt_id=str(data.get("receipt_id", "")),
             )
         except (KeyError, TypeError, ValueError):
@@ -366,9 +389,10 @@ class AgentLinkStore:
                 if current is None:
                     raise KeyError(f"unknown AgentLink job: {job_id!r}")
                 if current.state == "completed":
+                    normalized_response, _ = bound_agent_response(response)
                     if (
                         current.receipt_id == str(receipt_id or "")
-                        and current.response == str(response or "")[:100_000]
+                        and current.response == normalized_response
                     ):
                         return current
                     raise AgentLinkConflict(
@@ -382,7 +406,7 @@ class AgentLinkStore:
                     raise ValueError(
                         "AgentLink job has no prompt hash and cannot be reconciled"
                     )
-                normalized_response = str(response or "")[:100_000]
+                normalized_response, response_truncated = bound_agent_response(response)
                 if (
                     current.state == "completed_unverified"
                     and current.response != normalized_response
@@ -407,6 +431,7 @@ class AgentLinkStore:
                     channel_id=current.channel_id,
                     request_message_id=current.request_message_id,
                     response=normalized_response,
+                    response_truncated=response_truncated,
                     receipt_id=str(receipt_id or "")[:200],
                 )
                 self._jobs[updated.job_id] = updated
@@ -615,6 +640,9 @@ class AgentLinkManager:
                         terminal_state,
                         error=error,
                         response=str(fields.get("response", "")),
+                        response_truncated=bool(
+                            fields.get("response_truncated", False)
+                        ),
                         receipt_id=receipt_id,
                     )
                 except Exception as exc:  # noqa: BLE001

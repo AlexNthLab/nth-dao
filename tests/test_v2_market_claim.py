@@ -254,7 +254,7 @@ def test_linked_claim_overrides_agent_supplied_mission_id(
         def __exit__(self, *_args):
             return False
 
-        def read(self):
+        def read(self, _size: int = -1):
             return json.dumps({
                 "result": {
                     "claimed": True,

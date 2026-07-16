@@ -32,6 +32,7 @@ from nth_dao.mandate.intent import (
 )
 from nth_dao.web import create_app
 from nth_dao.web.rate_limit import (
+    PersistentRateLimiter,
     RateLimitDecision,
     RateLimiter,
     enforce_min_response_time,
@@ -103,6 +104,93 @@ def test_T13_V30a_rate_limiter_validates_construction():
         RateLimiter(max_per_window=0, window_seconds=1.0)
     with pytest.raises(ValueError, match="window_seconds"):
         RateLimiter(max_per_window=1, window_seconds=0.0)
+
+
+def test_persistent_rate_limiter_shares_budget_without_storing_raw_key(
+    tmp_path,
+) -> None:
+    now = [100.0]
+    path = tmp_path / "rate-limit.json"
+    worker_a = PersistentRateLimiter(
+        path, max_per_window=2, window_seconds=10.0, clock=lambda: now[0],
+    )
+    worker_b = PersistentRateLimiter(
+        path, max_per_window=2, window_seconds=10.0, clock=lambda: now[0],
+    )
+
+    assert worker_a.check("203.0.113.9").allowed
+    assert worker_b.check("203.0.113.9").allowed
+    assert not worker_a.check("203.0.113.9").allowed
+    assert "203.0.113.9" not in path.read_text(encoding="utf-8")
+
+    now[0] += 10.1
+    assert worker_b.check("203.0.113.9").allowed
+
+
+def test_persistent_rate_limiter_clock_rollback_does_not_reset_budget(
+    tmp_path,
+) -> None:
+    now = [100.0]
+    limiter = PersistentRateLimiter(
+        tmp_path / "rate-limit.json",
+        max_per_window=1,
+        window_seconds=10.0,
+        clock=lambda: now[0],
+    )
+
+    assert limiter.check("203.0.113.10").allowed
+    now[0] = 90.0
+    rolled_back = limiter.check("203.0.113.10")
+    assert not rolled_back.allowed
+    assert rolled_back.retry_after_seconds == pytest.approx(10.0)
+
+    now[0] = 110.1
+    assert limiter.check("203.0.113.10").allowed
+
+
+def test_persistent_limiter_denials_do_not_rewrite_or_reread_state(
+    tmp_path, monkeypatch,
+) -> None:
+    import nth_dao.web.rate_limit as rate_limit_module
+
+    path = tmp_path / "rate-limit.json"
+    writes = []
+    real_write = rate_limit_module.atomic_write_json
+
+    def counted_write(target, payload):
+        writes.append(target)
+        return real_write(target, payload)
+
+    monkeypatch.setattr(rate_limit_module, "atomic_write_json", counted_write)
+    limiter = PersistentRateLimiter(
+        path, max_per_window=1, window_seconds=60.0,
+    )
+    assert limiter.check("203.0.113.20").allowed
+    assert len(writes) == 1
+    first_denial = limiter.check("203.0.113.20")
+    assert not first_denial.allowed
+    assert len(writes) == 1
+
+    monkeypatch.setattr(
+        limiter,
+        "_load_state",
+        lambda: (_ for _ in ()).throw(AssertionError("state reread")),
+    )
+    assert not limiter.check("203.0.113.20").allowed
+    assert len(writes) == 1
+    assert "203.0.113.20" not in repr(limiter._denied_until)
+
+
+def test_persistent_rate_limiter_corrupt_state_fails_closed(tmp_path) -> None:
+    path = tmp_path / "rate-limit.json"
+    path.write_text("{}", encoding="utf-8")
+    limiter = PersistentRateLimiter(
+        path, max_per_window=1, window_seconds=10.0,
+    )
+
+    with pytest.raises(ValueError, match="state is malformed"):
+        limiter.check("203.0.113.11")
+    assert path.read_text(encoding="utf-8") == "{}"
 
 
 def test_T13_V30a_rate_limit_decision_dataclass():

@@ -188,6 +188,27 @@ def test_agent_link_marks_response_without_receipt_unverified(tmp_path):
         manager.close()
 
 
+def test_agent_link_bounds_response_and_persists_truncation_flag(tmp_path):
+    oversized = "界" * 40_000
+    manager = AgentLinkManager(AgentLinkStore(tmp_path))
+    try:
+        job = manager.submit(
+            agent_id="a",
+            agent_did="did:key:z6MkA",
+            worker=lambda: {"response": oversized},
+        )
+        completed = _wait_for(manager, job.job_id, "completed_unverified")
+        assert completed is not None
+        assert len(completed.response.encode("utf-8")) <= 100_000
+        assert completed.response_truncated is True
+        persisted = AgentLinkStore(tmp_path).get(job.job_id)
+        assert persisted is not None
+        assert persisted.response == completed.response
+        assert persisted.response_truncated is True
+    finally:
+        manager.close()
+
+
 def test_agent_link_close_marks_deferred_jobs_unknown(tmp_path):
     manager = AgentLinkManager(AgentLinkStore(tmp_path))
     job = manager.submit(

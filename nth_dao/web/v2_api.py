@@ -80,6 +80,7 @@ import json
 import logging
 import os
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -1861,8 +1862,11 @@ def _market_announcement_listing_type(ann: Any) -> str:
 
 
 def _market_announcement_to_wire(ann: Any) -> Dict[str, Any]:
+    from nth_dao.market.announcement import announcement_federation_key
+
     data = ann.to_dict()
     data["listing_type"] = _market_announcement_listing_type(ann)
+    data["federation_key"] = announcement_federation_key(ann)
     return data
 
 
@@ -2957,9 +2961,9 @@ async def _drive_supervised_agent_ask(
             )
             try:
                 with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
-                    return resp.status, resp.read()
+                    return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as http_exc:
-                return http_exc.code, http_exc.read()
+                return http_exc.code, _read_local_a2a_body(http_exc)
 
     content: Any = {}
     resp_status = 502
@@ -2968,7 +2972,12 @@ async def _drive_supervised_agent_ask(
             resp_status, resp_body = await asyncio.to_thread(_do_forward)
         except WorkScopeBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            A2AResponseTooLarge,
+        ) as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"agent-ask proxy failed at {url}: {exc}",
@@ -2991,6 +3000,7 @@ async def _drive_supervised_agent_ask(
         receipt_meta = _persist_agent_response_receipt(
             request, rec.agent_id, rec.did, content,
         )
+        content = _bound_agent_result_projection(content)
     return resp_status, content, rec, receipt_meta
 
 
@@ -4087,11 +4097,15 @@ def _proxy_ssestream(
                     "POST", url, content=body_bytes, headers=req_headers,
                 ) as resp:
                     if resp.status_code != 200:
-                        # aread reads remaining body fully; cap below.
-                        body = await resp.aread()
+                        body = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            remaining = _ERR_BODY_CAP - len(body)
+                            if remaining <= 0:
+                                break
+                            body.extend(chunk[:remaining])
                         yield _error_event(
                             f"upstream-{resp.status_code}",
-                            body[:_ERR_BODY_CAP].decode(
+                            bytes(body).decode(
                                 "utf-8", errors="replace",
                             ),
                         )
@@ -4100,7 +4114,19 @@ def _proxy_ssestream(
                     # forced 1KB read size — we hand them up the SSE
                     # pipe at whatever granularity the child emitted,
                     # preserving event boundaries.
+                    streamed = 0
                     async for chunk in resp.aiter_bytes():
+                        if streamed + len(chunk) > _MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES:
+                            yield _error_event(
+                                "response-too-large",
+                                (
+                                    "streamed A2A response exceeds "
+                                    f"{_MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES} bytes; "
+                                    "return a summary and artifact reference"
+                                ),
+                            )
+                            return
+                        streamed += len(chunk)
                         yield chunk
         except httpx.TimeoutException as exc:
             yield _error_event(
@@ -4166,6 +4192,45 @@ def _decode_or_passthrough(raw: bytes) -> Any:
             "raw_length": len(raw),
             "note": "child returned non-JSON; preview truncated to 1KB",
         }
+
+
+_MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class A2AResponseTooLarge(RuntimeError):
+    """A supervised child exceeded the bounded hub response envelope."""
+
+
+def _read_local_a2a_body(
+    response: Any, *, limit: int = _MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES,
+) -> bytes:
+    """Read at most one bounded local A2A response into hub memory."""
+    raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise A2AResponseTooLarge(
+            f"local A2A response exceeds {limit} bytes; return a summary and artifact reference"
+        )
+    return raw
+
+
+def _bound_agent_result_projection(content: Any) -> Any:
+    """Bound a successful Agent response after its full receipt is verified."""
+    if not isinstance(content, dict):
+        return content
+    result = content.get("result")
+    if not isinstance(result, dict) or "response" not in result:
+        return content
+    from .agent_link import bound_agent_response
+
+    response, truncated = bound_agent_response(result.get("response", ""))
+    if not truncated and not result.get("response_truncated"):
+        return content
+    bounded_result = dict(result)
+    bounded_result["response"] = response
+    bounded_result["response_truncated"] = True
+    bounded = dict(content)
+    bounded["result"] = bounded_result
+    return bounded
 
 
 def _state_cap_tokens_store(request: Request) -> Optional[Any]:
@@ -4507,6 +4572,13 @@ class ForeignClaimBody(BaseModel):
 
     cap_token: Dict[str, Any]
     receipt: Dict[str, Any]
+    model_config = {"extra": "forbid"}
+
+
+class ForeignClaimByKeyBody(ForeignClaimBody):
+    """Anonymous foreign claim addressed by signed-body content hash."""
+
+    federation_key: str
 
 
 class FederatedClaimBody(BaseModel):
@@ -4514,6 +4586,7 @@ class FederatedClaimBody(BaseModel):
     取自本节点联邦缓存(可信、已配置的 peer),防被诱导转投到攻击者节点。"""
 
     announcement_id: str
+    federation_key: str = ""
     agent_did: str
 
 
@@ -4531,6 +4604,13 @@ class FederationDiscoverBody(BaseModel):
     timeout_seconds: float = Field(default=2.0, ge=0.5, le=6.0)
     add: bool = True
     refresh: bool = True
+
+
+class FederationHelloBody(BaseModel):
+    """Permissionless reverse-discovery hint; identity is verified by fetch."""
+
+    peer_url: str = Field(min_length=1, max_length=2048)
+    did: str = Field(min_length=1, max_length=512)
 
 
 class DisputeStatementBody(BaseModel):
@@ -5140,11 +5220,11 @@ def _channel_ask_and_reply(
                     url, data=body_bytes, headers=headers, method="POST")
                 try:
                     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                        raw = resp.read()
+                        raw = _read_local_a2a_body(resp)
                     content = _decode_or_passthrough(raw)
                     break
                 except urllib.error.HTTPError as exc:
-                    raw = exc.read() if exc.fp else b""
+                    raw = _read_local_a2a_body(exc) if exc.fp else b""
                     content = _decode_or_passthrough(raw)
                     blob = (
                         json.dumps(content, ensure_ascii=False)
@@ -5174,6 +5254,9 @@ def _channel_ask_and_reply(
             if isinstance(result, dict):
                 reply = str(result.get("response") or "")
         reply = reply.strip()
+        from .agent_link import bound_agent_response
+
+        reply, response_truncated = bound_agent_response(reply)
         if reply:
             reply_metadata.update({
                 "channel_dispatch": True,
@@ -5181,6 +5264,8 @@ def _channel_ask_and_reply(
                 "request_message_id": request_message_id,
                 "agent_did": did,
             })
+            if response_truncated:
+                reply_metadata["response_truncated"] = True
             if link_job_id:
                 reply_metadata["link_job_id"] = link_job_id
             _post_channel_message(
@@ -5208,6 +5293,8 @@ def _channel_ask_and_reply(
                     reply_metadata.get("nth_receipt_id", "") or ""
                 ),
             }
+            if response_truncated:
+                outcome["response_truncated"] = True
         else:
             raise RuntimeError("agent returned an empty response")
     except Exception as exc:  # noqa: BLE001
@@ -5708,6 +5795,7 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
 _FED_POLLER_LOCK = threading.Lock()
 _FED_CONFIG_LOCK = threading.RLock()
 _FED_IDENTITY_INIT_LOCK = threading.Lock()
+_FED_HELLO_LIMITER_LOCK = threading.Lock()
 # 单个联邦 digest 的 ref 上限(serve 侧防无界响应;超出由拉方带 since 翻页)。
 _FED_DIGEST_PAGE = 500
 
@@ -5728,6 +5816,207 @@ def _fed_peer_metadata_file(ws: Optional[Path]) -> Optional[Path]:
     if ws is None:
         return None
     return ws / "federation" / "peers_meta.json"
+
+
+def _learned_fed_peer_store(ws: Optional[Path]):
+    if ws is None:
+        return None
+    from nth_dao.discovery.federation_registry import LearnedPeerStore
+
+    return LearnedPeerStore(ws)
+
+
+def _read_learned_fed_peer_records(ws: Optional[Path]) -> List[Any]:
+    store = _learned_fed_peer_store(ws)
+    if store is None:
+        return []
+    try:
+        return store.active()
+    except (OSError, TimeoutError, ValueError) as exc:
+        logger.warning("fed: learned peer registry read failed: %s", exc)
+        return []
+
+
+def _read_learned_fed_peers(ws: Optional[Path]) -> List[str]:
+    return [record.peer_url for record in _read_learned_fed_peer_records(ws)]
+
+
+def _federation_hello_limiter(request: Request):
+    state = request.app.state
+    limiter = getattr(state, "market_fed_hello_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "market_fed_hello_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            ws = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    ws / "federation" / "hello_rate_limit.json",
+                    max_per_window=12,
+                    window_seconds=60.0,
+                    max_tracked_keys=4096,
+                )
+                if ws is not None
+                else RateLimiter(
+                    max_per_window=12,
+                    window_seconds=60.0,
+                    max_tracked_keys=4096,
+                )
+            )
+            state.market_fed_hello_limiter = limiter
+    return limiter
+
+
+def _federation_hello_global_limiter(request: Request):
+    """Bound aggregate identity-card preflights across all source addresses."""
+    state = request.app.state
+    limiter = getattr(state, "market_fed_hello_global_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "market_fed_hello_global_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            ws = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    ws / "federation" / "hello_global_rate_limit.json",
+                    max_per_window=120,
+                    window_seconds=60.0,
+                    max_tracked_keys=4,
+                )
+                if ws is not None
+                else RateLimiter(
+                    max_per_window=120,
+                    window_seconds=60.0,
+                    max_tracked_keys=4,
+                )
+            )
+            state.market_fed_hello_global_limiter = limiter
+    return limiter
+
+
+def _foreign_claim_limiter(request: Request):
+    """Bound anonymous claim verification per network source."""
+    state = request.app.state
+    limiter = getattr(state, "market_fed_foreign_claim_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "market_fed_foreign_claim_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            ws = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    ws / "federation" / "foreign_claim_rate_limit.json",
+                    max_per_window=30,
+                    window_seconds=60.0,
+                    max_tracked_keys=4096,
+                )
+                if ws is not None
+                else RateLimiter(
+                    max_per_window=30,
+                    window_seconds=60.0,
+                    max_tracked_keys=4096,
+                )
+            )
+            state.market_fed_foreign_claim_limiter = limiter
+    return limiter
+
+
+def _foreign_claim_global_limiter(request: Request):
+    """Bound aggregate anonymous claim verification across source IPs."""
+    state = request.app.state
+    limiter = getattr(state, "market_fed_foreign_claim_global_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "market_fed_foreign_claim_global_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            ws = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    ws / "federation" / "foreign_claim_global_rate_limit.json",
+                    max_per_window=120,
+                    window_seconds=60.0,
+                    max_tracked_keys=4,
+                )
+                if ws is not None
+                else RateLimiter(
+                    max_per_window=120,
+                    window_seconds=60.0,
+                    max_tracked_keys=4,
+                )
+            )
+            state.market_fed_foreign_claim_global_limiter = limiter
+    return limiter
+
+
+def _federation_hello_client_key(request: Request) -> str:
+    """Resolve the rate-limit key without trusting spoofable proxy headers."""
+    direct = (
+        str(request.client.host).strip()
+        if request.client is not None and request.client.host
+        else "anonymous"
+    )
+    trusted: set[str] = set()
+    for raw in os.environ.get("NTH_TRUSTED_PROXY_IPS", "").split(","):
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        try:
+            trusted.add(str(ipaddress.ip_address(candidate)))
+        except ValueError:
+            logger.warning("ignoring invalid NTH_TRUSTED_PROXY_IPS entry")
+    try:
+        normalized_direct = str(ipaddress.ip_address(direct))
+    except ValueError:
+        normalized_direct = direct
+    if normalized_direct not in trusted:
+        return normalized_direct
+    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    try:
+        return str(ipaddress.ip_address(forwarded))
+    except ValueError:
+        return normalized_direct
+
+
+def _market_fed_announce_self(request: Request):
+    """Build a poller callback for reverse discovery, or disable honestly."""
+    base_url = str(
+        getattr(request.app.state, "nth_public_base_url", "") or ""
+    ).strip()
+    identity = _state_node_identity(request)
+    did = (
+        identity.as_did()
+        if identity is not None and hasattr(identity, "as_did")
+        else ""
+    )
+    if not base_url or not did:
+        return None
+    try:
+        from nth_dao.discovery.federation_registry import normalize_learned_peer_url
+
+        base_url = normalize_learned_peer_url(base_url)
+    except ValueError:
+        # LAN HTTP advertisements are handled by LAN/mDNS discovery. Reverse
+        # internet federation only advertises HTTPS endpoints.
+        return None
+
+    def announce(peers: List[str]) -> Dict[str, str]:
+        from .market_federation_poll import announce_peer_hello
+
+        return announce_peer_hello(peers, peer_url=base_url, did=did)
+
+    return announce
 
 
 _MAX_FED_IDENTITY_CARD_BYTES = 64 * 1024
@@ -5785,33 +6074,76 @@ def _federation_url_from_discovered_peer(peer: Any) -> str:
         return ""
 
 
-def _is_safe_discovered_federation_url(url: str) -> bool:
-    """Reject obvious self/metadata targets before an identity-card fetch.
-
-    LAN discovery intentionally permits RFC1918 addresses, but a peer record
-    must not make this process call its own loopback or an unspecified socket.
-    Operator-configured seed peers use the separate, explicit-input path and
-    are deliberately allowed to target local development services.
-    """
+def _resolve_safe_discovered_federation_ip(
+    url: str,
+    *,
+    resolve: Callable[..., list] = socket.getaddrinfo,
+) -> Optional[str]:
+    '''Resolve a LAN-discovered URL once and return a safe pinned address.'''
     try:
         parsed = urlsplit(url)
-    except Exception:  # noqa: BLE001
-        return False
-    if parsed.scheme not in {"http", "https"}:
-        return False
-    host = (parsed.hostname or "").strip().lower()
-    if not host or host == "localhost":
-        return False
+        if parsed.scheme not in {'http', 'https'}:
+            return None
+        host = (parsed.hostname or '').strip().lower().rstrip('.')
+    except (TypeError, ValueError):
+        return None
+    if (
+        not host
+        or host == 'localhost'
+        or host.endswith('.localhost')
+        or host.endswith('.local')
+    ):
+        return None
+
+    def allowed(address: Any) -> bool:
+        return not (
+            address.is_loopback
+            or address.is_unspecified
+            or address.is_multicast
+            or address.is_link_local
+            or address.is_reserved
+        )
+
     try:
-        address = ipaddress.ip_address(host)
+        literal = ipaddress.ip_address(host)
     except ValueError:
-        return True
-    return not (
-        address.is_loopback
-        or address.is_unspecified
-        or address.is_multicast
-        or address.is_link_local
-    )
+        literal = None
+    if literal is not None:
+        return str(literal) if allowed(literal) else None
+    try:
+        infos = resolve(host, None)
+    except Exception:  # noqa: BLE001
+        return None
+    if not infos:
+        return None
+    addresses: List[str] = []
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError, TypeError):
+            return None
+        if not allowed(address):
+            return None
+        addresses.append(str(address))
+    return addresses[0] if addresses else None
+
+
+def _is_safe_discovered_federation_url(url: str) -> bool:
+    """Reject DNS aliases for self/metadata before identity-card fetch."""
+
+    return _resolve_safe_discovered_federation_ip(url) is not None
+
+
+def _discovered_source_ip(source_addr: str) -> Optional[str]:
+    """Parse the network source attached by LAN/mDNS discovery."""
+    raw = str(source_addr or "").strip()
+    if not raw:
+        return None
+    try:
+        host = urlsplit(f"//{raw}").hostname or raw
+        return str(ipaddress.ip_address(host))
+    except (TypeError, ValueError):
+        return None
 
 
 class _RejectFederationRedirect(urllib.request.HTTPRedirectHandler):
@@ -5989,7 +6321,9 @@ def _market_fed_cycle_budget_s() -> float:
 
 def _market_fed_gossip_identity_verifier(
     request: Request,
-) -> Callable[[str], bool]:
+    *,
+    persist_learned: bool = False,
+) -> Callable[..., Optional[str]]:
     """Return a bounded-TTL verifier for URLs learned through gossip."""
     state = request.app.state
     with _FED_IDENTITY_INIT_LOCK:
@@ -6006,7 +6340,7 @@ def _market_fed_gossip_identity_verifier(
             inflight = {}
             state.market_fed_identity_inflight = inflight
 
-    def verify(peer_url: str, resolved_ip: str = "") -> bool:
+    def verify(peer_url: str, resolved_ip: str = "") -> Optional[str]:
         try:
             normalized = _normalize_configured_fed_peer(peer_url)
         except ValueError:
@@ -6022,32 +6356,97 @@ def _market_fed_gossip_identity_verifier(
             except (TypeError, ValueError):
                 return False
         now = time.monotonic()
+        cache_key = (normalized, resolved_ip)
         timeout = _env_float(
             "NTH_FED_IDENTITY_TIMEOUT_S",
             2.0,
             minimum=0.5,
             maximum=3.0,
         )
+
+        def persist_verified(metadata: Dict[str, Any]) -> None:
+            ws = _state_workspace(request)
+            try:
+                if persist_learned:
+                    store = _learned_fed_peer_store(ws)
+                    if store is not None:
+                        store.upsert_verified(
+                            normalized, metadata, resolved_ip=resolved_ip,
+                        )
+                elif normalized in _read_fed_peers(ws):
+                    with _FED_CONFIG_LOCK:
+                        persisted = _read_fed_peer_metadata(ws)
+                        if persisted.get(normalized) == metadata:
+                            return
+                        persisted[normalized] = metadata
+                        _write_fed_peer_metadata(ws, persisted)
+            except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                logger.warning(
+                    "fed: verified peer metadata persistence failed %s: %s",
+                    normalized,
+                    exc,
+                )
+
+        def is_local_identity(metadata: Dict[str, Any]) -> bool:
+            if not persist_learned:
+                return False
+            local_identity = _state_node_identity(request)
+            local_did = (
+                local_identity.as_did()
+                if local_identity is not None and hasattr(local_identity, "as_did")
+                else ""
+            )
+            peer_did = str(metadata.get("did") or "")
+            return bool(
+                local_did
+                and peer_did
+                and hmac.compare_digest(local_did, peer_did)
+            )
+
+        cached_result: Optional[bool] = None
+        cached_metadata: Any = None
         with lock:
-            cached = cache.get(normalized)
+            cached = cache.get(cache_key)
             if cached is not None and cached["expires_at"] > now:
-                return bool(cached["ok"])
-            event = inflight.get(normalized)
-            owner = event is None
-            if owner:
-                event = threading.Event()
-                inflight[normalized] = event
+                cached_result = bool(cached["ok"])
+                cached_metadata = cached.get("metadata")
+            if cached_result is not None:
+                event = None
+                owner = False
+            else:
+                event = inflight.get(cache_key)
+                owner = event is None
+                if owner:
+                    event = threading.Event()
+                    inflight[cache_key] = event
+
+        if cached_result is not None:
+            if cached_result and isinstance(cached_metadata, dict):
+                if is_local_identity(cached_metadata):
+                    return None
+                persist_verified(cached_metadata)
+                did = cached_metadata.get("did")
+                return did if isinstance(did, str) else None
+            return None
 
         if not owner:
             assert event is not None
             event.wait(timeout + 0.25)
             with lock:
-                cached = cache.get(normalized)
-                return bool(
+                cached = cache.get(cache_key)
+                ok = bool(
                     cached is not None
                     and cached["expires_at"] > time.monotonic()
                     and cached["ok"]
                 )
+                metadata = cached.get("metadata") if cached is not None else None
+            if ok and isinstance(metadata, dict):
+                if is_local_identity(metadata):
+                    return None
+                persist_verified(metadata)
+                did = metadata.get("did")
+                return did if isinstance(did, str) else None
+            return None
 
         assert event is not None
         try:
@@ -6061,13 +6460,19 @@ def _market_fed_gossip_identity_verifier(
                 metadata = None
                 error = f"{type(exc).__name__}: {exc}"
             ok = metadata is not None
+            if ok and metadata is not None and is_local_identity(metadata):
+                ok = False
+                error = "refusing to learn this node as a peer"
             if not ok:
                 logger.warning(
                     "fed: rejected gossip peer identity %s: %s", normalized, error,
                 )
+            if ok and metadata is not None:
+                persist_verified(metadata)
             with lock:
-                cache[normalized] = {
+                cache[cache_key] = {
                     "ok": ok,
+                    "metadata": metadata if ok else None,
                     "expires_at": now + (
                         _FED_GOSSIP_IDENTITY_SUCCESS_TTL_S
                         if ok else _FED_GOSSIP_IDENTITY_FAILURE_TTL_S
@@ -6079,10 +6484,13 @@ def _market_fed_gossip_identity_verifier(
                         key=lambda key: cache[key]["expires_at"],
                     )
                     cache.pop(oldest, None)
-            return ok
+            if ok and metadata is not None:
+                did = metadata.get("did")
+                return did if isinstance(did, str) else None
+            return None
         finally:
             with lock:
-                inflight.pop(normalized, None)
+                inflight.pop(cache_key, None)
                 event.set()
 
     return verify
@@ -6118,6 +6526,44 @@ def _read_fed_peer_metadata(ws: Optional[Path]) -> Dict[str, Dict[str, Any]]:
         if meta.get("peer_url") == peer_url and meta.get("did"):
             out[peer_url] = meta
     return out
+
+
+def _public_fed_peer_hints(ws: Optional[Path]) -> List[str]:
+    """Return only verified public URLs for the anonymous peer graph.
+
+    Operator seeds may be loopback, RFC1918, or internal hostnames for local
+    testing. Those belong in the authenticated status view, not in gossip.
+    """
+    from nth_dao.did_key import DIDKeyError, decode_ed25519_did_key_hex
+    from nth_dao.discovery.federation_registry import normalize_learned_peer_url
+
+    hints = _read_learned_fed_peers(ws)
+    metadata = _read_fed_peer_metadata(ws)
+    for raw_seed in _read_fed_peers(ws):
+        item = metadata.get(raw_seed)
+        if not isinstance(item, dict):
+            continue
+        try:
+            seed = normalize_learned_peer_url(raw_seed)
+            claimed = normalize_learned_peer_url(str(item.get("peer_url") or ""))
+            pubkey_hex = decode_ed25519_did_key_hex(str(item.get("did") or ""))
+        except (DIDKeyError, ValueError):
+            continue
+        if seed != claimed:
+            continue
+        if pubkey_hex != str(item.get("pubkey_hex") or "").lower():
+            continue
+        if item.get("identity_url") != (
+            f"{seed}/.well-known/nth-dao/identity.json"
+        ):
+            continue
+        if (
+            item.get("card_kind") != _FED_IDENTITY_CARD_KIND
+            or item.get("federation_protocol") != "nth-dao-federation-v1"
+        ):
+            continue
+        hints.append(seed)
+    return list(dict.fromkeys(hints))
 
 
 def _write_fed_peer_metadata(
@@ -6306,39 +6752,77 @@ def _read_fed_peers(ws: Optional[Path]) -> List[str]:
     return out
 
 
-def _state_market_fed_cache(request: Request):
-    """懒建任务市场联邦缓存 + 起后台 poller —— 仅当配了 peers 才启动(没配
-    则零开销返回 None)。单例挂 app.state.market_fed_cache,双检锁防并发重建。"""
+def _launch_market_fed_poller(
+    request: Request, cache: Any, ws: Optional[Path],
+) -> None:
+    """Start one lifecycle-owned federation poller under the caller's lock."""
+    from .market_federation_poll import start_poller
+
     state = request.app.state
-    cache = getattr(state, "market_fed_cache", None)
-    if cache is not None:
-        return cache
+    interval = _env_float(
+        "NTH_FED_POLL_INTERVAL_S", 20.0, minimum=1.0, maximum=3600.0,
+    )
+    stop_event = threading.Event()
+    thread = start_poller(
+        lambda: _read_fed_peers(ws),
+        cache,
+        get_untrusted_peers=lambda: _read_learned_fed_peers(ws),
+        announce_self=_market_fed_announce_self(request),
+        stop_event=stop_event,
+        interval_s=interval,
+        verify_gossip_peer=_market_fed_gossip_identity_verifier(
+            request, persist_learned=True,
+        ),
+        verify_seed_peer=_market_fed_gossip_identity_verifier(request),
+        max_duration_s=_market_fed_cycle_budget_s(),
+    )
+    state.market_fed_poller_stop_event = stop_event
+    state.market_fed_poller_thread = thread
+    state.market_fed_poller_started = True
+    logger.info(
+        "nth market federation poller started (%d peers, %.0fs)",
+        len(set(_read_fed_peers(ws)) | set(_read_learned_fed_peers(ws))),
+        interval,
+    )
+
+
+def _clear_finished_market_fed_poller(state: Any) -> None:
+    """Clear a stopped poller only after its thread has really exited."""
+    if not getattr(state, "market_fed_poller_started", False):
+        return
+    stop_event = getattr(state, "market_fed_poller_stop_event", None)
+    if stop_event is None or not hasattr(stop_event, "is_set"):
+        return
+    if not stop_event.is_set():
+        return
+    thread = getattr(state, "market_fed_poller_thread", None)
+    if thread is not None and hasattr(thread, "is_alive") and thread.is_alive():
+        return
+    state.market_fed_poller_started = False
+    state.market_fed_poller_stop_event = None
+    state.market_fed_poller_thread = None
+
+
+def _state_market_fed_cache(request: Request):
+    """Return the cache and ensure configured federation is running."""
+    state = request.app.state
+    _clear_finished_market_fed_poller(state)
     ws = _state_workspace(request)
-    if not _read_fed_peers(ws):
-        return None  # 没配 peers → 不联邦
+    has_peers = bool(_read_fed_peers(ws) or _read_learned_fed_peers(ws))
+    cache = getattr(state, "market_fed_cache", None)
+    if not has_peers:
+        return cache
+    if cache is not None and getattr(state, "market_fed_poller_started", False):
+        return cache
     with _FED_POLLER_LOCK:
         cache = getattr(state, "market_fed_cache", None)
         if cache is None:
-            from .market_federation_poll import FederationCache, start_poller
+            from .market_federation_poll import FederationCache
+
             cache = FederationCache()
-            try:
-                interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
-            except ValueError:
-                interval = 20.0
-            start_poller(
-                lambda: _read_fed_peers(ws),
-                cache,
-                interval_s=interval,
-                verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
-                verify_seed_peer=_market_fed_gossip_identity_verifier(request),
-                max_duration_s=_market_fed_cycle_budget_s(),
-            )
             state.market_fed_cache = cache
-            state.market_fed_poller_started = True
-            logger.info(
-                "nth market federation poller started (%d peers, %.0fs)",
-                len(_read_fed_peers(ws)), interval,
-            )
+        if not getattr(state, "market_fed_poller_started", False):
+            _launch_market_fed_poller(request, cache, ws)
     return cache
 
 
@@ -6351,26 +6835,78 @@ def _ensure_market_fed_cache_for_update(request: Request):
             from .market_federation_poll import FederationCache
             cache = FederationCache()
             state.market_fed_cache = cache
-        peers = _read_fed_peers(_state_workspace(request))
-        if peers and not getattr(state, "market_fed_poller_started", False):
-            from .market_federation_poll import start_poller
-            try:
-                interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
-            except ValueError:
-                interval = 20.0
-            start_poller(
-                lambda: _read_fed_peers(_state_workspace(request)),
-                cache,
-                interval_s=interval,
-                verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
-                verify_seed_peer=_market_fed_gossip_identity_verifier(request),
-                max_duration_s=_market_fed_cycle_budget_s(),
-            )
-            state.market_fed_poller_started = True
+        ws = _state_workspace(request)
+        peers = _read_fed_peers(ws)
+        learned_peers = _read_learned_fed_peers(ws)
+        if (peers or learned_peers) and not getattr(
+            state, "market_fed_poller_started", False
+        ):
+            _launch_market_fed_poller(request, cache, ws)
     return cache
 
 
+def start_market_federation_runtime(app: FastAPI) -> None:
+    """Start federation at service startup, even when no UI is opened."""
+    request = Request({"type": "http", "app": app})
+    _state_market_fed_cache(request)
+
+
+def stop_market_federation_runtime(app: FastAPI) -> None:
+    """Signal and briefly join the lifecycle-owned federation thread."""
+    state = app.state
+    stop_event = getattr(state, "market_fed_poller_stop_event", None)
+    if stop_event is not None and hasattr(stop_event, "set"):
+        stop_event.set()
+    thread = getattr(state, "market_fed_poller_thread", None)
+    if thread is not None and hasattr(thread, "join"):
+        thread.join(timeout=10.0)
+    if thread is not None and hasattr(thread, "is_alive") and thread.is_alive():
+        logger.warning(
+            "federation poller is still stopping after the shutdown timeout",
+        )
+        return
+    state.market_fed_poller_started = False
+    state.market_fed_poller_stop_event = None
+    state.market_fed_poller_thread = None
+
+
+def _market_announcement_compatibility_status(
+    workspace: Optional[Path], identity: Any,
+) -> Dict[str, Any]:
+    """Summarize legacy records that cannot be authority-safe federated."""
+    empty = {
+        "v1_records": 0,
+        "federation_ready_v1_records": 0,
+        "requires_publisher_resign": 0,
+    }
+    if workspace is None or identity is None or not hasattr(identity, "as_did"):
+        return empty
+    feed_path = workspace / "market_feed" / "announcements.jsonl"
+    if not feed_path.exists():
+        return empty
+    from nth_dao.market.announcement import NTH_ANNOUNCEMENT_KIND_V1
+    from nth_dao.market.feed import MarketFeed
+
+    source_did = identity.as_did()
+    v1_records = 0
+    federation_ready = 0
+    for announcement in MarketFeed(workspace).poll(
+        -1, include_expired=True,
+    ).announcements:
+        if announcement.kind != NTH_ANNOUNCEMENT_KIND_V1:
+            continue
+        v1_records += 1
+        if announcement.effective_authority_did() == source_did:
+            federation_ready += 1
+    return {
+        "v1_records": v1_records,
+        "federation_ready_v1_records": federation_ready,
+        "requires_publisher_resign": v1_records - federation_ready,
+    }
+
+
 def _market_fed_status(request: Request) -> Dict[str, Any]:
+    _clear_finished_market_fed_poller(request.app.state)
     ws = _state_workspace(request)
     cache = getattr(request.app.state, "market_fed_cache", None)
     status = (
@@ -6383,7 +6919,13 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
             "last_peer_count": 0,
         }
     )
-    peers = _read_fed_peers(ws)
+    seed_peers = _read_fed_peers(ws)
+    learned_records = _read_learned_fed_peer_records(ws)
+    learned_peers = [record.peer_url for record in learned_records]
+    peers = list(dict.fromkeys(seed_peers + learned_peers))
+    public_peer_url = str(
+        getattr(request.app.state, "nth_public_base_url", "") or ""
+    )
     env_peers: List[str] = []
     for item in os.environ.get("NTH_FED_PEERS", "").split(","):
         if not item.strip():
@@ -6394,6 +6936,18 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
             continue
     return {
         "peers": peers,
+        "seed_peers": seed_peers,
+        "learned_peers": {
+            record.peer_url: {
+                "did": record.did,
+                "pubkey_prefix": record.pubkey_hex[:16],
+                "last_verified_ms": record.last_verified_ms,
+                "expires_at_ms": record.expires_at_ms,
+            }
+            for record in learned_records
+        },
+        "public_peer_url": public_peer_url,
+        "reverse_discovery_enabled": _market_fed_announce_self(request) is not None,
         "file_peers": _read_fed_peer_file(ws),
         "env_peers": env_peers,
         "verified_peers": {
@@ -6407,6 +6961,10 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
         },
         "poller_started": bool(
             getattr(request.app.state, "market_fed_poller_started", False)
+        ),
+        "announcement_compatibility": _market_announcement_compatibility_status(
+            ws,
+            _state_node_identity(request),
         ),
         **status,
     }
@@ -7451,9 +8009,9 @@ def register_v2_routes(app: FastAPI) -> None:
         # 同套筛选;标 federated + source_peer。认领权威在主 DAO,这里只做发现。
         cache = _state_market_fed_cache(request)
         if cache is not None:
-            local_ids = {d["announcement_id"] for d in out}
-            for aid, entry in cache.snapshot().items():
-                if aid in local_ids:
+            local_keys = {d["federation_key"] for d in out}
+            for federation_key, entry in cache.snapshot().items():
+                if federation_key in local_keys:
                     continue
                 ann = entry["ann"]
                 if not _passes(ann):
@@ -7462,6 +8020,11 @@ def register_v2_routes(app: FastAPI) -> None:
                 d["claimed"] = False
                 d["federated"] = True
                 d["source_peer"] = entry.get("source", "")
+                d["federation_key"] = federation_key
+                d["federation_stale"] = bool(entry.get("stale", False))
+                d["federation_verified_at_ms"] = int(
+                    entry.get("last_verified_ms") or 0
+                )
                 out.append(d)
         return out
 
@@ -7679,47 +8242,194 @@ def register_v2_routes(app: FastAPI) -> None:
                 identity.sign(canonical_json(empty.signing_body())))
             return empty.to_dict()
         from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.claim import ClaimStore
         from nth_dao.market.federation import build_digest
+        claims = (
+            ClaimStore(ws)
+            if (ws / "market_claims").exists()
+            else None
+        )
         return build_digest(
-            MarketFeed(ws), identity, since_seq=since, limit=_FED_DIGEST_PAGE,
+            MarketFeed(ws),
+            identity,
+            since_seq=since,
+            limit=_FED_DIGEST_PAGE,
+            is_open=(
+                (lambda ann: not claims.is_claimed(ann.announcement_id))
+                if claims is not None
+                else None
+            ),
         ).to_dict()
 
     @app.get("/api/v2/market/federation/pull")
     def v2_market_fed_pull(
-        request: Request, ids: str = "",
+        request: Request, keys: str = "", ids: str = "",
     ) -> List[Dict[str, Any]]:
-        """按需拉全文:按 id 返回完整且已验签的公告(信任模型的"真相"层)。
+        """Pull verified full records by content key, with legacy ID fallback.
 
-        ids = 逗号分隔(封顶 200,防滥用)。不存在/验不过的 id 静默略过。
+        ``keys`` is canonical because it is transport-safe and binds the signed
+        body. ``ids`` remains available for pre-content-key digest clients.
         """
         ws = _state_workspace(request)
         if ws is None or not (
             ws / "market_feed" / "announcements.jsonl"
         ).exists():
             return []
+        key_list = [s.strip() for s in keys.split(",") if s.strip()][:200]
         id_list = [s.strip() for s in ids.split(",") if s.strip()][:200]
-        if not id_list:
+        if not key_list and not id_list:
             return []
+        from nth_dao.market.claim import ClaimStore
         from nth_dao.market.feed import MarketFeed
-        from nth_dao.market.federation import pull_announcements
-        return [a.to_dict() for a in pull_announcements(MarketFeed(ws), id_list)]
+        from nth_dao.market.federation import (
+            pull_announcements,
+            pull_announcements_by_keys,
+        )
+        claims = (
+            ClaimStore(ws)
+            if (ws / "market_claims").exists()
+            else None
+        )
+        feed = MarketFeed(ws)
+        pulled = pull_announcements_by_keys(feed, key_list)
+        if id_list:
+            pulled.extend(pull_announcements(feed, id_list))
+        seen = set()
+        result: List[Dict[str, Any]] = []
+        from nth_dao.market.announcement import announcement_federation_key
+        for ann in pulled:
+            key = announcement_federation_key(ann)
+            if key in seen or (
+                claims is not None and claims.is_claimed(ann.announcement_id)
+            ):
+                continue
+            seen.add(key)
+            result.append(ann.to_dict())
+        return result
 
     @app.get("/api/v2/market/federation/peers")
     def v2_market_fed_peers(request: Request) -> Dict[str, Any]:
-        """本节点已配置的联邦 peer 列表(gossip 的「成员」层,FED-B)。匿名读。
-
-        供对端**传递发现**:你只需配几个 peer,经它们的 peer 列表逐跳就能
-        发现整张可达网络的任务。只暴露已配置的 URL(本就是运营者填的发现入口)。
-        任务真伪不靠这个 —— 发现到的 peer 仍被直连 + 双层验签。
-        """
-        return {"peers": _read_fed_peers(_state_workspace(request))}
+        """Public verified peer hints for transitive discovery."""
+        return {"peers": _public_fed_peer_hints(_state_workspace(request))}
 
     @app.get("/api/v2/market/federation/status")
     def v2_market_fed_status(request: Request) -> Dict[str, Any]:
         """Operator-facing federation discovery status."""
-        if _read_fed_peers(_state_workspace(request)):
+        if bool(getattr(request.app.state, "nth_require_console_auth", False)):
+            _require_console_bearer_for_sensitive_read(request)
+        ws = _state_workspace(request)
+        if _read_fed_peers(ws) or _read_learned_fed_peers(ws):
             _state_market_fed_cache(request)
         return _market_fed_status(request)
+
+    @app.post("/api/v2/market/federation/hello")
+    def v2_market_fed_hello(
+        body: FederationHelloBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Learn a public DAO only after pinned signed-card verification."""
+        from nth_dao.did_key import is_did_key
+
+        client_key = _federation_hello_client_key(request)
+        try:
+            global_decision = _federation_hello_global_limiter(request).check(
+                "all-clients",
+            )
+            decisions = (global_decision,)
+            if global_decision.allowed:
+                decisions += (
+                    _federation_hello_limiter(request).check(client_key),
+                )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.warning("federation hello limiter unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="federation hello is temporarily unavailable",
+            )
+        denied = [decision for decision in decisions if not decision.allowed]
+        if denied:
+            retry_after = max(item.retry_after_seconds for item in denied)
+            raise HTTPException(
+                status_code=429,
+                detail="federation hello rate limit exceeded",
+                headers={"Retry-After": str(max(1, int(retry_after)))},
+            )
+        if not is_did_key(body.did):
+            raise HTTPException(
+                status_code=400,
+                detail="federation hello requires a valid Ed25519 did:key",
+            )
+        try:
+            from nth_dao.discovery.federation_registry import (
+                LearnedPeerCapacityError,
+                normalize_learned_peer_url,
+            )
+            from .market_federation_poll import _resolve_safe_gossip_ip
+
+            peer_url = normalize_learned_peer_url(body.peer_url)
+            resolved_ip = _resolve_safe_gossip_ip(peer_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not resolved_ip:
+            raise HTTPException(
+                status_code=400,
+                detail="federation hello peer is not a public HTTPS endpoint",
+            )
+        local_identity = _state_node_identity(request)
+        local_did = (
+            local_identity.as_did()
+            if local_identity is not None and hasattr(local_identity, "as_did")
+            else ""
+        )
+        if local_did and hmac.compare_digest(local_did, body.did):
+            raise HTTPException(status_code=409, detail="cannot learn this node as a peer")
+        metadata, error = _fetch_and_verify_federation_identity(
+            peer_url,
+            timeout_seconds=_env_float(
+                "NTH_FED_IDENTITY_TIMEOUT_S",
+                2.0,
+                minimum=0.5,
+                maximum=3.0,
+            ),
+            expected_did=body.did,
+            resolved_ip=resolved_ip,
+        )
+        if metadata is None:
+            logger.warning(
+                "fed: peer hello identity rejected for %s: %s",
+                peer_url,
+                error,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="federation hello identity could not be verified",
+            )
+        store = _learned_fed_peer_store(_state_workspace(request))
+        if store is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            record = store.upsert_verified(
+                peer_url, metadata, resolved_ip=resolved_ip,
+            )
+        except LearnedPeerCapacityError as exc:
+            logger.warning("fed: peer hello admission capacity rejected: %s", exc)
+            raise HTTPException(
+                status_code=429,
+                detail="federation peer admission capacity is full",
+                headers={"Retry-After": "3600"},
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.warning("fed: peer hello persistence failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="federation peer registry is temporarily unavailable",
+            )
+        _ensure_market_fed_cache_for_update(request)
+        return {
+            "learned": True,
+            "peer_url": record.peer_url,
+            "did": record.did,
+            "expires_at_ms": record.expires_at_ms,
+        }
 
     @app.post("/api/v2/market/federation/peers")
     def v2_market_fed_peer_update(
@@ -7756,8 +8466,15 @@ def register_v2_routes(app: FastAPI) -> None:
             except (OSError, RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
         cache = _ensure_market_fed_cache_for_update(request)
-        if not _read_fed_peers(ws):
+        if action == "remove":
+            cache.evict_source(peer)
+        if not (_read_fed_peers(ws) or _read_learned_fed_peers(ws)):
             cache.replace_all({}, peer_count=0)
+            stop_event = getattr(
+                request.app.state, "market_fed_poller_stop_event", None,
+            )
+            if stop_event is not None and hasattr(stop_event, "set"):
+                stop_event.set()
         status = _market_fed_status(request)
         status["updated"] = True
         status["peer_url"] = peer
@@ -7799,17 +8516,31 @@ def register_v2_routes(app: FastAPI) -> None:
                 row["identity_error"] = "peer did not advertise an HTTP federation URL"
                 skipped_rows.append(row)
                 continue
-            if not _is_safe_discovered_federation_url(url):
+            resolved_ip = _resolve_safe_discovered_federation_ip(url)
+            if not resolved_ip:
                 row["identity_verified"] = False
                 row["identity_error"] = (
                     "discovered federation URL targets a local or invalid address"
                 )
                 skipped_rows.append(row)
                 continue
+            resolved_address = ipaddress.ip_address(resolved_ip)
+            if resolved_address.is_private:
+                source_ip = _discovered_source_ip(
+                    str(row.get("source_addr") or "")
+                )
+                if source_ip != str(resolved_address):
+                    row["identity_verified"] = False
+                    row["identity_error"] = (
+                        "private federation URL does not match discovery source"
+                    )
+                    skipped_rows.append(row)
+                    continue
             identity_meta, identity_error = _fetch_and_verify_federation_identity(
                 url,
                 timeout_seconds=min(float(body.timeout_seconds), 3.0),
                 expected_did=str(row.get("did") or ""),
+                resolved_ip=resolved_ip,
             )
             if identity_meta is None:
                 row["identity_verified"] = False
@@ -7845,19 +8576,32 @@ def register_v2_routes(app: FastAPI) -> None:
                     raise HTTPException(status_code=500, detail=str(exc))
 
         cache = _ensure_market_fed_cache_for_update(request)
-        if body.refresh and _read_fed_peers(ws):
+        if body.refresh and (_read_fed_peers(ws) or _read_learned_fed_peers(ws)):
             from .market_federation_poll import federate_once
             peers = _read_fed_peers(ws)
             try:
                 entries = federate_once(
                     peers,
-                    verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
+                    untrusted_peers=_read_learned_fed_peers(ws),
+                    verify_gossip_peer=_market_fed_gossip_identity_verifier(
+                        request, persist_learned=True,
+                    ),
                     verify_seed_peer=_market_fed_gossip_identity_verifier(request),
                     max_duration_s=_market_fed_cycle_budget_s(),
                 )
-                cache.replace_all(entries, peer_count=len(peers))
+                cache.replace_all(
+                    entries,
+                    peer_count=len(
+                        set(peers) | set(_read_learned_fed_peers(ws))
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001
-                cache.mark_error(str(exc), peer_count=len(peers))
+                cache.mark_error(
+                    str(exc),
+                    peer_count=len(
+                        set(peers) | set(_read_learned_fed_peers(ws))
+                    ),
+                )
 
         status = _market_fed_status(request)
         status["discovered"] = True
@@ -7874,24 +8618,42 @@ def register_v2_routes(app: FastAPI) -> None:
     @app.post("/api/v2/market/federation/refresh")
     def v2_market_fed_refresh(request: Request) -> Dict[str, Any]:
         """Synchronously pull configured federation peers once."""
-        peers = _read_fed_peers(_state_workspace(request))
+        ws = _state_workspace(request)
+        peers = _read_fed_peers(ws)
+        learned_peers = _read_learned_fed_peers(ws)
         cache = _ensure_market_fed_cache_for_update(request)
-        if not peers:
+        if not (peers or learned_peers):
             cache.replace_all({}, peer_count=0)
             status = _market_fed_status(request)
             status["refreshed"] = True
             return status
-        from .market_federation_poll import federate_once
+        from .market_federation_poll import FederationCycleReport, federate_once
         try:
+            report = FederationCycleReport()
             entries = federate_once(
                 peers,
-                verify_gossip_peer=_market_fed_gossip_identity_verifier(request),
+                untrusted_peers=learned_peers,
+                verify_gossip_peer=_market_fed_gossip_identity_verifier(
+                    request, persist_learned=True,
+                ),
                 verify_seed_peer=_market_fed_gossip_identity_verifier(request),
                 max_duration_s=_market_fed_cycle_budget_s(),
+                cycle_report=report,
             )
-            cache.replace_all(entries, peer_count=len(peers))
+            completed_sources = report.completed_sources or {
+                str(entry.get("source") or "").rstrip("/")
+                for entry in entries.values()
+                if isinstance(entry, dict) and entry.get("source")
+            }
+            cache.apply_cycle(
+                entries,
+                completed_sources=completed_sources,
+                peer_count=len(set(peers) | set(learned_peers)),
+            )
         except Exception as exc:  # noqa: BLE001
-            cache.mark_error(str(exc), peer_count=len(peers))
+            cache.mark_error(
+                str(exc), peer_count=len(set(peers) | set(learned_peers)),
+            )
             raise HTTPException(
                 status_code=502,
                 detail=f"federation refresh failed: {exc}",
@@ -7900,8 +8662,7 @@ def register_v2_routes(app: FastAPI) -> None:
         status["refreshed"] = True
         return status
 
-    @app.post("/api/v2/market/{announcement_id}/claim-foreign")
-    def v2_market_claim_foreign(
+    def _v2_market_claim_foreign(
         announcement_id: str, body: ForeignClaimBody, request: Request,
     ) -> Dict[str, Any]:
         """跨 DAO 认领·来源 DAO 侧(XDAO-2):接受外部 agent 预签的
@@ -7916,14 +8677,58 @@ def register_v2_routes(app: FastAPI) -> None:
         )
         from nth_dao.market.feed import MarketFeed
 
+        try:
+            global_decision = _foreign_claim_global_limiter(request).check(
+                "all-clients",
+            )
+            decisions = (global_decision,)
+            if global_decision.allowed:
+                decisions += (
+                    _foreign_claim_limiter(request).check(
+                        _federation_hello_client_key(request),
+                    ),
+                )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.warning("foreign claim limiter unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="foreign claim verification is temporarily unavailable",
+            )
+        denied = [decision for decision in decisions if not decision.allowed]
+        if denied:
+            retry_after = max(item.retry_after_seconds for item in denied)
+            raise HTTPException(
+                status_code=429,
+                detail="foreign claim rate limit exceeded",
+                headers={"Retry-After": str(max(1, int(retry_after)))},
+            )
+
         ws = _state_workspace(request)
         if ws is None or not (
             ws / "market_feed" / "announcements.jsonl"
         ).exists():
             raise HTTPException(status_code=404, detail="announcement not found")
+        feed = MarketFeed(ws)
+        announcement = feed.get(announcement_id, include_expired=True)
+        identity = _state_node_identity(request)
+        node_did = (
+            identity.as_did()
+            if identity is not None and hasattr(identity, "as_did")
+            else ""
+        )
+        if (
+            announcement is None
+            or not node_did
+            or not getattr(identity, "can_sign", False)
+            or announcement.effective_authority_did() != node_did
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="this node is not the signed authority for the announcement",
+            )
         try:
             outcome = record_foreign_claim(
-                MarketFeed(ws), ClaimStore(ws), announcement_id,
+                feed, ClaimStore(ws), announcement_id,
                 body.cap_token, body.receipt,
                 # Phase 2c:跨 DAO 认领发生在本 hub 进程 → 影子双写 market.claim
                 # 进 hub 的 spine 单例(缺失则只 CAS,不阻断)。
@@ -7934,13 +8739,60 @@ def register_v2_routes(app: FastAPI) -> None:
         except ClaimRejected as exc:
             raise HTTPException(
                 status_code=403, detail=f"{exc.reason}: {exc.detail}")
+        from nth_dao.market.claim_ack import sign_authority_claim_ack
+
+        try:
+            authority_ack = sign_authority_claim_ack(
+                authority=identity,
+                announcement=announcement,
+                claim_record=outcome.claim_record,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.error("failed to sign authority claim acknowledgement: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim was recorded but its authority acknowledgement is unavailable",
+            )
         return {
             "claimed": True,
             "announcement_id": announcement_id,
             "claimant_did": outcome.claim_record.get("claimant_did", ""),
             "receipt_id": outcome.claim_record.get("receipt_id", ""),
             "foreign": True,
+            "authority_ack_id": authority_ack["ack_id"],
+            "authority_ack": authority_ack,
         }
+
+    @app.post("/api/v2/market/federation/claim-foreign")
+    def v2_market_claim_foreign_by_key(
+        body: ForeignClaimByKeyBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Record a foreign claim addressed by signed-body content hash."""
+        from nth_dao.market.feed import MarketFeed
+
+        ws = _state_workspace(request)
+        if ws is None or not (
+            ws / "market_feed" / "announcements.jsonl"
+        ).exists():
+            raise HTTPException(status_code=404, detail="announcement not found")
+        announcement = MarketFeed(ws).get_by_federation_key(
+            body.federation_key,
+            include_expired=True,
+        )
+        if announcement is None:
+            raise HTTPException(status_code=404, detail="announcement not found")
+        return _v2_market_claim_foreign(
+            announcement.announcement_id,
+            ForeignClaimBody(cap_token=body.cap_token, receipt=body.receipt),
+            request,
+        )
+
+    @app.post("/api/v2/market/{announcement_id}/claim-foreign")
+    def v2_market_claim_foreign(
+        announcement_id: str, body: ForeignClaimBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Legacy transport-safe ID route; content-key route is canonical."""
+        return _v2_market_claim_foreign(announcement_id, body, request)
 
     # ── 争议 / 审计 / 治理(Phase 4c:把 spine 投影接进 HTTP)──────────────
     # 写:接受当事方**预签**的争议声明,record_dispute 落 hub spine。走正常鉴权
@@ -8576,18 +9428,92 @@ def register_v2_routes(app: FastAPI) -> None:
 
         # 公告全文 + 来源:取自联邦缓存(已双层验签 + 来源=配置 peer)。
         cache = _state_market_fed_cache(request)
-        entry = (
-            cache.snapshot().get(body.announcement_id) if cache is not None else None
-        )
+        snapshot = cache.snapshot() if cache is not None else {}
+        requested_key = body.federation_key.strip()
+        entry = snapshot.get(requested_key) if requested_key else None
+        if entry is None and requested_key:
+            raise HTTPException(
+                status_code=404,
+                detail="federated announcement key is not in cache",
+            )
+        if entry is None and body.announcement_id:
+            matches = [
+                candidate for candidate in snapshot.values()
+                if candidate.get("ann") is not None
+                and candidate["ann"].announcement_id == body.announcement_id
+            ]
+            if len(matches) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "announcement_id is ambiguous across federation peers; "
+                        "refresh Tasks and retry with federation_key"
+                    ),
+                )
+            if len(matches) == 1:
+                entry = matches[0]
         if entry is None:
             raise HTTPException(
                 status_code=404,
                 detail="federated announcement not in cache (refresh Tasks first)")
+        if entry.get("stale") is True:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "federated announcement is stale and non-actionable; "
+                    "refresh its source before claiming"
+                ),
+            )
         ann = entry["ann"]
+        if ann.announcement_id != body.announcement_id:
+            raise HTTPException(
+                status_code=409,
+                detail="federation_key does not match announcement_id",
+            )
         source_peer = str(entry.get("source") or "").rstrip("/")
+        source_did = str(entry.get("source_did") or "")
         if not source_peer:
             raise HTTPException(
                 status_code=409, detail="unknown source peer for this announcement")
+        if not source_did or source_did != ann.effective_authority_did():
+            raise HTTPException(
+                status_code=409,
+                detail="federated announcement authority binding is invalid",
+            )
+        source_resolved_ip = ""
+        try:
+            source_scheme = urlsplit(source_peer).scheme
+            if source_scheme == "https":
+                from .market_federation_poll import _resolve_safe_gossip_ip
+
+                source_resolved_ip = _resolve_safe_gossip_ip(source_peer) or ""
+                if not source_resolved_ip:
+                    raise ValueError("source peer did not resolve to a public IP")
+            fresh_metadata, fresh_error = _fetch_and_verify_federation_identity(
+                source_peer,
+                timeout_seconds=_env_float(
+                    "NTH_FED_IDENTITY_TIMEOUT_S",
+                    2.0,
+                    minimum=0.5,
+                    maximum=3.0,
+                ),
+                expected_did=source_did,
+                resolved_ip=source_resolved_ip,
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.warning("fresh federation claim identity check failed: %s", exc)
+            fresh_metadata = None
+            fresh_error = type(exc).__name__
+        if fresh_metadata is None:
+            logger.warning(
+                "fresh federation claim identity rejected for %s: %s",
+                source_peer,
+                fresh_error,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="source peer identity changed; refresh federation before claiming",
+            )
 
         # 调用方鉴权:agent 自己的 spawn cap_token(与 ask/claim 同款注入)。
         store = _state_cap_tokens_store(request)
@@ -8614,9 +9540,9 @@ def register_v2_routes(app: FastAPI) -> None:
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=to) as resp:  # noqa: S310
-                    return resp.status, resp.read()
+                    return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as exc:
-                return exc.code, exc.read()
+                return exc.code, _read_local_a2a_body(exc)
 
         # 1) 本地 agent claim-sign(自签 cap_token + ClaimReceipt)。
         sign_url = f"http://127.0.0.1:{rec.a2a_port}/a2a/claim-sign"
@@ -8625,7 +9551,12 @@ def register_v2_routes(app: FastAPI) -> None:
                 _post, sign_url, {"announcement": ann.to_dict()},
                 auth=True, to=timeout,
             )
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            A2AResponseTooLarge,
+        ) as exc:
             raise HTTPException(status_code=502, detail=f"claim-sign dispatch failed: {exc}")
         s_content = _decode_or_passthrough(s_body)
         if s_status != 200 or not isinstance(s_content, dict):
@@ -8637,18 +9568,85 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=502, detail="agent claim-sign returned no cap_token/receipt")
 
-        # 2) 转投到主 DAO 的 /claim-foreign 落 CAS。
-        fwd_url = f"{source_peer}/api/v2/market/{body.announcement_id}/claim-foreign"
+        # 2) Address the source claim by signed-body hash. Legacy IDs may
+        # contain URL delimiters and are never interpolated into the path.
+        fwd_url = f"{source_peer}/api/v2/market/federation/claim-foreign"
         try:
-            f_status, f_body = await asyncio.to_thread(
-                _post, fwd_url, {"cap_token": cap_token, "receipt": receipt},
-                auth=False, to=15.0,
-            )
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            from nth_dao.market.announcement import announcement_federation_key
+
+            foreign_payload = {
+                "federation_key": announcement_federation_key(ann),
+                "cap_token": cap_token,
+                "receipt": receipt,
+            }
+            if source_resolved_ip:
+                from .market_federation_poll import _urllib_post_json_pinned_raw
+
+                f_status, f_body = await asyncio.to_thread(
+                    _urllib_post_json_pinned_raw,
+                    fwd_url,
+                    source_resolved_ip,
+                    foreign_payload,
+                    timeout_s=15.0,
+                )
+            else:
+                f_status, f_body = await asyncio.to_thread(
+                    _post, fwd_url, foreign_payload,
+                    auth=False, to=15.0,
+                )
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            A2AResponseTooLarge,
+        ) as exc:
             raise HTTPException(
                 status_code=502, detail=f"forward to source peer failed: {exc}")
-        return JSONResponse(
-            status_code=f_status, content=_decode_or_passthrough(f_body))
+        foreign_content = _decode_or_passthrough(f_body)
+        if 200 <= f_status < 300:
+            if not isinstance(foreign_content, dict) or foreign_content.get(
+                "claimed"
+            ) is not True:
+                raise HTTPException(
+                    status_code=502,
+                    detail="source peer returned an invalid claim result",
+                )
+            authority_ack = foreign_content.get("authority_ack")
+            from nth_dao.market.claim_ack import (
+                AuthorityClaimAckStore,
+                verify_authority_claim_ack,
+            )
+            from nth_dao.market.announcement import announcement_federation_key
+
+            ok, reason = verify_authority_claim_ack(
+                authority_ack,
+                expected_authority_did=source_did,
+                expected_federation_key=announcement_federation_key(ann),
+                expected_claimant_did=body.agent_did,
+                expected_claim_receipt=receipt,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"source authority claim acknowledgement is invalid: {reason}",
+                )
+            ws = _state_workspace(request)
+            if ws is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="workspace unavailable; cannot persist source claim acknowledgement",
+                )
+            try:
+                AuthorityClaimAckStore(ws).save(authority_ack)
+            except (OSError, TimeoutError, ValueError) as exc:
+                logger.warning("cannot persist source authority claim ack: %s", exc)
+                raise HTTPException(
+                    status_code=503,
+                    detail="source claim acknowledgement could not be persisted",
+                )
+            foreign_content["authority_ack_id"] = authority_ack["ack_id"]
+        return JSONResponse(status_code=f_status, content=foreign_content)
 
     @app.post("/api/v2/market/{announcement_id}/claim")
     async def v2_market_claim(
@@ -8771,13 +9769,18 @@ def register_v2_routes(app: FastAPI) -> None:
                 with urllib.request.urlopen(  # noqa: S310
                     req, timeout=forward_timeout,
                 ) as resp:
-                    return resp.status, resp.read()
+                    return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as http_exc:
-                return http_exc.code, http_exc.read()
+                return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
             resp_status, resp_body = await asyncio.to_thread(_do_forward)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            A2AResponseTooLarge,
+        ) as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"claim dispatch failed at {url}: {exc}",
@@ -9498,13 +10501,13 @@ def register_v2_routes(app: FastAPI) -> None:
                             f"/ping at {url}"
                         ),
                     )
-                raw = resp.read()
+                raw = _read_local_a2a_body(resp)
         except urllib.error.URLError as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"A2A proxy could not reach {url}: {exc}",
             )
-        except (TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError, A2AResponseTooLarge) as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"A2A proxy timed out / failed at {url}: {exc}",
@@ -9659,10 +10662,10 @@ def register_v2_routes(app: FastAPI) -> None:
                 with urllib.request.urlopen(  # noqa: S310
                     req, timeout=forward_timeout,
                 ) as resp:
-                    return resp.status, resp.read()
+                    return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as http_exc:
                 # Child returned non-2xx — forward status + body.
-                return http_exc.code, http_exc.read()
+                return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
             resp_status, resp_body = await asyncio.to_thread(_do_forward)
@@ -9671,7 +10674,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=502,
                 detail=f"A2A proxy could not reach {url}: {exc}",
             )
-        except (TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError, A2AResponseTooLarge) as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"A2A proxy timed out / failed at {url}: {exc}",
@@ -9680,6 +10683,7 @@ def register_v2_routes(app: FastAPI) -> None:
         content = _decode_or_passthrough(resp_body)
         if resp_status == 200:
             _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
+            content = _bound_agent_result_projection(content)
         return JSONResponse(status_code=resp_status, content=content)
 
     async def _agent_ask(did: str, method: str, request: Request) -> Any:
@@ -9786,13 +10790,18 @@ def register_v2_routes(app: FastAPI) -> None:
             )
             try:
                 with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
-                    return resp.status, resp.read()
+                    return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as http_exc:
-                return http_exc.code, http_exc.read()
+                return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
             resp_status, resp_body = await asyncio.to_thread(_do_forward)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            A2AResponseTooLarge,
+        ) as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"agent-ask proxy failed at {url}: {exc}",
@@ -9800,6 +10809,7 @@ def register_v2_routes(app: FastAPI) -> None:
         content = _decode_or_passthrough(resp_body)
         if resp_status == 200:
             _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
+            content = _bound_agent_result_projection(content)
             result = content.get("result") if isinstance(content, dict) else None
             response_text = (
                 str(result.get("response") or "").strip()
@@ -9929,11 +10939,24 @@ def register_v2_routes(app: FastAPI) -> None:
                 url, data=body_bytes, headers=req_headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                    return resp.status, resp.read()
+                    return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as e:
-                return e.code, (e.read() if e.fp else b"")
+                return e.code, (_read_local_a2a_body(e) if e.fp else b"")
 
-        status, raw = await asyncio.get_event_loop().run_in_executor(None, _forward)
+        try:
+            status, raw = await asyncio.get_event_loop().run_in_executor(
+                None, _forward,
+            )
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            A2AResponseTooLarge,
+        ) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"summarize proxy failed at {url}: {exc}",
+            ) from exc
         try:
             data = _json.loads(raw.decode("utf-8", "replace") or "{}")
         except Exception:
@@ -9948,11 +10971,15 @@ def register_v2_routes(app: FastAPI) -> None:
         ok, reason = verify_summary(
             receipt, summary_text=summary_text, messages=messages,
             expected_signer=did, instruction=instruction)
+        from .agent_link import bound_agent_response
+
+        projected_summary, summary_truncated = bound_agent_response(summary_text)
         return {
             "conversation_id": conversation_id,
             "covered_message_ids": [str(m.get("message_id", "")) for m in messages],
             "transcript_sha256": hashlib.sha256(transcript.encode("utf-8")).hexdigest(),
-            "summary_text": summary_text,
+            "summary_text": projected_summary,
+            "summary_truncated": summary_truncated,
             "agent_did": did,
             "instruction": instruction,
             "verified": ok,

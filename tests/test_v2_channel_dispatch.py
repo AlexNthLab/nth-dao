@@ -367,8 +367,9 @@ def test_channel_dispatch_passes_backend_kind_to_forward_timeout(
         def __exit__(self, *args):
             return False
 
-        def read(self):
-            return json.dumps({"result": {"response": "ok"}}).encode("utf-8")
+        def read(self, size=-1):
+            raw = json.dumps({"result": {"response": "ok"}}).encode("utf-8")
+            return raw if size < 0 else raw[:size]
 
     seen = {}
 
@@ -404,6 +405,62 @@ def test_channel_dispatch_passes_backend_kind_to_forward_timeout(
     assert [
         post["metadata"]["dispatch_phase"] for post in groups.posts
     ] == ["executing", "completed"]
+
+
+def test_channel_dispatch_bounds_large_agent_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    from nth_dao.web import v2_api as _v2
+
+    oversized = "界" * 40_000
+    raw = json.dumps({"result": {"response": oversized}}).encode("utf-8")
+
+    class FakeGroups:
+        def __init__(self) -> None:
+            self.posts = []
+
+        def post_message(self, channel_id, sender_id, body, **kwargs):
+            self.posts.append({"body": body, **kwargs})
+
+    class FakeResponse(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        _v2.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: FakeResponse(raw),
+    )
+    groups = FakeGroups()
+    outcome = _v2._channel_ask_and_reply(
+        groups,
+        {},
+        "did:key:zBoundedAgent",
+        1234,
+        "ops",
+        "return a large response",
+        request_message_id="request-large",
+        semaphore_acquired=False,
+    )
+
+    completed = groups.posts[-1]
+    assert len(completed["body"].encode("utf-8")) <= 100_000
+    assert completed["metadata"]["response_truncated"] is True
+    assert outcome["response_truncated"] is True
+
+
+def test_local_a2a_transport_rejects_oversized_body() -> None:
+    import io
+    from nth_dao.web import v2_api as _v2
+
+    with pytest.raises(_v2.A2AResponseTooLarge):
+        _v2._read_local_a2a_body(io.BytesIO(b"x" * 9), limit=8)
 
 
 def test_channel_dispatch_uses_work_scope_lease(

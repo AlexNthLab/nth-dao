@@ -91,6 +91,101 @@ from nth_dao.mandate import (
     verify_intent_mandate,
     verify_payment_mandate,
 )
+
+
+_FOREIGN_CLAIM_MAX_BODY_BYTES = 256 * 1024
+_FEDERATION_HELLO_MAX_BODY_BYTES = 16 * 1024
+
+
+class _RequestBodyTooLarge(Exception):
+    pass
+
+
+class _FederationBodyLimitMiddleware:
+    """Bound anonymous federation writes before FastAPI buffers JSON."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        path = str(scope.get("path") or "")
+        is_foreign_claim = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/v2/market/")
+            and path.endswith("/claim-foreign")
+        )
+        is_federation_hello = (
+            scope.get('type') == 'http'
+            and scope.get('method') == 'POST'
+            and path == '/api/v2/market/federation/hello'
+        )
+        if not (is_foreign_claim or is_federation_hello):
+            await self.app(scope, receive, send)
+            return
+
+        max_body_bytes = (
+            _FOREIGN_CLAIM_MAX_BODY_BYTES
+            if is_foreign_claim
+            else _FEDERATION_HELLO_MAX_BODY_BYTES
+        )
+        body_label = "foreign claim" if is_foreign_claim else "federation hello"
+        limit_label = f"{max_body_bytes // 1024} KiB"
+        lengths: List[int] = []
+        for name, value in scope.get("headers") or []:
+            if name.lower() != b"content-length":
+                continue
+            try:
+                parsed = int(value.decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Content-Length must be a non-negative integer"},
+                )
+                await response(scope, receive, send)
+                return
+            if parsed < 0:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Content-Length must be a non-negative integer"},
+                )
+                await response(scope, receive, send)
+                return
+            lengths.append(parsed)
+        if len(set(lengths)) > 1:
+            response = JSONResponse(
+                status_code=400,
+                content={"detail": "conflicting Content-Length headers"},
+            )
+            await response(scope, receive, send)
+            return
+        if lengths and lengths[0] > max_body_bytes:
+            response = JSONResponse(
+                status_code=413,
+                content={"detail": f"{body_label} body exceeds {limit_label}"},
+            )
+            await response(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive() -> dict:
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body") or b"")
+                if received > max_body_bytes:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _RequestBodyTooLarge:
+            response = JSONResponse(
+                status_code=413,
+                content={"detail": f"{body_label} body exceeds {limit_label}"},
+            )
+            await response(scope, receive, send)
 from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
 from nth_dao.orchestration import MissionStore
 from nth_dao.web.rate_limit import RateLimiter, enforce_min_response_time
@@ -294,7 +389,10 @@ def _federation_directory(base_url: str) -> dict[str, Any]:
             "digest_url": f"{base}/api/v2/market/federation/digest",
             "pull_url": f"{base}/api/v2/market/federation/pull",
             "peers_url": f"{base}/api/v2/market/federation/peers",
-            "claim_foreign_url": f"{base}/api/v2/market/{{announcement_id}}/claim-foreign",
+            "claim_foreign_url": f"{base}/api/v2/market/federation/claim-foreign",
+            "claim_foreign_legacy_url": (
+                f"{base}/api/v2/market/{{announcement_id}}/claim-foreign"
+            ),
         },
         "social": {
             "pull_url": f"{base}/api/v2/social/federation/pull",
@@ -740,9 +838,21 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        v2_runtime = None
         try:
+            try:
+                from . import v2_api as v2_runtime
+
+                v2_runtime.start_market_federation_runtime(_app)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("federation runtime startup failed: %s", exc)
             yield
         finally:
+            if v2_runtime is not None:
+                try:
+                    v2_runtime.stop_market_federation_runtime(_app)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("federation runtime shutdown failed: %s", exc)
             _shutdown_runtime(_app)
 
     app = FastAPI(
@@ -751,11 +861,13 @@ def create_app(
         version="0.9.0",
         lifespan=_lifespan,
     )
+    app.add_middleware(_FederationBodyLimitMiddleware)
 
     _atexit.register(_shutdown_runtime, app)
     app.state.nth = state
     app.state.nth_console_token = _load_or_create_console_token()
     app.state.nth_require_console_auth = require_console_auth
+    app.state.nth_public_base_url = _configured_public_base_url()
     # 公网部署可关掉"页面内嵌 token"(NTH_CONSOLE_TOKEN_IN_PAGE=0)。
     app.state.nth_embed_console_token = _embed_console_token_in_page()
 
@@ -829,6 +941,17 @@ def create_app(
             request.method == "POST"
             and request.url.path.startswith("/api/v2/market/")
             and request.url.path.endswith("/claim-foreign")
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # Federation hello is an anonymous, crypto-authorized discovery hint.
+        # The handler never trusts the submitted URL/DID: it enforces public
+        # HTTPS, pins DNS, fetches the remote signed identity card, and rate
+        # limits callers before persisting a bounded TTL record.
+        if (
+            request.method == "POST"
+            and request.url.path == "/api/v2/market/federation/hello"
         ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)

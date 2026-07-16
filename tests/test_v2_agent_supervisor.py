@@ -2396,7 +2396,7 @@ def test_v2_a2a_proxy_502_on_malformed_response(
         status = 200
         def __enter__(self) -> "_FakeResp": return self
         def __exit__(self, *_a: object) -> None: return None
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             # Non-JSON bytes — would crash json.loads.
             return b"<html>oops i'm not json</html>"
 
@@ -3080,6 +3080,47 @@ def test_proxy_ssestream_emits_error_envelope_on_upstream_500(
     assert b"data: " in body
     assert b'"code": "upstream-502"' in body or b'"code":"upstream-502"' in body
     assert b"child crashed" in body
+
+
+def test_proxy_ssestream_stops_before_oversized_success_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child cannot stream an unbounded response through the hub."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    import asyncio
+    import httpx
+    from nth_dao.web import v2_api as _v2
+
+    monkeypatch.setattr(_v2, "_MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES", 64)
+
+    def _transport_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 65)
+
+    real_async_client = httpx.AsyncClient
+
+    def patched(**kw: object) -> httpx.AsyncClient:
+        kw["transport"] = httpx.MockTransport(_transport_handler)
+        return real_async_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    resp = _v2._proxy_ssestream(
+        url="http://127.0.0.1:0/fake",
+        body_bytes=b"{}",
+        req_headers={},
+        forward_timeout=10.0,
+    )
+
+    async def drain() -> bytes:
+        chunks = []
+        async for chunk in resp.body_iterator:
+            chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+        return b"".join(chunks)
+
+    body = asyncio.run(drain())
+    assert b'"code": "response-too-large"' in body
+    assert b"x" * 65 not in body
 
 
 def test_v2_proxy_forwards_ask_stream_as_sse(
@@ -5923,7 +5964,7 @@ def test_hub_proxy_ask_uses_per_method_timeout(
         status = 200
         def __enter__(self) -> "_FakeResp": return self
         def __exit__(self, *_a: object) -> None: return None
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             return json.dumps({"result": {"ok": True}}).encode("utf-8")
 
     def fake_urlopen(_req: object, *, timeout: float = 0) -> _FakeResp:
@@ -6019,7 +6060,7 @@ def test_hub_proxy_ask_uses_backend_specific_timeout_floor(
         status = 200
         def __enter__(self) -> "_FakeResp": return self
         def __exit__(self, *_a: object) -> None: return None
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             return json.dumps({"result": {"ok": True}}).encode("utf-8")
 
     def fake_urlopen(_req: object, *, timeout: float = 0) -> _FakeResp:
@@ -6097,7 +6138,7 @@ def test_hub_injected_ask_uses_backend_specific_timeout_floor(
         status = 200
         def __enter__(self) -> "_FakeResp": return self
         def __exit__(self, *_a: object) -> None: return None
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             return json.dumps({"result": {"ok": True}}).encode("utf-8")
 
     def fake_urlopen(_req: object, *, timeout: float = 0) -> _FakeResp:
@@ -6448,7 +6489,7 @@ def test_channel_dispatch_retries_not_yet_authorized(
         def __exit__(self, *_exc):
             return False
 
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             return json.dumps({
                 "result": {"response": "agent reply after warmup"},
             }).encode("utf-8")
@@ -6480,14 +6521,27 @@ def test_channel_dispatch_retries_not_yet_authorized(
     )
 
     assert calls == 2
-    assert groups.messages == [(
-        "general", "did:key:z6MkAgent", "agent reply after warmup", {
-            "channel_dispatch": True,
-            "dispatch_phase": "completed",
-            "request_message_id": "",
-            "agent_did": "did:key:z6MkAgent",
-        },
-    )]
+    assert groups.messages == [
+        (
+            "general", "did:key:z6MkAgent",
+            "Hub started the Agent provider call.", {
+                "channel_dispatch": True,
+                "dispatch_phase": "executing",
+                "request_message_id": "",
+                "agent_did": "did:key:z6MkAgent",
+                "status_source": "hub",
+                "status_actor_id": "did:key:z6MkAgent",
+            },
+        ),
+        (
+            "general", "did:key:z6MkAgent", "agent reply after warmup", {
+                "channel_dispatch": True,
+                "dispatch_phase": "completed",
+                "request_message_id": "",
+                "agent_did": "did:key:z6MkAgent",
+            },
+        ),
+    ]
 
 
 def test_channel_dispatch_persists_response_receipt_before_posting(
@@ -6520,7 +6574,7 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             return json.dumps({
                 "result": {
                     "response": "receipt-backed channel reply",
@@ -6555,8 +6609,24 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
         "agent-123",
     )
 
-    assert events[0][0] == "persist"
-    assert events[1] == (
+    assert events[0] == (
+        "post",
+        (
+            "general",
+            "did:key:z6MkAgent",
+            "Hub started the Agent provider call.",
+            {
+                "channel_dispatch": True,
+                "dispatch_phase": "executing",
+                "request_message_id": "",
+                "agent_did": "did:key:z6MkAgent",
+                "status_source": "hub",
+                "status_actor_id": "did:key:z6MkAgent",
+            },
+        ),
+    )
+    assert events[1][0] == "persist"
+    assert events[2] == (
         "post",
         (
             "general",
@@ -6572,7 +6642,7 @@ def test_channel_dispatch_persists_response_receipt_before_posting(
             },
         ),
     )
-    _, persisted = events[0]
+    _, persisted = events[1]
     store, agent_id, expected_did, content = persisted  # type: ignore[misc]
     assert store is receipts_store
     assert agent_id == "agent-123"
@@ -6609,7 +6679,7 @@ def test_channel_dispatch_uses_hermes_timeout_budget(
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def read(self) -> bytes:
+        def read(self, _size: int = -1) -> bytes:
             return json.dumps({
                 "result": {"response": "slow hermes reply"},
             }).encode("utf-8")
@@ -6641,6 +6711,18 @@ def test_channel_dispatch_uses_hermes_timeout_budget(
     assert seen_payloads[0]["agent_link_job_id"] == "link-hermes"
     assert seen_timeouts == [305.0]
     assert groups.messages == [
+        (
+            "general", "did:key:z6MkHermes",
+            "Hub started the Agent provider call.", {
+                "channel_dispatch": True,
+                "dispatch_phase": "executing",
+                "request_message_id": "request-hermes",
+                "agent_did": "did:key:z6MkHermes",
+                "status_source": "hub",
+                "status_actor_id": "did:key:z6MkHermes",
+                "link_job_id": "link-hermes",
+            },
+        ),
         (
             "general", "did:key:z6MkHermes", "slow hermes reply", {
                 "channel_dispatch": True,
@@ -6701,8 +6783,9 @@ def test_channel_dispatch_posts_visible_error_on_http_failure(
         "did:key:z6MkCodex", 9999, "general", "hello",
     )
 
-    assert len(groups.messages) == 1
-    channel_id, sender_id, body, metadata = groups.messages[0]
+    assert len(groups.messages) == 2
+    assert groups.messages[0][3]["dispatch_phase"] == "executing"
+    channel_id, sender_id, body, metadata = groups.messages[-1]
     assert channel_id == "general"
     assert sender_id == "did:key:z6MkCodex"
     assert isinstance(metadata, dict)
@@ -6766,8 +6849,9 @@ def test_channel_dispatch_formats_backend_timeout_for_operators(
         "hermes",
     )
 
-    assert len(groups.messages) == 1
-    body = groups.messages[0][2]
+    assert len(groups.messages) == 2
+    assert groups.messages[0][3]["dispatch_phase"] == "executing"
+    body = groups.messages[-1][2]
     assert "agent error: backend-timeout" in body
     assert "Hermes may still be queued" in body
     assert "Tail:" not in body
