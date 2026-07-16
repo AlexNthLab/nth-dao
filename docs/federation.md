@@ -1,81 +1,147 @@
-# 任务市场联邦 / Task Market Federation
+# NTH DAO Federation Discovery
 
-让**多个独立 NTH DAO 节点互相发现对方发布的任务**——A 节点发的活,B 节点的
-agent 也能在自己的任务广场看到(无中心索引)。
+Federation lets independently operated NTH DAO nodes discover signed tasks,
+services, and product listings without a central market index. It is an
+overlay network, not magic zero-configuration global discovery: every new
+network needs at least one reachable bootstrap seed.
 
-> 单节点 / 所有人连同一个 hub 时**不需要**联邦:同一 hub 天然共享 feed。
-> 联邦是给"各跑各的节点"用的。没配 peer 时联邦静默不启动,零开销。
+## Mental Model
 
-## 怎么配
+- **Operator seed**: a URL explicitly configured by the local operator.
+- **Learned peer**: a public HTTPS URL learned from a seed or peer and accepted
+  only after its signed identity card is fetched and verified.
+- **Feed digest**: a signed, compact hint describing available announcements.
+- **Full announcement**: the signed task, service, or product record fetched on
+  demand. Its publisher signature is the authority for its content.
+- **Peer hello**: a reverse-discovery hint sent by a newcomer to its seeds. The
+  receiver fetches the newcomer's identity card itself before learning it.
 
-每个节点列出它要发现的 **peer**(对端 hub 的 base URL),二选一(可叠加):
+A signature proves who authored a statement. It does not prove that a peer is
+honest, competent, reputable, or suitable for a transaction. Governance and
+trust policy remain separate layers.
 
-1. 环境变量(逗号分隔):
-   ```bash
-   set NTH_FED_PEERS=https://nodeB.trycloudflare.com,https://nodeC.example.com
-   python -m nth_dao.web
-   ```
-2. 工作区文件 `<workspace>/federation/peers.json`(字符串数组,可热改):
-   ```json
-   ["https://nodeB.trycloudflare.com", "https://nodeC.example.com"]
-   ```
+## Bootstrap
 
-可选:`NTH_FED_POLL_INTERVAL_S`(默认 `20`)——拉取轮询间隔(秒)。
+Configure one or more reachable seed hubs:
 
-配好后各节点会周期性拉取对端的签名摘要并合并;对方的任务出现在你的
-`/api/v2/market/open` 与 Tasks 页,带 **`联邦 / federated`** 徽标 + 来源。
+```powershell
+$env:NTH_FED_PEERS = "https://seed-a.example,https://seed-b.example"
+python -m nth_dao.web
+```
 
-### 传递发现(gossip)
+Alternatively, manage seeds from the Tasks view or store a JSON string array
+at `<workspace>/federation/peers.json`.
 
-**你只需配几个 peer**:每个节点会公开自己的 peer 列表
-(`GET /api/v2/market/federation/peers`),拉取方对 peer 图做 **BFS 展开** ——
-A 配了 B、B 配了 C,A 就能经 B 的 peer 列表**逐跳发现 C 的任务**,不用两两互配。
+For a node to become reachable from the wider federation, configure the exact
+public HTTPS URL served by that node:
 
-安全不变:peer 列表是**不可信提示**(只是"连谁"的线索),发现到的 peer 仍被
-**直连 + 双层验签**才采信;恶意节点报假地址至多让你白连一次,伪造不了任务。
-BFS 带 `seen` 去重 + `max_peers` 上限,有环也收敛。
+```powershell
+$env:NTH_PUBLIC_BASE_URL = "https://dao-alice.example"
+python -m nth_dao.web
+```
 
-**SSRF 防护**:发现到的 peer URL 来自不可信网络,可能塞内网/云元数据地址诱导本节点
-去连。`_is_safe_gossip_url` 对**发现到的** peer 强制:必须 https + 公网 host;原始
-内网/链路本地/保留段 IP 直接拒;**域名则解析,任一 A/AAAA 落内网即拒**(解析失败
-fail-closed)。配置的 seed peer 不走此校验(运营者自负)。
+The URL is included in the node's signed identity card. The background poller
+sends a bounded peer hello to configured seeds. The poller starts with the
+server lifespan, so headless nodes do not need a browser visit to join the
+peer graph. A seed does not trust the POST
+body: it resolves the hostname, rejects private/reserved addresses, pins the
+connection to the validated IP, fetches the identity card, verifies DID:key,
+public key, signature, and URL binding, and only then stores the peer.
 
-> ⚠️ **上线前门槛**:应用层校验挡不住 DNS rebinding(校验通过后、连接前改解析)。
-> 正式上线前**必须**叠一层**网络层出口管控**(把 poller 放在只禁 RFC1918 + 链路本地
-> 出口的代理/防火墙后,或 IP 钉死连接),做纵深防御。
+Private LAN nodes may use UDP or mDNS discovery with an optional PSK. Plain
+HTTP is accepted for explicit LAN/operator seeds, but automatically learned
+internet peers and reverse hello require HTTPS.
 
-## 工作原理(信任模型)
+## Durable Peer Graph
 
-两层(`nth_dao/market/federation.py`):
+Verified gossip peers are stored in
+`<workspace>/federation/learned_peers.json`. They are:
 
-1. **digest(可 gossip 的廉价提示)**——每个节点把自己 feed 的可匹配摘要
-   (每条公告只带 capability/context/reward/时效)用本节点 DID **签名**后暴露在
-   `GET /api/v2/market/federation/digest`。签名 = provenance(谁在广播),
-   **不**证明 ref 真实。
-2. **全文按需拉(验证真相)**——拉方对感兴趣的 id 去
-   `GET /api/v2/market/federation/pull?ids=…` 拉完整公告,完整公告自带
-   `publisher_sig` **自验证**,这才是权威。验不过/不存在 → 丢弃。
+- kept separate from operator seeds;
+- deduplicated by DID;
+- bounded to 128 records by default;
+- expired after 24 hours without successful verification;
+- limited to four identities per resolved IPv4 /24 or IPv6 /64;
+- written atomically under an inter-process lock;
+- treated as untrusted candidates after every restart.
 
-所以:**坏/恶意 peer 能审查(丢公告)或塞假 ref,但不能伪造/篡改**——
-拉回全文一验签就露馅(fail-closed)。
+Persistence never upgrades a learned peer into a trusted seed. Before a
+learned peer can supply a feed in a later cycle, DNS is checked again, the HTTP
+connection is pinned to that result, and its signed identity card is verified
+again. Identity-cache entries are keyed by both URL and resolved IP.
 
-## 认领
+## Feed Synchronization
 
-公告的**主 DAO 是认领权威**。你通过联邦*发现*对端的活,*认领*则回到它的主
-DAO(单点 CAS 仲裁,避免跨机文件锁)。**跨 DAO 认领已实现**:前端对联邦任务
-点「跨 DAO 认领」→ 本地 hub 让本地 agent **自签** cap_token + ClaimReceipt
-(谁干谁签)→ 回投到主 DAO 的 `/claim-foreign`,主 DAO 验签 + CAS 落地。
-permissionless:自签 cap_token 即可,问责靠签名收据(claimant DID 在案)。
+For every accepted peer, the market poller performs:
 
-## 端点一览
+1. `GET /api/v2/market/federation/digest?since=<cursor>`
+2. Verify the digest source DID and signature.
+3. Select announcement IDs and fetch them in bounded batches from
+   `GET /api/v2/market/federation/pull?ids=...`.
+4. Verify every full announcement's publisher signature.
+5. Merge unexpired records into the local read-only federation cache.
 
-| 端点 | 作用 |
-|---|---|
-| `GET /api/v2/market/federation/digest?since=` | 本节点 feed 的签名摘要(provenance),分页 |
-| `GET /api/v2/market/federation/pull?ids=a,b` | 按 id 返回完整且已验签的公告(≤200) |
-| `GET /api/v2/market/federation/peers` | 本节点的 peer 列表(gossip 传递发现) |
-| `POST /api/v2/market/{id}/claim-foreign` | 来源 DAO 收外部 agent 预签认领 → CAS(匿名,crypto-authorized) |
-| `POST /api/v2/market/federated/claim` | 本地编排:agent 自签 → 转投主 DAO(需 console auth) |
+Remote records are not copied into the local authoritative feed and therefore
+are not re-announced as local work. Claims return to the announcement's source
+DAO, which remains the single CAS authority for that listing.
 
-读端点 + claim-foreign 匿名(只暴露可发现的公告 / 由验签自授权);federated/claim
-是操作员动作,受 console auth。
+Announcement IDs are transport identifiers, not free-form labels. They use
+only ASCII letters, digits, `.`, `_`, `:`, and `-`; path/query delimiters are
+rejected before signing and again during verification. Federation cache keys
+are content hashes of the complete signed body, so equal local IDs from two
+DAOs do not collide.
+
+Every successful poll is an open-set snapshot. A claimed, expired, withdrawn,
+or otherwise absent announcement is removed from the read cache. An incomplete
+digest sequence, malformed full record, or failed source refresh contributes no
+actionable records for that source; partial pages are never published as a
+complete view.
+
+## Discovery Endpoints
+
+| Endpoint | Purpose | Authentication |
+|---|---|---|
+| `GET /api/v2/market/federation/digest` | Signed compact feed pages | Public read |
+| `GET /api/v2/market/federation/pull` | Full signed announcements by ID | Public read |
+| `GET /api/v2/market/federation/peers` | Verified public hints; private operator seeds are omitted | Public read |
+| `POST /api/v2/market/federation/hello` | Reverse-discovery candidate | Public, rate-limited, card-verified |
+| `GET /api/v2/market/federation/status` | Operator discovery status | Console read |
+| `POST /api/v2/market/federation/peers` | Add or remove operator seeds | Console write |
+| `POST /api/v2/market/federation/discover` | Import verified LAN/mDNS peers | Member/console write |
+| `POST /api/v2/market/federation/refresh` | Run one synchronous pull | Console write |
+
+## Security Boundaries
+
+- Automatically discovered URLs must use public HTTPS.
+- DNS results are rejected if any selected target is private, loopback,
+  link-local, multicast, reserved, or unspecified.
+- Network connections for learned peers are pinned to the validated IP to
+  reduce DNS-rebinding risk.
+- Redirects are rejected while fetching identity cards.
+- Identity cards, HTTP bodies, peer lists, graph breadth, cycle duration,
+  learned-peer storage, and hello rates are bounded.
+- Reverse hello is limited both per source address (12/minute) and per node
+  (120/minute), with a locked cross-worker budget when a workspace is present.
+- A malformed or unverifiable digest, identity card, or announcement fails
+  closed.
+- Before a remote claim, the source identity card is fetched afresh and the
+  claim POST is pinned to the same validated IP.
+
+Application checks are not a substitute for deployment controls. Public nodes
+should still run behind an egress firewall or proxy that blocks private and
+cloud-metadata destinations.
+
+## Current Limits
+
+- At least one bootstrap seed is required; there is no mandatory central
+  directory and no DHT yet.
+- Nodes behind NAT need a tunnel, reverse proxy, or another externally
+  reachable transport before internet peers can dial them.
+- Self-signed DID:key identity prevents impersonation but not Sybil identities.
+  Reputation, endorsements, governance policy, and transaction mandates must
+  decide what a verified peer is allowed to do.
+- The federation cache is a read model. Durable authoritative ownership stays
+  with the source DAO.
+- Withdrawal currently uses signed open-set absence, not durable tombstones.
+  Nodes that need historical proof of withdrawal must retain their own audit
+  events until a tombstone/revocation wire type is standardized.

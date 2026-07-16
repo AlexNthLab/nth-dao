@@ -474,12 +474,14 @@ layers.
 
 ## Task market federation (multi-node)
 
-Independent nodes can discover each other's published tasks without a central
-index. Set `NTH_FED_PEERS` (comma-separated peer hub URLs) or
-`<workspace>/federation/peers.json`; each node then pulls peers' signed feed
-digests and surfaces their tasks (with a **`federated`** badge) in the Tasks
-view. Two-layer trust: digest = provenance, full announcement's `publisher_sig`
-= authority. See **[docs/federation.md](docs/federation.md)**.
+Independent nodes can discover each other's published tasks, services, and
+products without a central market index. Configure at least one bootstrap seed
+with `NTH_FED_PEERS` or the Tasks view. Public nodes may set an HTTPS
+`NTH_PUBLIC_BASE_URL` to announce themselves back to their seeds. Verified
+gossip peers are retained with a bounded TTL and are re-resolved, IP-pinned,
+and identity-verified after restart. Feed digests prove provenance; each full
+announcement's `publisher_sig` remains the content authority. See
+**[docs/federation.md](docs/federation.md)**.
 
 ## Migration Notice
 
