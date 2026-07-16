@@ -39,14 +39,18 @@ github.com 那样的中心。这里给出**无中心索引**的联邦数据模�
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from nth_dao.b64u import b64u_decode, b64u_encode
 from nth_dao.canonical_json import canonical_json
 from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
 from nth_dao.execution_receipt import now_ms
 from nth_dao.identity import _NACL_AVAILABLE
-from nth_dao.market.announcement import TaskAnnouncement, verify_announcement
+from nth_dao.market.announcement import (
+    TaskAnnouncement,
+    announcement_federation_key,
+    verify_announcement,
+)
 from nth_dao.market.match import match
 from nth_dao.market.subscription import MarketSubscription
 
@@ -63,10 +67,22 @@ REJECT_DIGEST_BAD_SOURCE_DID = "digest-bad-source-did"
 REJECT_DIGEST_SIG_INVALID = "digest-sig-invalid"
 REJECT_DIGEST_SIG_DECODE_FAILED = "digest-sig-decode-failed"
 REJECT_DIGEST_CRYPTO_UNAVAILABLE = "digest-crypto-unavailable"
+REJECT_DIGEST_SCHEMA_INVALID = "digest-schema-invalid"
+
+_MAX_DIGEST_REFS = 1_000
+_MAX_DIGEST_SIGNED_INT = (1 << 63) - 1
+_MAX_DIGEST_DID_CHARS = 128
+_MAX_DIGEST_ID_CHARS = 256
+_MAX_DIGEST_CAPABILITIES = 64
+_MAX_DIGEST_CAPABILITY_CHARS = 128
+_MAX_DIGEST_CONTEXT_CHARS = 128
+_MAX_DIGEST_ASSET_CHARS = 64
+_FEDERATION_KEY_PREFIX = "nth-ann-sha256:"
+_FEDERATION_KEY_CHARS = len(_FEDERATION_KEY_PREFIX) + 64
 
 # ref 里只放匹配需要的字段（刻意不含 input_schema / acceptance）。
 _REF_FIELDS = (
-    "announcement_id", "publisher_did", "capability_set", "context",
+    "announcement_id", "publisher_did", "authority_did", "capability_set", "context",
     "reward_minor", "reward_asset", "published_at_ms", "not_after",
 )
 
@@ -94,6 +110,103 @@ class FeedDigest:
         return {k: v for k, v in self.to_dict().items() if k != "digest_sig"}
 
 
+def _digest_text(value: Any, *, minimum: int = 0, maximum: int) -> bool:
+    return (
+        isinstance(value, str)
+        and minimum <= len(value.encode("utf-8")) <= maximum
+    )
+
+
+def _digest_uint(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= _MAX_DIGEST_SIGNED_INT
+
+
+def _validate_digest_ref(ref: Any) -> bool:
+    if not isinstance(ref, dict):
+        return False
+    if not _digest_text(
+        ref.get("announcement_id"), minimum=1, maximum=_MAX_DIGEST_ID_CHARS,
+    ):
+        return False
+    federation_key = ref.get("federation_key")
+    if federation_key is not None and not (
+        isinstance(federation_key, str)
+        and len(federation_key) == _FEDERATION_KEY_CHARS
+        and federation_key.startswith(_FEDERATION_KEY_PREFIX)
+        and all(ch in "0123456789abcdef" for ch in federation_key[-64:])
+    ):
+        return False
+    publisher_did = ref.get("publisher_did")
+    if not _digest_text(
+        publisher_did, minimum=1, maximum=_MAX_DIGEST_DID_CHARS,
+    ) or not is_did_key(publisher_did):
+        return False
+    authority_did = ref.get("authority_did", "")
+    if authority_did and (
+        not _digest_text(
+            authority_did, minimum=1, maximum=_MAX_DIGEST_DID_CHARS,
+        )
+        or not is_did_key(authority_did)
+    ):
+        return False
+    caps = ref.get("capability_set")
+    if not isinstance(caps, list) or len(caps) > _MAX_DIGEST_CAPABILITIES:
+        return False
+    if any(
+        not _digest_text(
+            cap, minimum=1, maximum=_MAX_DIGEST_CAPABILITY_CHARS,
+        )
+        for cap in caps
+    ):
+        return False
+    if not _digest_text(
+        ref.get("context"), minimum=1, maximum=_MAX_DIGEST_CONTEXT_CHARS,
+    ):
+        return False
+    if not _digest_uint(ref.get("reward_minor")):
+        return False
+    if not _digest_text(
+        ref.get("reward_asset"), minimum=1, maximum=_MAX_DIGEST_ASSET_CHARS,
+    ):
+        return False
+    if not _digest_uint(ref.get("published_at_ms")):
+        return False
+    if not _digest_uint(ref.get("not_after")):
+        return False
+    return True
+
+
+def _validate_digest_schema(
+    digest: FeedDigest, *, require_signature: bool = True,
+) -> Tuple[bool, str]:
+    """Reject signed-but-malformed wire data before consumers touch it."""
+    if digest.kind != NTH_FEED_DIGEST_KIND:
+        return False, REJECT_DIGEST_SCHEMA_INVALID
+    if not _digest_text(
+        digest.source_did, minimum=1, maximum=_MAX_DIGEST_DID_CHARS,
+    ) or not is_did_key(digest.source_did):
+        return False, REJECT_DIGEST_BAD_SOURCE_DID
+    if not _digest_uint(digest.generated_at_ms):
+        return False, REJECT_DIGEST_SCHEMA_INVALID
+    if type(digest.high_seq) is not int or not (
+        -1 <= digest.high_seq <= _MAX_DIGEST_SIGNED_INT
+    ):
+        return False, REJECT_DIGEST_SCHEMA_INVALID
+    if not isinstance(digest.refs, list) or len(digest.refs) > _MAX_DIGEST_REFS:
+        return False, REJECT_DIGEST_SCHEMA_INVALID
+    if any(not _validate_digest_ref(ref) for ref in digest.refs):
+        return False, REJECT_DIGEST_SCHEMA_INVALID
+    if require_signature:
+        if not _digest_text(digest.digest_sig, minimum=1, maximum=128):
+            return False, REJECT_DIGEST_MISSING_FIELD
+        try:
+            if len(b64u_decode(digest.digest_sig)) != 64:
+                return False, REJECT_DIGEST_SIG_DECODE_FAILED
+        except (TypeError, ValueError, UnicodeError):
+            return False, REJECT_DIGEST_SIG_DECODE_FAILED
+    return True, ""
+
+
 def build_digest(
     feed: "Any",  # MarketFeed
     source_identity: "Any",  # AgentIdentity，必须 can_sign
@@ -102,6 +215,7 @@ def build_digest(
     include_expired: bool = False,
     now_ms_override: int = 0,
     limit: "Any" = None,  # Optional[int]：每个 digest 最多多少 ref，None=不限
+    is_open: Optional[Callable[[TaskAnnouncement], bool]] = None,
 ) -> FeedDigest:
     """从本地 feed 生成签名摘要，供广播。
 
@@ -111,21 +225,48 @@ def build_digest(
     ``limit`` 封顶单个 digest 的 ref 数（serve 侧防无界响应）；截断时
     ``high_seq`` 停在已收末尾，拉方据此带 ``since`` 翻下一页。
     """
+    if type(since_seq) is not int or since_seq < -1:
+        raise ValueError("since_seq must be an integer >= -1")
+    if limit is None:
+        page_limit = _MAX_DIGEST_REFS
+    elif type(limit) is int and limit >= 0:
+        page_limit = min(limit, _MAX_DIGEST_REFS)
+    else:
+        raise ValueError("limit must be a non-negative integer or None")
+    if type(now_ms_override) is not int or now_ms_override < 0:
+        raise ValueError("now_ms_override must be a non-negative integer")
+
     poll = feed.poll(
-        since_seq, limit=limit, include_expired=include_expired,
+        since_seq, limit=page_limit, include_expired=include_expired,
         now_ms_override=now_ms_override,
     )
     refs: List[Dict[str, Any]] = []
+    source_did = source_identity.as_did()
     for ann in poll.announcements:
+        # v1 has no signed publisher-to-DAO delegation statement. Until that
+        # protocol exists, a node may advertise only announcements signed by
+        # its own endpoint identity; otherwise a mirror could impersonate the
+        # claim authority for another publisher's valid announcement.
+        if ann.effective_authority_did() != source_did:
+            continue
+        if is_open is not None and not is_open(ann):
+            continue
         d = ann.to_dict()
-        refs.append({k: d.get(k) for k in _REF_FIELDS})
+        ref = {k: d.get(k) for k in _REF_FIELDS}
+        ref["federation_key"] = announcement_federation_key(ann)
+        refs.append(ref)
 
     digest = FeedDigest(
-        source_did=source_identity.as_did(),
+        source_did=source_did,
         generated_at_ms=now_ms_override or now_ms(),
         high_seq=poll.cursor,
         refs=refs,
     )
+    schema_ok, schema_reason = _validate_digest_schema(
+        digest, require_signature=False,
+    )
+    if not schema_ok:
+        raise ValueError(f"invalid digest schema: {schema_reason}")
     sig_bytes = source_identity.sign(canonical_json(digest.signing_body()))
     digest.digest_sig = b64u_encode(sig_bytes)
     return digest
@@ -143,6 +284,9 @@ def verify_digest(digest: FeedDigest) -> Tuple[bool, str]:
     for required in ("kind", "source_did", "digest_sig"):
         if not getattr(digest, required, None):
             return False, REJECT_DIGEST_MISSING_FIELD
+    schema_ok, schema_reason = _validate_digest_schema(digest)
+    if not schema_ok:
+        return False, schema_reason
     src = digest.source_did
     if not isinstance(src, str) or not is_did_key(src):
         return False, REJECT_DIGEST_BAD_SOURCE_DID
@@ -151,7 +295,7 @@ def verify_digest(digest: FeedDigest) -> Tuple[bool, str]:
         return False, REJECT_DIGEST_BAD_SOURCE_DID
     try:
         sig_bytes = b64u_decode(str(digest.digest_sig))
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, UnicodeError):
         return False, REJECT_DIGEST_SIG_DECODE_FAILED
     try:
         _VerifyKey(bytes.fromhex(src_hex)).verify(
@@ -243,10 +387,10 @@ def merge_digest_refs(digests: List[FeedDigest]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for d in digests:
         for ref in d.refs:
-            aid = ref.get("announcement_id")
-            if not aid or aid in seen:
+            key = ref.get("federation_key") or ref.get("announcement_id")
+            if not key or key in seen:
                 continue
-            seen.add(aid)
+            seen.add(key)
             out.append(ref)
     return out
 
@@ -276,5 +420,28 @@ def pull_announcements(
             continue
         ok, _ = verify_announcement(ann)
         if ok:
+            out.append(ann)
+    return out
+
+
+def pull_announcements_by_keys(
+    source_feed: "Any",
+    federation_keys: List[str],
+    *,
+    include_expired: bool = False,
+    now_ms_override: int = 0,
+) -> List[TaskAnnouncement]:
+    """Return verified announcements selected by signed-body content hash."""
+    out: List[TaskAnnouncement] = []
+    for key in federation_keys:
+        ann = source_feed.get_by_federation_key(
+            key,
+            include_expired=include_expired,
+            now_ms_override=now_ms_override,
+        )
+        if ann is None:
+            continue
+        ok, _ = verify_announcement(ann)
+        if ok and announcement_federation_key(ann) == key:
             out.append(ann)
     return out

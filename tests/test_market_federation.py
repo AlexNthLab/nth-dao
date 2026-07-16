@@ -43,10 +43,14 @@ pytest.importorskip("nacl")
 
 
 def _pub(feed, publisher, **kw):
+    authority = kw.pop("authority", publisher)
+    authority_did = (
+        authority.as_did() if hasattr(authority, "as_did") else str(authority)
+    )
     ann = sign_announcement(
         publisher=publisher, title=kw.pop("title", "task"),
         capability_set=kw.pop("caps", ["code_review"]),
-        reward_minor=kw.pop("reward", 10), **kw,
+        reward_minor=kw.pop("reward", 10), authority_did=authority_did, **kw,
     )
     feed.publish(ann)
     return ann
@@ -59,8 +63,8 @@ def test_build_and_verify_digest(tmp_path) -> None:
     feed = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed, pub, title="t1", caps=["code_review"])
-    _pub(feed, pub, title="t2", caps=["research"])
+    _pub(feed, pub, authority=dao_a, title="t1", caps=["code_review"])
+    _pub(feed, pub, authority=dao_a, title="t2", caps=["research"])
 
     digest = build_digest(feed, dao_a)
     assert digest.source_did == dao_a.as_did()
@@ -77,7 +81,7 @@ def test_verify_digest_detects_tampered_ref(tmp_path) -> None:
     feed = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed, pub, reward=5)
+    _pub(feed, pub, authority=dao_a, reward=5)
     digest = build_digest(feed, dao_a)
     digest.refs[0]["reward_minor"] = 999999  # 篡改
     ok, reason = verify_digest(digest)
@@ -89,7 +93,7 @@ def test_verify_digest_rejects_bad_source(tmp_path) -> None:
     feed = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed, pub)
+    _pub(feed, pub, authority=dao_a)
     digest = build_digest(feed, dao_a)
     digest.source_did = "not-a-did"
     ok, reason = verify_digest(digest)
@@ -101,7 +105,7 @@ def test_digest_dict_roundtrip(tmp_path) -> None:
     feed = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed, pub)
+    _pub(feed, pub, authority=dao_a)
     digest = build_digest(feed, dao_a)
     # 模拟 gossip：序列化→反序列化后仍可验
     restored = FeedDigest.from_dict(digest.to_dict())
@@ -125,7 +129,14 @@ def test_cross_dao_discover_and_claim_at_home_authority(tmp_path) -> None:
     dao_a = AgentIdentity.generate(label="dao-A")
     publisher = AgentIdentity.generate(label="publisher")
     issuer = AgentIdentity.generate(label="issuer")   # 给 B 的 Agent 授权的 issuer
-    ann = _pub(feed_a, publisher, title="review-this", caps=["code_review"], reward=10)
+    ann = _pub(
+        feed_a,
+        publisher,
+        authority=dao_a,
+        title="review-this",
+        caps=["code_review"],
+        reward=10,
+    )
 
     # —— DAO-A 生成签名 digest（要广播的东西）——
     digest = build_digest(feed_a, dao_a)
@@ -176,7 +187,7 @@ def test_forged_ref_in_digest_dropped_on_pull(tmp_path) -> None:
     feed_a = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed_a, pub, title="real", caps=["code_review"])
+    _pub(feed_a, pub, authority=dao_a, title="real", caps=["code_review"])
 
     digest = build_digest(feed_a, dao_a)
     # source 往自己的 digest 里加一条假 ref（指向不存在的公告）
@@ -206,14 +217,11 @@ def test_forged_ref_in_digest_dropped_on_pull(tmp_path) -> None:
 
 
 def test_malicious_ref_types_do_not_crash_consumer(tmp_path) -> None:
-    """独立审查回归 (M4 R2)：恶意 source 签名推送类型错乱的 ref
-    （reward_minor="abc" / capability_set=int / not_after=str）→ 消费方
-    match_digest_refs 必须**不崩**（联邦信任模型：digest 不可信，解析要
-    类型安全，绝不裸 int()/list()）。坏类型静默回退，全文层再兜底。"""
+    """A valid signature must not make malformed digest fields acceptable."""
     feed_a = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed_a, pub, title="real", caps=["code_review"])
+    _pub(feed_a, pub, authority=dao_a, title="real", caps=["code_review"])
     digest = build_digest(feed_a, dao_a)
     # source 把字段类型搞乱，再重签（provenance 成立）
     digest.refs[0]["reward_minor"] = "abc"
@@ -221,11 +229,58 @@ def test_malicious_ref_types_do_not_crash_consumer(tmp_path) -> None:
     digest.refs[0]["not_after"] = "soon"
     digest.refs[0]["published_at_ms"] = {"nested": "junk"}
     digest.digest_sig = b64u_encode(dao_a.sign(canonical_json(digest.signing_body())))
-    assert verify_digest(digest)[0]   # 确实是 A 签的
-    sub = MarketSubscription(subscriber_did="did:key:zB", capabilities=["code_review"])
-    # 不崩即过（结果不重要，关键是 TypeError/ValueError 不抛出来）
-    hits = match_digest_refs(digest, sub)
-    assert isinstance(hits, list)
+    ok, reason = verify_digest(digest)
+    assert not ok
+    assert reason == "digest-schema-invalid"
+
+
+@pytest.mark.parametrize(
+    "unsafe_id",
+    ["../claim", "task/claim", "task,other", "task?admin=1", "task%2Fclaim"],
+)
+def test_announcement_id_rejects_transport_delimiters(unsafe_id: str) -> None:
+    publisher = AgentIdentity.generate(label="publisher")
+
+    with pytest.raises(ValueError, match="invalid announcement schema"):
+        sign_announcement(
+            publisher=publisher,
+            announcement_id=unsafe_id,
+            title="unsafe transport id",
+        )
+
+    ann = sign_announcement(
+        publisher=publisher,
+        announcement_id="safe-id",
+        title="safe transport id",
+    )
+    ann.announcement_id = unsafe_id
+    ann.publisher_sig = b64u_encode(
+        publisher.sign(canonical_json(ann.signing_body()))
+    )
+    assert verify_announcement(ann) == (False, "ann-schema-invalid")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    [("high_seq", "bad"), ("refs", 7), ("generated_at_ms", True)],
+)
+def test_validly_signed_malformed_digest_is_rejected(
+    tmp_path, field_name: str, bad_value: object,
+) -> None:
+    feed = MarketFeed(tmp_path / "A")
+    dao_a = AgentIdentity.generate(label="dao-A")
+    pub = AgentIdentity.generate(label="pub")
+    _pub(feed, pub, authority=dao_a)
+    digest = build_digest(feed, dao_a)
+    setattr(digest, field_name, bad_value)
+    digest.digest_sig = b64u_encode(
+        dao_a.sign(canonical_json(digest.signing_body()))
+    )
+
+    ok, reason = verify_digest(digest)
+
+    assert not ok
+    assert reason == "digest-schema-invalid"
 
 
 def test_relay_can_censor_cannot_forge(tmp_path) -> None:
@@ -233,8 +288,8 @@ def test_relay_can_censor_cannot_forge(tmp_path) -> None:
     feed_a = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed_a, pub, title="a", caps=["code_review"])
-    _pub(feed_a, pub, title="b", caps=["research"])
+    _pub(feed_a, pub, authority=dao_a, title="a", caps=["code_review"])
+    _pub(feed_a, pub, authority=dao_a, title="b", caps=["research"])
     digest = build_digest(feed_a, dao_a)
 
     # 中继审查：删掉一条 ref（不重签）→ 签名失效，下游能察觉被动过
@@ -256,7 +311,7 @@ def test_merge_digest_refs_dedups(tmp_path) -> None:
     feed_a = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")
     pub = AgentIdentity.generate(label="pub")
-    _pub(feed_a, pub, title="shared", caps=["code_review"])
+    _pub(feed_a, pub, authority=dao_a, title="shared", caps=["code_review"])
     d1 = build_digest(feed_a, dao_a)
     # 第二个"中继"转发同一份 digest（相同 ann）
     d2 = FeedDigest.from_dict(d1.to_dict())

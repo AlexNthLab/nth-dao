@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+import hashlib
+import re
 import uuid
 
 from nth_dao.b64u import b64u_decode, b64u_encode
@@ -40,9 +42,72 @@ REJECT_ANN_BAD_PUBLISHER_DID = "ann-bad-publisher-did"
 REJECT_ANN_SIG_INVALID = "ann-sig-invalid"
 REJECT_ANN_SIG_DECODE_FAILED = "ann-sig-decode-failed"
 REJECT_ANN_CRYPTO_UNAVAILABLE = "ann-crypto-unavailable"
+REJECT_ANN_SCHEMA_INVALID = "ann-schema-invalid"
 
 # 公告版本钉死，跨实现解析时用来识别 schema。
-NTH_ANNOUNCEMENT_KIND = "nth-task-announcement-v1"
+NTH_ANNOUNCEMENT_KIND_V1 = "nth-task-announcement-v1"
+NTH_ANNOUNCEMENT_KIND = "nth-task-announcement-v2"
+
+_MAX_ANNOUNCEMENT_ID_CHARS = 256
+_MAX_DID_CHARS = 128
+_MAX_TITLE_CHARS = 512
+_MAX_DESCRIPTION_CHARS = 64 * 1024
+_MAX_CAPABILITIES = 64
+_MAX_CAPABILITY_CHARS = 128
+_MAX_CONTEXT_CHARS = 128
+_MAX_ASSET_CHARS = 64
+_MAX_MISSION_ID_CHARS = 256
+_MAX_POLICY_BYTES = 64 * 1024
+_MAX_SIGNED_INT = (1 << 63) - 1
+_ANNOUNCEMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,255}\Z")
+
+
+def _bounded_text(value: Any, *, minimum: int = 0, maximum: int) -> bool:
+    return (
+        isinstance(value, str)
+        and minimum <= len(value.encode("utf-8")) <= maximum
+    )
+
+
+def _bounded_json_object(value: Any, *, maximum: int) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        return len(canonical_json(value)) <= maximum
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+
+
+def _valid_non_negative_int(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= _MAX_SIGNED_INT
+
+
+def _valid_announcement_id(ann: "TaskAnnouncement") -> bool:
+    """Validate IDs according to the signed announcement version.
+
+    Version 1 did not define a transport-safe alphabet. Existing signed v1
+    records therefore remain readable when their IDs are bounded printable
+    text. Version 2 IDs are also used in URLs and keep the strict alphabet.
+    """
+    value = ann.announcement_id
+    if not _bounded_text(
+        value, minimum=1, maximum=_MAX_ANNOUNCEMENT_ID_CHARS,
+    ) or value in {".", ".."}:
+        return False
+    if ann.kind == NTH_ANNOUNCEMENT_KIND_V1:
+        return value.isprintable()
+    return _ANNOUNCEMENT_ID_PATTERN.fullmatch(value) is not None
+
+
+def announcement_federation_key(ann: "TaskAnnouncement") -> str:
+    """Return the content-bound identifier used outside one DAO namespace.
+
+    ``announcement_id`` is only locally unique. The signed body hash also
+    binds publisher, claim authority, payload, and timestamps, so unrelated
+    DAOs can safely use the same local id without shadowing each other.
+    """
+    digest = hashlib.sha256(canonical_json(ann.signing_body())).hexdigest()
+    return f"nth-ann-sha256:{digest}"
 
 
 @dataclass
@@ -62,6 +127,9 @@ class TaskAnnouncement:
     announcement_id: str
     publisher_did: str
     title: str
+    # The publisher signs which DAO is the claim/CAS authority. Legacy v1
+    # records omit this field and therefore authorize only publisher_did.
+    authority_did: str = ""
     # —— 客观匹配维度（Match 的"能力"侧，M2 用）——
     capability_set: List[str] = field(default_factory=list)
     context: str = "general"
@@ -102,13 +170,86 @@ class TaskAnnouncement:
 
         canonical_json 内部 sort_keys，所以这里不需要手动排序。
         """
-        return {k: v for k, v in self.to_dict().items() if k != "publisher_sig"}
+        body = {k: v for k, v in self.to_dict().items() if k != "publisher_sig"}
+        if self.kind == NTH_ANNOUNCEMENT_KIND_V1:
+            body.pop("authority_did", None)
+        return body
+
+    def effective_authority_did(self) -> str:
+        """Return the signed claim authority, with a safe v1 fallback."""
+        if self.kind == NTH_ANNOUNCEMENT_KIND_V1:
+            return self.publisher_did
+        return self.authority_did
 
     def is_expired(self, now_ms_override: int = 0) -> bool:
         if not self.not_after:
             return False
         now = now_ms_override or now_ms()
         return now > self.not_after
+
+
+def _validate_announcement_schema(
+    ann: TaskAnnouncement, *, require_signature: bool = True,
+) -> Tuple[bool, str]:
+    """Validate the complete signed wire shape before cryptographic work.
+
+    A valid signature authenticates bytes, not their runtime types. This
+    guard prevents a legitimately signed but malformed object from reaching
+    matching, expiry, persistence, or claim code.
+    """
+    if ann.kind not in {NTH_ANNOUNCEMENT_KIND_V1, NTH_ANNOUNCEMENT_KIND}:
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _valid_announcement_id(ann):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_text(ann.publisher_did, minimum=1, maximum=_MAX_DID_CHARS):
+        return False, REJECT_ANN_BAD_PUBLISHER_DID
+    if not is_did_key(ann.publisher_did):
+        return False, REJECT_ANN_BAD_PUBLISHER_DID
+    authority_did = ann.effective_authority_did()
+    if not _bounded_text(authority_did, minimum=1, maximum=_MAX_DID_CHARS):
+        return False, REJECT_ANN_BAD_PUBLISHER_DID
+    if not is_did_key(authority_did):
+        return False, REJECT_ANN_BAD_PUBLISHER_DID
+    if not _bounded_text(ann.title, minimum=1, maximum=_MAX_TITLE_CHARS):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_text(ann.description, maximum=_MAX_DESCRIPTION_CHARS):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not isinstance(ann.capability_set, list):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if len(ann.capability_set) > _MAX_CAPABILITIES:
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if any(
+        not _bounded_text(cap, minimum=1, maximum=_MAX_CAPABILITY_CHARS)
+        for cap in ann.capability_set
+    ):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_text(ann.context, minimum=1, maximum=_MAX_CONTEXT_CHARS):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_json_object(ann.input_schema, maximum=_MAX_POLICY_BYTES):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_json_object(ann.acceptance, maximum=_MAX_POLICY_BYTES):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_json_object(ann.claimant_policy, maximum=_MAX_POLICY_BYTES):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _valid_non_negative_int(ann.reward_minor):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_text(ann.reward_asset, minimum=1, maximum=_MAX_ASSET_CHARS):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _bounded_text(ann.mission_id, maximum=_MAX_MISSION_ID_CHARS):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _valid_non_negative_int(ann.published_at_ms):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if not _valid_non_negative_int(ann.not_after):
+        return False, REJECT_ANN_SCHEMA_INVALID
+    if require_signature:
+        if not _bounded_text(ann.publisher_sig, minimum=1, maximum=128):
+            return False, REJECT_ANN_MISSING_FIELD
+        try:
+            if len(b64u_decode(ann.publisher_sig)) != 64:
+                return False, REJECT_ANN_SIG_DECODE_FAILED
+        except (TypeError, ValueError, UnicodeError):
+            return False, REJECT_ANN_SIG_DECODE_FAILED
+    return True, ""
 
 
 def sign_announcement(
@@ -121,6 +262,7 @@ def sign_announcement(
     acceptance: Optional[Dict[str, Any]] = None,
     reward_minor: int = 0,
     reward_asset: str = "credit",
+    authority_did: str = "",
     mission_id: str = "",
     claimant_policy: Optional[Dict[str, Any]] = None,
     description: str = "",
@@ -166,9 +308,16 @@ def sign_announcement(
     if not resolved_context:
         resolved_context = caps[0] if caps else "general"
 
+    resolved_authority_did = authority_did or publisher.as_did()
+    if not isinstance(resolved_authority_did, str) or not is_did_key(
+        resolved_authority_did
+    ):
+        raise ValueError("authority_did must be an Ed25519 did:key identifier")
+
     ann = TaskAnnouncement(
         announcement_id=announcement_id or uuid.uuid4().hex,
         publisher_did=publisher.as_did(),
+        authority_did=resolved_authority_did,
         title=title,
         capability_set=caps,
         context=resolved_context,
@@ -182,6 +331,11 @@ def sign_announcement(
         published_at_ms=published_at_ms or now_ms(),
         not_after=not_after,
     )
+    schema_ok, schema_reason = _validate_announcement_schema(
+        ann, require_signature=False,
+    )
+    if not schema_ok:
+        raise ValueError(f"invalid announcement schema: {schema_reason}")
     sig_bytes = publisher.sign(canonical_json(ann.signing_body()))
     ann.publisher_sig = b64u_encode(sig_bytes)
     return ann
@@ -210,16 +364,19 @@ def verify_announcement(ann: TaskAnnouncement) -> Tuple[bool, str]:
         if val is None or (isinstance(val, str) and not val.strip()):
             return False, REJECT_ANN_MISSING_FIELD
 
+    schema_ok, schema_reason = _validate_announcement_schema(ann)
+    if not schema_ok:
+        return False, schema_reason
+
     pub_did = ann.publisher_did
     if not isinstance(pub_did, str) or not is_did_key(pub_did):
         return False, REJECT_ANN_BAD_PUBLISHER_DID
     pub_hex = decode_ed25519_did_key_hex(pub_did) or ""
     if not pub_hex:
         return False, REJECT_ANN_BAD_PUBLISHER_DID
-
     try:
         sig_bytes = b64u_decode(str(ann.publisher_sig))
-    except Exception:  # noqa: BLE001 - 解码失败即拒
+    except (TypeError, ValueError, UnicodeError):
         return False, REJECT_ANN_SIG_DECODE_FAILED
 
     try:

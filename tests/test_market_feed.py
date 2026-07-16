@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pytest
 
+from nth_dao.b64u import b64u_encode
+from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity
 from nth_dao.market import (
     MarketFeed,
@@ -63,6 +65,42 @@ def test_verify_detects_tampered_reward() -> None:
     ok, reason = verify_announcement(ann)
     assert not ok
     assert reason == "ann-sig-invalid"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value"),
+    [
+        ("not_after", "never"),
+        ("reward_minor", True),
+        ("capability_set", 7),
+        ("input_schema", []),
+    ],
+)
+def test_verify_rejects_validly_signed_malformed_schema(
+    field_name: str, bad_value: object,
+) -> None:
+    """A publisher signature must not bless unsafe runtime types."""
+    pub = AgentIdentity.generate(label="publisher")
+    ann = sign_announcement(publisher=pub, title="schema attack")
+    setattr(ann, field_name, bad_value)
+    ann.publisher_sig = b64u_encode(
+        pub.sign(canonical_json(ann.signing_body()))
+    )
+
+    ok, reason = verify_announcement(ann)
+
+    assert not ok
+    assert reason == "ann-schema-invalid"
+
+
+def test_sign_rejects_oversized_announcement() -> None:
+    pub = AgentIdentity.generate(label="publisher")
+    with pytest.raises(ValueError, match="invalid announcement schema"):
+        sign_announcement(
+            publisher=pub,
+            title="too large",
+            description="x" * (64 * 1024 + 1),
+        )
 
 
 def test_verify_rejects_whitespace_only_required_field() -> None:

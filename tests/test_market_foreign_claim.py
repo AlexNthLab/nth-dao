@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("nacl")
 
 from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
-from nth_dao.execution_receipt import verify_receipt
+from nth_dao.execution_receipt import sign_receipt, verify_receipt
 from nth_dao.identity import AgentIdentity
 from nth_dao.market import (
     ClaimConflict,
@@ -28,6 +28,7 @@ from nth_dao.market import (
     sign_announcement,
     sign_claim_receipt,
 )
+from nth_dao.market.claim import _claim_timeline
 
 
 def _selfissue(agent, caps):
@@ -148,6 +149,86 @@ def test_record_rejects_receipt_token_mismatch(tmp_path) -> None:
     with pytest.raises(ClaimRejected) as e:
         record_foreign_claim(feed, store, ann.announcement_id, token_b, receipt)
     assert e.value.reason == REJECT_RECEIPT_BINDING
+
+
+def test_record_rejects_valid_signature_over_false_announcement_terms(
+    tmp_path,
+) -> None:
+    feed, store, pub, agent, ann = _setup(tmp_path)
+    token = _selfissue(agent, ["code_review"])
+    timeline = _claim_timeline(
+        ann, agent.as_did(), token["token_id"], ann.published_at_ms + 1,
+    )
+    timeline[0].payload["reward_minor"] = ann.reward_minor + 999_999
+    timeline[0].payload["publisher_did"] = agent.as_did()
+    receipt = sign_receipt(
+        timeline,
+        agent,
+        goal_id=f"market:claim:{ann.announcement_id}",
+        authorizing_cap_token=token,
+    )
+    assert verify_receipt(receipt)
+
+    with pytest.raises(ClaimRejected) as exc_info:
+        record_foreign_claim(
+            feed, store, ann.announcement_id, token, receipt,
+        )
+
+    assert exc_info.value.reason == REJECT_RECEIPT_BINDING
+
+
+def test_record_rejects_receipt_timestamp_outside_authority_skew(
+    tmp_path,
+) -> None:
+    feed, store, pub, agent, ann = _setup(tmp_path)
+    token = _selfissue(agent, ["code_review"])
+    authority_now = token["not_before"] + 1
+    receipt = sign_claim_receipt(
+        ann,
+        agent,
+        token,
+        now_ms_override=authority_now + 5 * 60 * 1000 + 1,
+    )
+
+    with pytest.raises(ClaimRejected) as exc_info:
+        record_foreign_claim(
+            feed,
+            store,
+            ann.announcement_id,
+            token,
+            receipt,
+            now_ms_override=authority_now,
+        )
+
+    assert exc_info.value.reason == REJECT_RECEIPT_BINDING
+    assert "clock-skew" in str(exc_info.value)
+
+
+def test_record_rejects_receipt_timestamp_outside_token_window(
+    tmp_path,
+) -> None:
+    feed, store, pub, agent, ann = _setup(tmp_path)
+    token = _selfissue(agent, ["code_review"])
+    authority_now = token["not_before"] + 1
+    receipt = sign_claim_receipt(
+        ann,
+        agent,
+        token,
+        now_ms_override=token["not_before"] - 1,
+    )
+
+    with pytest.raises(ClaimRejected) as exc_info:
+        record_foreign_claim(
+            feed,
+            store,
+            ann.announcement_id,
+            token,
+            receipt,
+            now_ms_override=authority_now,
+        )
+
+    assert exc_info.value.reason == REJECT_RECEIPT_BINDING
+    assert "capability-token validity window" in str(exc_info.value)
 
 
 def test_skill_insufficient(tmp_path) -> None:

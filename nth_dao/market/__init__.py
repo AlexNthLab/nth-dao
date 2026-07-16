@@ -27,11 +27,13 @@ from nth_dao.market.announcement import (
     TaskAnnouncement,
     sign_announcement,
     verify_announcement,
+    announcement_federation_key,
     REJECT_ANN_MISSING_FIELD,
     REJECT_ANN_BAD_PUBLISHER_DID,
     REJECT_ANN_SIG_INVALID,
     REJECT_ANN_SIG_DECODE_FAILED,
     REJECT_ANN_CRYPTO_UNAVAILABLE,
+    REJECT_ANN_SCHEMA_INVALID,
 )
 from nth_dao.market.feed import MarketFeed, PollResult
 from nth_dao.market.subscription import MarketSubscription
@@ -55,11 +57,13 @@ from nth_dao.market.federation import (
     match_digest_refs,
     merge_digest_refs,
     pull_announcements,
+    pull_announcements_by_keys,
     REJECT_DIGEST_MISSING_FIELD,
     REJECT_DIGEST_BAD_SOURCE_DID,
     REJECT_DIGEST_SIG_INVALID,
     REJECT_DIGEST_SIG_DECODE_FAILED,
     REJECT_DIGEST_CRYPTO_UNAVAILABLE,
+    REJECT_DIGEST_SCHEMA_INVALID,
 )
 from nth_dao.market.claim import (
     claim_announcement,
@@ -89,12 +93,19 @@ from nth_dao.market.mission_link import (
     MissionClaim,
     mission_progress,
 )
+from nth_dao.market.claim_ack import (
+    AUTHORITY_CLAIM_ACK_KIND,
+    AuthorityClaimAckStore,
+    sign_authority_claim_ack,
+    verify_authority_claim_ack,
+)
 
 __all__ = [
     # M1
     "TaskAnnouncement",
     "sign_announcement",
     "verify_announcement",
+    "announcement_federation_key",
     "MarketFeed",
     "PollResult",
     "REJECT_ANN_MISSING_FIELD",
@@ -102,6 +113,7 @@ __all__ = [
     "REJECT_ANN_SIG_INVALID",
     "REJECT_ANN_SIG_DECODE_FAILED",
     "REJECT_ANN_CRYPTO_UNAVAILABLE",
+    "REJECT_ANN_SCHEMA_INVALID",
     # M2
     "MarketSubscription",
     "match",
@@ -138,11 +150,13 @@ __all__ = [
     "match_digest_refs",
     "merge_digest_refs",
     "pull_announcements",
+    "pull_announcements_by_keys",
     "REJECT_DIGEST_MISSING_FIELD",
     "REJECT_DIGEST_BAD_SOURCE_DID",
     "REJECT_DIGEST_SIG_INVALID",
     "REJECT_DIGEST_SIG_DECODE_FAILED",
     "REJECT_DIGEST_CRYPTO_UNAVAILABLE",
+    "REJECT_DIGEST_SCHEMA_INVALID",
     # M5 reputation + mission link + claimant gating
     "ReputationProfile",
     "compute_reputation",
@@ -151,4 +165,8 @@ __all__ = [
     "mission_progress",
     "REJECT_CLAIMANT_BELOW_POLICY",
     "REJECT_CLAIMANT_REP_MISSING",
+    "AUTHORITY_CLAIM_ACK_KIND",
+    "AuthorityClaimAckStore",
+    "sign_authority_claim_ack",
+    "verify_authority_claim_ack",
 ]

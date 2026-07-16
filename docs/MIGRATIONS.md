@@ -76,6 +76,26 @@ No on-disk format changes. Pure additions:
 - New CLI: `nth-status`, `nth-metrics`.
 - New optional `requirements/*.lock.txt` for reproducible builds.
 
+### Market announcement v1 → v2
+
+Signed `nth-task-announcement-v1` records remain readable without rewriting
+their signed bytes. V1 IDs may contain printable characters that are unsafe in
+URL paths; federation therefore addresses full records and foreign claims by
+`federation_key` (the SHA-256 hash of the signed body), not by raw ID.
+
+V1 did not contain a signed claim-authority delegation. A node may federate a
+v1 record only when the publisher DID is also the node DID. Other v1 records
+remain locally readable but are not advertised, because treating the hosting
+node as their claim authority would be impersonation. The operator status at
+`GET /api/v2/market/federation/status` reports these as
+`announcement_compatibility.requires_publisher_resign`. The original publisher
+must reissue them as v2 with this node's DID in `authority_did`.
+
+Claim files now use `sha256-<announcement-id-hash>.json`. Readers still accept
+matching legacy filenames, while mismatched records at a colliding legacy path
+are ignored. Stop all older NTH DAO processes before upgrading so one workspace
+is not written concurrently by old and new claim-path implementations.
+
 ## Migration runner
 
 To verify a workspace from an older version loads cleanly:

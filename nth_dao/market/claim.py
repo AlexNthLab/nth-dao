@@ -37,10 +37,13 @@ C4 问题：旧 marketplace.claim 非原子，prior 审计标了 double-claim �
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
 
 from nth_dao.cap_token import verify_cap_token
 from nth_dao.execution_receipt import (
@@ -116,8 +119,6 @@ class ClaimRejected(Exception):
 
 # ─── 进程内线程锁（与 mission_store 同款，配合 InterProcessLock）───
 
-import threading
-
 _LOCKS: Dict[str, threading.RLock] = {}
 _LOCK_GUARD = threading.Lock()
 
@@ -148,11 +149,38 @@ class ClaimStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, announcement_id: str) -> Path:
-        # safe_id 防路径穿越（公告 id 进文件名）
+        digest = hashlib.sha256(announcement_id.encode("utf-8")).hexdigest()
+        return self.root / f"sha256-{digest}.json"
+
+    def _legacy_path(self, announcement_id: str) -> Path:
+        """Path used before claim records became collision-resistant."""
         return self.root / f"{safe_id(announcement_id)}.json"
 
+    @staticmethod
+    def _record_for(
+        path: Path, announcement_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        record = safe_load_json(path, fallback=None)
+        if not isinstance(record, dict):
+            return None
+        if record.get("announcement_id") != announcement_id:
+            return None
+        return record
+
     def get(self, announcement_id: str) -> Optional[Dict[str, Any]]:
-        return safe_load_json(self._path(announcement_id), fallback=None)
+        current = self._record_for(self._path(announcement_id), announcement_id)
+        if current is not None:
+            return current
+        return self._record_for(self._legacy_path(announcement_id), announcement_id)
+
+    @contextmanager
+    def locked_path(self, announcement_id: str) -> Iterator[Path]:
+        """Lock old and new namespaces during the filename migration."""
+        legacy = self._legacy_path(announcement_id)
+        current = self._path(announcement_id)
+        with _thread_lock_for(str(legacy)), InterProcessLock(legacy):
+            with _thread_lock_for(str(current)), InterProcessLock(current):
+                yield current
 
     def is_claimed(self, announcement_id: str) -> bool:
         rec = self.get(announcement_id)
@@ -163,12 +191,15 @@ class ClaimStore:
 
         损坏/无法解析的文件静默略过。顺序不保证。
         """
-        out: List[Dict[str, Any]] = []
+        by_id: Dict[str, Dict[str, Any]] = {}
         for p in self.root.glob("*.json"):
             rec = safe_load_json(p, fallback=None)
-            if isinstance(rec, dict):
-                out.append(rec)
-        return out
+            if not isinstance(rec, dict):
+                continue
+            announcement_id = rec.get("announcement_id")
+            if isinstance(announcement_id, str) and announcement_id:
+                by_id.setdefault(announcement_id, rec)
+        return list(by_id.values())
 
 
 def claim_announcement(
@@ -269,10 +300,9 @@ def claim_announcement(
             raise ClaimRejected(REJECT_CLAIMANT_BELOW_POLICY, rep_reason)
 
     # ── 3+4. CAS + 签收据 + 落盘（锁内一次完成）──
-    path = claim_store._path(announcement_id)
     claimed_at = now_ms_override or now_ms()
-    with _thread_lock_for(str(path)), InterProcessLock(path):
-        existing = safe_load_json(path, fallback=None)
+    with claim_store.locked_path(announcement_id) as path:
+        existing = claim_store.get(announcement_id)
         if existing is not None:
             # 已有认领记录
             if existing.get("claimant_did") == claimant_did:
@@ -337,6 +367,7 @@ def claim_announcement(
 
 REJECT_RECEIPT_INVALID = "claim-receipt-invalid"   # 收据签名/结构验不过
 REJECT_RECEIPT_BINDING = "claim-receipt-binding"   # 收据没绑定到本公告/claimant
+_MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS = 5 * 60 * 1000
 
 
 def _claim_timeline(
@@ -458,16 +489,49 @@ def record_foreign_claim(
     if str(receipt.get("goal_id", "")) != f"market:claim:{announcement_id}":
         raise ClaimRejected(
             REJECT_RECEIPT_BINDING, "receipt goal_id does not bind this announcement")
-    timeline = receipt.get("timeline") or []
-    payload = timeline[0].get("payload", {}) if (timeline and isinstance(timeline[0], dict)) else {}
+    timeline = receipt.get("timeline")
     if (
-        payload.get("announcement_id") != announcement_id
-        or payload.get("claimant_did") != claimant_did
-        or str(payload.get("cap_token_id", "")) != str(cap_token.get("token_id", ""))
+        not isinstance(timeline, list)
+        or len(timeline) != 1
+        or not isinstance(timeline[0], dict)
+        or type(timeline[0].get("timestamp")) is not int
+        or timeline[0]["timestamp"] <= 0
     ):
         raise ClaimRejected(
             REJECT_RECEIPT_BINDING,
-            "receipt timeline does not bind this announcement/claimant/cap_token")
+            "receipt must contain exactly one valid task-claim event",
+        )
+    signed_claimed_at = timeline[0]["timestamp"]
+    if abs(signed_claimed_at - claimed_at) > _MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS:
+        raise ClaimRejected(
+            REJECT_RECEIPT_BINDING,
+            "receipt timestamp is outside the authority clock-skew window",
+        )
+    token_not_before = cap_token.get("not_before")
+    token_not_after = cap_token.get("not_after")
+    if (
+        type(token_not_before) is not int
+        or type(token_not_after) is not int
+        or not token_not_before <= signed_claimed_at <= token_not_after
+    ):
+        raise ClaimRejected(
+            REJECT_RECEIPT_BINDING,
+            "receipt timestamp is outside the capability-token validity window",
+        )
+    expected_timeline = [
+        entry.to_dict()
+        for entry in _claim_timeline(
+            ann,
+            claimant_did,
+            str(cap_token.get("token_id", "")),
+            signed_claimed_at,
+        )
+    ]
+    if timeline != expected_timeline:
+        raise ClaimRejected(
+            REJECT_RECEIPT_BINDING,
+            "receipt timeline does not exactly bind the authoritative announcement",
+        )
 
     # 6. 技能子集
     need_skills = {normalize_capability(c) for c in ann.capability_set}
@@ -491,9 +555,8 @@ def record_foreign_claim(
             raise ClaimRejected(REJECT_CLAIMANT_BELOW_POLICY, rep_reason)
 
     # 8. CAS（落盘传入的 receipt，不重签）
-    path = claim_store._path(announcement_id)
-    with _thread_lock_for(str(path)), InterProcessLock(path):
-        existing = safe_load_json(path, fallback=None)
+    with claim_store.locked_path(announcement_id) as path:
+        existing = claim_store.get(announcement_id)
         if existing is not None:
             if existing.get("claimant_did") == claimant_did:
                 return ClaimOutcome(

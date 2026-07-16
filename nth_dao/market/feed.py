@@ -181,6 +181,38 @@ class MarketFeed:
                 return ann
         return None
 
+    def get_by_federation_key(
+        self,
+        federation_key: str,
+        *,
+        include_expired: bool = True,
+        now_ms_override: int = 0,
+    ) -> Optional[TaskAnnouncement]:
+        """Resolve an announcement by the hash of its signed body.
+
+        This avoids putting legacy v1 identifiers into URL paths or query
+        delimiters while preserving exact signed records on disk.
+        """
+        from nth_dao.market.announcement import announcement_federation_key
+
+        if not (
+            isinstance(federation_key, str)
+            and federation_key.startswith("nth-ann-sha256:")
+            and len(federation_key) == 79
+            and all(ch in "0123456789abcdef" for ch in federation_key[-64:])
+        ):
+            return None
+        for seq, raw in self._read_all():
+            ann = self._safe_parse(seq, raw)
+            if ann is None:
+                continue
+            if announcement_federation_key(ann) != federation_key:
+                continue
+            if not include_expired and ann.is_expired(now_ms_override):
+                return None
+            return ann
+        return None
+
     # ── 内部 ─────────────────────────────────────────────────────
 
     def _read_all(self) -> List[tuple]:
