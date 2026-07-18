@@ -6996,6 +6996,15 @@ def register_v2_routes(app: FastAPI) -> None:
         return
     app.state.v2_routes_registered = True
 
+    # Commerce is kept in a focused route module so its signed protocol and
+    # no-real-money boundary do not become entangled with the large console
+    # projection module.
+    from .commerce_api import register_commerce_routes
+    register_commerce_routes(
+        app,
+        sensitive_read_guard=_require_console_bearer_for_sensitive_read,
+    )
+
     # Load durable AgentLink state before requests arrive. The store converts
     # interrupted accepted/processing jobs to delivery_unknown; project those
     # outcomes back into their originating channels exactly once.

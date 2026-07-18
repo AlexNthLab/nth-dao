@@ -483,6 +483,15 @@ and identity-verified after restart. Feed digests prove provenance; each full
 announcement's `publisher_sig` remains the content authority. See
 **[docs/federation.md](docs/federation.md)**.
 
+## No-money digital-service commerce
+
+The v2 **Market** view provides an end-to-end test transaction loop for signed
+digital services: federated discovery, Intent, seller Cart, buyer Order,
+delivery, verification, dispute, and manual `NTH-TEST` settlement. It never
+moves real funds and rejects caller-selected payment rails or currencies.
+Operator setup, trust boundaries, recovery behavior, and API details are in
+**[docs/COMMERCE_MVP.md](docs/COMMERCE_MVP.md)**.
+
 ## Migration Notice
 
 NTH DAO is a hard rename. Existing forks or local checkouts should update their

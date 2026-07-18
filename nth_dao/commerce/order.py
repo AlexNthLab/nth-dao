@@ -37,6 +37,7 @@ _EVENT_FIELDS = frozenset({
     "order_id", "seq", "type", "actor_did", "prev_state", "new_state",
     "payload", "created_at_ms", "kind", "event_sig",
 })
+_MAX_ORDER_EVENT_BYTES = 160 * 1024
 _ORDER_PAYLOAD_FIELDS = frozenset({
     "schema_version", "listing_id", "listing_digest", "listing_type",
     "buyer_did", "buyer_agent_did", "seller_did",
@@ -157,6 +158,58 @@ class OrderStore:
             return OrderEvent.from_dict(events[0])
         except (TypeError, ValueError):
             return None
+
+    def list_verified(self, *, limit: int = 1000) -> List[OrderEvent]:
+        """Return verified orders without exposing corrupt on-disk records."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not (1 <= limit <= 10_000):
+            raise OrderRejected("limit must be between 1 and 10000")
+        rows: List[OrderEvent] = []
+        def modified(path: Path) -> int:
+            try:
+                return path.stat().st_mtime_ns
+            except OSError:
+                return 0
+
+        for path in sorted(self.root.glob("*.json"), key=modified, reverse=True):
+            if len(rows) >= limit:
+                break
+            suffix = path.stem
+            if not _PAYMENT_DIGEST.fullmatch(suffix):
+                continue
+            event = self.get(f"nth-order-sha256:{suffix}")
+            if event is not None:
+                rows.append(event)
+        return rows
+
+    def import_verified(self, event: OrderEvent) -> OrderEvent:
+        """Persist a remotely signed order with idempotent CAS semantics.
+
+        A recipient never re-signs the buyer's order. It verifies the complete
+        authorization snapshot and stores the exact signed event. Replays are
+        idempotent; a different event for the same payment-bound order id is a
+        hard conflict.
+        """
+        document = event.to_dict()
+        ok, reason = verify_order([document])
+        if not ok:
+            raise OrderRejected(f"remote order rejected: {reason}")
+        path = self._path(event.order_id)
+        with _thread_lock(path), InterProcessLock(path):
+            existing = self.get_events(event.order_id)
+            if path.exists() and existing is None:
+                raise OrderConflict("stored order is unreadable; refuse to overwrite")
+            if existing is not None:
+                ok, reason = verify_order(existing)
+                if not ok:
+                    raise OrderConflict(f"stored order is invalid: {reason}")
+                if existing != [document]:
+                    raise OrderConflict("order id already contains different signed bytes")
+                return OrderEvent.from_dict(existing[0])
+            atomic_write_json(
+                path,
+                {"order_id": event.order_id, "events": [document]},
+            )
+        return event
 
 
 def _validate_created_payload(event: OrderEvent) -> Tuple[bool, str]:
@@ -327,6 +380,11 @@ def verify_order(events: List[Dict[str, Any]]) -> Tuple[bool, str]:
         return False, "order must contain exactly one creation event"
     if set(events[0]) != _EVENT_FIELDS:
         return False, "order event has missing or unknown fields"
+    try:
+        if len(canonical_json(events[0])) > _MAX_ORDER_EVENT_BYTES:
+            return False, "order event exceeds the 160 KiB federation budget"
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False, "order event is not canonical JSON"
     try:
         event = OrderEvent.from_dict(events[0])
     except (TypeError, ValueError) as exc:

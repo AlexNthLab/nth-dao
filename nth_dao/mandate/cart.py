@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -588,9 +589,14 @@ def _validate_money(amount: Any, field_name: str) -> Dict[str, str]:
         )
     if parsed <= 0:
         raise ValueError(f"{field_name}.value must be positive, got {value!r}")
-    if not isinstance(currency, str) or not currency.isupper() or not 3 <= len(currency) <= 8:
+    if (
+        not isinstance(currency, str)
+        or not 3 <= len(currency) <= 16
+        or re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*", currency) is None
+    ):
         raise ValueError(
-            f"{field_name}.currency must be uppercase 3-8 char code, got {currency!r}"
+            f"{field_name}.currency must be an uppercase 3-16 character "
+            f"asset code, got {currency!r}"
         )
     return {"value": value, "currency": currency}
 

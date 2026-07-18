@@ -95,6 +95,9 @@ from nth_dao.mandate import (
 
 _FOREIGN_CLAIM_MAX_BODY_BYTES = 256 * 1024
 _FEDERATION_HELLO_MAX_BODY_BYTES = 16 * 1024
+_COMMERCE_CART_MAX_BODY_BYTES = 256 * 1024
+_COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
+_COMMERCE_WRITE_MAX_BODY_BYTES = 768 * 1024
 
 
 class _RequestBodyTooLarge(Exception):
@@ -120,16 +123,44 @@ class _FederationBodyLimitMiddleware:
             and scope.get('method') == 'POST'
             and path == '/api/v2/market/federation/hello'
         )
-        if not (is_foreign_claim or is_federation_hello):
+        is_commerce_cart = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/commerce/carts"
+        )
+        is_commerce_sync = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/commerce/federation/sync"
+        )
+        is_commerce_write = (
+            scope.get("type") == "http"
+            and scope.get("method") in {"POST", "PUT", "PATCH"}
+            and path.startswith("/api/v2/commerce/")
+        )
+        if not (
+            is_foreign_claim
+            or is_federation_hello
+            or is_commerce_write
+        ):
             await self.app(scope, receive, send)
             return
 
-        max_body_bytes = (
-            _FOREIGN_CLAIM_MAX_BODY_BYTES
-            if is_foreign_claim
-            else _FEDERATION_HELLO_MAX_BODY_BYTES
-        )
-        body_label = "foreign claim" if is_foreign_claim else "federation hello"
+        if is_foreign_claim:
+            max_body_bytes = _FOREIGN_CLAIM_MAX_BODY_BYTES
+            body_label = "foreign claim"
+        elif is_federation_hello:
+            max_body_bytes = _FEDERATION_HELLO_MAX_BODY_BYTES
+            body_label = "federation hello"
+        elif is_commerce_cart:
+            max_body_bytes = _COMMERCE_CART_MAX_BODY_BYTES
+            body_label = "commerce cart"
+        elif is_commerce_sync:
+            max_body_bytes = _COMMERCE_SYNC_MAX_BODY_BYTES
+            body_label = "commerce sync"
+        else:
+            max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
+            body_label = "commerce write"
         limit_label = f"{max_body_bytes // 1024} KiB"
         lengths: List[int] = []
         for name, value in scope.get("headers") or []:
@@ -188,7 +219,11 @@ class _FederationBodyLimitMiddleware:
             await response(scope, receive, send)
 from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
 from nth_dao.orchestration import MissionStore
-from nth_dao.web.rate_limit import RateLimiter, enforce_min_response_time
+from nth_dao.web.rate_limit import (
+    PersistentRateLimiter,
+    RateLimiter,
+    enforce_min_response_time,
+)
 from team_layer.blackboard import Blackboard
 
 
@@ -588,6 +623,26 @@ class WebState:
         self._group_list_cache = _MtimeCache()
         # v0.10 T-9: Mandate triad file-backed store, sidebar reads from this
         self.mandates = MandateStore(workspace)
+        # No-real-money commerce MVP stores. Order views are derived from the
+        # verified Order + Trade chains; the outbox is the only mutable
+        # delivery bookkeeping and can be safely retried after restart.
+        from ..commerce import ListingStore, OrderStore, TradeStore
+        from ..commerce.outbox import CommerceInbox, CommerceOutbox
+        self.commerce_listings = ListingStore(workspace)
+        self.commerce_orders = OrderStore(workspace)
+        self.commerce_trades = TradeStore(workspace)
+        self.commerce_outbox = CommerceOutbox(workspace)
+        self.commerce_inbox = CommerceInbox(workspace)
+        self.commerce_cart_limiter = PersistentRateLimiter(
+            Path(workspace) / "commerce" / "rate_limits" / "cart.json",
+            max_per_window=120,
+            window_seconds=60.0,
+        )
+        self.commerce_sync_limiter = PersistentRateLimiter(
+            Path(workspace) / "commerce" / "rate_limits" / "sync.json",
+            max_per_window=300,
+            window_seconds=60.0,
+        )
         # v0.10 V-30: per-actor rate limiters for the two crypto-heavy
         # /api/mandates/* routes. The verify endpoint is more sensitive
         # (free oracle + timing side-channel) so its window is tighter.
@@ -952,6 +1007,28 @@ def create_app(
         if (
             request.method == "POST"
             and request.url.path == "/api/v2/market/federation/hello"
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # Commerce replication is authenticated by a signed, content-bound
+        # envelope whose target DID must equal this node. Remote DAOs cannot
+        # possess the operator's console token; the handler performs the
+        # cryptographic authorization and bounded persistence instead.
+        if (
+            request.method == "POST"
+            and request.url.path == "/api/v2/commerce/federation/sync"
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # A seller may issue a Cart only for a valid, signed Intent that
+        # explicitly allow-lists the seller DID and a local signed Listing.
+        # This is the commerce equivalent of an authenticated quote request;
+        # remote buyers do not possess the seller console token.
+        if (
+            request.method == "POST"
+            and request.url.path == "/api/v2/commerce/carts"
         ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)

@@ -23,6 +23,7 @@ from nth_dao.commerce.order_trade import (
     verify_order_trade_binding,
 )
 from nth_dao.commerce.trade import (
+    TradeConflict,
     TradeEvent,
     TradeStore,
     sign_trade_event,
@@ -527,3 +528,72 @@ def test_order_trade_binding_rejects_extra_signed_open_payload(tmp_path):
     assert verify_order_trade_binding(
         order_store, trade_store, order.order_id
     ) == (False, "trade/order binding mismatch: payload fields")
+
+
+def test_remote_order_import_is_verified_idempotent_and_listed(tmp_path):
+    buyer, _, _, listing, intent, cart, payment = _authorised_checkout()
+    source = OrderStore(tmp_path / "buyer")
+    order = create_order_from_mandates(
+        source,
+        authority=buyer,
+        intent=intent,
+        cart=cart,
+        payment=payment,
+        listing=listing,
+        now_ms_override=listing.published_at_ms + 1_000,
+    )
+    recipient = OrderStore(tmp_path / "seller")
+
+    assert recipient.import_verified(order).to_dict() == order.to_dict()
+    assert recipient.import_verified(order).to_dict() == order.to_dict()
+    assert [row.order_id for row in recipient.list_verified()] == [order.order_id]
+
+    forged = OrderEvent.from_dict(order.to_dict())
+    forged.payload = dict(forged.payload)
+    forged.payload["amount_minor"] += 1
+    with pytest.raises(OrderRejected, match="remote order rejected"):
+        recipient.import_verified(forged)
+
+
+def test_remote_trade_merge_accepts_exact_prefix_and_rejects_fork(tmp_path):
+    buyer, _, seller, listing, intent, cart, payment = _authorised_checkout()
+    order_store = OrderStore(tmp_path / "buyer")
+    order = create_order_from_mandates(
+        order_store,
+        authority=buyer,
+        intent=intent,
+        cart=cart,
+        payment=payment,
+        listing=listing,
+        now_ms_override=listing.published_at_ms + 1_000,
+    )
+    source = TradeStore(tmp_path / "buyer")
+    open_commerce_trade(
+        source,
+        order_store,
+        order.order_id,
+        authority=buyer,
+        now_ms_override=listing.published_at_ms + 2_000,
+    )
+    recipient = TradeStore(tmp_path / "seller")
+    opened = source.get_events(order.order_id)
+    assert opened is not None
+    assert recipient.import_verified_events(order.order_id, opened) == opened
+
+    submit_delivery(
+        source,
+        order.order_id,
+        claimant=seller,
+        delivery={"artifact_digest": "sha256:" + "b" * 64},
+        now_ms_override=listing.published_at_ms + 3_000,
+    )
+    delivered = source.get_events(order.order_id)
+    assert delivered is not None
+    assert recipient.import_verified_events(order.order_id, delivered) == delivered
+    assert recipient.import_verified_events(order.order_id, delivered) == delivered
+
+    fork = [dict(item) for item in delivered]
+    fork[0] = dict(fork[0])
+    fork[0]["event_sig"] = "A" * 86
+    with pytest.raises(TradeConflict, match="does not extend"):
+        recipient.import_verified_events(order.order_id, fork)

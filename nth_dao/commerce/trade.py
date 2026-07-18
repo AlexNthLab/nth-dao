@@ -59,6 +59,8 @@ logger = logging.getLogger("nth_dao.commerce.trade")
 PathLike = Union[str, Path]
 
 NTH_TRADE_EVENT_KIND = "nth-trade-event-v1"
+_MAX_TRADE_PAYLOAD_BYTES = 256 * 1024
+_MAX_TRADE_CHAIN_BYTES = 320 * 1024
 _TRADE_EVENT_FIELDS = frozenset({
     "trade_id", "seq", "type", "actor_did", "prev_state", "new_state",
     "payload", "created_at_ms", "kind", "event_sig",
@@ -107,6 +109,7 @@ REJECT_EVENT_SIG_INVALID = "event-sig-invalid"
 REJECT_EVENT_BAD_ACTOR_DID = "event-bad-actor-did"
 REJECT_CHAIN_BROKEN = "chain-broken"
 REJECT_CRYPTO_UNAVAILABLE = "crypto-unavailable"
+REJECT_PAYLOAD_INVALID = "payload-invalid"
 
 
 class TradeRejected(Exception):
@@ -212,6 +215,49 @@ class TradeStore:
             return None
         events = data.get("events") if isinstance(data, dict) else None
         return events if isinstance(events, list) else []
+
+    def import_verified_events(
+        self,
+        trade_id: str,
+        events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Merge a remote signed chain only when it extends our exact prefix.
+
+        This is the replication rule for buyer/seller projections: duplicate
+        delivery is harmless, a longer valid chain advances local state, and
+        forks or out-of-order suffixes fail closed instead of being patched
+        together into a chain nobody signed.
+        """
+        if not isinstance(events, list) or not events:
+            raise TradeRejected(REJECT_CHAIN_BROKEN, "empty remote trade chain")
+        if len(events) > 1000:
+            raise TradeRejected(REJECT_CHAIN_BROKEN, "remote trade chain too long")
+        candidate = [dict(item) if isinstance(item, dict) else item for item in events]
+        path = self._path(trade_id)
+        lock = _thread_lock_for(str(path))
+        with lock, InterProcessLock(path):
+            existing = self.get_events(trade_id)
+            if path.exists() and existing is None:
+                raise TradeConflict("stored trade is unreadable; refuse to overwrite")
+            if existing and candidate[:len(existing)] != existing:
+                raise TradeConflict("remote trade does not extend the local signed prefix")
+            if existing is not None and len(candidate) < len(existing):
+                raise TradeConflict("remote trade is older than the local signed chain")
+            class _CandidateStore:
+                def get_events(self, requested_trade_id: str):
+                    return candidate if requested_trade_id == trade_id else None
+
+            # Verify before replacing durable state. The previous
+            # write-then-rollback sequence left a corrupt chain behind if the
+            # process died between those two writes.
+            ok, reason = verify_trade(_CandidateStore(), trade_id)  # type: ignore[arg-type]
+            if not ok:
+                raise TradeRejected(reason, "remote trade chain failed verification")
+            atomic_write_json(
+                path,
+                {"trade_id": trade_id, "events": candidate},
+            )
+            return candidate
 
 
 # ─── 转移表 ─────────────────────────────────────────────────────
@@ -323,6 +369,13 @@ def _append_event(
     （单角色传单元素集；dispute_opened 可由 publisher 或 claimant 提，
     传双元素集）。集里的 "" 会被剔除（未绑定的角色不算合法签名者）。
     """
+    if not isinstance(payload, dict):
+        raise TradeRejected(REJECT_PAYLOAD_INVALID, "event payload must be an object")
+    try:
+        if len(canonical_json(payload)) > _MAX_TRADE_PAYLOAD_BYTES:
+            raise TradeRejected(REJECT_PAYLOAD_INVALID, "event payload exceeds 256 KiB")
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise TradeRejected(REJECT_PAYLOAD_INVALID, "event payload is not canonical JSON") from exc
     path = store._path(trade_id)
     with _thread_lock_for(str(path)), InterProcessLock(path):
         data = safe_load_json(path, fallback=None)
@@ -333,6 +386,10 @@ def _append_event(
         events: List[Dict[str, Any]] = (
             data.get("events", []) if isinstance(data, dict) else []
         )
+        if events:
+            ok, reason = verify_trade(store, trade_id)
+            if not ok:
+                raise TradeRejected(reason, "stored trade failed verification")
 
         if expect_open:
             if events:
@@ -371,6 +428,19 @@ def _append_event(
             created_at_ms=now_ms_override or now_ms(),
         )
         sign_trade_event(actor, ev)
+        candidate_events = [*events, ev.to_dict()]
+        try:
+            if len(canonical_json({"events": candidate_events})) > _MAX_TRADE_CHAIN_BYTES:
+                raise TradeRejected(
+                    REJECT_PAYLOAD_INVALID,
+                    "signed trade chain exceeds the 320 KiB federation budget",
+                )
+        except TradeRejected:
+            raise
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise TradeRejected(
+                REJECT_PAYLOAD_INVALID, "signed trade chain is not canonical JSON",
+            ) from exc
         events.append(ev.to_dict())
         atomic_write_json(path, {"trade_id": trade_id, "events": events})
         return ev
@@ -631,6 +701,11 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
     events = store.get_events(trade_id)
     if not events:
         return False, REJECT_TRADE_NOT_FOUND
+    try:
+        if len(canonical_json({"events": events})) > _MAX_TRADE_CHAIN_BYTES:
+            return False, REJECT_PAYLOAD_INVALID
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False, REJECT_PAYLOAD_INVALID
 
     parties: Dict[str, str] = {}
     state = ""
@@ -641,6 +716,13 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
             ev = TradeEvent.from_dict(raw)
         except (TypeError, ValueError):
             return False, REJECT_CHAIN_BROKEN
+        if not isinstance(ev.payload, dict):
+            return False, REJECT_PAYLOAD_INVALID
+        try:
+            if len(canonical_json(ev.payload)) > _MAX_TRADE_PAYLOAD_BYTES:
+                return False, REJECT_PAYLOAD_INVALID
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            return False, REJECT_PAYLOAD_INVALID
         # seq 单调
         if ev.seq != i:
             return False, REJECT_CHAIN_BROKEN
@@ -698,6 +780,55 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
                     )
                     if not ok:
                         return False, reason
+            elif ev.type == EVENT_DISPUTE_RESOLVED:
+                terms = _trade_terms(events)
+                if terms:
+                    settlement = (ev.payload or {}).get("settlement", {})
+                    if not isinstance(settlement, dict):
+                        return False, "settlement-malformed"
+                    resolution = (ev.payload or {}).get("resolution")
+                    amount = terms.get("amount_minor")
+                    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+                        return False, "settlement-amount-invalid"
+                    currency = str(terms.get("currency", ""))
+                    if resolution == RESOLUTION_SETTLE:
+                        from nth_dao.commerce.settlement import verify_settlement
+                        ok, reason = verify_settlement(
+                            settlement,
+                            expected_amount_minor=amount,
+                            expected_currency=currency,
+                            expected_payee_did=str(terms.get("payee_did", "")),
+                            expected_payer_did=parties.get("publisher_did", ""),
+                        )
+                        if not ok:
+                            return False, reason
+                    elif resolution == RESOLUTION_REFUND:
+                        if not (
+                            settlement.get("adapter_id") == "manual"
+                            and settlement.get("amount_minor") == 0
+                            and settlement.get("refunded_amount_minor") == amount
+                            and settlement.get("currency") == currency
+                            and settlement.get("payee_did") == parties.get("publisher_did")
+                            and settlement.get("payer_did") == parties.get("publisher_did")
+                        ):
+                            return False, "settlement-refund-mismatch"
+                    elif resolution == RESOLUTION_SPLIT:
+                        paid = settlement.get("amount_minor")
+                        refunded = settlement.get("refunded_amount_minor")
+                        if (
+                            isinstance(paid, bool)
+                            or not isinstance(paid, int)
+                            or isinstance(refunded, bool)
+                            or not isinstance(refunded, int)
+                            or paid <= 0
+                            or refunded <= 0
+                            or paid + refunded != amount
+                            or settlement.get("adapter_id") != "manual"
+                            or settlement.get("currency") != currency
+                            or settlement.get("payee_did") != parties.get("claimant_did")
+                            or settlement.get("payer_did") != parties.get("publisher_did")
+                        ):
+                            return False, "settlement-split-mismatch"
         state = ev.new_state
 
     return True, ""

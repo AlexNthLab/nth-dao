@@ -130,7 +130,11 @@ _DID_KEY_RE = re.compile(
 # ISO 4217 currency codes are 3 uppercase letters. We also accept
 # longer stablecoin tickers like "USDC". The authoritative whitelist
 # lives at the SettlementAdapter layer; here we only enforce shape.
-_CURRENCY_RE = re.compile(r"^[A-Z]{3,8}$")
+# ISO-like uppercase assets plus namespaced test units such as NTH-TEST.
+# The commerce MVP deliberately uses NTH-TEST so no real-money code path is
+# required; rejecting that token here made the mandate and money layers
+# internally incompatible.
+_CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$")
 
 # Settlement method tokens: `<adapter>:<asset>` with conservative
 # character sets so weird whitespace / control chars can't smuggle
@@ -678,9 +682,14 @@ def _validate_max_amount(amt: Any) -> Dict[str, str]:
         )
     if parsed <= 0:
         raise ValueError(f"max_amount.value must be positive, got {value!r}")
-    if not isinstance(currency, str) or not _CURRENCY_RE.match(currency):
+    if (
+        not isinstance(currency, str)
+        or not (3 <= len(currency) <= 16)
+        or not _CURRENCY_RE.fullmatch(currency)
+    ):
         raise ValueError(
-            f"max_amount.currency must be uppercase code, got {currency!r}"
+            "max_amount.currency must be an uppercase 3-16 character "
+            f"asset code, got {currency!r}"
         )
     return {"value": value, "currency": currency}
 
