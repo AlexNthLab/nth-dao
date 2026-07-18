@@ -65,7 +65,10 @@ CONTENT_PATTERNS = (
     ),
     (
         "Windows user path",
-        re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\r\n\t ]+\\"),
+        re.compile(
+            r"(?i)\b[A-Z]:(?:\\{1,2})Users(?:\\{1,2})"
+            r"[^\\\r\n\t ]+(?:\\{1,2})"
+        ),
     ),
     (
         "macOS user path",
@@ -130,6 +133,11 @@ def dirty_entries(root: Path) -> list[str]:
 
 def tracked_paths(root: Path) -> list[Path]:
     raw = _git(root, "ls-files", "-z")
+    return [root / item.decode("utf-8") for item in raw.split(b"\0") if item]
+
+
+def untracked_paths(root: Path) -> list[Path]:
+    raw = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
     return [root / item.decode("utf-8") for item in raw.split(b"\0") if item]
 
 
@@ -198,8 +206,34 @@ def _decode_text(data: bytes) -> str | None:
 
 
 def scan_tracked_tree(root: Path) -> list[Finding]:
+    """Scan both staged/index bytes and current worktree bytes."""
     findings: list[Finding] = []
     for path in tracked_paths(root):
+        relative = path.relative_to(root).as_posix()
+        findings.extend(scan_name(relative))
+        try:
+            index_text = _decode_text(_git(root, "show", f":{relative}"))
+        except RuntimeError as exc:
+            findings.append(Finding(f"index:{relative}", str(exc)))
+        else:
+            if index_text is not None:
+                findings.extend(scan_text(f"index:{relative}", index_text))
+        if not path.is_file():
+            continue
+        try:
+            text = _decode_text(path.read_bytes())
+        except OSError as exc:
+            findings.append(Finding(relative, f"could not read tracked file: {exc}"))
+            continue
+        if text is not None:
+            findings.extend(scan_text(relative, text))
+    return findings
+
+
+def scan_untracked_tree(root: Path) -> list[Finding]:
+    """Scan files that Git could add, even when dirty status is allowed."""
+    findings: list[Finding] = []
+    for path in untracked_paths(root):
         relative = path.relative_to(root).as_posix()
         findings.extend(scan_name(relative))
         if not path.is_file():
@@ -207,7 +241,7 @@ def scan_tracked_tree(root: Path) -> list[Finding]:
         try:
             text = _decode_text(path.read_bytes())
         except OSError as exc:
-            findings.append(Finding(relative, f"could not read tracked file: {exc}"))
+            findings.append(Finding(relative, f"could not read untracked file: {exc}"))
             continue
         if text is not None:
             findings.extend(scan_text(relative, text))
@@ -319,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             for entry in dirty_entries(root):
                 findings.append(Finding(entry, "release requires a clean worktree"))
         findings.extend(scan_tracked_tree(root))
+        findings.extend(scan_untracked_tree(root))
 
     for archive_name in args.dist:
         archive = Path(archive_name).resolve()

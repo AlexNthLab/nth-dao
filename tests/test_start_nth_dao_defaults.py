@@ -17,4 +17,6 @@ def test_desktop_launcher_keeps_hermes_in_channel_team() -> None:
     assert 'NTH_HERMES_MODEL' in text
     assert 'NTH_HERMES_TOOLSETS' in text
     assert '$env:NTH_AGENT_WORKDIR = $RepoRoot' in text
+    assert '[string] $AgentWorkdir = ""' in text
+    assert 'Resolve-Path -LiteralPath $AgentWorkdir' in text
     assert 'NTH_AGENT_WORKDIR' in text

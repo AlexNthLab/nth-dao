@@ -1850,6 +1850,11 @@ def _normalize_market_listing_type(value: Any) -> str:
 
 
 def _market_announcement_listing_type(ann: Any) -> str:
+    if str(getattr(ann, "kind", "")) == "nth-task-announcement-v3":
+        try:
+            return _normalize_market_listing_type(getattr(ann, "listing_type", ""))
+        except ValueError:
+            return "task"
     schema = getattr(ann, "input_schema", {}) or {}
     if isinstance(schema, dict):
         raw = schema.get(_MARKET_LISTING_TYPE_FIELD, schema.get("listing_type", "task"))
@@ -1889,11 +1894,15 @@ def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
             ok, _why = spine.verify_chain()
             if ok:
                 from nth_dao.market.projection import MarketAnnounceProjection
+                from nth_dao.market.claim import ClaimStore
                 from nth_dao.spine import replay
                 proj = MarketAnnounceProjection()
                 replay(spine.read_all(), proj)
+                claims = ClaimStore(ws)
                 spine_local: List[Dict[str, Any]] = []
                 for ann in proj.open():
+                    if claims.is_unavailable(ann.announcement_id):
+                        continue
                     if not passes(ann):
                         continue
                     d = _market_announcement_to_wire(ann)
@@ -1917,7 +1926,7 @@ def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
         return []
     local: List[Dict[str, Any]] = []
     for ann in feed.poll(since_seq=-1, limit=500).announcements:
-        if claims.is_claimed(ann.announcement_id):
+        if claims.is_unavailable(ann.announcement_id):
             continue
         if not passes(ann):
             continue
@@ -8045,7 +8054,7 @@ def register_v2_routes(app: FastAPI) -> None:
         claims = ClaimStore(ws)
         counts: Dict[str, int] = {}
         for ann in feed.poll(since_seq=-1, limit=500).announcements:
-            if claims.is_claimed(ann.announcement_id):
+            if claims.is_unavailable(ann.announcement_id):
                 continue
             counts[ann.context] = counts.get(ann.context, 0) + 1
         return sorted(
@@ -8114,7 +8123,7 @@ def register_v2_routes(app: FastAPI) -> None:
             # 防 self-dealing:发布方不能给"自己认领自己发的活"验收刷分。
             raise HTTPException(
                 status_code=400, detail="publisher cannot accept their own claim")
-        claim = ClaimStore(ws).get(announcement_id)
+        claim = ClaimStore(ws).get(announcement_id, announcement=ann)
         if not claim or claim.get("claimant_did") != body.completer_did:
             raise HTTPException(
                 status_code=409,
@@ -8213,6 +8222,22 @@ def register_v2_routes(app: FastAPI) -> None:
     # 两个端点都匿名可读(只暴露本就可发现的公告摘要/全文,与 market/open
     # 一致)。信任模型:digest 是不可信提示(带 source 签名=provenance),
     # 全文带 publisher_sig 才是权威 —— 拉方两层都验。
+    @app.get("/api/v2/commerce/federation/listings/{digest}")
+    def v2_commerce_fed_listing(digest: str, request: Request) -> Dict[str, Any]:
+        """Serve one content-addressed, seller-signed listing."""
+        from nth_dao.commerce.listing import ListingRejected, ListingStore
+
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            listing = ListingStore(ws).get(digest)
+        except ListingRejected:
+            raise HTTPException(status_code=404, detail="listing not found")
+        if listing is None:
+            raise HTTPException(status_code=404, detail="listing not found")
+        return listing.to_dict()
+
     @app.get("/api/v2/market/federation/digest")
     def v2_market_fed_digest(
         request: Request, since: int = -1,
@@ -8255,7 +8280,7 @@ def register_v2_routes(app: FastAPI) -> None:
             since_seq=since,
             limit=_FED_DIGEST_PAGE,
             is_open=(
-                (lambda ann: not claims.is_claimed(ann.announcement_id))
+                (lambda ann: not claims.is_unavailable(ann.announcement_id))
                 if claims is not None
                 else None
             ),
@@ -8300,7 +8325,7 @@ def register_v2_routes(app: FastAPI) -> None:
         for ann in pulled:
             key = announcement_federation_key(ann)
             if key in seen or (
-                claims is not None and claims.is_claimed(ann.announcement_id)
+                claims is not None and claims.is_unavailable(ann.announcement_id)
             ):
                 continue
             seen.add(key)
@@ -9665,7 +9690,7 @@ def register_v2_routes(app: FastAPI) -> None:
         import urllib.request
 
         from nth_dao.cap_token import (
-            encode_authorization_header, sign_cap_token,
+            CAP_NTH_RECEIPT_SIGN, encode_authorization_header, sign_cap_token,
         )
         from nth_dao.market.feed import MarketFeed
 
@@ -9711,7 +9736,8 @@ def register_v2_routes(app: FastAPI) -> None:
         #     防一条声明特权 scope 的公告让 hub 把特权铸进本节点 agent 的 token。
         #     正常公告(仅市场技能)不受影响;滥用公告会在 claim 端因能力不足
         #     被拒(fail-closed),恰为正确行为。
-        #  ② scope_task_id 绑到本公告 —— token 只为这次认领,不可挪用别的任务。
+        #  2. Bind scope_task_id to the ClaimReceipt's complete goal_id so
+        #     this token cannot authorize another receipt or task.
         #  ③ 短 TTL(5min):单次认领立即用,最小权限。
         market_caps = [
             c for c in (ann.capability_set or [])
@@ -9723,8 +9749,10 @@ def register_v2_routes(app: FastAPI) -> None:
             subject_did=agent_did,
             # 无能力门槛的公告(permissionless)给一个惰性占位,满足"非空"约束;
             # claim_announcement 对空 need_skills 任意 have 都通过,占位无副作用。
-            capabilities=market_caps or ["task:open"],
-            scope_task_id=announcement_id,
+            capabilities=[
+                *(market_caps or ["task:open"]), CAP_NTH_RECEIPT_SIGN,
+            ],
+            scope_task_id=f"market:claim:{announcement_id}",
             ttl_ms=300_000,
         )
         store = _state_cap_tokens_store(request)

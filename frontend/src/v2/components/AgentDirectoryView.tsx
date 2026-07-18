@@ -37,7 +37,13 @@ export interface AgentDirectoryViewProps {
   onScanLan: () => Promise<void> | void;
   /** Issue cap_token to this agent — pivots to Delegate view. */
   onIssueCap: (did: string) => void;
-  onSpawnBackend?: (kind: string) => Promise<void> | void;
+  onSpawnBackend?: (
+    kind: string,
+    options?: {
+      projectWorkdir: string;
+      workAccess: "read-only" | "workspace-write";
+    },
+  ) => Promise<void> | void;
   onStopAgent?: (agentId: string) => Promise<void> | void;
   /** Send a chat message to this agent — pivots to Chat view with
    *  the right conversation pre-selected (audit fix 2026-06-10,
@@ -110,6 +116,10 @@ export function AgentDirectoryView({
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState("");
   const [spawningKind, setSpawningKind] = useState<string | null>(null);
+  const [projectWorkdir, setProjectWorkdir] = useState("");
+  const [workAccess, setWorkAccess] = useState<"read-only" | "workspace-write">(
+    "workspace-write",
+  );
   const [stoppingAgentId, setStoppingAgentId] = useState<string | null>(null);
   const [selectedDid, setSelectedDid] = useState<string | null>(
     agents[0]?.did ?? null,
@@ -331,7 +341,15 @@ export function AgentDirectoryView({
     if (!onSpawnBackend) return;
     setSpawningKind(kind);
     try {
-      await onSpawnBackend(kind);
+      const selectedWorkdir = projectWorkdir.trim();
+      if (selectedWorkdir) {
+        await onSpawnBackend(kind, {
+          projectWorkdir: selectedWorkdir,
+          workAccess,
+        });
+      } else {
+        await onSpawnBackend(kind);
+      }
     } finally {
       setSpawningKind(null);
     }
@@ -490,6 +508,46 @@ export function AgentDirectoryView({
               }}
             >
               <div className="detail-section-label">Local backend startup</div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(260px, 1fr) 160px",
+                  gap: 8,
+                  marginTop: 8,
+                }}
+              >
+                <input
+                  aria-label="Agent project folder"
+                  placeholder={t(
+                    "Absolute project path, e.g. C:\\Workspaces\\my-project",
+                    "Absolute project path, e.g. C:\\Workspaces\\my-project",
+                  )}
+                  value={projectWorkdir}
+                  onChange={(event) => setProjectWorkdir(event.target.value)}
+                  spellCheck={false}
+                  className="mono"
+                />
+                <select
+                  aria-label="Agent project access"
+                  value={workAccess}
+                  onChange={(event) => setWorkAccess(
+                    event.target.value as "read-only" | "workspace-write",
+                  )}
+                >
+                  <option value="workspace-write">
+                    {t("Workspace write", "Workspace write")}
+                  </option>
+                  <option value="read-only">
+                    {t("Read only", "Read only")}
+                  </option>
+                </select>
+              </div>
+              <p className="muted" style={{ fontSize: 10, margin: "6px 0 0" }}>
+                {t(
+                  "The folder is locked when the Agent starts; Channel replies reuse this project boundary. Leave blank for the launcher default.",
+                  "The folder is locked when the Agent starts; Channel replies reuse this project boundary. Leave blank for the launcher default.",
+                )}
+              </p>
               <div
                 style={{
                   display: "grid",
@@ -994,6 +1052,29 @@ export function AgentDirectoryView({
                     {selected.has_active_cap ? t("是", "yes") : t("否", "no")}
                   </span>
                 </div>
+                {selected.supervised && (
+                  <>
+                    <div className="detail-row">
+                      <span className="key">{t("Project folder", "Project folder")}</span>
+                      <span
+                        className="value"
+                        title={selected.work_scope_root || ""}
+                        style={{
+                          maxWidth: 190,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {selected.work_scope_root || t("Agent sandbox", "Agent sandbox")}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="key">{t("Project access", "Project access")}</span>
+                      <span className="value">{selected.work_access || "—"}</span>
+                    </div>
+                  </>
+                )}
               </div>
               {/* UI 集成（2026-06-13）：派任务 + 流式输出。只对有 a2a_port
                   的 supervised 在线 agent 显示（hub 可路由 + 注入 cap_token）。 */}

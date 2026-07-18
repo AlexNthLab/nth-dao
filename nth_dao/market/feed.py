@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from nth_dao.market.announcement import (
+    NTH_ANNOUNCEMENT_KIND_V3,
     TaskAnnouncement,
     verify_announcement,
 )
@@ -66,7 +67,8 @@ class MarketFeed:
     def __init__(
         self, root: PathLike, *, spine: "Optional[SignedEventLog]" = None,
     ) -> None:
-        self.root = Path(root) / "market_feed"
+        self.workspace = Path(root)
+        self.root = self.workspace / "market_feed"
         self.root.mkdir(parents=True, exist_ok=True)
         self.log_path = self.root / "announcements.jsonl"
         # Phase 2 影子双写:接线后 publish 同时把公告记入 spine(可选,默认关)。
@@ -90,6 +92,7 @@ class MarketFeed:
                 f"refusing to publish unverifiable announcement "
                 f"{ann.announcement_id!r}: {reason}"
             )
+        self._require_listing_binding(ann)
         # safe_append_jsonl 持锁 + fsync：跨进程并发发布安全，且
         # crash 不会丢已确认的 append。
         safe_append_jsonl(self.log_path, ann.to_dict())
@@ -268,8 +271,7 @@ class MarketFeed:
                 out.append((seq, None))
         return out
 
-    @staticmethod
-    def _safe_parse(seq: int, raw: Optional[dict]) -> Optional[TaskAnnouncement]:
+    def _safe_parse(self, seq: int, raw: Optional[dict]) -> Optional[TaskAnnouncement]:
         """把一行 raw dict 解析成已验签的公告；任何问题返回 None。"""
         if not isinstance(raw, dict):
             return None
@@ -286,4 +288,28 @@ class MarketFeed:
                 "market feed seq=%d failed verify (%s) — dropping", seq, reason,
             )
             return None
+        try:
+            self._require_listing_binding(ann)
+        except ValueError as exc:
+            logger.warning(
+                "market feed seq=%d failed listing binding (%s) - dropping",
+                seq,
+                exc,
+            )
+            return None
         return ann
+
+    def _require_listing_binding(self, ann: TaskAnnouncement) -> None:
+        if ann.kind != NTH_ANNOUNCEMENT_KIND_V3:
+            return
+        from nth_dao.commerce.listing import ListingStore
+        from nth_dao.commerce.listing_announcement import (
+            verify_listing_announcement_binding,
+        )
+
+        listing = ListingStore(self.workspace).get(ann.offer_digest)
+        if listing is None:
+            raise ValueError("commerce announcement has no verified local listing")
+        ok, reason = verify_listing_announcement_binding(listing, ann)
+        if not ok:
+            raise ValueError(reason)

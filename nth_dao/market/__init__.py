@@ -25,6 +25,10 @@ credits），而是在其旁边补齐"主动市场"缺的部分：
 
 from nth_dao.market.announcement import (
     TaskAnnouncement,
+    NTH_ANNOUNCEMENT_KIND_V1,
+    NTH_ANNOUNCEMENT_KIND_V2,
+    NTH_ANNOUNCEMENT_KIND_V3,
+    announcement_listing_type,
     sign_announcement,
     verify_announcement,
     announcement_federation_key,
@@ -69,6 +73,7 @@ from nth_dao.market.claim import (
     claim_announcement,
     sign_claim_receipt,
     record_foreign_claim,
+    verify_claim_record,
     ClaimStore,
     ClaimOutcome,
     ClaimConflict,
@@ -103,6 +108,10 @@ from nth_dao.market.claim_ack import (
 __all__ = [
     # M1
     "TaskAnnouncement",
+    "NTH_ANNOUNCEMENT_KIND_V1",
+    "NTH_ANNOUNCEMENT_KIND_V2",
+    "NTH_ANNOUNCEMENT_KIND_V3",
+    "announcement_listing_type",
     "sign_announcement",
     "verify_announcement",
     "announcement_federation_key",
@@ -131,6 +140,7 @@ __all__ = [
     "claim_announcement",
     "sign_claim_receipt",
     "record_foreign_claim",
+    "verify_claim_record",
     "ClaimStore",
     "ClaimOutcome",
     "ClaimConflict",

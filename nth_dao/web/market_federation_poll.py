@@ -368,6 +368,7 @@ def _pull_from_peer_snapshot(
     if not refs:
         return []
     out: List[TaskAnnouncement] = []
+    verified_listings: Dict[str, Any] = {}
     keyed = [r["federation_key"] for r in refs if r.get("federation_key")]
     legacy_ids = [r["announcement_id"] for r in refs if not r.get("federation_key")]
     for parameter, values in (("keys", keyed), ("ids", legacy_ids)):
@@ -401,7 +402,13 @@ def _pull_from_peer_snapshot(
                     )
                     return None
                 vok, _ = verify_announcement(ann)
-                if vok and ann.effective_authority_did() == expected_source_did:
+                if (
+                    vok
+                    and ann.effective_authority_did() == expected_source_did
+                    and _verify_pulled_listing(
+                        base, ann, http_get, verified_listings,
+                    )
+                ):
                     out.append(ann)
                 elif vok:
                     logger.warning(
@@ -415,6 +422,42 @@ def _pull_from_peer_snapshot(
                 else:
                     return None
     return out
+
+
+def _verify_pulled_listing(
+    base: str,
+    ann: TaskAnnouncement,
+    http_get: HttpGetJson,
+    verified_listings: Dict[str, Any],
+) -> bool:
+    """Resolve and bind commerce summaries; legacy task announcements pass."""
+    from nth_dao.market.announcement import NTH_ANNOUNCEMENT_KIND_V3
+
+    if ann.kind != NTH_ANNOUNCEMENT_KIND_V3:
+        return True
+    from nth_dao.commerce.listing import SignedListing
+    from nth_dao.commerce.listing_announcement import (
+        listing_offer_uri,
+        verify_listing_announcement_binding,
+    )
+
+    if ann.offer_uri != listing_offer_uri(ann.offer_digest):
+        return False
+    listing = verified_listings.get(ann.offer_digest)
+    if listing is None:
+        try:
+            raw = http_get(f"{base}{ann.offer_uri}")
+            listing = SignedListing.from_dict(raw)
+        except (OSError, TypeError, ValueError, urllib.error.URLError):
+            return False
+    ok, _ = verify_listing_announcement_binding(listing, ann)
+    if not ok:
+        return False
+    # Cache the immutable listing bytes, not the binding result. Every signed
+    # announcement must still be rebound: the same seller can sign multiple
+    # summaries for one digest, and only some may match its price/type/expiry.
+    verified_listings[ann.offer_digest] = listing
+    return True
 
 
 def pull_from_peer(

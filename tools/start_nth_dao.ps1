@@ -10,7 +10,8 @@ param(
     [string] $CodexModel = "gpt-5.4",
     [int] $CodexTimeoutSeconds = 240,
     [string] $HermesModel = "deepseek-v4-flash",
-    [string] $HermesToolsets = "safe"
+    [string] $HermesToolsets = "safe",
+    [string] $AgentWorkdir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,7 +52,13 @@ if (-not $env:NTH_HERMES_MODEL) {
 if (-not $env:NTH_HERMES_TOOLSETS) {
     $env:NTH_HERMES_TOOLSETS = $HermesToolsets
 }
-if (-not $env:NTH_AGENT_WORKDIR) {
+if ($AgentWorkdir) {
+    $resolvedAgentWorkdir = Resolve-Path -LiteralPath $AgentWorkdir -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $resolvedAgentWorkdir -PathType Container)) {
+        throw "AgentWorkdir must name an existing directory: $AgentWorkdir"
+    }
+    $env:NTH_AGENT_WORKDIR = [string] $resolvedAgentWorkdir
+} elseif (-not $env:NTH_AGENT_WORKDIR) {
     $env:NTH_AGENT_WORKDIR = $RepoRoot
 }
 

@@ -55,8 +55,10 @@ from nth_dao.market.match import match
 from nth_dao.market.subscription import MarketSubscription
 
 try:
+    from nacl.exceptions import BadSignatureError as _BadSignatureError
     from nacl.signing import VerifyKey as _VerifyKey
 except ImportError:  # pragma: no cover
+    _BadSignatureError = ValueError  # type: ignore[assignment,misc]
     _VerifyKey = None  # type: ignore[assignment]
 
 
@@ -77,14 +79,18 @@ _MAX_DIGEST_CAPABILITIES = 64
 _MAX_DIGEST_CAPABILITY_CHARS = 128
 _MAX_DIGEST_CONTEXT_CHARS = 128
 _MAX_DIGEST_ASSET_CHARS = 64
+_MAX_DIGEST_AVAILABILITY_BYTES = 4 * 1024
 _FEDERATION_KEY_PREFIX = "nth-ann-sha256:"
 _FEDERATION_KEY_CHARS = len(_FEDERATION_KEY_PREFIX) + 64
 
 # ref 里只放匹配需要的字段（刻意不含 input_schema / acceptance）。
 _REF_FIELDS = (
-    "announcement_id", "publisher_did", "authority_did", "capability_set", "context",
-    "reward_minor", "reward_asset", "published_at_ms", "not_after",
+    "kind", "announcement_id", "publisher_did", "authority_did",
+    "capability_set", "context", "reward_minor", "reward_asset",
+    "published_at_ms", "not_after", "listing_type", "offer_digest",
+    "price_minor", "price_asset", "availability_summary",
 )
+_REF_ALLOWED_FIELDS = frozenset((*_REF_FIELDS, "federation_key"))
 
 
 @dataclass
@@ -104,7 +110,9 @@ class FeedDigest:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FeedDigest":
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        if not isinstance(data, dict) or not set(data).issubset(known):
+            raise ValueError("feed digest has unknown fields")
+        return cls(**data)
 
     def signing_body(self) -> Dict[str, Any]:
         return {k: v for k, v in self.to_dict().items() if k != "digest_sig"}
@@ -123,6 +131,8 @@ def _digest_uint(value: Any) -> bool:
 
 def _validate_digest_ref(ref: Any) -> bool:
     if not isinstance(ref, dict):
+        return False
+    if not set(ref).issubset(_REF_ALLOWED_FIELDS):
         return False
     if not _digest_text(
         ref.get("announcement_id"), minimum=1, maximum=_MAX_DIGEST_ID_CHARS,
@@ -173,6 +183,52 @@ def _validate_digest_ref(ref: Any) -> bool:
         return False
     if not _digest_uint(ref.get("not_after")):
         return False
+    # Historical nth-feed-digest-v1 refs did not carry announcement kind.
+    # Absence therefore means a legacy v2 summary, not an invalid digest.
+    kind = ref.get("kind", "nth-task-announcement-v2")
+    if kind not in {
+        "nth-task-announcement-v1",
+        "nth-task-announcement-v2",
+        "nth-task-announcement-v3",
+    }:
+        return False
+    listing_type = ref.get("listing_type", "")
+    offer_digest = ref.get("offer_digest", "")
+    price_asset = ref.get("price_asset", "")
+    availability = ref.get("availability_summary", {})
+    if kind == "nth-task-announcement-v3":
+        if not set((*_REF_FIELDS, "federation_key")).issubset(ref):
+            return False
+        if listing_type not in {"product", "service"}:
+            return False
+        if not (
+            isinstance(offer_digest, str)
+            and len(offer_digest) == 71
+            and offer_digest.startswith("sha256:")
+            and all(ch in "0123456789abcdef" for ch in offer_digest[7:])
+        ):
+            return False
+        if not _digest_uint(ref.get("price_minor")):
+            return False
+        if not _digest_text(price_asset, minimum=1, maximum=_MAX_DIGEST_ASSET_CHARS):
+            return False
+        if not isinstance(availability, dict):
+            return False
+        try:
+            if len(canonical_json(availability)) > _MAX_DIGEST_AVAILABILITY_BYTES:
+                return False
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            return False
+        if (
+            ref.get("price_minor") != ref.get("reward_minor")
+            or price_asset != ref.get("reward_asset")
+        ):
+            return False
+    elif (
+        listing_type != "" or offer_digest != "" or ref.get("price_minor", 0) != 0
+        or price_asset != "" or availability != {}
+    ):
+        return False
     return True
 
 
@@ -200,7 +256,8 @@ def _validate_digest_schema(
         if not _digest_text(digest.digest_sig, minimum=1, maximum=128):
             return False, REJECT_DIGEST_MISSING_FIELD
         try:
-            if len(b64u_decode(digest.digest_sig)) != 64:
+            decoded = b64u_decode(digest.digest_sig)
+            if len(decoded) != 64 or b64u_encode(decoded) != digest.digest_sig:
                 return False, REJECT_DIGEST_SIG_DECODE_FAILED
         except (TypeError, ValueError, UnicodeError):
             return False, REJECT_DIGEST_SIG_DECODE_FAILED
@@ -301,7 +358,7 @@ def verify_digest(digest: FeedDigest) -> Tuple[bool, str]:
         _VerifyKey(bytes.fromhex(src_hex)).verify(
             canonical_json(digest.signing_body()), sig_bytes,
         )
-    except Exception:  # noqa: BLE001
+    except (_BadSignatureError, TypeError, ValueError, UnicodeError):
         return False, REJECT_DIGEST_SIG_INVALID
     return True, ""
 
@@ -323,12 +380,22 @@ def _ref_to_partial_ann(ref: Dict[str, Any]) -> TaskAnnouncement:
         announcement_id=_safe_str(ref.get("announcement_id")),
         publisher_did=_safe_str(ref.get("publisher_did")),
         title="",
+        kind=_safe_str(ref.get("kind")) or "nth-task-announcement-v2",
         capability_set=_safe_str_list(ref.get("capability_set")),
         context=_safe_str(ref.get("context")) or "general",
         reward_minor=_safe_int(ref.get("reward_minor")),
         reward_asset=_safe_str(ref.get("reward_asset")) or "credit",
         published_at_ms=_safe_int(ref.get("published_at_ms")),
         not_after=_safe_int(ref.get("not_after")),
+        listing_type=_safe_str(ref.get("listing_type")),
+        offer_digest=_safe_str(ref.get("offer_digest")),
+        price_minor=_safe_int(ref.get("price_minor")),
+        price_asset=_safe_str(ref.get("price_asset")),
+        availability_summary=(
+            dict(ref.get("availability_summary"))
+            if isinstance(ref.get("availability_summary"), dict)
+            else {}
+        ),
     )
 
 

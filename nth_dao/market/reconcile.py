@@ -87,16 +87,33 @@ def reconcile_market(
     for ann in feed.poll(
         since_seq=-1, limit=None, now_ms_override=now_ms_override,
     ).announcements:
-        if claim_store.is_claimed(ann.announcement_id):
+        if claim_store.is_unavailable(ann.announcement_id):
             continue
         feed_open.add(ann.announcement_id)
 
     proj = MarketAnnounceProjection()
     for ev in spine.read_all():
         proj.apply(ev)
-    spine_open = {
+    spine_open_raw = {
         a.announcement_id for a in proj.open(now_ms_override=now_ms_override)
     }
+    occupied = {
+        ann.announcement_id
+        for ann in feed.poll(
+            since_seq=-1, limit=None, include_expired=True,
+            now_ms_override=now_ms_override,
+        ).announcements
+        if claim_store.is_unavailable(ann.announcement_id)
+    }
+    corrupt_claim_slots = sorted(
+        aid for aid in occupied if claim_store.get(aid) is None
+    )
+    _, spine_claims = _spine_known(spine)
+    claim_projection_gaps = sorted(
+        aid for aid in occupied
+        if claim_store.get(aid) is not None and aid not in spine_claims
+    )
+    spine_open = spine_open_raw - occupied
 
     only_feed = sorted(feed_open - spine_open)
     only_spine = sorted(spine_open - feed_open)
@@ -106,5 +123,12 @@ def reconcile_market(
         "in_both": len(feed_open & spine_open),
         "only_in_feed": only_feed,
         "only_in_spine": only_spine,
-        "in_sync": not only_feed and not only_spine,
+        "corrupt_claim_slots": corrupt_claim_slots,
+        "claim_projection_gaps": claim_projection_gaps,
+        "in_sync": (
+            not only_feed
+            and not only_spine
+            and not corrupt_claim_slots
+            and not claim_projection_gaps
+        ),
     }

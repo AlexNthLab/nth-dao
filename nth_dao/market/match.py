@@ -24,7 +24,7 @@ machine-readable reason，便于 UI/日志解释"为什么这条没推给我"。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from nth_dao.market.announcement import TaskAnnouncement
 from nth_dao.market.subscription import MarketSubscription

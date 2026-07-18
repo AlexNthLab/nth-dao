@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,7 @@ from nth_dao.market import (
     REJECT_SKILL_INSUFFICIENT,
     CLAIM_STATUS_CLAIMED,
 )
+from nth_dao.util.io import atomic_write_json
 
 pytest.importorskip("nacl")
 
@@ -97,6 +99,95 @@ def test_claim_success_returns_verifiable_receipt(tmp_path) -> None:
     assert rec["status"] == CLAIM_STATUS_CLAIMED
     assert rec["claimant_did"] == claimant.as_did()
     assert rec["receipt_id"] == out.receipt["receipt_id"]
+
+
+def test_claim_refuses_to_overwrite_unreadable_cas_slot(tmp_path) -> None:
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="issuer")
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    ann = _publish(feed, publisher)
+    token = _token_for(issuer, claimant)
+    atomic_write_json(store._path(ann.announcement_id), {"status": "claimed"})
+
+    with pytest.raises(ClaimConflict, match="unreadable claim record"):
+        claim_announcement(
+            feed,
+            store,
+            ann.announcement_id,
+            claimant=claimant,
+            cap_token=token,
+        )
+    assert store.get(ann.announcement_id) is None
+
+
+def test_claim_store_rejects_top_level_forgery_even_with_valid_receipt(
+    tmp_path,
+) -> None:
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="issuer")
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    impostor = AgentIdentity.generate(label="impostor")
+    ann = _publish(feed, publisher)
+    out = claim_announcement(
+        feed,
+        store,
+        ann.announcement_id,
+        claimant=claimant,
+        cap_token=_token_for(issuer, claimant),
+    )
+    forged = dict(out.claim_record)
+    forged["claimant_did"] = impostor.as_did()
+    atomic_write_json(store._path(ann.announcement_id), forged)
+
+    assert store.get(ann.announcement_id) is None
+    assert store.is_unavailable(ann.announcement_id)
+    assert store.all_records() == []
+
+
+def test_claim_store_can_bind_record_to_authoritative_announcement(tmp_path) -> None:
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="issuer")
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    ann = _publish(feed, publisher, reward=42)
+    claim_announcement(
+        feed,
+        store,
+        ann.announcement_id,
+        claimant=claimant,
+        cap_token=_token_for(issuer, claimant),
+    )
+
+    assert store.get(ann.announcement_id, announcement=ann) is not None
+    conflicting = replace(ann, reward_minor=999)
+    assert store.get(ann.announcement_id, announcement=conflicting) is None
+    assert store.is_unavailable(ann.announcement_id)
+
+
+def test_corrupt_current_claim_cannot_fall_back_to_legacy_record(tmp_path) -> None:
+    feed = MarketFeed(tmp_path)
+    store = ClaimStore(tmp_path)
+    issuer = AgentIdentity.generate(label="issuer")
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    ann = _publish(feed, publisher)
+    outcome = claim_announcement(
+        feed,
+        store,
+        ann.announcement_id,
+        claimant=claimant,
+        cap_token=_token_for(issuer, claimant),
+    )
+    atomic_write_json(store._legacy_path(ann.announcement_id), outcome.claim_record)
+    atomic_write_json(store._path(ann.announcement_id), {"status": "corrupt"})
+
+    assert store.get(ann.announcement_id) is None
+    assert store.all_records() == []
 
 
 def test_claim_receipt_payload_pins_economics(tmp_path) -> None:

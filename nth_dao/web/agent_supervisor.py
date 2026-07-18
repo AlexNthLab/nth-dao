@@ -65,7 +65,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -223,6 +222,7 @@ class AgentRecord:
             "provider_state": self.provider_state,
             "provider_checked_at": self.provider_checked_at,
             "work_scope_id": self.work_scope.scope_id,
+            "work_scope_root": self.work_scope.root,
             "work_access": self.work_scope.access,
             "work_revision": self.work_scope.revision,
         }

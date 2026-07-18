@@ -49,6 +49,7 @@ from nth_dao.cap_token import verify_cap_token
 from nth_dao.execution_receipt import (
     TimelineEntry, now_ms, sign_receipt, verify_receipt,
 )
+from nth_dao.did_key import is_did_key
 from nth_dao.market.announcement import TaskAnnouncement
 from nth_dao.market.projection import EVENT_MARKET_CLAIM
 from nth_dao.market.vocabulary import normalize_capability
@@ -73,6 +74,15 @@ REJECT_CLAIMANT_BELOW_POLICY = "claimant-below-policy"  # 信誉不满足发布�
 REJECT_CLAIMANT_REP_MISSING = "claimant-reputation-missing"  # 有门槛但没给信誉
 
 CLAIM_STATUS_CLAIMED = "claimed"
+_CLAIM_RECORD_FIELDS = frozenset({
+    "announcement_id", "status", "claimant_did", "publisher_did",
+    "cap_token_id", "claimed_at_ms", "receipt_id", "receipt",
+})
+_CLAIM_TIMELINE_PAYLOAD_FIELDS = frozenset({
+    "announcement_id", "claimant_did", "publisher_did", "cap_token_id",
+    "capability_set", "reward_minor", "reward_asset", "mission_id",
+    "claimed_at_ms",
+})
 
 
 def _spine_record_claim(
@@ -159,19 +169,51 @@ class ClaimStore:
     @staticmethod
     def _record_for(
         path: Path, announcement_id: str,
+        announcement: Optional[TaskAnnouncement] = None,
     ) -> Optional[Dict[str, Any]]:
         record = safe_load_json(path, fallback=None)
         if not isinstance(record, dict):
             return None
         if record.get("announcement_id") != announcement_id:
             return None
+        ok, reason = verify_claim_record(record, announcement=announcement)
+        if not ok:
+            logger.warning(
+                "claim record %s failed verification: %s", announcement_id, reason,
+            )
+            return None
         return record
 
-    def get(self, announcement_id: str) -> Optional[Dict[str, Any]]:
-        current = self._record_for(self._path(announcement_id), announcement_id)
-        if current is not None:
+    def get(
+        self,
+        announcement_id: str,
+        *,
+        announcement: Optional[TaskAnnouncement] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Load a valid claim, optionally binding it to an authoritative announcement."""
+        current_path = self._path(announcement_id)
+        current = self._record_for(
+            current_path, announcement_id, announcement,
+        )
+        # The collision-resistant namespace is authoritative once present.
+        # Falling back after a malformed current record would let stale legacy
+        # state mask corruption or a conflicting migration result.
+        if current is not None or current_path.exists():
             return current
-        return self._record_for(self._legacy_path(announcement_id), announcement_id)
+        return self._record_for(
+            self._legacy_path(announcement_id), announcement_id, announcement,
+        )
+
+    def has_record_file(self, announcement_id: str) -> bool:
+        """Return whether the claim CAS slot is occupied, valid or not."""
+        return (
+            self._path(announcement_id).exists()
+            or self._legacy_path(announcement_id).exists()
+        )
+
+    def is_unavailable(self, announcement_id: str) -> bool:
+        """Fail closed for discovery when a claim slot cannot be trusted."""
+        return self.has_record_file(announcement_id)
 
     @contextmanager
     def locked_path(self, announcement_id: str) -> Iterator[Path]:
@@ -191,14 +233,20 @@ class ClaimStore:
 
         损坏/无法解析的文件静默略过。顺序不保证。
         """
-        by_id: Dict[str, Dict[str, Any]] = {}
+        candidate_ids: set[str] = set()
         for p in self.root.glob("*.json"):
             rec = safe_load_json(p, fallback=None)
-            if not isinstance(rec, dict):
+            ok, _ = verify_claim_record(rec)
+            if not ok:
                 continue
             announcement_id = rec.get("announcement_id")
             if isinstance(announcement_id, str) and announcement_id:
-                by_id.setdefault(announcement_id, rec)
+                candidate_ids.add(announcement_id)
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for announcement_id in sorted(candidate_ids):
+            rec = self.get(announcement_id)
+            if rec is not None:
+                by_id[announcement_id] = rec
         return list(by_id.values())
 
 
@@ -302,7 +350,7 @@ def claim_announcement(
     # ── 3+4. CAS + 签收据 + 落盘（锁内一次完成）──
     claimed_at = now_ms_override or now_ms()
     with claim_store.locked_path(announcement_id) as path:
-        existing = claim_store.get(announcement_id)
+        existing = claim_store.get(announcement_id, announcement=ann)
         if existing is not None:
             # 已有认领记录
             if existing.get("claimant_did") == claimant_did:
@@ -315,6 +363,10 @@ def claim_announcement(
             raise ClaimConflict(
                 f"announcement {announcement_id} already claimed by "
                 f"{existing.get('claimant_did')}"
+            )
+        if claim_store.has_record_file(announcement_id):
+            raise ClaimConflict(
+                f"announcement {announcement_id} has an unreadable claim record"
             )
 
         # CAS 胜者：签 ClaimReceipt（约束 E）
@@ -556,7 +608,7 @@ def record_foreign_claim(
 
     # 8. CAS（落盘传入的 receipt，不重签）
     with claim_store.locked_path(announcement_id) as path:
-        existing = claim_store.get(announcement_id)
+        existing = claim_store.get(announcement_id, announcement=ann)
         if existing is not None:
             if existing.get("claimant_did") == claimant_did:
                 return ClaimOutcome(
@@ -564,13 +616,17 @@ def record_foreign_claim(
             raise ClaimConflict(
                 f"announcement {announcement_id} already claimed by "
                 f"{existing.get('claimant_did')}")
+        if claim_store.has_record_file(announcement_id):
+            raise ClaimConflict(
+                f"announcement {announcement_id} has an unreadable claim record"
+            )
         claim_record = {
             "announcement_id": announcement_id,
             "status": CLAIM_STATUS_CLAIMED,
             "claimant_did": claimant_did,
             "publisher_did": ann.publisher_did,
             "cap_token_id": str(cap_token.get("token_id", "")),
-            "claimed_at_ms": int(claimed_at),
+            "claimed_at_ms": int(signed_claimed_at),
             "receipt_id": receipt.get("receipt_id", ""),
             "receipt": receipt,   # 外部预签收据，原样落盘（自带签名，篡改即失效）
             "foreign": True,      # 标记：跨 DAO 认领
@@ -579,3 +635,86 @@ def record_foreign_claim(
         # Phase 2c 影子双写:CAS 成功后把认领记入 spine(best-effort)。
         _spine_record_claim(spine, claim_record)
         return ClaimOutcome(claim_record=claim_record, receipt=receipt)
+
+
+def verify_claim_record(
+    record: Any,
+    *,
+    announcement: Optional[TaskAnnouncement] = None,
+) -> tuple[bool, str]:
+    """Verify one persisted claim as a signed, internally bound statement."""
+    if not isinstance(record, dict):
+        return False, "claim record must be an object"
+    allowed_fields = set(_CLAIM_RECORD_FIELDS)
+    if record.get("foreign") is True:
+        allowed_fields.add("foreign")
+    if set(record) != allowed_fields:
+        return False, "claim record has missing or unknown fields"
+    if record.get("status") != CLAIM_STATUS_CLAIMED:
+        return False, "claim status is invalid"
+
+    announcement_id = record.get("announcement_id")
+    claimant_did = record.get("claimant_did")
+    publisher_did = record.get("publisher_did")
+    cap_token_id = record.get("cap_token_id")
+    claimed_at_ms = record.get("claimed_at_ms")
+    receipt_id = record.get("receipt_id")
+    if not isinstance(announcement_id, str) or not announcement_id:
+        return False, "claim announcement_id is invalid"
+    if not isinstance(claimant_did, str) or not is_did_key(claimant_did):
+        return False, "claim claimant_did is invalid"
+    if not isinstance(publisher_did, str) or not is_did_key(publisher_did):
+        return False, "claim publisher_did is invalid"
+    if not isinstance(cap_token_id, str) or not cap_token_id:
+        return False, "claim cap_token_id is invalid"
+    if type(claimed_at_ms) is not int or claimed_at_ms <= 0:
+        return False, "claim timestamp is invalid"
+    if not isinstance(receipt_id, str) or not receipt_id:
+        return False, "claim receipt_id is invalid"
+
+    receipt = record.get("receipt")
+    if not isinstance(receipt, dict) or not verify_receipt(receipt):
+        return False, "claim receipt is invalid"
+    if receipt.get("receipt_id") != receipt_id:
+        return False, "claim receipt_id mismatch"
+    if receipt.get("signer_did") != claimant_did:
+        return False, "claim signer mismatch"
+    if receipt.get("goal_id") != f"market:claim:{announcement_id}":
+        return False, "claim receipt goal mismatch"
+    cap_token = receipt.get("authorizing_cap_token")
+    if not isinstance(cap_token, dict) or cap_token.get("token_id") != cap_token_id:
+        return False, "claim capability token mismatch"
+
+    timeline = receipt.get("timeline")
+    if not isinstance(timeline, list) or len(timeline) != 1:
+        return False, "claim receipt timeline is invalid"
+    entry = timeline[0]
+    if not isinstance(entry, dict) or set(entry) != {"timestamp", "type", "payload"}:
+        return False, "claim receipt entry is malformed"
+    if entry.get("type") != "nth.task_claimed" or entry.get("timestamp") != claimed_at_ms:
+        return False, "claim receipt event mismatch"
+    payload = entry.get("payload")
+    if not isinstance(payload, dict) or set(payload) != _CLAIM_TIMELINE_PAYLOAD_FIELDS:
+        return False, "claim receipt payload is malformed"
+    expected_top_level = {
+        "announcement_id": announcement_id,
+        "claimant_did": claimant_did,
+        "publisher_did": publisher_did,
+        "cap_token_id": cap_token_id,
+        "claimed_at_ms": claimed_at_ms,
+    }
+    for key, expected in expected_top_level.items():
+        if payload.get(key) != expected:
+            return False, f"claim receipt payload mismatch: {key}"
+    if announcement is not None:
+        if announcement.announcement_id != announcement_id:
+            return False, "claim announcement mismatch"
+        expected_timeline = [
+            item.to_dict()
+            for item in _claim_timeline(
+                announcement, claimant_did, cap_token_id, claimed_at_ms,
+            )
+        ]
+        if timeline != expected_timeline:
+            return False, "claim receipt does not bind authoritative announcement"
+    return True, "ok"

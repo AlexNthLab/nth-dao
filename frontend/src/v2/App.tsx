@@ -1012,13 +1012,23 @@ function AppInner() {
 
   /* ── agent directory handlers (audit fix M14/M15 2026-06-10):
    *    silent console.log replaced with user-visible toasts. ─── */
-  async function handleSpawnBackend(kind: string) {
+  async function handleSpawnBackend(
+    kind: string,
+    options?: {
+      projectWorkdir: string;
+      workAccess: "read-only" | "workspace-write";
+    },
+  ) {
     try {
       const res = await spawnAgent({
         kind,
         label: `${kind} helper`,
         capabilities: ["a2a:message_send"],
         persist: true,
+        ...(options ? {
+          project_workdir: options.projectWorkdir,
+          work_access: options.workAccess,
+        } : {}),
       });
       setAgents((prev) => [
         res.agent,

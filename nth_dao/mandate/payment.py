@@ -445,6 +445,8 @@ def complete_triad_chain(
     intent: Dict[str, Any],
     cart: Dict[str, Any],
     payment: Dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
 ) -> Tuple[bool, str]:
     """End-to-end gate: verify the entire Intent->Cart->Payment chain.
 
@@ -519,9 +521,9 @@ def complete_triad_chain(
     # authority. Treat malformed timestamps as invalid too: a verifier
     # that cannot establish the validity window must fail closed.
     for label, status in (
-        ("intent", intent_expiry_status(intent)),
-        ("cart", cart_expiry_status(cart)),
-        ("payment", payment_expiry_status(payment)),
+        ("intent", intent_expiry_status(intent, now=now)),
+        ("cart", cart_expiry_status(cart, now=now)),
+        ("payment", payment_expiry_status(payment, now=now)),
     ):
         if status == ExpiryStatus.EXPIRED:
             return False, f"{label}: expired"

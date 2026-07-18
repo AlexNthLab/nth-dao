@@ -188,5 +188,8 @@ def test_claim_store_reads_matching_legacy_record_only(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert store.is_claimed("task:a-b")
+    # Historical records without a signed receipt occupy the CAS slot but can
+    # no longer be promoted to trusted claim state.
+    assert not store.is_claimed("task:a-b")
+    assert store.is_unavailable("task:a-b")
     assert store.get("task-a-b") is None

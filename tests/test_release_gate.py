@@ -36,6 +36,15 @@ def test_content_scan_detects_private_material_and_local_paths():
     }
 
 
+def test_content_scan_detects_source_escaped_windows_user_path():
+    findings = release_gate.scan_text(
+        "sample.py",
+        'WORKDIR = "C:\\\\Users\\\\LocalOperator\\\\workspace"',
+    )
+
+    assert _reasons(findings) == {"Windows user path"}
+
+
 def test_content_scan_ignores_documented_names_and_short_test_keys():
     findings = release_gate.scan_text(
         "test.py",
@@ -111,3 +120,36 @@ def test_dirty_entries_reports_untracked_files(tmp_path):
     (tmp_path / "new.txt").write_text("local", encoding="utf-8")
 
     assert any("new.txt" in entry for entry in release_gate.dirty_entries(tmp_path))
+
+
+def test_allow_dirty_scan_still_checks_untracked_sensitive_files(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "identity.json").write_text(
+        "-----BEGIN " + "PRIVATE KEY-----\nsecret",
+        encoding="utf-8",
+    )
+
+    findings = release_gate.scan_untracked_tree(tmp_path)
+
+    assert "sensitive credential/runtime filename" in _reasons(findings)
+    assert "private-key marker" in _reasons(findings)
+
+
+def test_tracked_scan_checks_staged_bytes_not_only_worktree(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    path = tmp_path / "config.txt"
+    path.write_text("-----BEGIN " + "PRIVATE KEY-----\nsecret", encoding="utf-8")
+    subprocess.run(["git", "add", "config.txt"], cwd=tmp_path, check=True)
+    path.write_text("safe worktree content", encoding="utf-8")
+
+    findings = release_gate.scan_tracked_tree(tmp_path)
+
+    assert any(
+        finding.location == "index:config.txt"
+        and finding.reason == "private-key marker"
+        for finding in findings
+    )

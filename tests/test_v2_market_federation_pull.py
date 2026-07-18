@@ -16,13 +16,21 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from nth_dao.identity import AgentIdentity, crypto_available
+from nth_dao.commerce.listing import (
+    ListingStore, SignedListing, listing_digest, sign_listing,
+)
+from nth_dao.commerce.listing_announcement import (
+    listing_offer_uri, publish_listing_announcement,
+)
 from nth_dao.b64u import b64u_encode
 from nth_dao.canonical_json import canonical_json
 from nth_dao.market.announcement import sign_announcement, verify_announcement
+from nth_dao.market.feed import MarketFeed
 from nth_dao.market.federation import FeedDigest
 from nth_dao.web import create_app
 from nth_dao.web.market_federation_poll import (
-    FederationCache, FederationCycleReport, federate_once, pull_from_peer,
+    FederationCache, FederationCycleReport, _verify_pulled_listing,
+    federate_once, pull_from_peer,
 )
 from nth_dao.util.io import atomic_write_json
 
@@ -60,6 +68,100 @@ def test_pull_from_peer_returns_verified(tmp_path: Path) -> None:
     got = [a for a in anns if a.announcement_id == aid]
     assert got, "联邦拉取应拿到 B 的公告"
     assert verify_announcement(got[0])[0]  # 全文 publisher_sig 验过
+
+
+def test_pull_from_peer_resolves_and_binds_full_commerce_listing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "b"
+    app = create_app(root, require_console_auth=False)
+    b = TestClient(app)
+    seller = app.state.nth.node_identity
+    listing = sign_listing(
+        seller,
+        SignedListing(
+            listing_id="remote-review",
+            listing_type="service",
+            seller_did=seller.as_did(),
+            title="Remote review",
+            description="One review",
+            price_value="2",
+            price_currency="USDC",
+            settlement_methods=["x402:usdc"],
+            published_at_ms=1_000,
+            not_after_ms=9_999_999_999_999,
+        ),
+    )
+    ann = publish_listing_announcement(
+        ListingStore(root),
+        MarketFeed(root),
+        seller=seller,
+        listing=listing,
+        capability_set=["code_review"],
+    )
+
+    pulled = pull_from_peer(
+        "https://peer-b.example",
+        _http_get_via(b),
+        expected_source_did=seller.as_did(),
+    )
+
+    assert [item.announcement_id for item in pulled] == [ann.announcement_id]
+
+
+def test_listing_cache_rebinds_every_signed_announcement(tmp_path: Path) -> None:
+    seller = AgentIdentity.generate(label="seller")
+    listing = sign_listing(
+        seller,
+        SignedListing(
+            listing_id="cached-offer",
+            listing_type="service",
+            seller_did=seller.as_did(),
+            title="Review",
+            description="One review",
+            price_value="2",
+            price_currency="USDC",
+            settlement_methods=["x402:usdc"],
+            published_at_ms=1_000,
+            not_after_ms=9_999_999_999_999,
+        ),
+    )
+    digest = listing_digest(listing)
+
+    def commerce_announcement(price_minor: int):
+        return sign_announcement(
+            publisher=seller,
+            title=listing.title,
+            description=listing.description,
+            kind="nth-task-announcement-v3",
+            listing_type=listing.listing_type,
+            offer_digest=digest,
+            offer_uri=listing_offer_uri(digest),
+            reward_minor=price_minor,
+            reward_asset="USDC",
+            price_minor=price_minor,
+            price_asset="USDC",
+            published_at_ms=listing.published_at_ms,
+            not_after=listing.not_after_ms,
+        )
+
+    valid = commerce_announcement(2_000_000)
+    mismatched = commerce_announcement(3_000_000)
+    cache = {}
+    fetches = 0
+
+    def fetch_listing(_url: str):
+        nonlocal fetches
+        fetches += 1
+        return listing.to_dict()
+
+    assert _verify_pulled_listing(
+        "https://seller.example", valid, fetch_listing, cache,
+    )
+    assert not _verify_pulled_listing(
+        "https://seller.example", mismatched, fetch_listing, cache,
+    )
+    assert fetches == 1
 
 
 def test_market_open_merges_federated_from_peer(tmp_path: Path) -> None:

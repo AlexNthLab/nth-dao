@@ -500,6 +500,7 @@ export interface AgentEntry {
   /** Effective child execution timeout selected by the hub for this backend. */
   ask_timeout_s?: number;
   work_scope_id?: string;
+  work_scope_root?: string;
   work_access?: "read-only" | "workspace-write" | string;
   work_revision?: string;
   /** Supervisor-local id used for stop/restart actions. */

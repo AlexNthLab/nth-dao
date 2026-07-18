@@ -101,6 +101,14 @@ def test_verify_digest_rejects_bad_source(tmp_path) -> None:
     assert reason == REJECT_DIGEST_BAD_SOURCE_DID
 
 
+def test_verify_digest_rejects_noncanonical_padded_signature(tmp_path) -> None:
+    source = AgentIdentity.generate(label="source")
+    digest = build_digest(MarketFeed(tmp_path), source)
+    digest.digest_sig += "=="
+
+    assert verify_digest(digest)[0] is False
+
+
 def test_digest_dict_roundtrip(tmp_path) -> None:
     feed = MarketFeed(tmp_path / "A")
     dao_a = AgentIdentity.generate(label="dao-A")

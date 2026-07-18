@@ -24,7 +24,7 @@ M5 能算的维度（全部从 M1-M4 已有的签名 claim 记录派生，不编
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from nth_dao.execution_receipt import verify_receipt

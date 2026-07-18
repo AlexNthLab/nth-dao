@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from nth_dao.execution_receipt import verify_receipt
 from nth_dao.identity import crypto_available
+from nth_dao.market.claim import ClaimStore
 from nth_dao.web import create_app
 
 pytestmark = pytest.mark.skipif(
@@ -97,6 +98,12 @@ def test_claim_closed_loop_agent_self_signs(tmp_path: Path) -> None:
         # 关键:认领方 DID == 这个 agent —— 它用自己的私钥签的(谁干谁签)。
         assert result.get("claimant_did") == agent_did
         assert result.get("receipt_id")
+        claim_record = ClaimStore(tmp_path).get(ann_id)
+        assert claim_record is not None
+        claim_token = claim_record["receipt"]["authorizing_cap_token"]
+        assert "nth:receipt_sign" in claim_token["capabilities"]
+        assert claim_token["scope_task_id"] == f"market:claim:{ann_id}"
+        assert verify_receipt(claim_record["receipt"])
         mission_id = result.get("mission_id")
         process_id = result.get("process_id")
         assert mission_id, cl.text

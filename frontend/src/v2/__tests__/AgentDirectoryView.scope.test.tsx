@@ -211,6 +211,60 @@ it("does not start a duplicate local backend that is already running", () => {
   expect(onSpawnBackend).not.toHaveBeenCalled();
 });
 
+it("passes an explicit project folder and access policy when starting", () => {
+  const onSpawnBackend = vi.fn();
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[]}
+        {...noopProps}
+        onSpawnBackend={onSpawnBackend}
+        backendStatuses={{
+          codex: {
+            kind: "codex",
+            label: "Codex",
+            ready: true,
+            available: true,
+            detail: "Ready.",
+          },
+        }}
+      />
+    </LangProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Agent project folder"), {
+    target: { value: "C:\\Workspaces\\sample-project" },
+  });
+  fireEvent.change(screen.getByLabelText("Agent project access"), {
+    target: { value: "read-only" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+  expect(onSpawnBackend).toHaveBeenCalledWith("codex", {
+    projectWorkdir: "C:\\Workspaces\\sample-project",
+    workAccess: "read-only",
+  });
+});
+
+it("shows the effective project boundary for a supervised agent", () => {
+  const project = "C:\\Workspaces\\sample-project";
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkScoped", {
+          supervised: true,
+          work_scope_root: project,
+          work_access: "workspace-write",
+        })]}
+        {...noopProps}
+      />
+    </LangProvider>,
+  );
+
+  expect(screen.getByTitle(project).textContent).toBe(project);
+  expect(screen.getByText("workspace-write")).toBeTruthy();
+});
+
 it("surfaces Hermes warmup status while an agent task is starting", async () => {
   let finishAsk!: (value: { text: string; backend: string; model: string }) => void;
   const onAskAgent = vi.fn((

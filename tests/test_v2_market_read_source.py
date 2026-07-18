@@ -11,6 +11,8 @@ pytest.importorskip("nacl")
 from fastapi.testclient import TestClient
 
 from nth_dao.web import create_app
+from nth_dao.market.claim import ClaimStore
+from nth_dao.util.io import atomic_write_json
 
 
 def _open_ids(client: TestClient) -> set:
@@ -64,3 +66,29 @@ def test_spine_source_fails_safe_to_feed(tmp_path: Path, monkeypatch) -> None:
     app.state.nth.spine = None              # 模拟 spine 缺失
     monkeypatch.setenv("NTH_MARKET_READ_SOURCE", "spine")
     assert aid in _open_ids(client)         # 回退 feed,照常可见
+
+
+def test_corrupt_claim_slot_is_hidden_by_both_sources_and_breaks_reconcile(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    response = client.post(
+        "/api/v2/market/announce",
+        json={"title": "claimed?", "capability_set": []},
+    )
+    aid = response.json()["announcement_id"]
+    store = ClaimStore(tmp_path)
+    atomic_write_json(store._path(aid), {
+        "announcement_id": aid,
+        "status": "claimed",
+        "claimant_did": "did:key:forged",
+    })
+
+    monkeypatch.delenv("NTH_MARKET_READ_SOURCE", raising=False)
+    assert aid not in _open_ids(client)
+    monkeypatch.setenv("NTH_MARKET_READ_SOURCE", "spine")
+    assert aid not in _open_ids(client)
+    report = client.get("/api/v2/market/reconcile").json()
+    assert report["in_sync"] is False
+    assert report["corrupt_claim_slots"] == [aid]

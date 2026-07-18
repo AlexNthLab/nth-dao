@@ -3225,6 +3225,8 @@ def _start_a2a_server(
                         capabilities=[
                             *ann.capability_set, CAP_NTH_RECEIPT_SIGN,
                         ],
+                        scope_task_id=f"market:claim:{ann.announcement_id}",
+                        ttl_ms=300_000,
                     )
                     receipt = sign_claim_receipt(ann, signer, cap)
                 except Exception as exc:  # noqa: BLE001

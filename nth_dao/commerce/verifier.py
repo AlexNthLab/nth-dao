@@ -22,7 +22,7 @@ outcome.checks)``。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt, verify_receipt
 from nth_dao.market.announcement import TaskAnnouncement

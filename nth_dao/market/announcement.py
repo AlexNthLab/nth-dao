@@ -30,8 +30,10 @@ from nth_dao.execution_receipt import now_ms
 from nth_dao.identity import _NACL_AVAILABLE
 
 try:
+    from nacl.exceptions import BadSignatureError as _BadSignatureError
     from nacl.signing import VerifyKey as _VerifyKey
 except ImportError:  # pragma: no cover - exercised only without pynacl
+    _BadSignatureError = ValueError  # type: ignore[assignment,misc]
     _VerifyKey = None  # type: ignore[assignment]
 
 
@@ -46,7 +48,11 @@ REJECT_ANN_SCHEMA_INVALID = "ann-schema-invalid"
 
 # 公告版本钉死，跨实现解析时用来识别 schema。
 NTH_ANNOUNCEMENT_KIND_V1 = "nth-task-announcement-v1"
-NTH_ANNOUNCEMENT_KIND = "nth-task-announcement-v2"
+NTH_ANNOUNCEMENT_KIND_V2 = "nth-task-announcement-v2"
+NTH_ANNOUNCEMENT_KIND_V3 = "nth-task-announcement-v3"
+# Preserve the historical default so existing callers do not silently change
+# their signed wire body. Commerce publishers opt in to v3 explicitly.
+NTH_ANNOUNCEMENT_KIND = NTH_ANNOUNCEMENT_KIND_V2
 
 _MAX_ANNOUNCEMENT_ID_CHARS = 256
 _MAX_DID_CHARS = 128
@@ -58,8 +64,11 @@ _MAX_CONTEXT_CHARS = 128
 _MAX_ASSET_CHARS = 64
 _MAX_MISSION_ID_CHARS = 256
 _MAX_POLICY_BYTES = 64 * 1024
+_MAX_AVAILABILITY_BYTES = 4 * 1024
+_MAX_OFFER_URI_CHARS = 2048
 _MAX_SIGNED_INT = (1 << 63) - 1
 _ANNOUNCEMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,255}\Z")
+_OFFER_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 def _bounded_text(value: Any, *, minimum: int = 0, maximum: int) -> bool:
@@ -130,6 +139,14 @@ class TaskAnnouncement:
     # The publisher signs which DAO is the claim/CAS authority. Legacy v1
     # records omit this field and therefore authorize only publisher_did.
     authority_did: str = ""
+    # v3 commerce discovery summary. These fields are absent from the signed
+    # v1/v2 body and must stay at their neutral defaults for legacy records.
+    listing_type: str = ""
+    offer_digest: str = ""
+    offer_uri: str = ""
+    price_minor: int = 0
+    price_asset: str = ""
+    availability_summary: Dict[str, Any] = field(default_factory=dict)
     # —— 客观匹配维度（Match 的"能力"侧，M2 用）——
     capability_set: List[str] = field(default_factory=list)
     context: str = "general"
@@ -161,9 +178,14 @@ class TaskAnnouncement:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TaskAnnouncement":
-        # 只取已知字段，忽略未来版本的额外字段（向前兼容）。
+        # Unknown fields are unsigned parser input, not forward-compatible
+        # extensions. Protocol evolution must introduce a new signed kind.
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        if not isinstance(data, dict) or not set(data).issubset(known):
+            raise ValueError("announcement has unknown fields")
+        # Missing fields retain dataclass defaults so historical v1/v2 wire
+        # records remain readable. New fields require a new signed `kind`.
+        return cls(**data)
 
     def signing_body(self) -> Dict[str, Any]:
         """签名覆盖的 body —— 除 publisher_sig 外的全部字段。
@@ -171,6 +193,12 @@ class TaskAnnouncement:
         canonical_json 内部 sort_keys，所以这里不需要手动排序。
         """
         body = {k: v for k, v in self.to_dict().items() if k != "publisher_sig"}
+        if self.kind in {NTH_ANNOUNCEMENT_KIND_V1, NTH_ANNOUNCEMENT_KIND_V2}:
+            for key in (
+                "listing_type", "offer_digest", "offer_uri", "price_minor",
+                "price_asset", "availability_summary",
+            ):
+                body.pop(key, None)
         if self.kind == NTH_ANNOUNCEMENT_KIND_V1:
             body.pop("authority_did", None)
         return body
@@ -197,7 +225,11 @@ def _validate_announcement_schema(
     guard prevents a legitimately signed but malformed object from reaching
     matching, expiry, persistence, or claim code.
     """
-    if ann.kind not in {NTH_ANNOUNCEMENT_KIND_V1, NTH_ANNOUNCEMENT_KIND}:
+    if ann.kind not in {
+        NTH_ANNOUNCEMENT_KIND_V1,
+        NTH_ANNOUNCEMENT_KIND_V2,
+        NTH_ANNOUNCEMENT_KIND_V3,
+    }:
         return False, REJECT_ANN_SCHEMA_INVALID
     if not _valid_announcement_id(ann):
         return False, REJECT_ANN_SCHEMA_INVALID
@@ -210,6 +242,36 @@ def _validate_announcement_schema(
         return False, REJECT_ANN_BAD_PUBLISHER_DID
     if not is_did_key(authority_did):
         return False, REJECT_ANN_BAD_PUBLISHER_DID
+    if ann.kind == NTH_ANNOUNCEMENT_KIND_V3:
+        if ann.listing_type not in {"product", "service"}:
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not isinstance(ann.offer_digest, str) or not _OFFER_DIGEST_PATTERN.fullmatch(ann.offer_digest):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not _bounded_text(
+            ann.offer_uri, minimum=1, maximum=_MAX_OFFER_URI_CHARS,
+        ):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not _valid_non_negative_int(ann.price_minor):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not _bounded_text(ann.price_asset, minimum=1, maximum=_MAX_ASSET_CHARS):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not _bounded_json_object(
+            ann.availability_summary,
+            maximum=_MAX_AVAILABILITY_BYTES,
+        ):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if ann.price_minor != ann.reward_minor or ann.price_asset != ann.reward_asset:
+            return False, REJECT_ANN_SCHEMA_INVALID
+    elif (
+        ann.listing_type != ""
+        or ann.offer_digest != ""
+        or ann.offer_uri != ""
+        or ann.price_minor != 0
+        or ann.price_asset != ""
+        or ann.availability_summary != {}
+    ):
+        # Never let a legacy signature authenticate v3-looking unsigned data.
+        return False, REJECT_ANN_SCHEMA_INVALID
     if not _bounded_text(ann.title, minimum=1, maximum=_MAX_TITLE_CHARS):
         return False, REJECT_ANN_SCHEMA_INVALID
     if not _bounded_text(ann.description, maximum=_MAX_DESCRIPTION_CHARS):
@@ -245,7 +307,8 @@ def _validate_announcement_schema(
         if not _bounded_text(ann.publisher_sig, minimum=1, maximum=128):
             return False, REJECT_ANN_MISSING_FIELD
         try:
-            if len(b64u_decode(ann.publisher_sig)) != 64:
+            decoded = b64u_decode(ann.publisher_sig)
+            if len(decoded) != 64 or b64u_encode(decoded) != ann.publisher_sig:
                 return False, REJECT_ANN_SIG_DECODE_FAILED
         except (TypeError, ValueError, UnicodeError):
             return False, REJECT_ANN_SIG_DECODE_FAILED
@@ -269,6 +332,13 @@ def sign_announcement(
     not_after: int = 0,
     announcement_id: str = "",
     published_at_ms: int = 0,
+    kind: str = NTH_ANNOUNCEMENT_KIND,
+    listing_type: str = "",
+    offer_digest: str = "",
+    offer_uri: str = "",
+    price_minor: int = 0,
+    price_asset: str = "",
+    availability_summary: Optional[Dict[str, Any]] = None,
 ) -> TaskAnnouncement:
     """构造并签名一条公告。
 
@@ -318,6 +388,12 @@ def sign_announcement(
         announcement_id=announcement_id or uuid.uuid4().hex,
         publisher_did=publisher.as_did(),
         authority_did=resolved_authority_did,
+        listing_type=listing_type,
+        offer_digest=offer_digest,
+        offer_uri=offer_uri,
+        price_minor=price_minor,
+        price_asset=price_asset,
+        availability_summary=dict(availability_summary or {}),
         title=title,
         capability_set=caps,
         context=resolved_context,
@@ -330,6 +406,7 @@ def sign_announcement(
         description=description,
         published_at_ms=published_at_ms or now_ms(),
         not_after=not_after,
+        kind=kind,
     )
     schema_ok, schema_reason = _validate_announcement_schema(
         ann, require_signature=False,
@@ -383,7 +460,16 @@ def verify_announcement(ann: TaskAnnouncement) -> Tuple[bool, str]:
         _VerifyKey(bytes.fromhex(pub_hex)).verify(
             canonical_json(ann.signing_body()), sig_bytes,
         )
-    except Exception:  # noqa: BLE001 - 验签失败即拒
+    except (_BadSignatureError, TypeError, ValueError, UnicodeError):
         return False, REJECT_ANN_SIG_INVALID
 
     return True, ""
+
+
+def announcement_listing_type(ann: TaskAnnouncement) -> str:
+    """Return the trusted listing type across v1/v2/v3 wire formats."""
+    if ann.kind == NTH_ANNOUNCEMENT_KIND_V3:
+        return ann.listing_type
+    schema = ann.input_schema if isinstance(ann.input_schema, dict) else {}
+    value = schema.get("__nth_listing_type", schema.get("listing_type", "task"))
+    return value if value in {"task", "service", "product"} else "task"

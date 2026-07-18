@@ -19,7 +19,7 @@ M5 阶段的"进度"= 认领状态（claimed / unclaimed），因为交付/验�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, List
 
 from nth_dao.market.claim import CLAIM_STATUS_CLAIMED
 
@@ -76,7 +76,7 @@ def mission_progress(
     claims: List[MissionClaim] = []
     for ann in announcements:
         aid = getattr(ann, "announcement_id", "")
-        rec = claim_store.get(aid)
+        rec = claim_store.get(aid, announcement=ann)
         if isinstance(rec, dict) and rec.get("status") == CLAIM_STATUS_CLAIMED:
             claims.append(MissionClaim(
                 announcement_id=aid,

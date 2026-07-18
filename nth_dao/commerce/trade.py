@@ -33,6 +33,7 @@ claimant/publisher 从中取出并绑定。一笔认领 → 一个 trade
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -47,8 +48,10 @@ from nth_dao.util.io import (
 )
 
 try:
+    from nacl.exceptions import BadSignatureError as _BadSignatureError
     from nacl.signing import VerifyKey as _VerifyKey
 except ImportError:  # pragma: no cover
+    _BadSignatureError = ValueError  # type: ignore[assignment,misc]
     _VerifyKey = None  # type: ignore[assignment]
 
 logger = logging.getLogger("nth_dao.commerce.trade")
@@ -56,6 +59,10 @@ logger = logging.getLogger("nth_dao.commerce.trade")
 PathLike = Union[str, Path]
 
 NTH_TRADE_EVENT_KIND = "nth-trade-event-v1"
+_TRADE_EVENT_FIELDS = frozenset({
+    "trade_id", "seq", "type", "actor_did", "prev_state", "new_state",
+    "payload", "created_at_ms", "kind", "event_sig",
+})
 
 # ── 状态 ──
 STATE_EXECUTING = "executing"
@@ -160,19 +167,23 @@ def verify_trade_event(event: TradeEvent) -> Tuple[bool, str]:
     hexk = decode_ed25519_did_key_hex(did) or ""
     if not hexk:
         return False, REJECT_EVENT_BAD_ACTOR_DID
+    if not isinstance(event.event_sig, str) or not (
+        1 <= len(event.event_sig) <= 128
+    ):
+        return False, REJECT_EVENT_SIG_INVALID
     try:
         sig = b64u_decode(str(event.event_sig))
+        if len(sig) != 64 or b64u_encode(sig) != event.event_sig:
+            return False, REJECT_EVENT_SIG_INVALID
         _VerifyKey(bytes.fromhex(hexk)).verify(
             canonical_json(event.signing_body()), sig,
         )
-    except Exception:  # noqa: BLE001
+    except (_BadSignatureError, TypeError, ValueError, UnicodeError):
         return False, REJECT_EVENT_SIG_INVALID
     return True, ""
 
 
 # ─── 存储 ───────────────────────────────────────────────────────
-
-import threading
 
 _LOCKS: Dict[str, threading.RLock] = {}
 _LOCK_GUARD = threading.Lock()
@@ -315,6 +326,10 @@ def _append_event(
     path = store._path(trade_id)
     with _thread_lock_for(str(path)), InterProcessLock(path):
         data = safe_load_json(path, fallback=None)
+        if path.exists() and not isinstance(data, dict):
+            raise TradeRejected(REJECT_CHAIN_BROKEN, "stored trade is unreadable")
+        if isinstance(data, dict) and not isinstance(data.get("events", []), list):
+            raise TradeRejected(REJECT_CHAIN_BROKEN, "stored trade events are malformed")
         events: List[Dict[str, Any]] = (
             data.get("events", []) if isinstance(data, dict) else []
         )
@@ -620,7 +635,12 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
     parties: Dict[str, str] = {}
     state = ""
     for i, raw in enumerate(events):
-        ev = TradeEvent.from_dict(raw)
+        if not isinstance(raw, dict) or set(raw) != _TRADE_EVENT_FIELDS:
+            return False, REJECT_CHAIN_BROKEN
+        try:
+            ev = TradeEvent.from_dict(raw)
+        except (TypeError, ValueError):
+            return False, REJECT_CHAIN_BROKEN
         # seq 单调
         if ev.seq != i:
             return False, REJECT_CHAIN_BROKEN

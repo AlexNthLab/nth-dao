@@ -290,6 +290,27 @@ def test_verify_trade_detects_tampered_event(tmp_path) -> None:
     assert reason == "event-sig-invalid"
 
 
+@pytest.mark.parametrize("event_sig", ["A" * 129, "AA", "valid-padded"])
+def test_trade_signature_input_is_bounded_and_exact_length(
+    tmp_path, event_sig
+) -> None:
+    store = TradeStore(tmp_path)
+    auth = AgentIdentity.generate(label="dao")
+    pub = AgentIdentity.generate(label="pub")
+    worker = AgentIdentity.generate(label="worker")
+    open_trade(store, authority=auth, claim_record=_claim("sig-bound", worker, pub))
+    path = store._path("sig-bound")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["events"][0]["event_sig"] = (
+        data["events"][0]["event_sig"] + "=="
+        if event_sig == "valid-padded"
+        else event_sig
+    )
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert verify_trade(store, "sig-bound") == (False, "event-sig-invalid")
+
+
 # ─── 并发 open ───────────────────────────────────────────────────
 
 
