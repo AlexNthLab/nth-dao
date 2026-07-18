@@ -1358,7 +1358,7 @@ def test_v2_receipt_persistor_drops_when_receipts_store_missing(
     )
     # Force the lazy supervisor build by accessing it (any GET that
     # touches it works; use the agents listing).
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
     client.get("/api/v2/agents")
     sup = app.state.v2_supervisor
     # Spawn an agent so we have a record to attach the receipt to.
@@ -2208,7 +2208,7 @@ def test_v2_decision_raiser_works_before_decisions_endpoint_touched(
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
         require_console_auth=False,
     )
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
     # Force the supervisor build but NOT the decisions store.
     client.get("/api/v2/agents")
     sup = app.state.v2_supervisor
@@ -2254,7 +2254,7 @@ def test_v2_decision_raiser_assigns_id_and_source(
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
         require_console_auth=False,
     )
-    client = TestClient(app)
+    client = _lifespan_client(app, request)
     # Force the lazy supervisor build by triggering a GET.
     client.get("/api/v2/agents")
     sup = app.state.v2_supervisor
