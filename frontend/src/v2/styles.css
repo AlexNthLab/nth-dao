@@ -1408,3 +1408,72 @@ select option {
   justify-content: center;
   min-width: 0;
 }
+
+/* Commerce workbench: a compact operational surface, not a storefront
+ * landing page. The layout follows the existing sidebar/main/detail shell. */
+.commerce-scope {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.commerce-scope button {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  color: var(--fg-secondary);
+  background: transparent;
+  text-align: left;
+}
+.commerce-scope button.active { color: var(--fg-primary); background: var(--bg-elevated); }
+.commerce-scope button span { font-family: var(--t-mono); font-size: 11px; color: var(--fg-tertiary); }
+.commerce-offer-row { display: grid; gap: 4px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.commerce-offer-row strong { font-size: 13px; overflow-wrap: anywhere; }
+.commerce-offer-row span, .commerce-offer-row code { font-size: 11px; color: var(--fg-tertiary); }
+.commerce-federated-offer small { color: var(--fg-tertiary); overflow-wrap: anywhere; }
+.commerce-federated-offer .btn { justify-self: start; }
+.commerce-delivery-claim pre {
+  max-height: 260px;
+  margin: 8px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.commerce-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.commerce-head-actions, .commerce-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.commerce-main { display: grid; align-content: start; gap: 16px; }
+.commerce-form { border-bottom: 1px solid var(--border); padding-bottom: 18px; }
+.commerce-form h2, .commerce-workbench h2 { margin: 0 0 12px; font-size: 18px; letter-spacing: 0; }
+.commerce-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.commerce-form-grid label, .commerce-target { display: grid; gap: 5px; min-width: 0; font-size: 12px; font-weight: 600; color: var(--fg-secondary); }
+.commerce-form-grid label.wide { grid-column: 1 / -1; }
+.commerce-form input, .commerce-form textarea, .commerce-workbench input, .commerce-workbench textarea {
+  width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm); background: var(--bg-panel); color: var(--fg-primary); font: inherit;
+}
+.commerce-form textarea, .commerce-workbench textarea { min-height: 92px; resize: vertical; }
+.commerce-form-actions { margin-top: 12px; }
+.commerce-order-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.commerce-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 16px 0; background: var(--border); border: 1px solid var(--border); }
+.commerce-facts div { min-width: 0; padding: 10px; background: var(--bg-panel); }
+.commerce-facts dt { font-size: 10px; text-transform: uppercase; color: var(--fg-tertiary); }
+.commerce-facts dd { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.commerce-action { margin: 16px 0; padding-top: 14px; border-top: 1px solid var(--border); }
+.commerce-action h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0; }
+.commerce-action .btn { margin-top: 8px; }
+.commerce-target { margin: 12px 0; }
+.commerce-timeline { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.commerce-timeline li { display: grid; gap: 3px; padding-left: 10px; border-left: 2px solid var(--accent-muted); }
+.commerce-timeline strong { font-size: 12px; overflow-wrap: anywhere; }
+.commerce-timeline span, .commerce-timeline code { font-size: 10px; color: var(--fg-tertiary); overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .commerce-head { display: grid; }
+  .commerce-head-actions { justify-content: flex-start; }
+  .commerce-form-grid, .commerce-facts { grid-template-columns: 1fr; }
+  .commerce-form-grid label.wide { grid-column: auto; }
+}

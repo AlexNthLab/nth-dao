@@ -36,9 +36,9 @@ function loadLang(): Lang {
     const v = localStorage.getItem(LANG_KEY);
     if (v === "zh" || v === "en") return v;
   } catch {
-    /* 隐私模式禁读 —— 降级默认中文 */
+    /* Private browsing may block storage; retain the English default. */
   }
-  return "zh";
+  return "en";
 }
 
 export function LangProvider({ children }: { children: ReactNode }) {
@@ -67,6 +67,6 @@ export function LangProvider({ children }: { children: ReactNode }) {
 /** 取语言上下文。必须在 LangProvider 内调用。 */
 export function useLang(): LangContextValue {
   const ctx = useContext(LangContext);
-  if (!ctx) throw new Error("useLang 必须在 LangProvider 内使用");
+  if (!ctx) throw new Error("useLang must be used within LangProvider");
   return ctx;
 }

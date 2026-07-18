@@ -88,14 +88,14 @@ describe("TasksView", () => {
         </ToastProvider>
       </LangProvider>,
     );
-    expect(screen.getByText(/认领成功后会进入 Missions/)).toBeTruthy();
+    expect(screen.getByText(/Claimed tasks move into Missions/)).toBeTruthy();
     // 公告卡片
     expect(await screen.findByText("review the auth PR")).toBeTruthy();
     expect(screen.getByText("look at the token check")).toBeTruthy();
     // 发布入口
-    expect(screen.getByText("+ 发布任务")).toBeTruthy();
+    expect(screen.getByText("+ Publish task")).toBeTruthy();
     // 认领按钮:无可用 agent(fetchAgents 返回 [])→ 禁用。
-    const claim = screen.getByText("认领") as HTMLButtonElement;
+    const claim = screen.getByText("Claim") as HTMLButtonElement;
     expect(claim.disabled).toBe(true);
   });
 
@@ -138,10 +138,10 @@ describe("TasksView", () => {
     );
 
     await screen.findByText("review the auth PR");
-    fireEvent.click(screen.getByText("认领"));
-    expect(await screen.findByText(/执行视图未完全写入/)).toBeTruthy();
-    expect(await screen.findByText(/Mission 执行视图写入失败/)).toBeTruthy();
-    expect(await screen.findByText(/Blackboard 协作现场写入失败/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Claim"));
+    expect(await screen.findByText(/execution view not fully persisted/)).toBeTruthy();
+    expect(await screen.findByText(/Mission execution view failed to persist/)).toBeTruthy();
+    expect(await screen.findByText(/Blackboard collaboration view failed to persist/)).toBeTruthy();
   });
 
   it("uses the content-bound key when claiming a federated task", async () => {
@@ -183,7 +183,7 @@ describe("TasksView", () => {
       </LangProvider>,
     );
     await screen.findByText("remote task");
-    fireEvent.click(screen.getByText("跨 DAO 认领"));
+    fireEvent.click(screen.getByText("claim (cross-DAO)"));
 
     await waitFor(() => expect(claimFederatedTask).toHaveBeenCalledWith(
       "shared-id",

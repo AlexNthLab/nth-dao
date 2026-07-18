@@ -24,16 +24,16 @@ describe("BlackboardView process creation", () => {
       </LangProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "新流程" }));
-    fireEvent.change(screen.getByPlaceholderText("例如:退款订单 #4521"), {
+    fireEvent.click(screen.getByRole("button", { name: "New process" }));
+    fireEvent.change(screen.getByPlaceholderText("e.g. Refund order #4521"), {
       target: { value: "Review DID invite" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "创建流程" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create process" }));
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     await waitFor(() => {
-      expect((screen.getByRole("button", { name: "创建中..." }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole("button", { name: "Creating..." }) as HTMLButtonElement).disabled).toBe(true);
     });
 
     await act(async () => {
@@ -42,8 +42,8 @@ describe("BlackboardView process creation", () => {
     });
 
     await waitFor(() => {
-      expect((screen.getByRole("button", { name: "创建流程" }) as HTMLButtonElement).disabled).toBe(false);
+      expect((screen.getByRole("button", { name: "Create process" }) as HTMLButtonElement).disabled).toBe(false);
     });
-    expect(screen.getByText("发起一个新流程")).toBeTruthy();
+    expect(screen.getByText("Start a new process")).toBeTruthy();
   });
 });

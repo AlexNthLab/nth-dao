@@ -139,6 +139,13 @@ export const IconBraces = (p: Props) => (
   </Svg>
 );
 
+export const IconShoppingBag = (p: Props) => (
+  <Svg {...p}>
+    <path d="M6 8V6a6 6 0 0 1 12 0v2" />
+    <path d="M4 8h16l1 13H3L4 8z" />
+  </Svg>
+);
+
 export const IconCopy = (p: Props) => (
   <Svg {...p}>
     <rect x="9" y="9" width="13" height="13" rx="2" />

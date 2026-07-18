@@ -30,6 +30,8 @@ import type {
   ChatMessage,
   Conversation,
   ConversationSummary,
+  CommerceListingRow,
+  CommerceOrderView,
   Decision,
   HandoffDetail,
   IdentityHeader,
@@ -269,6 +271,109 @@ export const fetchConversations = (s?: AbortSignal) =>
   getJson<Conversation[]>("/conversations", s);
 export const fetchMessages      = (convId: string, s?: AbortSignal) =>
   getJson<ChatMessage[]>(`/messages/${encodeURIComponent(convId)}`, s);
+
+export const fetchCommerceListings = (s?: AbortSignal) =>
+  getJson<CommerceListingRow[]>("/commerce/listings", s);
+
+export const fetchCommerceOrders = (
+  role?: "buyer" | "seller", signal?: AbortSignal,
+) => getJson<CommerceOrderView[]>(
+  `/commerce/orders${role ? `?role=${role}` : ""}`, signal,
+);
+
+export const fetchCommerceOrder = (orderId: string, signal?: AbortSignal) =>
+  getJson<CommerceOrderView>(`/commerce/orders/${encodeURIComponent(orderId)}`, signal);
+
+export function publishCommerceListing(input: {
+  listingId: string;
+  title: string;
+  description?: string;
+  priceValue: string;
+  capabilities?: string[];
+}) {
+  return postJson<{ digest: string; listing: unknown; warning: string }>(
+    "/commerce/listings",
+    {
+      listing_id: input.listingId,
+      title: input.title,
+      description: input.description ?? "",
+      price_value: input.priceValue,
+      capabilities: input.capabilities ?? [],
+    },
+  );
+}
+
+export function remoteCommerceCheckout(input: {
+  targetUrl: string;
+  listingDigest: string;
+  purpose?: string;
+  idempotencyKey: string;
+}) {
+  return postJson<{ order: CommerceOrderView; delivery: { status: string; error?: string }; warning: string }>(
+    "/commerce/checkout/remote",
+    {
+      target_url: input.targetUrl,
+      listing_digest: input.listingDigest,
+      purpose: input.purpose ?? "purchase digital service",
+      idempotency_key: input.idempotencyKey,
+    },
+  );
+}
+
+export function submitCommerceDelivery(
+  orderId: string, delivery: Record<string, unknown>, targetUrl = "",
+) {
+  return postJson<CommerceActionResult>(
+    `/commerce/orders/${encodeURIComponent(orderId)}/delivery`,
+    { delivery, target_url: targetUrl },
+  );
+}
+
+export function verifyCommerceDelivery(
+  orderId: string, verdict: "pass" | "fail", result: Record<string, unknown>, targetUrl = "",
+) {
+  return postJson<CommerceActionResult>(
+    `/commerce/orders/${encodeURIComponent(orderId)}/verify`,
+    { verdict, result, target_url: targetUrl },
+  );
+}
+
+export function settleCommerceOrder(orderId: string, targetUrl = "") {
+  return postJson<CommerceActionResult>(
+    `/commerce/orders/${encodeURIComponent(orderId)}/settle`,
+    { target_url: targetUrl },
+  );
+}
+
+export function disputeCommerceOrder(
+  orderId: string, reason: string, targetUrl = "",
+) {
+  return postJson<CommerceActionResult>(
+    `/commerce/orders/${encodeURIComponent(orderId)}/dispute`,
+    { reason, evidence: {}, target_url: targetUrl },
+  );
+}
+
+export function resolveCommerceDispute(
+  orderId: string, resolution: "settle" | "refund", targetUrl = "",
+) {
+  return postJson<CommerceActionResult>(
+    `/commerce/orders/${encodeURIComponent(orderId)}/resolve`,
+    { resolution, rationale: "Operator decision", target_url: targetUrl },
+  );
+}
+
+export interface CommerceActionResult {
+  order: CommerceOrderView;
+  warning: string;
+  queued?: { message_id: string; status: string; error?: string } | null;
+}
+
+export function dispatchCommerceOutbox() {
+  return postJson<Array<{ message_id: string; status: string; error?: string }>>(
+    "/commerce/outbox/dispatch",
+  );
+}
 
 /* ── Phase 2: decision resolve POSTs ──────────────────────────
  * Approve / reject / defer. The hub signs a receipt on approve

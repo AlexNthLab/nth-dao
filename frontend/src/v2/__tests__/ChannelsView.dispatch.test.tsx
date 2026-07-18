@@ -118,7 +118,7 @@ describe("ChannelsView durable dispatch phases", () => {
 
     await waitFor(() => expect(postChannelMessage).toHaveBeenCalled());
     expect(screen.queryByText(/No agent reply after/)).toBeNull();
-    expect(screen.queryByLabelText("agent thinking")).toBeNull();
+    expect(await screen.findByLabelText("agent thinking")).toBeTruthy();
   });
 
   it("uses message mentions instead of a separate recipient selector", async () => {

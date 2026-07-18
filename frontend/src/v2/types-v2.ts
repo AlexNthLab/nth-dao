@@ -306,6 +306,7 @@ export type NavId =
   | "inbox"
   | "missions"
   | "tasks"
+  | "commerce"
   | "rules"
   | "agents"
   | "channels"
@@ -314,6 +315,56 @@ export type NavId =
   | "reputation"
   | "contacts"
   | "chat";
+
+export interface CommerceListing {
+  listing_id: string;
+  listing_type: "service";
+  seller_did: string;
+  title: string;
+  description: string;
+  price_value: string;
+  price_currency: "NTH-TEST";
+  settlement_methods: ["manual:nth_test"];
+  details: Record<string, unknown>;
+  published_at_ms: number;
+  not_after_ms: number;
+  kind: string;
+  seller_sig: string;
+}
+
+export interface CommerceListingRow {
+  digest: string;
+  listing: CommerceListing;
+  source: string;
+}
+
+export interface CommerceTimelineEvent {
+  seq: number;
+  type: string;
+  actor_did: string;
+  state: string;
+  created_at_ms: number;
+  receipt_id: string;
+  details?: Record<string, unknown>;
+}
+
+export interface CommerceOrderView {
+  order_id: string;
+  role: "buyer" | "seller" | "observer";
+  state: string;
+  buyer_did: string;
+  seller_did: string;
+  listing_id: string;
+  listing_digest: string;
+  listing_type: "service";
+  title: string;
+  amount_minor: number;
+  currency: "NTH-TEST";
+  settlement_method: "manual:nth_test";
+  created_at_ms: number;
+  binding: string;
+  events: CommerceTimelineEvent[];
+}
 
 /** 频道(收编自 8765 群聊,/api/v2/channels)。 */
 export interface Channel {
@@ -363,6 +414,11 @@ export interface TaskAnnouncement {
   publisher_did: string;
   title: string;
   listing_type?: "task" | "service" | "product";
+  offer_digest?: string;
+  offer_uri?: string;
+  price_minor?: number;
+  price_asset?: string;
+  availability_summary?: Record<string, unknown>;
   description?: string;
   input_schema?: Record<string, unknown>;
   capability_set: string[];

@@ -36,6 +36,7 @@ import { loadChat, saveChat } from "./chatStore";
 import { loadSummaries, appendSummary } from "./summaryStore";
 import { AgentDirectoryView } from "./components/AgentDirectoryView";
 import { TasksView } from "./components/TasksView";
+import { CommerceView } from "./components/CommerceView";
 import { BlackboardView, type NewProcessDraft } from "./components/BlackboardView";
 import { ChatView } from "./components/ChatView";
 import { ChannelsView } from "./components/ChannelsView";
@@ -106,7 +107,7 @@ const ACTIVE_NAV_KEY = "nth.v2.activeNav";
 
 /** 合法 NavId 白名单——存进来的脏值/旧版本遗留值一律不认,降级默认页。 */
 const VALID_NAV_IDS: ReadonlySet<NavId> = new Set<NavId>([
-  "blackboard", "inbox", "missions", "tasks", "rules",
+  "blackboard", "inbox", "missions", "tasks", "commerce", "rules",
   "agents", "channels", "audit", "governance", "reputation", "contacts", "chat",
 ]);
 
@@ -1278,6 +1279,8 @@ function AppInner() {
     );
   } else if (active === "tasks") {
     view = <TasksView />;
+  } else if (active === "commerce") {
+    view = <CommerceView />;
   } else if (active === "agents") {
     view = (
       <AgentDirectoryView
@@ -1396,6 +1399,7 @@ function labelFor(id: NavId): string {
     case "inbox":      return "Decisions";
     case "missions":   return "Missions";
     case "tasks":      return "Tasks";
+    case "commerce":   return "Market";
     case "rules":      return "Rules";
     case "agents":     return "Agents";
     case "channels":   return "Channels";
