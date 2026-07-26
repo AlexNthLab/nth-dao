@@ -54,8 +54,8 @@ QQ/Agents @ Agent
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import socket
 import uuid
 from dataclasses import dataclass, field
@@ -73,6 +73,7 @@ DEFAULT_MESSAGES_DIR = "team_messages"
 TEAM_CHANNEL = "team"
 DM_PREFIX = "dm"
 GROUP_PREFIX = "group"
+CHANNEL_DIR_PREFIX = "channel-v2-"
 
 
 #
@@ -139,12 +140,28 @@ class ChannelMessage:
 
 
 def _channel_dir(channel: str) -> str:
-    """
+    """Return a collision-resistant, fixed-length storage key."""
+    _validate_channel(channel)
+    digest = hashlib.sha256(channel.encode("utf-8")).hexdigest()
+    return f"{CHANNEL_DIR_PREFIX}{digest}"
 
-    "team"       "team"
-    "group:backend"  "group--backend"
-    "dm:alice--bob"  "dm--alice--bob"
-    """
+
+def _validate_channel(channel: str) -> None:
+    if not isinstance(channel, str):
+        raise TypeError("channel must be a string")
+    if not channel:
+        raise ValueError("channel must not be empty")
+    if "\\" in channel:
+        raise ValueError("channel must not contain backslashes")
+    if channel in {".", ".."}:
+        raise ValueError("channel must not be a relative path component")
+    if any(ord(char) < 32 for char in channel):
+        raise ValueError("channel must not contain control characters")
+
+
+def _legacy_channel_dir(channel: str) -> str:
+    """Return the pre-v2 directory name for read-only compatibility."""
+    _validate_channel(channel)
     return channel.replace(":", "--").replace("/", "-")
 
 
@@ -280,30 +297,15 @@ class TeamChannel:
                → 现在先全部加载，按 timestamp 全局排序，再切 limit
             2) since_msg_id 在跨文件时可能漏掉 → 改成"先排序后切"
         """
-        dir_path = self.base_dir / _channel_dir(channel)
-        if not dir_path.exists():
-            return []
+        all_msgs = [
+            message
+            for message in self._iter_stored_messages(
+                self._channel_read_dirs(channel)
+            )
+            if message.channel == channel
+        ]
 
         # 1) 全部加载 + 按 timestamp 排序
-        all_msgs: List[ChannelMessage] = []
-        for file_path in sorted(dir_path.glob("*.jsonl")):
-            try:
-                lines = file_path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                try:
-                    all_msgs.append(ChannelMessage.from_dict(data))
-                except Exception:
-                    continue
-
         all_msgs.sort(key=lambda m: (m.timestamp, m.msg_id))
 
         # 2) 切 since 边界
@@ -340,21 +342,11 @@ class TeamChannel:
         Returns:
             {channel_name: [messages]}
         """
-        result = {}
-
-        if channels:
-            dirs = [_channel_dir(c) for c in channels]
-        else:
-            if not self.base_dir.exists():
-                return result
-            dirs = sorted(
-                d.name for d in self.base_dir.iterdir()
-                if d.is_dir() and not d.name.startswith(".")
-            )
-
-        for dir_name in dirs:
-            #
-            channel = dir_name.replace("--", ":", 1)
+        result: Dict[str, List[ChannelMessage]] = {}
+        # Preserve the historical contract: both None and [] mean
+        # "all channels"; a non-empty list is an explicit filter.
+        selected_channels = channels if channels else self.list_channels()
+        for channel in selected_channels:
             msgs = self.fetch(channel=channel, since=since, limit=limit_per_channel)
             if msgs:
                 result[channel] = msgs
@@ -380,28 +372,14 @@ class TeamChannel:
         target = agent_id or self.agent_id
         results = []
 
-        if not self.base_dir.exists():
-            return results
-
-        for dir_path in sorted(self.base_dir.iterdir()):
-            if not dir_path.is_dir() or dir_path.name.startswith("."):
+        for message in self._iter_stored_messages():
+            if target not in message.mentions:
                 continue
-            for file_path in sorted(dir_path.glob("*.jsonl")):
-                try:
-                    for line in file_path.read_text(encoding="utf-8").strip().split("\n"):
-                        if not line.strip():
-                            continue
-                        data = json.loads(line)
-                        mentions = data.get("mentions", [])
-                        if target not in mentions:
-                            continue
-                        if since and data.get("timestamp", "") <= since:
-                            continue
-                        results.append(ChannelMessage.from_dict(data))
-                        if len(results) >= limit:
-                            break
-                except Exception:
-                    continue
+            if since and message.timestamp <= since:
+                continue
+            results.append(message)
+            if len(results) >= limit:
+                break
 
         return results
 
@@ -425,30 +403,17 @@ class TeamChannel:
         results = []
         keyword_lower = keyword.lower()
 
-        dirs_to_search = (
-            [self.base_dir / _channel_dir(channel)]
-            if channel
-            else [d for d in self.base_dir.iterdir() if d.is_dir()]
-        )
-
-        for dir_path in dirs_to_search:
-            if not dir_path.exists():
+        dirs_to_search = self._channel_read_dirs(channel) if channel else None
+        for message in self._iter_stored_messages(dirs_to_search):
+            if channel and message.channel != channel:
                 continue
-            for file_path in sorted(dir_path.glob("*.jsonl")):
-                try:
-                    for line in file_path.read_text(encoding="utf-8").strip().split("\n"):
-                        if not line.strip():
-                            continue
-                        data = json.loads(line)
-                        if keyword_lower not in data.get("content", "").lower():
-                            continue
-                        if from_agent and data.get("from_agent") != from_agent:
-                            continue
-                        results.append(ChannelMessage.from_dict(data))
-                        if len(results) >= limit:
-                            return results
-                except Exception:
-                    continue
+            if keyword_lower not in message.content.lower():
+                continue
+            if from_agent and message.from_agent != from_agent:
+                continue
+            results.append(message)
+            if len(results) >= limit:
+                return results
 
         return results
 
@@ -456,36 +421,15 @@ class TeamChannel:
 
     def list_channels(self) -> List[str]:
         """"""
-        if not self.base_dir.exists():
-            return []
-        return sorted(
-            d.name.replace("--", ":", 1)
-            for d in self.base_dir.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        )
+        return sorted({message.channel for message in self._iter_stored_messages()})
 
     def stats(self) -> Dict[str, Any]:
         """"""
+        channels: Dict[str, int] = {}
         total_messages = 0
-        channels = {}
-
-        if self.base_dir.exists():
-            for dir_path in self.base_dir.iterdir():
-                if not dir_path.is_dir() or dir_path.name.startswith("."):
-                    continue
-                count = 0
-                for file_path in dir_path.glob("*.jsonl"):
-                    try:
-                        count += sum(
-                            1
-                            for line in file_path.read_text(encoding="utf-8").splitlines()
-                            if line.strip()
-                        )
-                    except Exception:
-                        pass
-                channel_name = dir_path.name.replace("--", ":", 1)
-                channels[channel_name] = count
-                total_messages += count
+        for message in self._iter_stored_messages():
+            channels[message.channel] = channels.get(message.channel, 0) + 1
+            total_messages += 1
 
         return {
             "total_messages": total_messages,
@@ -522,6 +466,54 @@ class TeamChannel:
         return removed
 
     #
+
+    def _channel_read_dirs(self, channel: str) -> List[Path]:
+        names = (_channel_dir(channel), _legacy_channel_dir(channel))
+        return [self.base_dir / name for name in dict.fromkeys(names)]
+
+    def _iter_stored_messages(
+        self,
+        directories: Optional[List[Path]] = None,
+    ) -> Iterator[ChannelMessage]:
+        if not self.base_dir.exists():
+            return
+        if directories is None:
+            directories = sorted(
+                path
+                for path in self.base_dir.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            )
+
+        seen: set[str] = set()
+        for directory in directories:
+            try:
+                is_directory = directory.is_dir()
+            except OSError:
+                continue
+            if not is_directory:
+                continue
+            for file_path in sorted(directory.glob("*.jsonl")):
+                try:
+                    lines = file_path.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    continue
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        message = ChannelMessage.from_dict(json.loads(line))
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        continue
+                    key = json.dumps(
+                        message.to_dict(),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield message
 
     def _append(self, msg: ChannelMessage) -> None:
         """ JSONL """
