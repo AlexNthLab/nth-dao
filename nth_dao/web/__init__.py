@@ -14,6 +14,7 @@ import hmac
 import json
 import secrets
 import socket
+import threading
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -838,6 +839,93 @@ class MandateVerifyPayload(BaseModel):
     actor_id: str
 
 
+class _MDNSPublisher:
+    """Own a non-blocking mDNS advertisement for one web app."""
+
+    def __init__(self, state: WebState) -> None:
+        self._state = state
+        self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._responder: Optional[Any] = None
+
+    def start(self) -> None:
+        with self._lock:
+            if self._responder is not None:
+                return
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._cancel.clear()
+            thread = threading.Thread(
+                target=self._run,
+                name="nth-mdns-publisher",
+                daemon=True,
+            )
+            self._thread = thread
+        thread.start()
+
+    def stop(self) -> None:
+        self._cancel.set()
+        with self._lock:
+            responder = self._responder
+            self._responder = None
+            self._state.mdns_responder = None
+            thread = self._thread
+        if responder is not None:
+            try:
+                responder.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("mDNS responder stop failed: %s", exc)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.25)
+            if thread.is_alive():
+                logger.debug("mDNS publisher is still finishing in background")
+
+    def _run(self) -> None:
+        responder = _build_mdns_responder(self._state)
+        if responder is None:
+            self._clear_thread()
+            return
+        try:
+            responder.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "LAN DID publish failed; node will NOT be discoverable "
+                "on the local network: %s",
+                exc,
+            )
+            self._clear_thread()
+            return
+
+        with self._lock:
+            cancelled = self._cancel.is_set()
+            if not cancelled:
+                self._responder = responder
+                self._state.mdns_responder = responder
+            self._thread = None
+        if cancelled:
+            try:
+                responder.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("cancelled mDNS responder stop failed: %s", exc)
+            return
+
+        logger.info(
+            "LAN DID publish active: network_id=%s did=%s "
+            "pubkey_prefix=%s label=%r "
+            "(set NTH_LAN_PUBLISH=0 to disable, "
+            "NTH_LAN_LABEL=<text> to customise label)",
+            getattr(responder, "agent_id", "?"),
+            getattr(responder, "did", "") or "?",
+            (getattr(responder, "pubkey_hex", "") or "?")[:16],
+            getattr(responder, "label", ""),
+        )
+
+    def _clear_thread(self) -> None:
+        with self._lock:
+            self._thread = None
+
+
 def create_app(
     workspace: str | Path | None = None,
     *,
@@ -853,22 +941,15 @@ def create_app(
     root = _resolve_safe_workspace(workspace)
     state = WebState(root)
     _bootstrap(state)
+    mdns_publisher = _MDNSPublisher(state)
 
-    # LAN DID publish (2026-06-07): withdraw the mDNS advertisement
-    # when the process exits so stale records do not outlive us. atexit
-    # covers normal interpreter shutdown; FastAPI lifespan covers uvicorn
-    # shutdown/reload. Both call the same idempotent helper.
+    # Network services are owned by FastAPI lifespan, not create_app().
+    # This keeps application construction side-effect free and prevents
+    # tests/tools that only inspect the ASGI app from leaking mDNS threads.
+    # While lifespan is active, a per-app atexit callback still protects
+    # normal interpreter shutdown.
     import atexit as _atexit
-
-    def _stop_responder() -> None:
-        responder = getattr(state, "mdns_responder", None)
-        if responder is None:
-            return
-        try:
-            responder.stop()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("mDNS responder stop failed: %s", exc)
-        state.mdns_responder = None
+    shutdown_registered = False
 
     def _shutdown_runtime(app_instance: FastAPI) -> None:
         """Stop durable dispatch workers before tearing down the hub.
@@ -900,12 +981,20 @@ def create_app(
                 supervisor.shutdown()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent supervisor shutdown failed: %s", exc)
-        _stop_responder()
+        mdns_publisher.stop()
+
+    def _shutdown_at_exit() -> None:
+        _shutdown_runtime(app)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        nonlocal shutdown_registered
         v2_runtime = None
         try:
+            mdns_publisher.start()
+            if not shutdown_registered:
+                _atexit.register(_shutdown_at_exit)
+                shutdown_registered = True
             try:
                 from . import v2_api as v2_runtime
 
@@ -929,6 +1018,9 @@ def create_app(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("federation runtime shutdown failed: %s", exc)
             _shutdown_runtime(_app)
+            if shutdown_registered:
+                _atexit.unregister(_shutdown_at_exit)
+                shutdown_registered = False
 
     app = FastAPI(
         title="NTH DAO Console",
@@ -938,7 +1030,6 @@ def create_app(
     )
     app.add_middleware(_FederationBodyLimitMiddleware)
 
-    _atexit.register(_shutdown_runtime, app)
     app.state.nth = state
     app.state.nth_console_token = _load_or_create_console_token()
     app.state.nth_require_console_auth = require_console_auth
@@ -3179,6 +3270,76 @@ def create_app(
     return app
 
 
+def _build_mdns_responder(state: WebState) -> Optional[Any]:
+    """Build an mDNS responder without performing network I/O."""
+    if os.environ.get("NTH_LAN_PUBLISH", "1").strip() == "0":
+        return None
+    if state.node_identity is None:
+        return None
+
+    try:
+        from ..discovery.lan_mdns import MDNSDiscovery, is_available
+
+        if not is_available():
+            logger.info(
+                "LAN DID publish skipped: install ``zeroconf`` "
+                "(pip install zeroconf) to make this node discoverable "
+                "on the local network",
+            )
+            return None
+
+        config = state.membership.load_config()
+        node_did = _safe_did(state.node_identity)
+        node_pk = getattr(state.node_identity, "pubkey_hex", "") or ""
+        raw_agent_id = getattr(state.node_identity, "agent_id", "")
+        node_network_id = (
+            str(raw_agent_id) if raw_agent_id else DEFAULT_ADMIN_ID
+        )
+
+        custom_label = os.environ.get("NTH_LAN_LABEL", "").strip()
+        if custom_label == "team_name":
+            advertised_label = getattr(config, "team_name", "") or "NTH DAO"
+        elif custom_label:
+            advertised_label = custom_label[:60]
+        else:
+            advertised_label = "NTH DAO node"
+
+        federation_base_url = _configured_public_base_url()
+        federation_metadata = {}
+        if federation_base_url:
+            federation_metadata = {
+                "http_url": federation_base_url,
+                "federation_url": federation_base_url,
+                "agent_card_url": (
+                    f"{federation_base_url}/.well-known/agent.json"
+                ),
+            }
+        else:
+            logger.info(
+                "LAN DID publish has no HTTP federation URL; set "
+                "NTH_PUBLIC_BASE_URL or bind with NTH_HOST + "
+                "NTH_ALLOW_REMOTE_BIND=1 for cross-PC task discovery",
+            )
+
+        return MDNSDiscovery(
+            agent_id=node_network_id,
+            label=advertised_label,
+            capabilities=["nth-dao", "nth-dao-federation"],
+            groups=["home"],
+            ws_url=federation_base_url,
+            pubkey_hex=node_pk,
+            did=node_did,
+            metadata=federation_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "LAN DID publish setup failed; node will NOT be discoverable "
+            "on the local network: %s",
+            exc,
+        )
+        return None
+
+
 def _bootstrap(state: WebState) -> None:
     # ── DID bootstrap (2026-06-07) ────────────────────────────────────────
     # Each fresh install must own a unique Ed25519 keypair persisted to
@@ -3319,112 +3480,6 @@ def _bootstrap(state: WebState) -> None:
         if not ok:
             logger.debug("echo-agent join skipped (membership policy)")
 
-    # ── LAN DID publish (2026-06-07) ──────────────────────────────────────
-    # Make this node DISCOVERABLE on the local network. Without this,
-    # a peer's /api/agents/lan_discover only ever returns peers that
-    # ALSO chose to announce - which they never would on a fresh install.
-    # The mDNS responder embeds our did:key in the TXT record so any
-    # NTH DAO browsing the LAN learns "the host at 192.168.x.y is DID
-    # did:key:zXYZ" in a single round.
-    #
-    # Disabled when:
-    #   * NTH_LAN_PUBLISH=0      operator opt-out (e.g. shared coffee-shop wifi)
-    #   * pynacl / zeroconf missing  graceful degradation
-    #   * node_identity is None      no DID to publish anyway
-    state.mdns_responder = None
-    publish_enabled = os.environ.get("NTH_LAN_PUBLISH", "1").strip() != "0"
-    if publish_enabled and state.node_identity is not None:
-        try:
-            from ..discovery.lan_mdns import MDNSDiscovery, is_available
-            if not is_available():
-                logger.info(
-                    "LAN DID publish skipped: install ``zeroconf`` "
-                    "(pip install zeroconf) to make this node "
-                    "discoverable on the local network",
-                )
-            else:
-                node_did = _safe_did(state.node_identity)
-                node_pk = getattr(state.node_identity, "pubkey_hex", "") or ""
-                # R-25 (2026-06-08): use the node identity's own
-                # agent_id (random per-install hex like "27c71290e1ab")
-                # rather than the hard-coded DEFAULT_ADMIN_ID ("admin").
-                # Two nodes that BOTH advertised "admin" used to
-                # collide - a discoverer would filter the peer out
-                # treating them as self because the agent_id matched.
-                # The random per-install id solves that AND gives an
-                # operator a stable network handle separate from the
-                # human-facing "admin" role.
-                #
-                # ``state.node_identity.agent_id`` is an ``AgentID``
-                # value object, not a bare str. mDNS service info
-                # interpolation needs a string so we coerce via str().
-                _raw_agent_id = getattr(state.node_identity, "agent_id", "")
-                node_network_id = (
-                    str(_raw_agent_id) if _raw_agent_id else DEFAULT_ADMIN_ID
-                )
-                # R-26 (2026-06-08): the prior code broadcast the raw
-                # workspace ``team_name`` in mDNS TXT. team_name can
-                # be PII / business-sensitive ("Alice's Secret M&A
-                # DAO"). mDNS is plaintext on the LAN, so anyone with
-                # a packet sniffer or even ``dns-sd -B _nth-dao._tcp``
-                # would see it.
-                #
-                # New posture: by default we advertise a generic
-                # opaque label. Operators who genuinely want to set a
-                # custom label (e.g. for in-house clusters that share
-                # a trusted LAN) opt in via NTH_LAN_LABEL. Setting
-                # NTH_LAN_LABEL=team_name is the legacy behaviour.
-                custom_label = os.environ.get("NTH_LAN_LABEL", "").strip()
-                if custom_label == "team_name":
-                    advertised_label = (
-                        getattr(config, "team_name", "") or "NTH DAO"
-                    )
-                elif custom_label:
-                    advertised_label = custom_label[:60]
-                else:
-                    advertised_label = "NTH DAO node"
-                federation_base_url = _configured_public_base_url()
-                federation_metadata = {}
-                if federation_base_url:
-                    federation_metadata = {
-                        "http_url": federation_base_url,
-                        "federation_url": federation_base_url,
-                        "agent_card_url": (
-                            f"{federation_base_url}/.well-known/agent.json"
-                        ),
-                    }
-                else:
-                    logger.info(
-                        "LAN DID publish has no HTTP federation URL; set "
-                        "NTH_PUBLIC_BASE_URL or bind with NTH_HOST + "
-                        "NTH_ALLOW_REMOTE_BIND=1 for cross-PC task discovery",
-                    )
-                responder = MDNSDiscovery(
-                    agent_id=node_network_id,
-                    label=advertised_label,
-                    capabilities=["nth-dao", "nth-dao-federation"],
-                    groups=["home"],
-                    ws_url=federation_base_url,
-                    pubkey_hex=node_pk,
-                    did=node_did,
-                    metadata=federation_metadata,
-                )
-                responder.start()
-                state.mdns_responder = responder
-                logger.info(
-                    "LAN DID publish active: network_id=%s did=%s "
-                    "pubkey_prefix=%s label=%r "
-                    "(set NTH_LAN_PUBLISH=0 to disable, "
-                    "NTH_LAN_LABEL=<text> to customise label)",
-                    node_network_id, node_did or "?",
-                    node_pk[:16] or "?", advertised_label,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "LAN DID publish failed; node will NOT be discoverable "
-                "on the local network: %s", exc,
-            )
-            state.mdns_responder = None
 
 
 def _require_member_or_joinable(state: WebState, agent_id: str) -> None:

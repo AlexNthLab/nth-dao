@@ -11,18 +11,17 @@ Pins:
   * The discoverer reads ``did`` from incoming hello messages
   * MDNSDiscovery threads ``did`` through TXT props
   * Both backends default ``did=""`` for legacy compatibility
-  * The web ``_bootstrap`` opens (and the shutdown hook closes) an
-    mDNS responder when zeroconf is installed AND NTH_LAN_PUBLISH != 0
+  * The web lifespan opens and closes an mDNS responder when zeroconf
+    is installed AND NTH_LAN_PUBLISH != 0
   * ``/api/agents/lan_discover`` surfaces ``did`` and ``pubkey_prefix``
     in the peer rows
 """
 
 from __future__ import annotations
 
-import json
+import atexit
+import threading
 from dataclasses import fields as dataclass_fields
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -69,7 +68,6 @@ def test_LAN_DID_udp_discover_reads_did_from_hello(monkeypatch):
     """When a hello message arrives carrying ``did``, the resulting
     LANPeer must surface it."""
     # Drive the listener loop manually with a synthetic message.
-    d = LANDiscovery(agent_id="bob")
     fake_msg = {
         "type": "nth-dao-hello",
         "v": 1,
@@ -152,32 +150,31 @@ def test_LAN_DID_mdns_unpack_uses_did_for_peer():
     )
 
 
-# ===== web bootstrap: responder runs by default =====
+# ===== web lifespan: responder runs only while the server is active =====
 
 
 @pytest.mark.skipif(
     not crypto_available(),
     reason="LAN DID publish requires PyNaCl for the bootstrap identity",
 )
-def test_LAN_DID_bootstrap_starts_mdns_responder_when_zeroconf_available(
+def test_LAN_DID_lifespan_starts_mdns_responder_when_zeroconf_available(
     tmp_path, monkeypatch,
 ):
-    """When zeroconf is importable AND NTH_LAN_PUBLISH != 0, _bootstrap
-    must construct + start a responder so the LAN can see us. We patch
-    MDNSDiscovery to a stub that records start/stop without binding
-    a real socket."""
+    """Application construction is inert; lifespan owns publish/withdraw."""
     started: list[dict] = []
     stopped: list[bool] = []
+    start_event = threading.Event()
 
     class _StubMDNS:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
         def start(self):
             started.append(dict(self.kwargs))
+            start_event.set()
         def stop(self):
             stopped.append(True)
 
-    # Replace the import target inside _bootstrap and force is_available
+    # Replace the import target inside lifespan and force is_available
     # to True so the gate opens.
     import nth_dao.discovery.lan_mdns as mdns_mod
     monkeypatch.setattr(mdns_mod, "MDNSDiscovery", _StubMDNS)
@@ -185,27 +182,22 @@ def test_LAN_DID_bootstrap_starts_mdns_responder_when_zeroconf_available(
     monkeypatch.delenv("NTH_LAN_PUBLISH", raising=False)
 
     app = create_app(tmp_path)
-    assert started, "responder was not started during _bootstrap"
-    # The DID we just put into team.json appears in the start kwargs
-    spawn = started[0]
-    assert spawn.get("did", "").startswith("did:key:z"), (
-        f"responder spawned without a DID: {spawn}"
-    )
-    # R-25 (2026-06-08): the LAN responder's agent_id is now the
-    # per-install random hex from node_identity, NOT the hardcoded
-    # "admin". The hardcoded value caused two NTH DAO nodes on the
-    # same LAN to look like the same identity and filter each other
-    # out. Pin the new contract: hex string, definitely not "admin".
-    network_id = spawn.get("agent_id", "")
-    assert network_id != "admin"
-    assert all(c in "0123456789abcdef" for c in network_id)
-    assert 6 <= len(network_id) <= 32
+    assert started == [], "create_app() must not start network services"
+    with TestClient(app):
+        assert start_event.wait(1.0), "responder did not start in background"
+        # The DID persisted during bootstrap appears in the advertisement.
+        spawn = started[0]
+        assert spawn.get("did", "").startswith("did:key:z"), (
+            f"responder spawned without a DID: {spawn}"
+        )
+        network_id = spawn.get("agent_id", "")
+        assert network_id != "admin"
+        assert all(c in "0123456789abcdef" for c in network_id)
+        assert 6 <= len(network_id) <= 32
+        assert app.state.nth.mdns_responder is not None
 
-    # Shutdown hook closes the responder cleanly
-    state = app.state.nth
-    assert state.mdns_responder is not None
-    state.mdns_responder.stop()
-    assert stopped
+    assert stopped == [True]
+    assert app.state.nth.mdns_responder is None
 
 
 def test_LAN_DID_publish_can_be_disabled_by_env(tmp_path, monkeypatch):
@@ -213,9 +205,10 @@ def test_LAN_DID_publish_can_be_disabled_by_env(tmp_path, monkeypatch):
     networks where we should not advertise."""
     monkeypatch.setenv("NTH_LAN_PUBLISH", "0")
     app = create_app(tmp_path)
-    assert app.state.nth.mdns_responder is None, (
-        "responder must not start when NTH_LAN_PUBLISH=0"
-    )
+    with TestClient(app):
+        assert app.state.nth.mdns_responder is None, (
+            "responder must not start when NTH_LAN_PUBLISH=0"
+        )
 
 
 def test_LAN_DID_publish_silently_skips_when_zeroconf_missing(
@@ -227,6 +220,73 @@ def test_LAN_DID_publish_silently_skips_when_zeroconf_missing(
     monkeypatch.setattr(mdns_mod, "is_available", lambda: False)
     monkeypatch.delenv("NTH_LAN_PUBLISH", raising=False)
     app = create_app(tmp_path)
+    with TestClient(app):
+        assert app.state.nth.mdns_responder is None
+
+
+def test_web_lifespan_registers_and_unregisters_one_shutdown_hook(
+    tmp_path, monkeypatch,
+):
+    registered = []
+    unregistered = []
+    monkeypatch.setenv("NTH_LAN_PUBLISH", "0")
+    monkeypatch.setattr(
+        atexit,
+        "register",
+        lambda callback, *args, **kwargs: registered.append(callback),
+    )
+    monkeypatch.setattr(
+        atexit,
+        "unregister",
+        lambda callback: unregistered.append(callback),
+    )
+
+    app = create_app(tmp_path)
+    assert registered == [], "create_app() must not retain an atexit callback"
+    with TestClient(app):
+        assert len(registered) == 1
+
+    assert unregistered == registered
+
+
+def test_slow_mdns_registration_is_cancelled_without_blocking_shutdown(
+    tmp_path, monkeypatch,
+):
+    entered = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+
+    class _SlowMDNS:
+        agent_id = "slow"
+        did = "did:key:zSlow"
+        pubkey_hex = "aa" * 32
+        label = "slow"
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            entered.set()
+            release.wait(2.0)
+
+        def stop(self):
+            stopped.set()
+
+    import nth_dao.discovery.lan_mdns as mdns_mod
+
+    monkeypatch.setattr(mdns_mod, "MDNSDiscovery", _SlowMDNS)
+    monkeypatch.setattr(mdns_mod, "is_available", lambda: True)
+    monkeypatch.delenv("NTH_LAN_PUBLISH", raising=False)
+
+    app = create_app(tmp_path)
+    with TestClient(app):
+        assert entered.wait(1.0)
+        assert app.state.nth.mdns_responder is None
+
+    # The lifespan has returned even though registration is still blocked.
+    assert not stopped.is_set()
+    release.set()
+    assert stopped.wait(1.0)
     assert app.state.nth.mdns_responder is None
 
 

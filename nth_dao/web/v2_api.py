@@ -2899,6 +2899,33 @@ def _persist_agent_response_receipt_to_store(
     }
 
 
+_AGENT_AUTH_READINESS_TIMEOUT_S = 3.0
+_AGENT_AUTH_READINESS_RETRY_S = 0.25
+
+
+async def _forward_local_agent_with_readiness_retry(
+    forward: Callable[[], Tuple[int, bytes]],
+) -> Tuple[int, Any]:
+    """Retry only the child's transient pre-cap-token authorization state."""
+    import asyncio
+
+    deadline = time.monotonic() + _AGENT_AUTH_READINESS_TIMEOUT_S
+    while True:
+        status, raw = await asyncio.to_thread(forward)
+        content = _decode_or_passthrough(raw)
+        if status != 401:
+            return status, content
+        error = content.get("error") if isinstance(content, dict) else None
+        not_ready = (
+            isinstance(error, dict)
+            and error.get("code") == "not-yet-authorized"
+        )
+        remaining = deadline - time.monotonic()
+        if not not_ready or remaining <= 0:
+            return status, content
+        await asyncio.sleep(min(_AGENT_AUTH_READINESS_RETRY_S, remaining))
+
+
 async def _drive_supervised_agent_ask(
     request: Request,
     did: str,
@@ -2910,7 +2937,6 @@ async def _drive_supervised_agent_ask(
     never receives or forwards a child cap_token; the hub injects the stored
     token and persists the child response receipt before returning.
     """
-    import asyncio
     import urllib.error
     import urllib.request
 
@@ -2974,36 +3000,22 @@ async def _drive_supervised_agent_ask(
             except urllib.error.HTTPError as http_exc:
                 return http_exc.code, _read_local_a2a_body(http_exc)
 
-    content: Any = {}
-    resp_status = 502
-    for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
-        try:
-            resp_status, resp_body = await asyncio.to_thread(_do_forward)
-        except WorkScopeBusy as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            OSError,
-            A2AResponseTooLarge,
-        ) as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"agent-ask proxy failed at {url}: {exc}",
-            )
-        content = _decode_or_passthrough(resp_body)
-        if resp_status == 401:
-            blob = (
-                json.dumps(content, ensure_ascii=False)
-                if isinstance(content, dict) else str(content)
-            )
-            if (
-                "not-yet-authorized" in blob
-                and attempt < _CHANNEL_DISPATCH_RETRIES
-            ):
-                await asyncio.sleep(_CHANNEL_DISPATCH_RETRY_SLEEP_S)
-                continue
-        break
+    try:
+        resp_status, content = (
+            await _forward_local_agent_with_readiness_retry(_do_forward)
+        )
+    except WorkScopeBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        A2AResponseTooLarge,
+    ) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"agent-ask proxy failed at {url}: {exc}",
+        )
     receipt_meta: Optional[Dict[str, str]] = None
     if resp_status == 200:
         receipt_meta = _persist_agent_response_receipt(
@@ -9811,7 +9823,9 @@ def register_v2_routes(app: FastAPI) -> None:
                 return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
-            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+            resp_status, content = (
+                await _forward_local_agent_with_readiness_retry(_do_forward)
+            )
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -9822,7 +9836,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=502,
                 detail=f"claim dispatch failed at {url}: {exc}",
             )
-        content = _decode_or_passthrough(resp_body)
         # 目标↔市场回流:认领成功(200 + result.claimed)→ 把对应 mission
         # step 标 CLAIMED + 记 assignee。best-effort,不影响认领本身的结果。
         if resp_status == 200 and isinstance(content, dict):
@@ -10665,11 +10678,6 @@ def register_v2_routes(app: FastAPI) -> None:
         if auth:
             req_headers["Authorization"] = auth
 
-        # Run the blocking urllib call on the threadpool so we
-        # don't block the event loop while waiting up to 2s for
-        # the child to reply.
-        import asyncio
-
         # H-1 fix (review round Phase 4 R1): use the per-method
         # timeout so slow backends (claude-code, future Hermes,
         # etc.) aren't capped at the snappy default that was sized
@@ -10705,7 +10713,9 @@ def register_v2_routes(app: FastAPI) -> None:
                 return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
-            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+            resp_status, content = (
+                await _forward_local_agent_with_readiness_retry(_do_forward)
+            )
         except urllib.error.URLError as exc:
             raise HTTPException(
                 status_code=502,
@@ -10717,7 +10727,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail=f"A2A proxy timed out / failed at {url}: {exc}",
             )
 
-        content = _decode_or_passthrough(resp_body)
         if resp_status == 200:
             _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
             content = _bound_agent_result_projection(content)
@@ -10819,8 +10828,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 req_headers=req_headers, forward_timeout=forward_timeout,
             )
 
-        import asyncio
-
         def _do_forward() -> Tuple[int, bytes]:
             req = urllib.request.Request(
                 url, data=body_bytes, headers=req_headers, method="POST",
@@ -10832,7 +10839,9 @@ def register_v2_routes(app: FastAPI) -> None:
                 return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
-            resp_status, resp_body = await asyncio.to_thread(_do_forward)
+            resp_status, content = (
+                await _forward_local_agent_with_readiness_retry(_do_forward)
+            )
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -10843,7 +10852,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=502,
                 detail=f"agent-ask proxy failed at {url}: {exc}",
             )
-        content = _decode_or_passthrough(resp_body)
         if resp_status == 200:
             _persist_agent_response_receipt(request, rec.agent_id, rec.did, content)
             content = _bound_agent_result_projection(content)
