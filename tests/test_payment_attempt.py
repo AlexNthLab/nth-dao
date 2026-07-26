@@ -384,14 +384,14 @@ def test_legacy_error_text_is_redacted_during_migration(tmp_path) -> None:
         store,
         created.attempt_id,
         payer,
-        legacy_error="token=LEGACY-SECRET C:\\Users\\private\\wallet.json",
+        legacy_error="token=LEGACY-SECRET private-wallet-file",
     )
 
     migrated = store.migrate_legacy(created.attempt_id, actor=payer)
     assert migrated.last_error == "legacy-retry-error"
     persisted = store._path(created.attempt_id).read_bytes()
     assert b"LEGACY-SECRET" not in persisted
-    assert b"wallet.json" not in persisted
+    assert b"private-wallet-file" not in persisted
 
 
 def test_legacy_migration_recovers_when_main_write_failed_after_prepare(
@@ -883,7 +883,7 @@ def test_provider_exception_details_are_not_persisted(tmp_path) -> None:
 
         def lookup(self, **_kwargs):
             raise RuntimeError(
-                "token=SUPERSECRET path=C:\\Users\\private\\wallet.json"
+                "token=SUPERSECRET source=private-wallet-file"
             )
 
         def pay(self, **_kwargs):
@@ -904,7 +904,7 @@ def test_provider_exception_details_are_not_persisted(tmp_path) -> None:
         if path.is_file()
     )
     assert b"SUPERSECRET" not in persisted
-    assert b"wallet.json" not in persisted
+    assert b"private-wallet-file" not in persisted
 
 
 def test_untrusted_orphan_metadata_is_normalized_before_persistence(tmp_path) -> None:

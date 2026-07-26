@@ -17,7 +17,6 @@ from __future__ import annotations
 import importlib
 import builtins
 import asyncio
-import os
 import sys
 import types
 from pathlib import Path
@@ -40,15 +39,23 @@ def clean_env(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     # Point Path.home() at a clean tmp dir so ~/.hermes/.env doesn't exist.
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    # Always resolve the module from this checkout. A contributor may have
+    # another nth_telegram_bot.py on sys.path; importing that file would make
+    # this suite environment-dependent and could execute untrusted code.
+    monkeypatch.syspath_prepend(str(EXAMPLES_DIR))
     # Force a fresh import every time, so _load_dotenv re-runs against the
     # redirected HOME and the lazy `_validate_env` is the only source of truth.
-    sys.modules.pop("nth_telegram_bot", None)
-    yield
+    missing = object()
+    previous = sys.modules.pop("nth_telegram_bot", missing)
+    try:
+        yield
+    finally:
+        sys.modules.pop("nth_telegram_bot", None)
+        if previous is not missing:
+            sys.modules["nth_telegram_bot"] = previous
 
 
 def _import_bot():
-    if str(EXAMPLES_DIR) not in sys.path:
-        sys.path.insert(0, str(EXAMPLES_DIR))
     return importlib.import_module("nth_telegram_bot")
 
 

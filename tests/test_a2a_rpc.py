@@ -36,7 +36,6 @@ from nth_dao.a2a_rpc import (
     JSONRPC_INVALID_REQUEST,
     JSONRPC_METHOD_NOT_FOUND,
     JSONRPC_PARSE_ERROR,
-    ROLE_AGENT,
     ROLE_USER,
     TASK_STATE_CANCELED,
     TASK_STATE_SUBMITTED,
@@ -56,7 +55,11 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setenv("NTH_LAN_PUBLISH", "0")
-    return TestClient(create_app(tmp_path, require_console_auth=False))
+    test_client = TestClient(create_app(tmp_path, require_console_auth=False))
+    try:
+        yield test_client
+    finally:
+        test_client.close()
 
 
 @pytest.fixture
@@ -64,9 +67,12 @@ def auth_client(tmp_path, monkeypatch):
     """A separate fixture for tests that need the console gate ON
     (to prove /api/a2a/rpc is gated)."""
     monkeypatch.setenv("NTH_LAN_PUBLISH", "0")
-    client = TestClient(create_app(tmp_path, require_console_auth=True))
-    token = client.app.state.nth_console_token
-    return client, token
+    test_client = TestClient(create_app(tmp_path, require_console_auth=True))
+    token = test_client.app.state.nth_console_token
+    try:
+        yield test_client, token
+    finally:
+        test_client.close()
 
 
 def _rpc(method: str, params=None, req_id="r1") -> dict:
@@ -494,7 +500,6 @@ def test_ma2_recoverable_runtimeerror_in_sign_is_caught(
     """If the identity loses its signing capability mid-flight (rare
     but possible with key rotation), sign_receipt raises RuntimeError.
     That's recoverable — mark the task and let the consumer continue."""
-    real_sign = client.app.state.nth.node_identity.sign
     def boom_sign(_payload):
         raise RuntimeError("key wiped")
     monkeypatch.setattr(
