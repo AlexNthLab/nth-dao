@@ -38,6 +38,7 @@ jobs:
             requirements/dev.lock.txt
             requirements/web.lock.txt
             requirements/crypto.lock.txt
+            requirements/p2p.lock.txt
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -52,7 +53,8 @@ jobs:
           python -m pip install \
             -r requirements/dev.lock.txt \
             -r requirements/web.lock.txt \
-            -r requirements/crypto.lock.txt
+            -r requirements/crypto.lock.txt \
+            -r requirements/p2p.lock.txt
           python -m pip install build==1.3.0 twine==6.2.0
           python -m pip install --no-deps -e .
 
@@ -104,11 +106,21 @@ jobs:
           "$RUNNER_TEMP/nth-dao-smoke/bin/python" -m pip install \
             -r requirements/web.lock.txt \
             -r requirements/crypto.lock.txt
+          WHEEL=$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.whl' -print -quit)
+          test -n "$WHEEL"
+          WHEEL_HASH=$(sha256sum "$WHEEL" | cut -d' ' -f1)
+          SMOKE_REQUIREMENTS="$RUNNER_TEMP/nth-dao-smoke-requirements.txt"
+          printf '%s\n' \
+            "-r $GITHUB_WORKSPACE/requirements/p2p.lock.txt" \
+            "nth-dao[p2p] @ file://$WHEEL --hash=sha256:$WHEEL_HASH" \
+            > "$SMOKE_REQUIREMENTS"
           "$RUNNER_TEMP/nth-dao-smoke/bin/python" -m pip install \
-            --no-deps dist/*.whl
+            --require-hashes \
+            -r "$SMOKE_REQUIREMENTS"
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/nth-dao-smoke/bin/python" - <<'PY'
           import importlib
+          import importlib.metadata
 
           modules = (
               "nth_dao",
@@ -118,6 +130,7 @@ jobs:
               "nth_dao.conversation",
               "nth_dao.dispute",
               "nth_dao.governance",
+              "nth_dao.gossip",
               "nth_dao.integrations",
               "nth_dao.market",
               "nth_dao.runtime",
@@ -129,6 +142,15 @@ jobs:
           )
           for module in modules:
               importlib.import_module(module)
+          from nth_dao import gossip
+          assert gossip._WEBSOCKETS_AVAILABLE
+          metadata = importlib.metadata.metadata("nth-dao")
+          assert "p2p" in (metadata.get_all("Provides-Extra") or [])
+          requirements = importlib.metadata.requires("nth-dao") or []
+          assert any(
+              "websockets" in requirement and 'extra == "p2p"' in requirement
+              for requirement in requirements
+          )
           print(f"Imported {len(modules)} release modules from the wheel.")
           PY
 

@@ -52,12 +52,10 @@ import logging
 import os
 import secrets
 import time
-import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger("nth_dao.gossip")
 
@@ -85,7 +83,7 @@ def _ws_required(feature: str) -> None:
         raise ImportError(
             f"{feature} requires websockets. Install with:\n"
             f"  pip install nth-dao[p2p]\n"
-            f"  (or: pip install websockets>=12.0)"
+            f"  (or: pip install 'websockets>=13.0,<17.0')"
         )
 
 
