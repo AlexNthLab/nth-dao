@@ -25,8 +25,10 @@ direction, and merge criteria.
 This beta previews the v0.10 protocol surface for testers and early
 integrators:
 
-- Signed `IntentMandate`, `CartMandate`, and `PaymentMandate`
-  primitives, with Data Integrity style proof helpers.
+- Signed `IntentMandate`, `CartMandate`, and `PaymentMandate` primitives, with
+  Data Integrity style proof helpers.
+- Fail-closed, test-network-only payment attempts; see the
+  [Payment Security Boundary](docs/PAYMENT_SECURITY.md).
 - Mandate conformance vectors and EventBus mandate lifecycle events.
 - A2A JSON-RPC server and Agent Card helpers for task lookup and
   capability discovery.

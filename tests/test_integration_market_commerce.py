@@ -189,9 +189,10 @@ def test_full_chain_underpay_passes_chain_but_caught_by_binding(tmp_path) -> Non
     rail = FakePaymentRail()
     settle_trade(
         tstore, ann_id, settler=s["publisher"],
-        adapter=X402SettlementAdapter(rail),
-        intent=SettlementIntent(trade_id=ann_id, amount_minor=1,
-                                currency=ASSET, payee_did=s["worker"].as_did()))
+            adapter=X402SettlementAdapter(rail),
+            intent=SettlementIntent(trade_id=ann_id, amount_minor=1,
+                                    currency=ASSET, payee_did=s["worker"].as_did(),
+                                    payer_did=s["publisher"].as_did()))
     assert trade_state(tstore, ann_id) == STATE_SETTLED
 
     # 链自洽：通过（结算 1 == terms 1）—— 单独不足以发现白嫖

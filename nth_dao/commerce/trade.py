@@ -777,6 +777,7 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
                         expected_amount_minor=exp_amt,
                         expected_currency=str(terms.get("currency", "")),
                         expected_payee_did=str(terms.get("payee_did", "")),
+                        expected_payer_did=parties.get("publisher_did", ""),
                     )
                     if not ok:
                         return False, reason

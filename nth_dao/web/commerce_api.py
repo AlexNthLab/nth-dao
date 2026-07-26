@@ -34,6 +34,12 @@ from nth_dao.commerce.listing_announcement import publish_listing_announcement
 from nth_dao.commerce.order import OrderEvent, OrderRejected
 from nth_dao.commerce.order_trade import open_commerce_trade
 from nth_dao.commerce.outbox import (
+    OUTBOX_ERROR_PEER_HTTP_REJECTED,
+    OUTBOX_ERROR_PEER_HTTP_RETRYABLE,
+    OUTBOX_ERROR_PEER_NETWORK,
+    OUTBOX_ERROR_PEER_RESPONSE,
+    OUTBOX_ERROR_PERSISTENCE,
+    OUTBOX_ERROR_TARGET_REJECTED,
     CommerceAck,
     CommerceEnvelope,
     CommerceEnvelopeRejected,
@@ -47,8 +53,10 @@ from nth_dao.commerce.projection import (
     list_order_views,
     project_order,
 )
+from nth_dao.commerce.reconciliation import CommerceReconciler
 from nth_dao.commerce.settlement import (
     ManualSettlementAdapter,
+    SettlementFailed,
     SettlementIntent,
     settle_trade,
 )
@@ -409,14 +417,17 @@ def _queue_committed_response(
     try:
         queued = _queue_current(request, order_id, target_did, target)
     except (CommerceEnvelopeRejected, HTTPException, OSError, RuntimeError, TypeError, ValueError) as exc:
-        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-        logger.warning("commerce action committed but queueing failed for %s: %s", order_id, detail)
+        logger.warning(
+            "commerce action committed but queueing failed for %s (%s)",
+            order_id,
+            type(exc).__name__,
+        )
         return {
             "message_id": "",
             "status": "pending",
             "target_url": target,
             "recoverable": True,
-            "error": str(detail)[:200],
+            "error": OUTBOX_ERROR_PERSISTENCE,
         }
     # Persist before transport, then make one bounded delivery attempt.  A
     # failed peer call leaves the signed envelope pending for the reconciler;
@@ -425,17 +436,16 @@ def _queue_committed_response(
         return queued
     try:
         record = state.commerce_outbox.claim(queued["message_id"])
-    except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError):
         logger.warning(
-            "commerce action committed but delivery claim failed for %s: %s",
+            "commerce action committed but delivery claim failed for %s",
             order_id,
-            exc,
         )
         return {
             **queued,
             "status": "pending",
             "recoverable": True,
-            "error": str(exc)[:200],
+            "error": OUTBOX_ERROR_PERSISTENCE,
         }
     if record is None:
         current = state.commerce_outbox.get(queued["message_id"])
@@ -445,12 +455,16 @@ def _queue_committed_response(
     try:
         return {**queued, **_dispatch_record(state, record)}
     except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError) as exc:
-        logger.warning("commerce action committed but dispatch failed for %s: %s", order_id, exc)
+        logger.warning(
+            "commerce action committed but dispatch failed for %s (%s)",
+            order_id,
+            type(exc).__name__,
+        )
         return {
             **queued,
             "status": "pending",
             "recoverable": True,
-            "error": str(exc)[:200],
+            "error": OUTBOX_ERROR_PERSISTENCE,
         }
 
 
@@ -538,7 +552,12 @@ def _queue_current(request: Request, order_id: str, target_did: str, target_url:
         },
         created_at_ms=now_ms(),
     )
-    record = state.commerce_outbox.enqueue(envelope, target_url=target)
+    record = state.commerce_outbox.enqueue(
+        envelope,
+        target_url=target,
+        allow_retarget=True,
+        now_ms_override=now_ms(),
+    )
     return {
         "message_id": envelope.message_id,
         "status": record.status,
@@ -553,6 +572,8 @@ def _record_dispatch_attempt(
     *,
     acknowledged_at_ms: int = 0,
     error: str = "",
+    retry_after_ms: int = 0,
+    retryable: bool = True,
 ) -> tuple[bool, str]:
     """Persist one leased delivery result without reviving a stale worker."""
     try:
@@ -561,20 +582,27 @@ def _record_dispatch_attempt(
             acknowledged_at_ms=acknowledged_at_ms,
             error=error,
             lease_id=lease_id,
+            retry_after_ms=retry_after_ms,
+            retryable=retryable,
         )
-    except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError):
         try:
             current = state.commerce_outbox.get(message_id)
         except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError):
             current = None
         if current is not None and current.status == "acknowledged":
             return True, ""
-        logger.warning("commerce delivery result lost its lease for %s: %s", message_id, exc)
-        return False, f"delivery result was not persisted: {exc}"[:200]
+        logger.warning("commerce delivery result was not persisted for %s", message_id)
+        return False, OUTBOX_ERROR_PERSISTENCE
     return record.status == "acknowledged", str(record.last_error or "")[:200]
 
 
-def _dispatch_record(state: Any, record: Any) -> Dict[str, Any]:
+def _dispatch_record(
+    state: Any,
+    record: Any,
+    *,
+    retry_after_ms: int = 0,
+) -> Dict[str, Any]:
     message_id = str(record.envelope.get("message_id", ""))
     try:
         target = _normalize_target_url(record.target_url)
@@ -589,16 +617,22 @@ def _dispatch_record(state: Any, record: Any) -> Dict[str, Any]:
             raise CommerceEnvelopeRejected("outbox source is not the local node")
         if _target_for_did(Path(state.workspace), envelope.target_did) != target:
             raise CommerceEnvelopeRejected("target is not identity-bound to the envelope DID")
-    except (CommerceEnvelopeRejected, ValueError, AttributeError) as exc:
+    except (CommerceEnvelopeRejected, ValueError, AttributeError):
         acknowledged, _persist_error = _record_dispatch_attempt(
             state,
             message_id,
             str(getattr(record, "lease_id", "")),
-            error=str(exc),
+            error=OUTBOX_ERROR_TARGET_REJECTED,
+            retry_after_ms=retry_after_ms,
+            retryable=False,
         )
         if acknowledged:
             return {"message_id": message_id, "status": "acknowledged"}
-        return {"message_id": message_id, "status": "pending", "error": str(exc)[:200]}
+        return {
+            "message_id": message_id,
+            "status": "blocked",
+            "error": _persist_error or OUTBOX_ERROR_TARGET_REJECTED,
+        }
     url = target + "/api/v2/commerce/federation/sync"
     body = json.dumps(
         {"envelope": record.envelope}, ensure_ascii=False,
@@ -617,22 +651,22 @@ def _dispatch_record(state: Any, record: Any) -> Dict[str, Any]:
             raw = response.read(65_536)
         result = json.loads(raw.decode("utf-8"))
         if not isinstance(result, dict):
-            raise OSError("peer acknowledgement has the wrong shape")
+            raise CommerceEnvelopeRejected("peer acknowledgement has the wrong shape")
         ack = CommerceAck.from_dict(result.get("ack"))
         ok, reason = verify_ack(ack)
         if not ok:
-            raise OSError(f"peer acknowledgement signature rejected: {reason}")
+            raise CommerceEnvelopeRejected(f"peer acknowledgement signature rejected: {reason}")
         order_raw = envelope.payload.get("order")
         trade_events = envelope.payload.get("trade_events")
         if not isinstance(order_raw, dict) or not isinstance(trade_events, list):
-            raise OSError("outbox envelope payload is malformed")
+            raise CommerceEnvelopeRejected("outbox envelope payload is malformed")
         if (
             ack.message_id != envelope.message_id
             or ack.order_id != order_raw.get("order_id")
             or ack.received_chain_head != trade_chain_head(trade_events)
             or ack.receiver_did != envelope.target_did
         ):
-            raise OSError("peer acknowledgement binding rejected")
+            raise CommerceEnvelopeRejected("peer acknowledgement binding rejected")
         acknowledged, persist_error = _record_dispatch_attempt(
             state,
             message_id,
@@ -646,25 +680,61 @@ def _dispatch_record(state: Any, record: Any) -> Dict[str, Any]:
                 "error": persist_error or "delivery acknowledgement was not persisted",
             }
         return {"message_id": message_id, "status": "acknowledged"}
-    except (
-        CommerceEnvelopeRejected,
-        OSError,
-        UnicodeError,
-        json.JSONDecodeError,
-        urllib.error.URLError,
-    ) as exc:
+    except (CommerceEnvelopeRejected, UnicodeError, json.JSONDecodeError):
         acknowledged, persist_error = _record_dispatch_attempt(
             state,
             message_id,
             str(getattr(record, "lease_id", "")),
-            error=str(exc),
+            error=OUTBOX_ERROR_PEER_RESPONSE,
+            retry_after_ms=retry_after_ms,
+            retryable=False,
+        )
+        if acknowledged:
+            return {"message_id": message_id, "status": "acknowledged"}
+        return {
+            "message_id": message_id,
+            "status": "blocked",
+            "error": persist_error or OUTBOX_ERROR_PEER_RESPONSE,
+        }
+    except urllib.error.HTTPError as exc:
+        retryable = exc.code in {408, 425, 429} or exc.code >= 500
+        acknowledged, persist_error = _record_dispatch_attempt(
+            state,
+            message_id,
+            str(getattr(record, "lease_id", "")),
+            error=(
+                OUTBOX_ERROR_PEER_HTTP_RETRYABLE
+                if retryable
+                else OUTBOX_ERROR_PEER_HTTP_REJECTED
+            ),
+            retry_after_ms=retry_after_ms,
+            retryable=retryable,
+        )
+        if acknowledged:
+            return {"message_id": message_id, "status": "acknowledged"}
+        return {
+            "message_id": message_id,
+            "status": "pending" if retryable else "blocked",
+            "error": persist_error or (
+                OUTBOX_ERROR_PEER_HTTP_RETRYABLE
+                if retryable
+                else OUTBOX_ERROR_PEER_HTTP_REJECTED
+            ),
+        }
+    except (OSError, urllib.error.URLError):
+        acknowledged, persist_error = _record_dispatch_attempt(
+            state,
+            message_id,
+            str(getattr(record, "lease_id", "")),
+            error=OUTBOX_ERROR_PEER_NETWORK,
+            retry_after_ms=retry_after_ms,
         )
         if acknowledged:
             return {"message_id": message_id, "status": "acknowledged"}
         return {
             "message_id": message_id,
             "status": "pending",
-            "error": persist_error or str(exc)[:200],
+            "error": persist_error or OUTBOX_ERROR_PEER_NETWORK,
         }
 
 
@@ -704,6 +774,16 @@ def register_commerce_routes(
     *,
     sensitive_read_guard: Callable[[Request], None] | None = None,
 ) -> None:
+    state = app.state.nth
+    if getattr(state, "commerce_reconciler", None) is None:
+        state.commerce_reconciler = CommerceReconciler(
+            state.commerce_outbox,
+            lambda record, retry_after_ms: _dispatch_record(
+                state,
+                record,
+                retry_after_ms=retry_after_ms,
+            ),
+        )
     @app.post("/api/v2/commerce/listings")
     def publish_listing(body: PublishListingBody, request: Request) -> Dict[str, Any]:
         state = _state(request)
@@ -1082,7 +1162,7 @@ def register_commerce_routes(
                     memo=f"NTH DAO manual settlement {order_id}",
                 ),
             )
-        except (TradeRejected, RuntimeError, ValueError) as exc:
+        except (SettlementFailed, TradeRejected, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         warning = _spine(request, "commerce.settlement.completed", {"order_id": order_id, "event": event.to_dict()})
         queued = _queue_committed_response(request, order_id, target_did, target)
@@ -1179,15 +1259,58 @@ def register_commerce_routes(
     @app.get("/api/v2/commerce/outbox")
     def outbox(request: Request) -> List[Dict[str, Any]]:
         _guard_sensitive_read(request, sensitive_read_guard)
-        return [record.__dict__ for record in _state(request).commerce_outbox.pending(limit=500)]
+        store = _state(request).commerce_outbox
+        records = store.pending(limit=500)
+        remaining = 500 - len(records)
+        if remaining:
+            records.extend(store.blocked(limit=remaining))
+        return [record.__dict__ for record in records]
+
+    @app.get("/api/v2/commerce/reconciliation")
+    def reconciliation_status(request: Request) -> Dict[str, Any]:
+        _guard_sensitive_read(request, sensitive_read_guard)
+        state = _state(request)
+        reconciler = getattr(state, "commerce_reconciler", None)
+        if reconciler is None:
+            raise HTTPException(status_code=503, detail="commerce reconciler unavailable")
+        status = reconciler.status()
+        pending = state.commerce_outbox.pending(limit=1_000)
+        blocked = state.commerce_outbox.blocked(limit=1_000)
+        status["pending"] = len(pending)
+        status["blocked"] = len(blocked)
+        status["pending_truncated"] = len(pending) == 1_000
+        status["blocked_truncated"] = len(blocked) == 1_000
+        status["next_attempt_at_ms"] = min(
+            (record.next_attempt_at_ms for record in pending if record.next_attempt_at_ms),
+            default=0,
+        )
+        return status
 
     @app.post("/api/v2/commerce/outbox/dispatch")
     def dispatch(request: Request) -> List[Dict[str, Any]]:
         state = _state(request)
-        return [
-            _dispatch_record(state, record)
-            for record in state.commerce_outbox.claim_pending(limit=100)
-        ]
+        results: List[Dict[str, Any]] = []
+        # Snapshot identifiers, then claim immediately before each network
+        # call. Pre-claiming the whole batch would let later leases expire
+        # while earlier HTTP requests are still in flight.
+        candidates = state.commerce_outbox.pending(limit=100)
+        remaining = 100 - len(candidates)
+        if remaining:
+            candidates.extend(state.commerce_outbox.blocked(limit=remaining))
+        for candidate in candidates:
+            message_id = str(candidate.envelope.get("message_id", ""))
+            try:
+                record = state.commerce_outbox.claim(message_id, force=True)
+            except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "manual commerce dispatch skipped %s (%s)",
+                    message_id,
+                    type(exc).__name__,
+                )
+                continue
+            if record is not None:
+                results.append(_dispatch_record(state, record))
+        return results
 
     @app.post("/api/v2/commerce/federation/sync")
     def sync(body: SyncBody, request: Request) -> Dict[str, Any]:

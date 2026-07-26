@@ -1,20 +1,18 @@
-"""Nth DAO commerce —— 交易状态机（claim → 执行 → 交付 → 验收 → 结算）。
+"""Nth DAO commerce state machine.
 
-主动市场（``nth_dao.market``）负责"谁来干"（discover→match→claim）。
-commerce 负责"干得怎样、钱怎么付"（execute→deliver→verify→settle）。
-接缝：``open_trade`` 吃一条市场 claim_record 开局。
+The market package handles discovery, matching, and claims. Commerce handles
+execution, delivery, verification, disputes, and settlement. ``open_trade``
+binds a signed market claim to a new trade.
 
-设计见桌面 ``A2A交易演进路线图-2026-06-12-重锚定当前代码.md``。
-
-里程碑：
-  CS1 ✅  签名 trade 状态机（无真钱，manual 结算）
-  CS2 ✅  commerce↔market 绑定校验 + DeterministicTestVerifier（首个 SKU）
-  CS3 ✅  争议处理（DISPUTED → SETTLED / REFUNDED / SPLIT_SETTLED）
-  CS4 ✅  结算 adapter（manual + x402 testnet，PaymentRail 注入）+ 校验
+Milestones:
+  CS1: signed trade state machine with manual, no-money settlement.
+  CS2: commerce-to-market binding and deterministic verification.
+  CS3: dispute resolution to settlement, refund, or split settlement.
+  CS4: settlement adapters with an injected payment-rail boundary.
 """
 
 from nth_dao.commerce.trade import (
-    # 状态
+    # States
     STATE_EXECUTING,
     STATE_DELIVERED,
     STATE_VERIFIED,
@@ -24,7 +22,7 @@ from nth_dao.commerce.trade import (
     STATE_REFUNDED,
     STATE_SPLIT_SETTLED,
     TERMINAL_STATES,
-    # 事件类型 / verdict / resolution
+    # Event types, verdicts, and resolutions
     EVENT_TRADE_OPENED,
     EVENT_DELIVERY_SUBMITTED,
     EVENT_VERIFICATION_RECORDED,
@@ -36,22 +34,22 @@ from nth_dao.commerce.trade import (
     RESOLUTION_SETTLE,
     RESOLUTION_REFUND,
     RESOLUTION_SPLIT,
-    # 对象 + 存储
+    # Objects and storage
     TradeEvent,
     TradeStore,
     sign_trade_event,
     verify_trade_event,
-    # 转移函数
+    # Transitions
     open_trade,
     submit_delivery,
     record_verification,
     record_settlement,
     open_dispute,
     resolve_dispute,
-    # 查询 + 验证
+    # Queries and verification
     trade_state,
     verify_trade,
-    # 异常
+    # Errors
     TradeRejected,
     TradeConflict,
     # reject reasons
@@ -125,6 +123,7 @@ __all__ = [
     "RailReceipt",
     "FakePaymentRail",
     "SettlementFailed",
+    "settlement_idempotency_key",
     "settlement_payload",
     "settle_trade",
     "verify_settlement",
@@ -141,7 +140,18 @@ __all__ = [
     "REJECT_PAYER_MISMATCH",
     "REJECT_TX_REF_MISSING",
     "REJECT_NETWORK_MISSING",
+    "REJECT_NETWORK_NOT_TESTNET",
     "REJECT_PROOF_MISSING",
+    "REJECT_RECEIPT_INVALID",
+    "REJECT_RECEIPT_NOT_CONFIRMED",
+    "REJECT_RECEIPT_TOO_LARGE",
+    "REJECT_RECEIPT_NOT_FOUND",
+    "REJECT_IDEMPOTENCY_KEY_MISMATCH",
+    "REJECT_INTENT_INVALID",
+    "REJECT_SCHEMA_INVALID",
+    "REJECT_SETTLED_AT_INVALID",
+    "X402_TEST_NETWORKS",
+    "RAIL_RECEIPT_CONFIRMED",
 ]
 
 from nth_dao.commerce.binding import (
@@ -171,6 +181,7 @@ from nth_dao.commerce.settlement import (
     RailReceipt,
     FakePaymentRail,
     SettlementFailed,
+    settlement_idempotency_key,
     settlement_payload,
     settle_trade,
     verify_settlement,
@@ -187,7 +198,18 @@ from nth_dao.commerce.settlement import (
     REJECT_PAYER_MISMATCH,
     REJECT_TX_REF_MISSING,
     REJECT_NETWORK_MISSING,
+    REJECT_NETWORK_NOT_TESTNET,
     REJECT_PROOF_MISSING,
+    REJECT_RECEIPT_INVALID,
+    REJECT_RECEIPT_NOT_CONFIRMED,
+    REJECT_RECEIPT_TOO_LARGE,
+    REJECT_RECEIPT_NOT_FOUND,
+    REJECT_IDEMPOTENCY_KEY_MISMATCH,
+    REJECT_INTENT_INVALID,
+    REJECT_SCHEMA_INVALID,
+    REJECT_SETTLED_AT_INVALID,
+    X402_TEST_NETWORKS,
+    RAIL_RECEIPT_CONFIRMED,
 )
 
 # Signed commerce catalog and authorised ordering.
@@ -250,6 +272,23 @@ from nth_dao.commerce.projection import (
     list_order_views,
     project_order,
 )
+from nth_dao.commerce.reconciliation import CommerceReconciler, ReconcilerConfig
+from nth_dao.commerce.payment_attempt import (
+    PaymentAttemptConflict,
+    PaymentAttemptExecutor,
+    PaymentAttemptReconciler,
+    PaymentAttemptEvent,
+    PaymentAttemptRejected,
+    PaymentAttemptStore,
+    PaymentAttemptView,
+    PaymentExecutorConfig,
+    verify_payment_attempt,
+)
+from nth_dao.commerce.payment_witness import (
+    FilePaymentAttemptHeadWitness,
+    PaymentAttemptHeadWitness,
+    PaymentWitnessRejected,
+)
 
 __all__ += [
     "verify_trade_binding", "REJECT_NO_OPENED", "REJECT_ANN_ID_MISMATCH",
@@ -271,4 +310,11 @@ __all__ += [
     "sign_ack", "sign_envelope", "trade_chain_head", "verify_ack",
     "verify_envelope",
     "CommerceProjectionRejected", "list_order_views", "project_order",
+    "CommerceReconciler", "ReconcilerConfig",
+    "PaymentAttemptConflict", "PaymentAttemptExecutor", "PaymentAttemptEvent",
+    "PaymentAttemptReconciler",
+    "PaymentAttemptRejected", "PaymentAttemptStore", "PaymentAttemptView",
+    "PaymentExecutorConfig", "verify_payment_attempt",
+    "FilePaymentAttemptHeadWitness", "PaymentAttemptHeadWitness",
+    "PaymentWitnessRejected",
 ]

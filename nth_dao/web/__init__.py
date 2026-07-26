@@ -877,6 +877,17 @@ def create_app(
         disappear. Jobs still waiting in a local queue are persisted as
         ``delivery_unknown`` by the manager; they are never silently dropped.
         """
+        nth_state = getattr(app_instance.state, "nth", None)
+        reconciler = getattr(nth_state, "commerce_reconciler", None)
+        if reconciler is not None:
+            try:
+                if not reconciler.stop(timeout_s=10.0):
+                    logger.warning("commerce reconciler is still stopping")
+            except (RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "commerce reconciler shutdown failed (%s)",
+                    type(exc).__name__,
+                )
         manager = getattr(app_instance.state, "agent_link_manager", None)
         if manager is not None:
             try:
@@ -901,6 +912,15 @@ def create_app(
                 v2_runtime.start_market_federation_runtime(_app)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("federation runtime startup failed: %s", exc)
+            reconciler = getattr(state, "commerce_reconciler", None)
+            if reconciler is not None:
+                try:
+                    reconciler.start()
+                except (RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "commerce reconciler startup failed (%s)",
+                        type(exc).__name__,
+                    )
             yield
         finally:
             if v2_runtime is not None:

@@ -3,6 +3,7 @@ import socket
 import threading
 import time
 from types import SimpleNamespace
+import urllib.error
 import urllib.request
 
 import uvicorn
@@ -222,7 +223,7 @@ def test_committed_delivery_reports_recoverable_queue_failure(tmp_path, monkeypa
     assert response.json()["order"]["state"] == "delivered"
     assert response.json()["queued"]["status"] == "pending"
     assert response.json()["queued"]["recoverable"] is True
-    assert "outbox failure" in response.json()["queued"]["error"]
+    assert response.json()["queued"]["error"] == "delivery-persistence-error"
 
 
 def test_committed_delivery_reports_recoverable_claim_failure(tmp_path, monkeypatch):
@@ -247,7 +248,7 @@ def test_committed_delivery_reports_recoverable_claim_failure(tmp_path, monkeypa
     assert response.json()["order"]["state"] == "delivered"
     assert response.json()["queued"]["status"] == "pending"
     assert response.json()["queued"]["recoverable"] is True
-    assert "claim lock failure" in response.json()["queued"]["error"]
+    assert response.json()["queued"]["error"] == "delivery-persistence-error"
     assert state.commerce_outbox.pending()
 
 
@@ -341,9 +342,116 @@ def test_dispatch_rejects_unsigned_message_id_echo(tmp_path, monkeypatch):
     result = seller.post("/api/v2/commerce/outbox/dispatch")
 
     assert result.status_code == 200
-    assert result.json()[0]["status"] == "pending"
-    assert "ack" in result.json()[0]["error"]
-    assert seller_app.state.nth.commerce_outbox.pending()
+    assert result.json()[0]["status"] == "blocked"
+    assert result.json()[0]["error"] == "peer-response-invalid"
+    assert seller_app.state.nth.commerce_outbox.pending() == []
+    assert seller_app.state.nth.commerce_outbox.blocked()
+    visible = seller.get("/api/v2/commerce/outbox")
+    assert visible.status_code == 200
+    assert visible.json()[0]["status"] == "blocked"
+    assert visible.json()[0]["envelope"]["message_id"] == queued["message_id"]
+
+
+def test_http_retry_classification_blocks_4xx_but_retries_5xx(tmp_path, monkeypatch):
+    seller_app, buyer_app, seller, _buyer, order_id = _executing_order_pair(tmp_path)
+    target = "https://buyer.example"
+    _bind_peer(seller_app.state.nth.workspace, target, buyer_app)
+    queued = seller.post(
+        f"/api/v2/commerce/orders/{order_id}/queue",
+        json={
+            "target_did": buyer_app.state.nth.node_identity.as_did(),
+            "target_url": target,
+        },
+    ).json()
+
+    def http_error(code):
+        return urllib.error.HTTPError(target, code, "simulated", {}, None)
+
+    monkeypatch.setattr(
+        commerce_api._PEER_OPENER,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(http_error(503)),
+    )
+    retryable = seller.post("/api/v2/commerce/outbox/dispatch")
+    assert retryable.json()[0]["status"] == "pending"
+    assert retryable.json()[0]["error"] == "peer-http-retryable"
+
+    monkeypatch.setattr(
+        commerce_api._PEER_OPENER,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(http_error(401)),
+    )
+    permanent = seller.post("/api/v2/commerce/outbox/dispatch")
+    assert permanent.json()[0]["status"] == "blocked"
+    assert permanent.json()[0]["error"] == "peer-http-rejected"
+    assert seller_app.state.nth.commerce_outbox.get(queued["message_id"]).status == "blocked"
+
+
+def test_queue_retargets_pending_message_after_same_did_peer_migration(tmp_path):
+    seller_app, buyer_app, seller, _buyer, order_id = _executing_order_pair(tmp_path)
+    old_target = "https://buyer-old.example"
+    new_target = "https://buyer-new.example"
+    buyer_did = buyer_app.state.nth.node_identity.as_did()
+    _bind_peer(seller_app.state.nth.workspace, old_target, buyer_app)
+    first = seller.post(
+        f"/api/v2/commerce/orders/{order_id}/queue",
+        json={"target_did": buyer_did, "target_url": old_target},
+    )
+    assert first.status_code == 200
+
+    _bind_peer(seller_app.state.nth.workspace, new_target, buyer_app)
+    moved = seller.post(
+        f"/api/v2/commerce/orders/{order_id}/queue",
+        json={"target_did": buyer_did, "target_url": new_target},
+    )
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["message_id"] == first.json()["message_id"]
+    record = seller_app.state.nth.commerce_outbox.get(moved.json()["message_id"])
+    assert record.target_url == new_target
+    assert record.route_history[-1]["previous_url"] == old_target
+    assert record.route_history[-1]["target_did"] == buyer_did
+
+
+def test_manual_dispatch_claims_each_record_immediately_before_delivery(
+    tmp_path, monkeypatch,
+):
+    app = create_app(tmp_path, require_console_auth=False)
+    state = app.state.nth
+    target = AgentIdentity.generate()
+    envelopes = [
+        sign_envelope(
+            state.node_identity,
+            target_did=target.as_did(),
+            payload={"order": {"id": f"manual-batch-{index}"}},
+            created_at_ms=1_900_000_000_000 + index,
+        )
+        for index in range(2)
+    ]
+    for envelope in envelopes:
+        state.commerce_outbox.enqueue(
+            envelope,
+            target_url="https://seller.example",
+        )
+    message_ids = {envelope.message_id for envelope in envelopes}
+    observed_other_states = []
+
+    def acknowledge(_state, record):
+        current_id = record.envelope["message_id"]
+        other_id = (message_ids - {current_id}).pop()
+        observed_other_states.append(state.commerce_outbox.get(other_id).status)
+        stored = state.commerce_outbox.record_attempt(
+            current_id,
+            acknowledged_at_ms=1_900_000_002_000,
+            lease_id=record.lease_id,
+        )
+        return {"message_id": current_id, "status": stored.status}
+
+    monkeypatch.setattr(commerce_api, "_dispatch_record", acknowledge)
+    response = TestClient(app).post("/api/v2/commerce/outbox/dispatch")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 2
+    assert observed_other_states[0] == "pending"
 
 
 def test_stale_dispatch_lease_cannot_overwrite_new_owner(tmp_path):
@@ -364,7 +472,41 @@ def test_stale_dispatch_lease_cannot_overwrite_new_owner(tmp_path):
     )
 
     assert acknowledged is False
-    assert "not persisted" in error
+    assert error == "delivery-persistence-error"
+
+
+def test_reconciler_delivers_when_offline_peer_starts_later(tmp_path):
+    seller_app, buyer_app, seller, _buyer, order_id = _executing_order_pair(tmp_path)
+    buyer_port = _free_port()
+    target = f"http://127.0.0.1:{buyer_port}"
+    _bind_peer(seller_app.state.nth.workspace, target, buyer_app)
+
+    committed = seller.post(
+        f"/api/v2/commerce/orders/{order_id}/delivery",
+        json={
+            "delivery": {"artifact_digest": "sha256:" + "9" * 64},
+            "target_url": target,
+        },
+    )
+    assert committed.status_code == 200, committed.text
+    message_id = committed.json()["queued"]["message_id"]
+    assert committed.json()["queued"]["status"] == "pending"
+    assert seller_app.state.nth.commerce_outbox.get(message_id).attempts == 1
+
+    with _Server(buyer_app, buyer_port), _Server(seller_app, _free_port()):
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            record = seller_app.state.nth.commerce_outbox.get(message_id)
+            if record is not None and record.status == "acknowledged":
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("reconciler did not deliver after the peer started")
+
+    record = seller_app.state.nth.commerce_outbox.get(message_id)
+    assert record.status == "acknowledged"
+    assert record.attempts == 2
+    assert buyer_app.state.nth.commerce_trades.get_events(order_id)[-1]["new_state"] == "delivered"
 
 
 def test_two_node_no_money_digital_service_loop(tmp_path):
@@ -446,6 +588,11 @@ def test_two_node_no_money_digital_service_loop(tmp_path):
     )
     assert settled.status_code == 200, settled.text
     assert settled.json()["order"]["state"] == "settled"
+    duplicate_settlement = buyer.post(
+        f"/api/v2/commerce/orders/{order_id}/settle", json={}
+    )
+    assert duplicate_settlement.status_code == 409
+    assert "settlement-bad-state" in duplicate_settlement.text
     assert _sync(buyer_app, seller, order_id)["state"] == "settled"
 
     buyer_view = buyer.get(f"/api/v2/commerce/orders/{order_id}").json()
@@ -570,8 +717,9 @@ def test_outbox_rechecks_peer_configuration_before_network_io(tmp_path, monkeypa
     monkeypatch.setattr(commerce_api._PEER_OPENER, "open", unexpected_network)
     result = TestClient(app).post("/api/v2/commerce/outbox/dispatch")
     assert result.status_code == 200
-    assert result.json()[0]["status"] == "pending"
-    assert "no longer" in result.json()[0]["error"]
+    assert result.json()[0]["status"] == "blocked"
+    assert state.commerce_outbox.get(envelope.message_id).status == "blocked"
+    assert result.json()[0]["error"] == "target-policy-rejected"
 
 
 def test_remote_checkout_uses_configured_peer_and_delivers_outbox(tmp_path):

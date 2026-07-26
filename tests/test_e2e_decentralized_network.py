@@ -114,7 +114,8 @@ def test_full_chain_discovery_to_settlement(tmp_path: Path) -> None:
                  adapter=X402SettlementAdapter(rail),
                  intent=SettlementIntent(trade_id=ann.announcement_id,
                                          amount_minor=REWARD, currency=ASSET,
-                                         payee_did=worker.as_did()))
+                                         payee_did=worker.as_did(),
+                                         payer_did=publisher.as_did()))
     assert trade_state(tstore, ann.announcement_id) == STATE_SETTLED
     assert rail.calls and rail.calls[0]["payee_did"] == worker.as_did()
 
