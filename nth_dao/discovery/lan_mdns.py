@@ -1,11 +1,11 @@
-"""MDNSDiscovery — mDNS/Bonjour backend for "people nearby".
+"""MDNSDiscovery - mDNS/Bonjour backend for "people nearby".
 
 The plain UDP `LANDiscovery` is great where every peer is on the same
 broadcast domain and broadcast traffic is allowed. Modern networks
 (corporate Wi-Fi, container overlays, isolated VLANs) often drop
-broadcast but still pass multicast — mDNS is the standard tool for
+broadcast but still pass multicast. mDNS is the standard tool for
 this case, and it's also what other LAN tools (printers, AirDrop,
-Spotify Connect…) already use. Adding an mDNS backend means NTH DAO
+Spotify Connect) already use. Adding an mDNS backend means NTH DAO
 peers find each other on any network where mDNS works.
 
 This module is the optional `[lan]` extra. Install with
@@ -33,10 +33,10 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from .lan import LANPeer  # reuse the same value type — easy mixing with UDP backend
+from .lan import LANPeer  # Reuse the value type so callers can mix backends.
 
 logger = logging.getLogger("nth_dao.discovery.lan_mdns")
 
@@ -64,7 +64,7 @@ def _require_zeroconf() -> None:
 
 
 def _local_ip() -> str:
-    """Best-effort outbound IP — used as the mDNS service address.
+    """Best-effort outbound IP used as the mDNS service address.
 
     Falls back to 127.0.0.1 if no network is reachable. Same trick the
     stdlib examples use; not perfect for multi-homed boxes but adequate
@@ -361,7 +361,7 @@ class MDNSDiscovery:
             return agent_id == self.agent_id
         return False
 
-    # 鈹€鈹€鈹€ context manager 鈹€鈹€鈹€
+    # Context manager
     def __enter__(self) -> "MDNSDiscovery":
         self.start()
         return self

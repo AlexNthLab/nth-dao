@@ -1,4 +1,4 @@
-"""AchievementCredential reducer 鈥?fold AgentLedger events into monthly W3C VCs.
+"""AchievementCredential reducer - fold AgentLedger events into monthly W3C VCs.
 
 The AgentLedger is append-only and per-event granular. For sharing, sync, and
 external verification we want a coarser portable summary:
@@ -49,7 +49,7 @@ W3C VC alignment (data-model 2.0, JWT/LD-agnostic JSON form):
     }
 
 Self-issued: an agent vouches for its own activity. The on-chain ledger
-hash range pins the claim to a specific run of events 鈥?anyone replaying
+hash range pins the claim to a specific run of events. Anyone replaying
 ledger.jsonl through this reducer must arrive at the same numbers, which
 makes the credential cheaply auditable.
 """
@@ -88,7 +88,7 @@ PROOF_TYPE = "Ed25519Signature2020"
 
 
 def _period_bounds(period: str) -> Tuple[datetime, datetime]:
-    """`period` like "2026-04" 鈫?(start, end inclusive) in naive local time.
+    """Map `period` like "2026-04" to inclusive naive-local time bounds.
 
     Matches `LedgerEvent.timestamp` which is `datetime.now().isoformat()`
     (naive, local) so string comparison works.
@@ -124,7 +124,7 @@ def list_periods(ledger: AgentLedger) -> List[str]:
 def reduce_period(ledger: AgentLedger, period: str) -> Dict[str, Any]:
     """Fold one month's events into a credentialSubject-shaped dict.
 
-    Deterministic 鈥?same events 鈬?same dict. Empty-month returns a
+    Deterministic: the same events produce the same dict. Empty-month returns a
     well-formed all-zeros snapshot so the caller can still issue a
     "no-activity" credential if desired (rarely useful; check the
     `event_count` field).

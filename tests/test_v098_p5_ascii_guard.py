@@ -22,6 +22,9 @@ PROTOCOL_LAYER_FILES = [
     "nth_dao/event_subscriptions.py",
     "nth_dao/fault_isolation.py",
     "nth_dao/agent_profile.py",
+    "nth_dao/achievement.py",
+    "nth_dao/discovery/lan_mdns.py",
+    "nth_dao/orchestration/template.py",
 ]
 
 

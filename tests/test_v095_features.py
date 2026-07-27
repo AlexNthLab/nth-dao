@@ -1,6 +1,5 @@
-"""v0.9.5 鈥?AgentLedger + Guardian recovery + A2A translation tests."""
+"""v0.9.5 AgentLedger, Guardian recovery, and A2A translation tests."""
 
-import json
 
 import pytest
 
@@ -12,7 +11,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ AgentLedger 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# AgentLedger
 
 
 def test_agent_ledger_appends_and_reduces(tmp_path):
@@ -46,7 +45,7 @@ def test_agent_ledger_appends_and_reduces(tmp_path):
 
 
 def test_agent_ledger_scopes_by_pubkey_fingerprint(tmp_path):
-    """Same pubkey, different agent_id strings 鈫?same ledger file."""
+    """The same pubkey uses the same ledger file across agent_id strings."""
     from nth_dao.agent_ledger import AgentLedger
     ident = AgentIdentity.generate(label="alice")
     al1 = AgentLedger(tmp_path, identity=ident)
@@ -134,7 +133,7 @@ def test_agent_ledger_works_without_identity(tmp_path):
     assert e.sig == ""
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ Guardian recovery 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Guardian recovery
 
 
 def test_guardian_set_round_trip_and_signature(tmp_path):
@@ -213,7 +212,7 @@ def test_replacement_below_threshold_rejected(tmp_path):
     gs = publish_guardian_set(alice, [g1.pubkey_hex, g2.pubkey_hex], threshold=2)
     proof = begin_key_replacement(gs, new_alice.pubkey_hex)
     proof.signatures.append(sign_replacement(g1, proof))
-    # only 1 of 2 鈥?below threshold
+    # Only 1 of 2, below threshold.
     valid, reason = verify_replacement(proof, gs)
     assert not valid
     assert "signatures" in reason
@@ -370,12 +369,12 @@ def test_guardian_store_commit_below_threshold_returns_false(tmp_path):
     assert store.resolve_current_pubkey(alice.fingerprint()) is None
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ A2A translation 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# A2A translation
 
 
 def test_template_to_a2a_skill_includes_input_schema(tmp_path):
     from nth_dao.a2a import template_to_a2a_skill
-    from nth_dao.orchestration import IOField, StepSkeleton, mint_template
+    from nth_dao.orchestration import IOField, mint_template
     alice = AgentIdentity.generate(label="alice")
     t = mint_template(
         alice,
@@ -556,7 +555,7 @@ def test_mission_inputs_from_a2a_message_rejects_large_nested_list(tmp_path):
         mission_inputs_from_a2a_message({"input": {"items": list(range(257))}}, t)
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ facade 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Facade
 
 
 def test_facade_exports_v095():
