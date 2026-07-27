@@ -18,7 +18,7 @@ direction, and merge criteria.
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Zero deps](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-1067%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-2735%20passing-brightgreen.svg)](tests/)
 
 ## What's New in 0.10.0b1 - Beta release
 
@@ -41,8 +41,8 @@ integrators:
 - Packaging fixes so `nth_dao.mandate` and the required `team_layer`
   runtime packages are included in distributions.
 
-Validation for this beta: Python suite `1067 passed, 11 skipped`;
-frontend Vitest `2 passed`; production frontend build passed.
+Validation for this beta: Python suite `2735 passed, 12 skipped`;
+frontend Vitest `108 passed`; production frontend build passed.
 
 ## What's New in 0.9.6 - Unique group names, governance votes, chat-native collaboration UI
 
