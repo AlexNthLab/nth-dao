@@ -1,7 +1,11 @@
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 import urllib.error
 import urllib.request
@@ -122,6 +126,109 @@ class _Server:
     def __exit__(self, *_args):
         self.server.should_exit = True
         self.thread.join(timeout=5)
+
+
+class _ProcessServer:
+    """Run one NTH DAO node in an independent Python process."""
+
+    _BOOT = (
+        "import sys, uvicorn;"
+        "from pathlib import Path;"
+        "from nth_dao.web import create_app;"
+        "app=create_app(Path(sys.argv[1]), require_console_auth=False);"
+        "uvicorn.run(app, host='127.0.0.1', port=int(sys.argv[2]), "
+        "log_level='error', access_log=False)"
+    )
+
+    def __init__(self, workspace: Path, port: int) -> None:
+        self.workspace = workspace
+        self.port = port
+        self.url = f"http://127.0.0.1:{port}"
+        self.process = None
+        self._log_handle = None
+        self.log_path = workspace.parent / f"{workspace.name}-server.log"
+
+    def start(self) -> None:
+        if self.process is not None:
+            raise RuntimeError("process server already started")
+        env = {
+            **os.environ,
+            "NTH_LAN_PUBLISH": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+        }
+        self._log_handle = self.log_path.open("ab")
+        creationflags = (
+            subprocess.CREATE_NO_WINDOW
+            if sys.platform == "win32"
+            else 0
+        )
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                self._BOOT,
+                str(self.workspace),
+                str(self.port),
+            ],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=self._log_handle,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+        )
+        for _ in range(300):
+            if self.process.poll() is not None:
+                detail = self.log_path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                raise RuntimeError(
+                    f"node process exited {self.process.returncode}: {detail[-2000:]}"
+                )
+            try:
+                _http_json(
+                    f"{self.url}/.well-known/nth-dao/identity.json",
+                )
+                return
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.025)
+        raise RuntimeError(f"node process did not start on {self.url}")
+
+    def stop(self) -> None:
+        process = self.process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        self.process = None
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
+
+
+def _bind_process_peer(workspace: Path, target_url: str, card: dict) -> None:
+    atomic_write_json(workspace / "federation" / "peers.json", [target_url])
+    atomic_write_json(workspace / "federation" / "peers_meta.json", {
+        target_url: {
+            "did": card["did"],
+            "pubkey_hex": card["pubkey_hex"],
+            "peer_url": target_url,
+            "identity_url": (
+                f"{target_url}/.well-known/nth-dao/identity.json"
+            ),
+            "card_kind": "nth-dao-identity-card-v1",
+            "federation_protocol": "nth-dao-federation-v1",
+        },
+    })
 
 
 def _http_json(url, *, payload=None):
@@ -310,6 +417,116 @@ def test_sync_replay_returns_one_durable_signed_ack(tmp_path):
     )
     assert rejected.status_code == 400
     assert "replay window" in rejected.text
+
+
+def test_sync_trade_failure_does_not_publish_partial_order(tmp_path, monkeypatch):
+    seller_app = create_app(tmp_path / "seller", require_console_auth=False)
+    buyer_app = create_app(tmp_path / "buyer", require_console_auth=False)
+    seller = TestClient(seller_app)
+    buyer = TestClient(buyer_app)
+    published = seller.post("/api/v2/commerce/listings", json={
+        "listing_id": "atomic-sync", "title": "Atomic sync", "price_value": "1",
+    }).json()
+    intent = buyer.post("/api/v2/commerce/intents", json={
+        "listing": published["listing"], "purpose": "fault injection",
+    }).json()["intent"]
+    cart = seller.post("/api/v2/commerce/carts", json={
+        "listing_digest": published["digest"], "intent": intent,
+    }).json()["cart"]
+    order = buyer.post("/api/v2/commerce/orders", json={
+        "listing": published["listing"], "intent": intent, "cart": cart,
+    }).json()["order"]
+    order_id = order["order_id"]
+    source = buyer_app.state.nth
+    target = seller_app.state.nth
+    envelope = sign_envelope(
+        source.node_identity,
+        target_did=target.node_identity.as_did(),
+        payload={
+            "order": source.commerce_orders.get(order_id).to_dict(),
+            "trade_events": source.commerce_trades.get_events(order_id),
+        },
+        created_at_ms=now_ms(),
+    )
+
+    monkeypatch.setattr(
+        target.commerce_trades,
+        "import_verified_events",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("fault injection before trade commit")
+        ),
+    )
+    response = seller.post(
+        "/api/v2/commerce/federation/sync",
+        json={"envelope": envelope.to_dict()},
+    )
+
+    assert response.status_code == 409
+    assert target.commerce_orders.get(order_id) is None
+    assert target.commerce_trades.get_events(order_id) is None
+    assert list(target.commerce_inbox.root.glob("*.json")) == []
+
+
+def test_sync_order_failure_leaves_hidden_trade_and_retry_completes(
+    tmp_path,
+    monkeypatch,
+):
+    seller_app = create_app(tmp_path / "seller", require_console_auth=False)
+    buyer_app = create_app(tmp_path / "buyer", require_console_auth=False)
+    seller = TestClient(seller_app)
+    buyer = TestClient(buyer_app)
+    published = seller.post("/api/v2/commerce/listings", json={
+        "listing_id": "retry-sync", "title": "Retry sync", "price_value": "1",
+    }).json()
+    intent = buyer.post("/api/v2/commerce/intents", json={
+        "listing": published["listing"], "purpose": "order fault injection",
+    }).json()["intent"]
+    cart = seller.post("/api/v2/commerce/carts", json={
+        "listing_digest": published["digest"], "intent": intent,
+    }).json()["cart"]
+    order = buyer.post("/api/v2/commerce/orders", json={
+        "listing": published["listing"], "intent": intent, "cart": cart,
+    }).json()["order"]
+    order_id = order["order_id"]
+    source = buyer_app.state.nth
+    target = seller_app.state.nth
+    envelope = sign_envelope(
+        source.node_identity,
+        target_did=target.node_identity.as_did(),
+        payload={
+            "order": source.commerce_orders.get(order_id).to_dict(),
+            "trade_events": source.commerce_trades.get_events(order_id),
+        },
+        created_at_ms=now_ms(),
+    )
+    original_import = target.commerce_orders.import_verified
+    monkeypatch.setattr(
+        target.commerce_orders,
+        "import_verified",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("fault injection before visible order commit")
+        ),
+    )
+    failed = seller.post(
+        "/api/v2/commerce/federation/sync",
+        json={"envelope": envelope.to_dict()},
+    )
+
+    assert failed.status_code == 409
+    assert target.commerce_orders.get(order_id) is None
+    assert target.commerce_trades.get_events(order_id)
+    assert target.commerce_provisional._path(order_id).exists()
+    assert seller.get(f"/api/v2/commerce/orders/{order_id}").status_code == 404
+
+    monkeypatch.setattr(target.commerce_orders, "import_verified", original_import)
+    retried = seller.post(
+        "/api/v2/commerce/federation/sync",
+        json={"envelope": envelope.to_dict()},
+    )
+    assert retried.status_code == 200, retried.text
+    assert target.commerce_orders.get(order_id) is not None
+    assert not target.commerce_provisional._path(order_id).exists()
+    assert retried.json()["state"] == "executing"
 
 
 def test_dispatch_rejects_unsigned_message_id_echo(tmp_path, monkeypatch):
@@ -858,6 +1075,91 @@ def test_real_http_nodes_auto_replicate_complete_no_money_lifecycle(tmp_path):
     assert buyer_view["events"] == seller_view["events"]
     assert buyer_app.state.nth.commerce_outbox.pending() == []
     assert seller_app.state.nth.commerce_outbox.pending() == []
+
+
+def test_two_process_nodes_complete_fifty_trades_across_restart(tmp_path):
+    """Acceptance soak: two OS processes, durable restart, 50 full trades."""
+    seller = _ProcessServer(tmp_path / "seller-process", _free_port())
+    buyer = _ProcessServer(tmp_path / "buyer-process", _free_port())
+    try:
+        seller.start()
+        buyer.start()
+        seller_card = _http_json(
+            f"{seller.url}/.well-known/nth-dao/identity.json",
+        )
+        buyer_card = _http_json(
+            f"{buyer.url}/.well-known/nth-dao/identity.json",
+        )
+        _bind_process_peer(seller.workspace, buyer.url, buyer_card)
+        _bind_process_peer(buyer.workspace, seller.url, seller_card)
+        published = _http_json(
+            f"{seller.url}/api/v2/commerce/listings",
+            payload={
+                "listing_id": "process-soak-review",
+                "title": "Independent process review",
+                "price_value": "1",
+            },
+        )
+
+        for index in range(50):
+            checkout_body = {
+                "target_url": seller.url,
+                "listing_digest": published["digest"],
+                "purpose": f"independent process transaction {index}",
+                "idempotency_key": f"process-soak-checkout-{index:04d}",
+            }
+            checkout = _http_json(
+                f"{buyer.url}/api/v2/commerce/checkout/remote",
+                payload=checkout_body,
+            )
+            order_id = checkout["order"]["order_id"]
+            assert checkout["delivery"]["status"] == "acknowledged"
+
+            if index == 24:
+                seller.restart()
+                buyer.restart()
+                replay = _http_json(
+                    f"{buyer.url}/api/v2/commerce/checkout/remote",
+                    payload=checkout_body,
+                )
+                assert replay["order"]["order_id"] == order_id
+
+            delivery = _http_json(
+                f"{seller.url}/api/v2/commerce/orders/{order_id}/delivery",
+                payload={
+                    "delivery": {
+                        "artifact_digest": "sha256:" + f"{index:064x}",
+                    },
+                    "target_url": buyer.url,
+                },
+            )
+            assert delivery["queued"]["status"] == "acknowledged"
+            verification = _http_json(
+                f"{buyer.url}/api/v2/commerce/orders/{order_id}/verify",
+                payload={
+                    "verdict": "pass",
+                    "result": {"process_soak": index},
+                    "target_url": seller.url,
+                },
+            )
+            assert verification["queued"]["status"] == "acknowledged"
+            settlement = _http_json(
+                f"{buyer.url}/api/v2/commerce/orders/{order_id}/settle",
+                payload={"target_url": seller.url},
+            )
+            assert settlement["queued"]["status"] == "acknowledged"
+            assert _http_json(
+                f"{seller.url}/api/v2/commerce/orders/{order_id}",
+            )["state"] == "settled"
+            assert _http_json(
+                f"{buyer.url}/api/v2/commerce/orders/{order_id}",
+            )["state"] == "settled"
+    finally:
+        buyer.stop()
+        seller.stop()
+
+    assert len(list((buyer.workspace / "commerce" / "orders").glob("*.json"))) == 50
+    assert len(list((seller.workspace / "commerce" / "orders").glob("*.json"))) == 50
 
 
 def test_dispute_refund_is_complete_signed_and_replicable(tmp_path):

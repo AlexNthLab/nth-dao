@@ -181,6 +181,33 @@ class OrderStore:
                 rows.append(event)
         return rows
 
+    def _validate_import_locked(
+        self,
+        event: OrderEvent,
+        path: Path,
+    ) -> Optional[OrderEvent]:
+        document = event.to_dict()
+        ok, reason = verify_order([document])
+        if not ok:
+            raise OrderRejected(f"remote order rejected: {reason}")
+        existing = self.get_events(event.order_id)
+        if path.exists() and existing is None:
+            raise OrderConflict("stored order is unreadable; refuse to overwrite")
+        if existing is None:
+            return None
+        ok, reason = verify_order(existing)
+        if not ok:
+            raise OrderConflict(f"stored order is invalid: {reason}")
+        if existing != [document]:
+            raise OrderConflict("order id already contains different signed bytes")
+        return OrderEvent.from_dict(existing[0])
+
+    def validate_import(self, event: OrderEvent) -> Optional[OrderEvent]:
+        """Validate a remote order and existing CAS state without writing."""
+        path = self._path(event.order_id)
+        with _thread_lock(path), InterProcessLock(path):
+            return self._validate_import_locked(event, path)
+
     def import_verified(self, event: OrderEvent) -> OrderEvent:
         """Persist a remotely signed order with idempotent CAS semantics.
 
@@ -189,25 +216,14 @@ class OrderStore:
         idempotent; a different event for the same payment-bound order id is a
         hard conflict.
         """
-        document = event.to_dict()
-        ok, reason = verify_order([document])
-        if not ok:
-            raise OrderRejected(f"remote order rejected: {reason}")
         path = self._path(event.order_id)
         with _thread_lock(path), InterProcessLock(path):
-            existing = self.get_events(event.order_id)
-            if path.exists() and existing is None:
-                raise OrderConflict("stored order is unreadable; refuse to overwrite")
+            existing = self._validate_import_locked(event, path)
             if existing is not None:
-                ok, reason = verify_order(existing)
-                if not ok:
-                    raise OrderConflict(f"stored order is invalid: {reason}")
-                if existing != [document]:
-                    raise OrderConflict("order id already contains different signed bytes")
-                return OrderEvent.from_dict(existing[0])
+                return existing
             atomic_write_json(
                 path,
-                {"order_id": event.order_id, "events": [document]},
+                {"order_id": event.order_id, "events": [event.to_dict()]},
             )
         return event
 

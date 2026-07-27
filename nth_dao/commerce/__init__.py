@@ -273,6 +273,11 @@ from nth_dao.commerce.projection import (
     project_order,
 )
 from nth_dao.commerce.reconciliation import CommerceReconciler, ReconcilerConfig
+from nth_dao.commerce.provisional import (
+    ProvisionalImport as ProvisionalImport,
+    ProvisionalImportRejected as ProvisionalImportRejected,
+    ProvisionalImportStore as ProvisionalImportStore,
+)
 from nth_dao.commerce.payment_attempt import (
     PaymentAttemptConflict,
     PaymentAttemptExecutor,

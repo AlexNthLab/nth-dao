@@ -53,7 +53,7 @@ from nth_dao.commerce.projection import (
     list_order_views,
     project_order,
 )
-from nth_dao.commerce.reconciliation import CommerceReconciler
+from nth_dao.commerce.reconciliation import CommerceReconciler, ReconcilerConfig
 from nth_dao.commerce.settlement import (
     ManualSettlementAdapter,
     SettlementFailed,
@@ -95,6 +95,7 @@ _MAX_TTL_SECONDS = 86_400
 _MAX_LISTING_DETAILS_BYTES = 64 * 1024
 _MAX_ENVELOPE_AGE_MS = 30 * 24 * 60 * 60 * 1000
 _MAX_ENVELOPE_FUTURE_SKEW_MS = 5 * 60 * 1000
+_DEFAULT_ORPHAN_AFTER_S = 7 * 86_400
 
 
 class _StrictBody(BaseModel):
@@ -776,12 +777,34 @@ def register_commerce_routes(
 ) -> None:
     state = app.state.nth
     if getattr(state, "commerce_reconciler", None) is None:
+        try:
+            orphan_after_s = int(os.environ.get(
+                "NTH_COMMERCE_ORPHAN_AFTER_S",
+                str(_DEFAULT_ORPHAN_AFTER_S),
+            ))
+        except ValueError as exc:
+            raise RuntimeError(
+                "NTH_COMMERCE_ORPHAN_AFTER_S must be an integer"
+            ) from exc
+        reconciler_config = ReconcilerConfig(
+            orphan_after_s=orphan_after_s,
+        )
         state.commerce_reconciler = CommerceReconciler(
             state.commerce_outbox,
             lambda record, retry_after_ms: _dispatch_record(
                 state,
                 record,
                 retry_after_ms=retry_after_ms,
+            ),
+            config=reconciler_config,
+            maintenance=lambda current_ms, limit: (
+                state.commerce_provisional.reconcile(
+                    orders=state.commerce_orders,
+                    trades=state.commerce_trades,
+                    orphan_after_s=reconciler_config.orphan_after_s,
+                    limit=limit,
+                    now_ms_override=current_ms,
+                )
             ),
         )
     @app.post("/api/v2/commerce/listings")
@@ -1357,8 +1380,24 @@ def register_commerce_routes(
                     "ack": existing_ack.to_dict(),
                     "replay": True,
                 }
-            state.commerce_orders.import_verified(order)
-            state.commerce_trades.import_verified_events(order.order_id, trade_events)
+            # Validate the complete bundle before mutating either projection.
+            # Persist the trade first: without its matching OrderEvent it is
+            # not visible through commerce order APIs, and an idempotent retry
+            # can finish the commit after an I/O interruption.
+            state.commerce_orders.validate_import(order)
+            state.commerce_trades.validate_import_events(
+                order.order_id,
+                trade_events,
+            )
+            state.commerce_provisional.import_bundle(
+                order=order,
+                trade_events=trade_events,
+                message_id=envelope.message_id,
+                source_did=envelope.source_did,
+                orders=state.commerce_orders,
+                trades=state.commerce_trades,
+                created_at_ms=envelope.created_at_ms,
+            )
         except HTTPException:
             raise
         except (CommerceEnvelopeRejected, OrderRejected, TradeRejected, RuntimeError, TypeError, ValueError) as exc:

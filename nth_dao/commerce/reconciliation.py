@@ -24,6 +24,7 @@ from nth_dao.commerce.outbox import (
 logger = logging.getLogger(__name__)
 
 DispatchRecord = Callable[[OutboxRecord, int], Dict[str, Any]]
+MaintenanceCycle = Callable[[int, int], Dict[str, int]]
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class ReconcilerConfig:
     max_backoff_ms: int = 300_000
     jitter_ratio: float = 0.2
     archive_after_s: int = 0
+    orphan_after_s: int = 7 * 86_400
 
     def __post_init__(self) -> None:
         if isinstance(self.poll_interval_s, bool) or not isinstance(self.poll_interval_s, (int, float)):
@@ -57,6 +59,12 @@ class ReconcilerConfig:
             or (self.archive_after_s != 0 and self.archive_after_s < 86_400)
         ):
             raise ValueError("archive_after_s must be 0 or at least 86400")
+        if (
+            isinstance(self.orphan_after_s, bool)
+            or not isinstance(self.orphan_after_s, int)
+            or self.orphan_after_s < 86_400
+        ):
+            raise ValueError("orphan_after_s must be at least 86400")
 
 
 class CommerceReconciler:
@@ -74,12 +82,16 @@ class CommerceReconciler:
         dispatch: DispatchRecord,
         *,
         config: ReconcilerConfig | None = None,
+        maintenance: MaintenanceCycle | None = None,
     ) -> None:
         if not callable(dispatch):
             raise TypeError("dispatch must be callable")
         self.outbox = outbox
         self.dispatch = dispatch
         self.config = config or ReconcilerConfig()
+        if maintenance is not None and not callable(maintenance):
+            raise TypeError("maintenance must be callable")
+        self.maintenance = maintenance
         self._stop_event = threading.Event()
         self._run_lock = threading.Lock()
         self._state_lock = threading.RLock()
@@ -91,6 +103,9 @@ class CommerceReconciler:
         self._claimed_total = 0
         self._acknowledged_total = 0
         self._failed_total = 0
+        self._maintenance_total = 0
+        self._quarantined_total = 0
+        self._maintenance_error = ""
 
     def retry_delay_ms(self, prior_attempts: int, message_id: str = "") -> int:
         if isinstance(prior_attempts, bool) or not isinstance(prior_attempts, int) or prior_attempts < 0:
@@ -207,6 +222,28 @@ class CommerceReconciler:
                     before_ms=current_ms - self.config.archive_after_s * 1_000,
                     limit=self.config.batch_limit,
                 )
+            if self.maintenance is not None:
+                current_ms = now_ms_override or time.time_ns() // 1_000_000
+                try:
+                    maintenance = self.maintenance(
+                        current_ms,
+                        self.config.batch_limit,
+                    )
+                    with self._state_lock:
+                        self._maintenance_total += int(
+                            maintenance.get("scanned", 0)
+                        )
+                        self._quarantined_total += int(
+                            maintenance.get("quarantined", 0)
+                        )
+                        self._maintenance_error = ""
+                except Exception as exc:  # noqa: BLE001 - maintenance is isolated
+                    with self._state_lock:
+                        self._maintenance_error = OUTBOX_ERROR_RUNTIME
+                    logger.error(
+                        "commerce import maintenance failed (%s)",
+                        type(exc).__name__,
+                    )
             return {
                 "busy": False,
                 "claimed": claimed,
@@ -288,5 +325,8 @@ class CommerceReconciler:
                 "claimed_total": self._claimed_total,
                 "acknowledged_total": self._acknowledged_total,
                 "failed_total": self._failed_total,
+                "maintenance_total": self._maintenance_total,
+                "quarantined_total": self._quarantined_total,
+                "maintenance_error": self._maintenance_error,
                 "config": asdict(self.config),
             }

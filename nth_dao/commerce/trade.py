@@ -32,7 +32,9 @@ claimant/publisher 从中取出并绑定。一笔认领 → 一个 trade
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -216,6 +218,45 @@ class TradeStore:
         events = data.get("events") if isinstance(data, dict) else None
         return events if isinstance(events, list) else []
 
+    def _validate_import_locked(
+        self,
+        trade_id: str,
+        events: List[Dict[str, Any]],
+        path: Path,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(events, list) or not events:
+            raise TradeRejected(REJECT_CHAIN_BROKEN, "empty remote trade chain")
+        if len(events) > 1000:
+            raise TradeRejected(REJECT_CHAIN_BROKEN, "remote trade chain too long")
+        candidate = [dict(item) if isinstance(item, dict) else item for item in events]
+        existing = self.get_events(trade_id)
+        if path.exists() and not existing:
+            raise TradeConflict("stored trade is unreadable; refuse to overwrite")
+        if existing and candidate[:len(existing)] != existing:
+            raise TradeConflict("remote trade does not extend the local signed prefix")
+        if existing is not None and len(candidate) < len(existing):
+            raise TradeConflict("remote trade is older than the local signed chain")
+
+        class _CandidateStore:
+            def get_events(self, requested_trade_id: str):
+                return candidate if requested_trade_id == trade_id else None
+
+        ok, reason = verify_trade(_CandidateStore(), trade_id)  # type: ignore[arg-type]
+        if not ok:
+            raise TradeRejected(reason, "remote trade chain failed verification")
+        return candidate
+
+    def validate_import_events(
+        self,
+        trade_id: str,
+        events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Validate a remote chain and existing prefix without writing."""
+        path = self._path(trade_id)
+        lock = _thread_lock_for(str(path))
+        with lock, InterProcessLock(path):
+            return self._validate_import_locked(trade_id, events, path)
+
     def import_verified_events(
         self,
         trade_id: str,
@@ -228,36 +269,73 @@ class TradeStore:
         forks or out-of-order suffixes fail closed instead of being patched
         together into a chain nobody signed.
         """
-        if not isinstance(events, list) or not events:
-            raise TradeRejected(REJECT_CHAIN_BROKEN, "empty remote trade chain")
-        if len(events) > 1000:
-            raise TradeRejected(REJECT_CHAIN_BROKEN, "remote trade chain too long")
-        candidate = [dict(item) if isinstance(item, dict) else item for item in events]
         path = self._path(trade_id)
         lock = _thread_lock_for(str(path))
         with lock, InterProcessLock(path):
-            existing = self.get_events(trade_id)
-            if path.exists() and existing is None:
-                raise TradeConflict("stored trade is unreadable; refuse to overwrite")
-            if existing and candidate[:len(existing)] != existing:
-                raise TradeConflict("remote trade does not extend the local signed prefix")
-            if existing is not None and len(candidate) < len(existing):
-                raise TradeConflict("remote trade is older than the local signed chain")
-            class _CandidateStore:
-                def get_events(self, requested_trade_id: str):
-                    return candidate if requested_trade_id == trade_id else None
-
-            # Verify before replacing durable state. The previous
-            # write-then-rollback sequence left a corrupt chain behind if the
-            # process died between those two writes.
-            ok, reason = verify_trade(_CandidateStore(), trade_id)  # type: ignore[arg-type]
-            if not ok:
-                raise TradeRejected(reason, "remote trade chain failed verification")
+            candidate = self._validate_import_locked(trade_id, events, path)
             atomic_write_json(
                 path,
                 {"trade_id": trade_id, "events": candidate},
             )
             return candidate
+
+    def quarantine_verified_orphan(
+        self,
+        trade_id: str,
+        *,
+        expected_chain_head: str,
+        destination: Path,
+    ) -> bool:
+        """Move an exact verified chain out of the active store."""
+        path = self._path(trade_id)
+        lock = _thread_lock_for(str(path))
+        with lock, InterProcessLock(path):
+            events = self._validate_verified_orphan_locked(
+                trade_id,
+                expected_chain_head=expected_chain_head,
+            )
+            if events is None:
+                return False
+            destination = Path(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                raise TradeConflict("orphan quarantine destination exists")
+            os.replace(path, destination)
+            return True
+
+    def validate_verified_orphan(
+        self,
+        trade_id: str,
+        *,
+        expected_chain_head: str,
+    ) -> bool:
+        """Check an orphan candidate without moving active state."""
+        path = self._path(trade_id)
+        lock = _thread_lock_for(str(path))
+        with lock, InterProcessLock(path):
+            return self._validate_verified_orphan_locked(
+                trade_id,
+                expected_chain_head=expected_chain_head,
+            ) is not None
+
+    def _validate_verified_orphan_locked(
+        self,
+        trade_id: str,
+        *,
+        expected_chain_head: str,
+    ) -> Optional[List[Dict[str, Any]]]:
+        events = self.get_events(trade_id)
+        if not events:
+            return None
+        ok, reason = verify_trade(self, trade_id)
+        if not ok:
+            raise TradeRejected(reason, "orphan trade failed verification")
+        actual_head = "sha256:" + hashlib.sha256(
+            canonical_json(events[-1])
+        ).hexdigest()
+        if actual_head != expected_chain_head:
+            raise TradeConflict("orphan trade chain head changed")
+        return events
 
 
 # ─── 转移表 ─────────────────────────────────────────────────────
@@ -715,6 +793,8 @@ def verify_trade(store: TradeStore, trade_id: str) -> Tuple[bool, str]:
         try:
             ev = TradeEvent.from_dict(raw)
         except (TypeError, ValueError):
+            return False, REJECT_CHAIN_BROKEN
+        if ev.trade_id != trade_id:
             return False, REJECT_CHAIN_BROKEN
         if not isinstance(ev.payload, dict):
             return False, REJECT_PAYLOAD_INVALID

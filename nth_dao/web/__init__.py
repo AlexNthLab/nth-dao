@@ -627,11 +627,17 @@ class WebState:
         # No-real-money commerce MVP stores. Order views are derived from the
         # verified Order + Trade chains; the outbox is the only mutable
         # delivery bookkeeping and can be safely retried after restart.
-        from ..commerce import ListingStore, OrderStore, TradeStore
+        from ..commerce import (
+            ListingStore,
+            OrderStore,
+            ProvisionalImportStore,
+            TradeStore,
+        )
         from ..commerce.outbox import CommerceInbox, CommerceOutbox
         self.commerce_listings = ListingStore(workspace)
         self.commerce_orders = OrderStore(workspace)
         self.commerce_trades = TradeStore(workspace)
+        self.commerce_provisional = ProvisionalImportStore(workspace)
         self.commerce_outbox = CommerceOutbox(workspace)
         self.commerce_inbox = CommerceInbox(workspace)
         self.commerce_cart_limiter = PersistentRateLimiter(

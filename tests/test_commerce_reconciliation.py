@@ -344,6 +344,19 @@ def test_web_lifespan_owns_reconciler_and_exposes_status(tmp_path):
     assert worker.status()["running"] is False
 
 
+def test_web_reconciler_exposes_configured_orphan_retention(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("NTH_COMMERCE_ORPHAN_AFTER_S", "86400")
+    app = create_app(tmp_path, require_console_auth=False)
+
+    response = TestClient(app).get("/api/v2/commerce/reconciliation")
+
+    assert response.status_code == 200
+    assert response.json()["config"]["orphan_after_s"] == 86_400
+
+
 def test_reconciliation_status_marks_capped_counts_as_truncated(tmp_path, monkeypatch):
     app = create_app(tmp_path, require_console_auth=False)
     row = SimpleNamespace(next_attempt_at_ms=0)

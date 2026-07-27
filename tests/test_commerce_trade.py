@@ -22,10 +22,12 @@ import json
 import multiprocessing as mp
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from nth_dao.identity import AgentIdentity
+from nth_dao.util.io import atomic_write_json
 from nth_dao.commerce import (
     TradeStore,
     open_trade,
@@ -34,6 +36,7 @@ from nth_dao.commerce import (
     record_settlement,
     trade_state,
     verify_trade,
+    TradeConflict,
     TradeRejected,
     STATE_EXECUTING,
     STATE_DELIVERED,
@@ -46,6 +49,7 @@ from nth_dao.commerce import (
     REJECT_WRONG_ACTOR,
     REJECT_TRADE_EXISTS,
     REJECT_BAD_VERDICT,
+    REJECT_CHAIN_BROKEN,
 )
 
 pytest.importorskip("nacl")
@@ -112,6 +116,49 @@ def test_verify_fail_goes_to_failed_terminal(tmp_path) -> None:
         record_settlement(store, "ann-2", settler=pub, settlement={"adapter_id": "manual"})
     assert exc.value.reason == REJECT_ILLEGAL_TRANSITION
     assert verify_trade(store, "ann-2")[0]
+
+
+def test_verify_trade_binds_every_event_to_requested_trade_id(tmp_path) -> None:
+    store = TradeStore(tmp_path)
+    authority = AgentIdentity.generate(label="dao")
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    open_trade(
+        store,
+        authority=authority,
+        claim_record=_claim("bound-trade", claimant, publisher),
+    )
+    events = store.get_events("bound-trade")
+
+    mismatched_store = SimpleNamespace(get_events=lambda _trade_id: events)
+    assert verify_trade(mismatched_store, "different-trade") == (
+        False,
+        REJECT_CHAIN_BROKEN,
+    )
+
+
+def test_import_refuses_to_overwrite_empty_corrupt_trade(tmp_path) -> None:
+    source = TradeStore(tmp_path / "source")
+    target = TradeStore(tmp_path / "target")
+    authority = AgentIdentity.generate(label="dao")
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    open_trade(
+        source,
+        authority=authority,
+        claim_record=_claim("corrupt-trade", claimant, publisher),
+    )
+    events = source.get_events("corrupt-trade")
+    target_path = target._path("corrupt-trade")
+    atomic_write_json(
+        target_path,
+        {"trade_id": "corrupt-trade", "events": []},
+    )
+
+    with pytest.raises(TradeConflict, match="unreadable"):
+        target.import_verified_events("corrupt-trade", events)
+
+    assert target.get_events("corrupt-trade") == []
 
 
 # ─── 非法转移 ────────────────────────────────────────────────────
