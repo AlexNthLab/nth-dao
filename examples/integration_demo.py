@@ -12,7 +12,6 @@ PR 1-5
 """
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,10 +24,18 @@ if sys.platform == "win32":
     except AttributeError:
         pass
 
-REPO = Path(__file__).resolve().parent.parent  # examples/ -> repo root
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
 # Make sibling team_layer/nth_dao packages importable when run directly
 # (`python examples/integration_demo.py` from the repo root).
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(SOURCE_ROOT))
+
+from examples.demo_workspace import (  # noqa: E402
+    new_demo_workspace,
+    prepare_demo_workspace,
+)
+
+
+REPO = new_demo_workspace("integration")
 
 
 def section(title: str):
@@ -36,28 +43,6 @@ def section(title: str):
     print("=" * 70)
     print(title)
     print("=" * 70)
-
-
-def cleanup():
-    paths = [
-        REPO / "team_logs",
-        REPO / "sidechain" / "ledger.jsonl",
-        REPO / "sidechain" / ".last_collected",
-        REPO / "sidechain" / "reload.signal",
-        REPO / "sidechain" / "evolution_audit.jsonl",
-        REPO / "sidechain" / "sync_audit.jsonl",
-        REPO / "sidechain" / "pending_patches",
-        REPO / "memory" / "user-model.json",
-        REPO / "skills" / "registry" / "fix_timeout_database.md",
-    ]
-    for p in paths:
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-        elif p.exists():
-            p.unlink()
-    (REPO / "team_logs").mkdir(exist_ok=True)
-    (REPO / "sidechain").mkdir(exist_ok=True)
-    (REPO / "memory").mkdir(exist_ok=True)
 
 
 def plant_reload_signal():
@@ -75,7 +60,7 @@ def plant_reload_signal():
 
 def seed_failure_logs():
     """ 4  timeout_database PR 4 EvoLoop """
-    from team_layer.memory_providers import LedgerProvider
+    from nth_dao import LedgerProvider
     ledger = LedgerProvider(str(REPO / "sidechain" / "ledger.jsonl"))
     ledger.initialize({})
     for i in range(4):
@@ -87,16 +72,20 @@ def seed_failure_logs():
             token_cost=6000,  # 4*6000=24000 > 15000*1.5=22500
         )
     ledger.on_session_end()
-    print(f"  Seeded 4 timeout_database entries (24000t total, threshold 22500t)")
+    print("  Seeded 4 timeout_database entries (24000t total, threshold 22500t)")
 
 
 def run_entrypoint(args: list) -> int:
     """ team_entrypoint.py """
     print(f"  Command: python team_entrypoint.py {' '.join(args)}\n")
     proc = subprocess.run(
-        [sys.executable, str(REPO / "team_entrypoint.py"), *args],
+        [sys.executable, str(SOURCE_ROOT / "team_entrypoint.py"), *args],
         cwd=str(REPO),
-        env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"},
+        env={
+            **__import__("os").environ,
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONPATH": str(SOURCE_ROOT),
+        },
         capture_output=True,
         text=True,
         encoding="utf-8",       # Windows  GBK UTF-8
@@ -169,12 +158,14 @@ def show_audit_excerpt():
 
 
 def main():
+    prepare_demo_workspace(REPO)
+    (REPO / "team_logs").mkdir()
+    (REPO / "sidechain").mkdir()
+    (REPO / "memory").mkdir()
     section("PR 1-5 ")
     print(" TeamAgent  5  PR")
 
-    section("[Setup]  + ")
-    cleanup()
-    print("   cleaned previous artifacts")
+    section(f"[Setup] isolated workspace: {REPO}")
     plant_reload_signal()
     seed_failure_logs()
 

@@ -11,6 +11,7 @@ EvoLoop
    - destructive_drop   PENDING_REVIEW (high risk)
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,8 +25,11 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # examples/ -> repo root
 
-from team_layer.memory_providers import LedgerProvider
-from team_layer.evolution import EvoLoop, EvoTrigger
+from examples.demo_workspace import new_demo_workspace, prepare_demo_workspace
+from nth_dao import EvoLoop, EvoTrigger, LedgerProvider
+
+
+DEMO_ROOT = new_demo_workspace("evolution")
 
 
 def seed_ledger(ledger: LedgerProvider):
@@ -64,35 +68,20 @@ def seed_ledger(ledger: LedgerProvider):
     ledger.on_session_end()
 
 
-def cleanup_artifacts():
-    """ demo """
-    targets = [
-        Path("sidechain/ledger.jsonl"),
-        Path("sidechain/evolution_audit.jsonl"),
-        Path("skills/registry/fix_timeout_database.md"),
-        Path("skills/registry/fix_destructive_drop_table.md"),
-        Path("sidechain/pending_patches/fix_destructive_drop_table.patch.json"),
-        Path("sidechain/pending_patches/fix_timeout_database.patch.json"),
-    ]
-    for path in targets:
-        if path.exists():
-            path.unlink()
-            print(f"  cleaned: {path}")
-
-
 def main():
+    prepare_demo_workspace(DEMO_ROOT)
+    os.chdir(DEMO_ROOT)
     print("=" * 70)
     print("EvoLoop   PR 4")
     print("=" * 70)
 
-    print("\n[Step 0] ...")
-    cleanup_artifacts()
+    print(f"\n[Step 0] isolated workspace: {DEMO_ROOT}")
 
     print("\n[Step 1]  Ledger ...")
     ledger = LedgerProvider("sidechain/ledger.jsonl")
     ledger.initialize({})
     seed_ledger(ledger)
-    print(f"  Total entries written: 4 + 2 + 4 = 10")
+    print("  Total entries written: 4 + 2 + 4 = 10")
 
     print("\n[Step 2]  Trigger ...")
     trigger = EvoTrigger(ledger, evolution_budget=15000)
@@ -123,7 +112,7 @@ def main():
     print(f"\n[AUTO_MERGE] {auto_merged}")
     if auto_merged.exists():
         print(f"   Exists ({auto_merged.stat().st_size} bytes)")
-        print(f"  Preview (first 5 lines):")
+        print("  Preview (first 5 lines):")
         for line in auto_merged.read_text(encoding="utf-8").split("\n")[:5]:
             print(f"    {line}")
     else:

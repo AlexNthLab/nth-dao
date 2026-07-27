@@ -38,7 +38,6 @@
 """
 
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -52,9 +51,10 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import nth_dao as nth
-from nth_dao.orchestration import StepStatus
+from examples.demo_workspace import new_demo_workspace, prepare_demo_workspace
 
-REPO = Path(__file__).resolve().parent.parent  # examples/ -> repo root
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+REPO = new_demo_workspace("real-world")
 
 
 def section(t):
@@ -64,33 +64,12 @@ def section(t):
     print("=" * 76)
 
 
-def cleanup():
-    """ demo  ~/.hermes/"""
-    paths = [
-        REPO / "team_agents",
-        REPO / "missions",
-        REPO / "memory" / "user-model.json",
-        REPO / "sidechain" / "ledger.jsonl",
-        REPO / "sidechain" / "evolution_audit.jsonl",
-        REPO / "sidechain" / "sync_audit.jsonl",
-        REPO / "blackboard" / "shared.jsonl",
-        REPO / "blackboard" / "group_dev.jsonl",
-        REPO / "blackboard" / "private_alice-coder.jsonl",
-    ]
-    for p in paths:
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-        elif p.exists():
-            p.unlink()
-
-
 def main():
+    prepare_demo_workspace(REPO)
     section("Hermes Team   demo")
     print(" LLM  team_layer/backends/hermes.py 3 ")
     print("Backend: hermes + DeepSeek")
     print()
-
-    cleanup()
 
     #
     section("[Step 1] attach()   Hermes Team agent")
@@ -160,14 +139,14 @@ def main():
     team.runner.claim(mission.id, s.id)
 
     #
-    code_path = REPO / "team_layer" / "backends" / "hermes.py"
+    code_path = SOURCE_ROOT / "team_layer" / "backends" / "hermes.py"
     code = code_path.read_text(encoding="utf-8")
     snippet = code[code.find("def send_turn"):][:2200]  #  2.2KB
     print(f"   Read {code_path.name} ({len(code)} bytes total, snippet {len(snippet)} chars)")
     team.runner.complete(
         mission.id, s.id,
         output={"snippet_len": len(snippet)},
-        note=f"loaded {code_path.relative_to(REPO)}",
+        note=f"loaded {code_path.relative_to(SOURCE_ROOT)}",
     )
 
     #
@@ -193,7 +172,7 @@ Be specific (line of code or pattern). Don't generic-praise.
 ```"""
 
     print(f"   Prompt length: {len(prompt)} chars")
-    print(f"   Calling DeepSeek via Hermes backend...")
+    print("   Calling DeepSeek via Hermes backend...")
     print()
 
     #  turn   team.agent.run_with_backend
@@ -209,24 +188,24 @@ Be specific (line of code or pattern). Don't generic-praise.
     summary = result["session_summary"]
     turn = result["turns"][0] if result["turns"] else None
 
-    print(f"  Backend session summary:")
+    print("  Backend session summary:")
     print(f"    total_turns:    {summary.total_turns}")
     print(f"    total_tokens:   {summary.total_usage.total}")
     print(f"    duration:       {summary.duration_seconds:.2f}s")
     print(f"    final_status:   {summary.final_status}")
 
     if turn:
-        print(f"\n  Turn 1:")
+        print("\n  Turn 1:")
         print(f"    finish_reason: {turn['finish_reason']}")
         print(f"    tokens:        {turn['tokens']}")
         print(f"    latency:       {turn['latency']:.2f}s")
         if turn['error']:
             print(f"    error:         {turn['error'][:120]}")
         if turn['response_content']:
-            print(f"\n   LLM response (first 800 chars) ")
+            print("\n   LLM response (first 800 chars) ")
             for line in turn['response_content'][:800].split("\n"):
                 print(f"   {line}")
-            print(f"  ")
+            print("  ")
 
     #  step
     if turn and turn['finish_reason'] == 'stop' and turn['response_content']:
@@ -247,14 +226,14 @@ Be specific (line of code or pattern). Don't generic-praise.
     final = team.mission_store.get(mission.id)
     p = final.progress()
     print(f"  Mission status: {final.status}  ({p['done']}/{p['total']} done, {p['failed']} failed)")
-    print(f"\n  Step trail:")
+    print("\n  Step trail:")
     for s in final.steps:
         print(f"    [{s.status:9s}] {s.id:12s} assignee={s.assignee}")
         for n in s.notes[-2:]:
             print(f"       {n[:120]}")
 
     print()
-    print(f"  Ledger entries (in-memory + buffer):")
+    print("  Ledger entries (in-memory + buffer):")
     #  flush buffer LedgerProvider  batch
     ledger_provider = team.memory.providers["LedgerProvider"]
     #  buffer  on_session_end
@@ -275,12 +254,12 @@ Be specific (line of code or pattern). Don't generic-praise.
                 print(f"    [{sig:25s}] cost={entry.get('token_cost', 0):5d}t  "
                       f"action={entry.get('action_type', '?')[:30]}")
         else:
-            print(f"    (still in buffer  will flush on detach)")
+            print("    (still in buffer  will flush on detach)")
 
     #
     section("[Step 8] EvoLoop   ")
     #
-    from team_layer.evolution import EvoLoop
+    from nth_dao import EvoLoop
     evo = EvoLoop(ledger=team.memory.providers["LedgerProvider"])
     results = evo.run_once()
     if results:
@@ -288,16 +267,16 @@ Be specific (line of code or pattern). Don't generic-praise.
         for r in results:
             print(f"    {r.summary()}")
     else:
-        print(f"   Not triggered yet (need count3 AND wasted>budget*1.5)")
-        print(f"      EvoLoop ")
+        print("   Not triggered yet (need count3 AND wasted>budget*1.5)")
+        print("      EvoLoop ")
 
     #
     section("[Step 9] detach()  ")
     #
     team.detach()
     print(f"   {team.agent_id} detached")
-    print(f"   heartbeat file  offline")
-    print(f"   memory/user-model.json ")
+    print("   heartbeat file  offline")
+    print("   memory/user-model.json ")
 
     section(" Real-world demo complete")
     print()

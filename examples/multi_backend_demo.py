@@ -18,7 +18,7 @@ PR 7  Backend
       alice/bob  VectorProvider
 """
 
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -31,18 +31,23 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # examples/ -> repo root
 
-from team_layer import TeamAgent, TeamMemoryManager
-from team_layer.backends import default_registry
-from team_layer.blackboard import Blackboard, BlackboardProvider, render_kanban
-from team_layer.evolution import EvoLoop
-from team_layer.memory_providers import (
+from examples.demo_workspace import new_demo_workspace, prepare_demo_workspace
+from nth_dao import (
+    Blackboard,
+    BlackboardProvider,
+    EvoLoop,
     LedgerProvider,
     SoulProvider,
+    TeamAgent,
+    TeamMemoryManager,
     UserModelProvider,
     VectorProvider,
+    default_registry,
+    render_kanban,
 )
 
-REPO = Path(__file__).resolve().parent.parent  # examples/ -> repo root
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+REPO = new_demo_workspace("multi-backend")
 
 
 def section(t):
@@ -52,34 +57,13 @@ def section(t):
     print("=" * 76)
 
 
-def cleanup():
-    paths = [
-        REPO / "blackboard" / "shared.jsonl",
-        REPO / "blackboard" / "group_dev.jsonl",
-        REPO / "sidechain" / "ledger.jsonl",
-        REPO / "sidechain" / "evolution_audit.jsonl",
-        REPO / "sidechain" / "pending_patches",
-        REPO / "memory" / "user-model.json",
-    ]
-    for p in paths:
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-        elif p.exists():
-            p.unlink()
-    #  EvoLoop  fix_* skills
-    reg = REPO / "skills" / "registry"
-    if reg.exists():
-        for f in reg.glob("fix_carol_mock_*.md"):
-            f.unlink()
-
-
 def make_agent(agent_id: str, groups: list = None) -> TeamAgent:
     """ TeamAgent Provider"""
     providers = [
-        SoulProvider("skills/TEAM-SOUL.md"),
-        UserModelProvider(f"memory/user-model.json"),
-        VectorProvider("skills/registry"),
-        LedgerProvider("sidechain/ledger.jsonl"),  #  Agent  ledger
+        SoulProvider(str(SOURCE_ROOT / "skills" / "TEAM-SOUL.md")),
+        UserModelProvider(str(REPO / "memory" / "user-model.json")),
+        VectorProvider(str(REPO / "skills" / "registry")),
+        LedgerProvider(str(REPO / "sidechain" / "ledger.jsonl")),
         BlackboardProvider(
             agent_id=agent_id,
             blackboard_root=str(REPO / "blackboard"),
@@ -92,11 +76,12 @@ def make_agent(agent_id: str, groups: list = None) -> TeamAgent:
 
 
 def main():
+    prepare_demo_workspace(REPO)
+    os.chdir(REPO)
     section("PR 7  Backend ")
     print("3  Agent  backend NTH DAO runtime")
 
-    section("[Step 0]  + ")
-    cleanup()
+    section(f"[Step 0] isolated workspace: {REPO}")
     bb = Blackboard(REPO / "blackboard")
 
     section("[Step 1] Backend ")
@@ -197,7 +182,7 @@ def main():
         print(f"  Total ledger entries:    {entries}")
     print(f"  carol_mock_error count:  {ledger.count_error_occurrences('carol_mock_error')}")
     print(f"  carol_mock_error wasted: {ledger.sum_token_cost_by_sig('carol_mock_error')} tokens")
-    print(f"  EVOLUTION_BUDGET:        15000  (threshold = 22500t)")
+    print("  EVOLUTION_BUDGET:        15000  (threshold = 22500t)")
 
     section("[Step 7] EvoLoop  backend ")
     print("  Trigger: count >= 3 AND wasted > budget * 1.5")
@@ -213,7 +198,7 @@ def main():
     print(render_kanban(all_entries, width=30))
 
     section("[Step 9] alice  carol  skill")
-    new_alice_vp = VectorProvider("skills/registry")
+    new_alice_vp = VectorProvider(str(REPO / "skills" / "registry"))
     new_alice_vp.initialize({})
     fix_skills = [s for s in new_alice_vp.skill_index if "carol" in s["name"].lower()]
     if fix_skills:

@@ -14,8 +14,6 @@ PR 5
        sync_audit.jsonl
 """
 
-import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -29,38 +27,17 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # examples/ -> repo root
 
-from team_layer.git_sync import (
-    SyncConfig,
-    LogCollector,
+from examples.demo_workspace import new_demo_workspace, prepare_demo_workspace
+from nth_dao import (
     CentralAggregator,
+    LedgerProvider,
+    LogCollector,
     SkillLoader,
+    SyncConfig,
 )
-from team_layer.memory_providers import LedgerProvider
 
 
-REPO_ROOT = Path(__file__).parent
-
-
-def cleanup():
-    """ demo """
-    paths = [
-        REPO_ROOT / "logs",
-        REPO_ROOT / "sidechain" / "ledger.jsonl",
-        REPO_ROOT / "sidechain" / "aggregated_ledger.jsonl",
-        REPO_ROOT / "sidechain" / "aggregate_report.md",
-        REPO_ROOT / "sidechain" / "evolution_audit.jsonl",
-        REPO_ROOT / "sidechain" / "sync_audit.jsonl",
-        REPO_ROOT / "sidechain" / ".last_collected",
-        REPO_ROOT / "sidechain" / "pending_patches",
-        REPO_ROOT / "skills" / "registry" / "fix_timeout_database.md",
-    ]
-    for path in paths:
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-            print(f"  cleaned dir: {path.name}")
-        elif path.exists():
-            path.unlink()
-            print(f"  cleaned file: {path.name}")
+REPO_ROOT = new_demo_workspace("sync")
 
 
 def simulate_terminal(hostname: str, username: str, agent_id: str, error_count: int):
@@ -72,6 +49,10 @@ def simulate_terminal(hostname: str, username: str, agent_id: str, error_count: 
         repo_root=REPO_ROOT,
         hostname=hostname,
         username=username,
+        sidechain_dir=f"sidechain/{hostname}",
+        ledger_path=f"sidechain/{hostname}/ledger.jsonl",
+        sync_audit_path=f"sidechain/{hostname}/sync_audit.jsonl",
+        reload_signal_path=f"sidechain/{hostname}/reload.signal",
         auto_push=False,  # demo
     )
 
@@ -93,11 +74,6 @@ def simulate_terminal(hostname: str, username: str, agent_id: str, error_count: 
     collector = LogCollector(cfg)
     result = collector.collect(auto_push=False)
     print(f"  {result}")
-
-    #  collect  ledger
-    cfg.ledger_full_path().unlink(missing_ok=True)
-    (cfg.sidechain_path() / ".last_collected").unlink(missing_ok=True)
-
 
 def show_logs_dir():
     """ logs/ """
@@ -149,12 +125,12 @@ def show_report_preview():
 
 
 def main():
+    prepare_demo_workspace(REPO_ROOT)
     print("=" * 70)
     print("PR 5   ")
     print("=" * 70)
 
-    print("\n[Step 0] ...")
-    cleanup()
+    print(f"\n[Step 0] isolated workspace: {REPO_ROOT}")
 
     print("\n[Step 1]  + collect")
     simulate_terminal("alice-laptop", "alice", "worker-alice", error_count=4)
@@ -168,7 +144,7 @@ def main():
     aggregator = CentralAggregator(cfg, noise_min_count=2)
     report = aggregator.run(trigger_evolution=True)
 
-    print(f"\n  Report summary:")
+    print("\n  Report summary:")
     print(f"    total_entries     = {report.total_entries}")
     print(f"    unique_hosts      = {report.unique_hosts}")
     print(f"    error_sigs        = {report.error_sigs}")
@@ -183,7 +159,7 @@ def main():
     loader = SkillLoader(cfg)
     print(f"  Loader reload paths: {loader.reload_paths}")
     print(f"  Signal mechanism: {'pkill -HUP' if sys.platform != 'win32' else 'signal-file'}")
-    print(f"  (Skipped actual reload to avoid touching working tree)")
+    print("  (Skipped actual reload to avoid touching working tree)")
 
     print()
     print("=" * 70)

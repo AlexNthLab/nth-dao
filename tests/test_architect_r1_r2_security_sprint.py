@@ -22,13 +22,11 @@ R-2 - /api/build_id pre-fix spawned `git` on every request (DoS
 from __future__ import annotations
 
 import inspect
-import os
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-import nth_dao.web as web_mod
 from nth_dao.web import (
     _BACKEND_GIT_REV,
     _resolve_safe_bind_host,
@@ -135,7 +133,7 @@ def test_R2_build_id_handler_does_not_spawn_subprocess(client):
     problem under poll-load."""
     # Locate the handler via the FastAPI app's route table - it's a
     # closure inside create_app, not a module-level symbol.
-    app = create_app(Path("."))
+    app = client.app
     handler = None
     for route in app.routes:
         if getattr(route, "path", "") == "/api/build_id":

@@ -32,14 +32,42 @@ if (-not $node) {
     throw "Could not find a usable node.exe. Set NTH_DAO_NODE to an absolute node.exe path."
 }
 
-if (-not $VitestArgs -or $VitestArgs.Count -eq 0) {
-    # Several jsdom tests intentionally stub globals such as fetch, window,
-    # timers, and module mocks. Running test files in parallel lets those
-    # globals bleed across files in Vitest's shared worker context, producing
-    # order-dependent false negatives. Keep frontend verification deterministic
-    # by default; callers can still pass their own VitestArgs for local speed.
-    $VitestArgs = @("run", "--environment", "jsdom", "--fileParallelism=false")
+if (-not $VitestArgs) {
+    $VitestArgs = @()
 }
 
-& $node $vitest @VitestArgs
+$resolvedArgs = [System.Collections.Generic.List[string]]::new()
+foreach ($arg in $VitestArgs) {
+    $resolvedArgs.Add($arg)
+}
+
+$lowerArgs = @($resolvedArgs | ForEach-Object { $_.ToLowerInvariant() })
+$hasMode = $lowerArgs | Where-Object {
+    $_ -in @("run", "--run", "watch", "dev", "related")
+}
+if (-not $hasMode) {
+    $resolvedArgs.Insert(0, "run")
+}
+
+$hasEnvironment = $lowerArgs | Where-Object {
+    $_ -eq "--environment" -or $_.StartsWith("--environment=")
+}
+if (-not $hasEnvironment) {
+    $resolvedArgs.Add("--environment")
+    $resolvedArgs.Add("jsdom")
+}
+
+# Several jsdom tests intentionally stub globals such as fetch, window,
+# timers, and module mocks. Keep file execution deterministic unless the
+# caller explicitly chooses a fileParallelism setting.
+$hasFileParallelism = $lowerArgs | Where-Object {
+    $_ -eq "--fileparallelism" `
+        -or $_.StartsWith("--fileparallelism=") `
+        -or $_ -eq "--no-file-parallelism"
+}
+if (-not $hasFileParallelism) {
+    $resolvedArgs.Add("--fileParallelism=false")
+}
+
+& $node $vitest @resolvedArgs
 exit $LASTEXITCODE

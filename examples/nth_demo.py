@@ -21,9 +21,7 @@ Mission v23  step
   6. Mission planning  active  completed
 """
 
-import shutil
 import sys
-import time
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -36,9 +34,9 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # examples/ -> repo root
 
 import nth_dao as nth
-from nth_dao.orchestration import StepStatus
+from examples.demo_workspace import new_demo_workspace, prepare_demo_workspace
 
-REPO = Path(__file__).resolve().parent.parent  # examples/ -> repo root
+REPO = new_demo_workspace("orchestration")
 
 
 def section(t):
@@ -48,28 +46,12 @@ def section(t):
     print("=" * 76)
 
 
-def cleanup():
-    paths = [
-        REPO / "team_agents",
-        REPO / "missions",
-        REPO / "blackboard" / "shared.jsonl",
-        REPO / "blackboard" / "group_payments.jsonl",
-        REPO / "sidechain" / "ledger.jsonl",
-        REPO / "memory" / "user-model.json",
-    ]
-    for p in paths:
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-        elif p.exists():
-            p.unlink()
-
-
 def main():
+    prepare_demo_workspace(REPO)
     section("PR 8 NTH DAO  Discovery + Mission Orchestration")
     print("3  Agent  attach()      Mission")
 
-    section("[Setup] ")
-    cleanup()
+    section(f"[Setup] isolated workspace: {REPO}")
 
     #
     section("[Step 1] alice attach()   + ")
@@ -131,7 +113,7 @@ def main():
     )
     print(f"   bob registered: {bob.agent_id}")
     print()
-    print(f"  bob.discover() ():")
+    print("  bob.discover() ():")
     for r in bob.discover():
         print(f"    {r.short()}")
 
@@ -142,7 +124,7 @@ def main():
     if teammate and teammate.record.agent_id != bob.agent_id:
         print(f"   matched: {teammate.record.agent_id} (score={teammate.score})")
     else:
-        print(f"   no other 'backend' agent  bob is the only one (himself excluded)")
+        print("   no other 'backend' agent  bob is the only one (himself excluded)")
 
     # bob  step
     bob_work = bob.runner.find_work()
@@ -155,7 +137,7 @@ def main():
     section("[Step 5] bob claim +  step 'design-api'")
     #
     bob.runner.claim(mission.id, "design-api")
-    print(f"   bob claimed 'design-api'  status=active")
+    print("   bob claimed 'design-api'  status=active")
 
     #  backend
     response = bob.backend.send_turn(
@@ -170,7 +152,7 @@ def main():
         output={"api_spec": "POST /webhooks/payment, GET /api/orders/:id"},
         note="API contract draft posted to blackboard",
     )
-    print(f"   bob completed 'design-api'")
+    print("   bob completed 'design-api'")
 
     #
     section("[Step 6] alice    step 2 ")
@@ -203,7 +185,7 @@ def main():
     )
     print(f"   carol registered: {carol.agent_id}")
 
-    print(f"\n  discover:")
+    print("\n  discover:")
     for r in carol.discover():
         print(f"    {r.short()}")
 
@@ -228,7 +210,7 @@ def main():
     print(f"  Status:  {final.status}")
     print(f"  Done:    {p['done']}/{p['total']} ({p['percent']}%)")
     print()
-    print(f"  ")
+    print("  ")
     for s in final.steps:
         assignees = "  ".join(s.previous_assignees + [s.assignee or "?"])
         print(f"    {s.id:18s} [{s.status:9s}]  by  {assignees}")

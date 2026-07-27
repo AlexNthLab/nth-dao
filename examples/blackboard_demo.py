@@ -16,7 +16,6 @@ PR 6 Blackboard
   6. BlackboardProvider  system prompt
 """
 
-import shutil
 import sys
 from pathlib import Path
 
@@ -29,16 +28,17 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # examples/ -> repo root
 
-from team_layer.blackboard import (
+from examples.demo_workspace import new_demo_workspace, prepare_demo_workspace
+from nth_dao import (
     Blackboard,
-    Scope,
     BlackboardProvider,
+    Scope,
     render_kanban,
     render_table,
 )
 
-REPO = Path(__file__).resolve().parent.parent  # examples/ -> repo root
-BB_ROOT = REPO / "blackboard"
+DEMO_ROOT = new_demo_workspace("blackboard")
+BB_ROOT = DEMO_ROOT / "blackboard"
 
 
 def section(title: str):
@@ -48,18 +48,11 @@ def section(title: str):
     print("=" * 72)
 
 
-def cleanup():
-    """ demo  .gitignore / .gitkeep"""
-    if BB_ROOT.exists():
-        for f in BB_ROOT.glob("*.jsonl"):
-            f.unlink()
-
-
 def main():
+    prepare_demo_workspace(DEMO_ROOT)
     section("PR 6 Blackboard   Agent ")
 
-    print("\n[Setup] ...")
-    cleanup()
+    print(f"\n[Setup] isolated workspace: {DEMO_ROOT}")
     bb = Blackboard(BB_ROOT)
     print(f"  Blackboard root: {BB_ROOT}")
 
@@ -220,11 +213,10 @@ def main():
 
     section(" Blackboard demo ")
     print()
-    print("CLI ")
-    print("  python -m team_layer.blackboard list")
-    print("  python -m team_layer.blackboard view --scope shared")
-    print("  python -m team_layer.blackboard post 'fix bug' --author alice --scope shared")
-    print("  python -m team_layer.blackboard update <id> --status done --author alice")
+    print("Public API")
+    print("  from nth_dao import Blackboard, Scope")
+    print("  board = Blackboard('/path/to/workspace/blackboard')")
+    print("  rows = board.list(scope=Scope.SHARED)")
 
 
 if __name__ == "__main__":
