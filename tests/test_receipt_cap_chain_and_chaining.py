@@ -36,7 +36,9 @@ What this suite proves:
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -413,6 +415,46 @@ def test_store_head_is_per_signer(tmp_path, admin, helper):
     store.save(r_helper)
     assert store.head_content_hash(admin.as_did()) == r_admin["content_hash"]
     assert store.head_content_hash(helper.as_did()) == r_helper["content_hash"]
+
+
+def test_store_sign_and_save_serializes_competing_chain_extensions(
+    tmp_path, helper,
+):
+    """Two independent store instances must not mint sibling chain heads."""
+    barrier = Barrier(2)
+
+    def _append(index: int):
+        store = ReceiptStore(tmp_path)
+        barrier.wait(timeout=5)
+        return store.sign_and_save([_entry(worker=index)], helper)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        receipts = list(pool.map(_append, (1, 2)))
+
+    persisted = [
+        ReceiptStore(tmp_path).load(str(receipt["receipt_id"]))
+        for receipt in receipts
+    ]
+    assert all(receipt is not None for receipt in persisted)
+    loaded = [receipt for receipt in persisted if receipt is not None]
+    prev_hashes = [extract_prev_content_hash(receipt) for receipt in loaded]
+    assert prev_hashes.count("") == 1
+    assert len(set(prev_hashes) - {""}) == 1
+    assert verify_receipt_chain(loaded)
+
+
+def test_store_sign_and_save_refuses_tampered_existing_head(
+    tmp_path, helper,
+):
+    store = ReceiptStore(tmp_path)
+    poisoned = sign_receipt([_entry(value="original")], helper)
+    poisoned["timeline"][-1]["payload"]["value"] = "tampered"
+    store.save(poisoned)
+
+    with pytest.raises(RuntimeError, match="poisoned chain"):
+        store.sign_and_save([_entry(value="next")], helper)
+
+    assert store.list_ids() == [poisoned["receipt_id"]]
 
 
 def test_e4_cap_token_chain_plus_receipt_chain_combined(

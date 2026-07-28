@@ -117,7 +117,7 @@ describe("AgentDirectoryView — Phase G scope badge", () => {
   });
 });
 
-it("renders backend startup guide and gates unavailable backends", () => {
+it("shows detected backends and requires an explicit join", () => {
   const onSpawnBackend = vi.fn();
   render(
     <LangProvider>
@@ -126,13 +126,6 @@ it("renders backend startup guide and gates unavailable backends", () => {
         {...noopProps}
         onSpawnBackend={onSpawnBackend}
         backendStatuses={{
-          mock: {
-            kind: "mock",
-            label: "Mock",
-            ready: true,
-            available: true,
-            detail: "Built-in smoke backend.",
-          },
           "claude-code": {
             kind: "claude-code",
             label: "Claude Code",
@@ -155,7 +148,7 @@ it("renders backend startup guide and gates unavailable backends", () => {
             kind: "hermes",
             label: "Hermes",
             ready: false,
-            available: false,
+            available: true,
             detail: "Install hermes-agent and configure its local profile.",
             warning: "Hermes runs in-process.",
           },
@@ -164,8 +157,9 @@ it("renders backend startup guide and gates unavailable backends", () => {
     </LangProvider>,
   );
 
-  expect(screen.getByText("Local backend startup")).toBeTruthy();
-  expect(screen.getByText("Mock")).toBeTruthy();
+  expect(screen.getByText("Detected on this PC")).toBeTruthy();
+  expect(screen.getByText(/Nothing joins automatically/)).toBeTruthy();
+  expect(screen.queryByText("Mock")).toBeNull();
   expect(screen.getByText("Claude Code")).toBeTruthy();
   expect(screen.getByText("runtime: cli-needs-conpty")).toBeTruthy();
   expect(screen.getByText("Codex")).toBeTruthy();
@@ -174,11 +168,13 @@ it("renders backend startup guide and gates unavailable backends", () => {
   expect(screen.getAllByText("setup needed")).toHaveLength(2);
   expect(screen.getByText("Hermes runs in-process.")).toBeTruthy();
 
-  const startButtons = screen.getAllByText("Start");
-  fireEvent.click(startButtons[0]);
-  expect(onSpawnBackend).toHaveBeenCalledWith("mock");
+  const joinButtons = screen.getAllByText("Join NTH DAO");
+  const enabledJoin = joinButtons.find((button) => !button.hasAttribute("disabled"));
+  expect(enabledJoin).toBeTruthy();
+  fireEvent.click(enabledJoin!);
+  expect(onSpawnBackend).toHaveBeenCalledWith("codex");
 
-  const disabledHermes = startButtons.find((b) => b.hasAttribute("disabled"));
+  const disabledHermes = joinButtons.find((b) => b.hasAttribute("disabled"));
   expect(disabledHermes).toBeTruthy();
   const disabledClaude = screen.getByTitle(/ConPTY wrapper/);
   expect(disabledClaude.hasAttribute("disabled")).toBe(true);
@@ -205,7 +201,7 @@ it("does not start a duplicate local backend that is already running", () => {
     </LangProvider>,
   );
 
-  const running = screen.getByRole("button", { name: "Running" });
+  const running = screen.getByRole("button", { name: "Joined" });
   expect(running.hasAttribute("disabled")).toBe(true);
   fireEvent.click(running);
   expect(onSpawnBackend).not.toHaveBeenCalled();
@@ -238,7 +234,7 @@ it("passes an explicit project folder and access policy when starting", () => {
   fireEvent.change(screen.getByLabelText("Agent project access"), {
     target: { value: "read-only" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Start" }));
+  fireEvent.click(screen.getByRole("button", { name: "Join NTH DAO" }));
 
   expect(onSpawnBackend).toHaveBeenCalledWith("codex", {
     projectWorkdir: "C:\\Workspaces\\sample-project",

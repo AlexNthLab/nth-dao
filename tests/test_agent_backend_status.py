@@ -14,10 +14,7 @@ def test_backend_status_endpoint_lists_supported_kinds_without_paths(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     backends = body["backends"]
-    assert set(backends) == {"mock", "claude-code", "codex", "hermes"}
-    assert backends["mock"]["ready"] is True
-    assert backends["mock"]["transport_ready"] is True
-    assert backends["mock"]["provider_verified"] is True
+    assert set(backends) == {"claude-code", "codex", "hermes"}
     assert backends["hermes"]["provider_verified"] is False
     assert backends["codex"]["ask_timeout_s"] > 90
     assert backends["hermes"]["ask_timeout_s"] >= 170
@@ -26,6 +23,19 @@ def test_backend_status_endpoint_lists_supported_kinds_without_paths(tmp_path):
     assert str(tmp_path) not in rendered
     assert "ANTHROPIC_API_KEY" not in rendered
     assert "auth.json" not in rendered
+
+
+def test_backend_status_can_expose_mock_only_in_explicit_test_mode(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("NTH_ENABLE_TEST_BACKENDS", "1")
+    app = create_app(workspace=tmp_path, require_console_auth=False)
+
+    backends = TestClient(app).get(
+        "/api/v2/agents/backends/status",
+    ).json()["backends"]
+
+    assert backends["mock"]["ready"] is True
 
 
 def test_backend_status_route_is_not_swallowed_by_did_route(tmp_path):

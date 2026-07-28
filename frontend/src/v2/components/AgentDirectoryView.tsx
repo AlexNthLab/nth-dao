@@ -332,10 +332,10 @@ export function AgentDirectoryView({
     return m;
   }, [agents]);
 
-  const backendOrder = ["mock", "claude-code", "codex", "hermes"];
+  const backendOrder = ["claude-code", "codex", "hermes"];
   const backendCards = backendOrder
     .map((kind) => backendStatuses[kind])
-    .filter((b): b is BackendStatus => Boolean(b));
+    .filter((b): b is BackendStatus => Boolean(b?.available));
 
   async function handleSpawn(kind: string) {
     if (!onSpawnBackend) return;
@@ -497,7 +497,7 @@ export function AgentDirectoryView({
           )}
 
 
-          {backendCards.length > 0 && (
+          {(
             <div
               style={{
                 background: "var(--bg-panel)",
@@ -507,7 +507,16 @@ export function AgentDirectoryView({
                 marginBottom: 16,
               }}
             >
-              <div className="detail-section-label">Local backend startup</div>
+              <div className="detail-section-label">Detected on this PC</div>
+              <p className="muted" style={{ fontSize: 11, margin: "6px 0 0" }}>
+                Nothing joins automatically. Review each detected Agent and
+                choose whether it should join this DAO.
+              </p>
+              {backendCards.length === 0 && (
+                <p className="muted" style={{ fontSize: 12, margin: "12px 0 0" }}>
+                  No supported local Agent installation was detected.
+                </p>
+              )}
               <div
                 style={{
                   display: "grid",
@@ -604,9 +613,13 @@ export function AgentDirectoryView({
                           || spawningKind === b.kind
                         }
                         onClick={() => void handleSpawn(b.kind)}
-                        title={launchable ? `Spawn ${b.label}` : b.detail}
+                        title={launchable ? `Join ${b.label} to NTH DAO` : b.detail}
                       >
-                        {spawningKind === b.kind ? "Starting..." : running ? "Running" : "Start"}
+                        {spawningKind === b.kind
+                          ? "Joining..."
+                          : running
+                            ? "Joined"
+                            : "Join NTH DAO"}
                       </button>
                     </div>
                   );

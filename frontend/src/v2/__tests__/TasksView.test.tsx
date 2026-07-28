@@ -80,6 +80,43 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
+  it("runs bounded federation discovery when the Tasks view opens", async () => {
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    await waitFor(() => expect(discoverFederationPeers).toHaveBeenCalledWith({
+      actorId: "admin",
+      timeoutSeconds: 1.25,
+      add: true,
+      refresh: true,
+    }));
+  });
+
+  it("leaves periodic discovery to the server lifecycle", async () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <LangProvider>
+          <ToastProvider>
+            <TasksView />
+          </ToastProvider>
+        </LangProvider>,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(discoverFederationPeers).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(discoverFederationPeers).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("板子渲染任务、发布按钮、认领占位禁用", async () => {
     render(
       <LangProvider>
@@ -241,6 +278,15 @@ describe("TasksView", () => {
   });
 
   it("discovers nearby DAO federation peers from the Tasks sidebar", async () => {
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+    await waitFor(() => expect(discoverFederationPeers).toHaveBeenCalled());
+    vi.mocked(discoverFederationPeers).mockClear();
     vi.mocked(discoverFederationPeers).mockResolvedValueOnce({
       peers: ["http://192.168.1.20:8080"],
       file_peers: ["http://192.168.1.20:8080"],
@@ -255,14 +301,6 @@ describe("TasksView", () => {
       skipped_peers: [],
       discovery_errors: [],
     });
-
-    render(
-      <LangProvider>
-        <ToastProvider>
-          <TasksView />
-        </ToastProvider>
-      </LangProvider>,
-    );
 
     fireEvent.click(screen.getByText("Discover nearby DAOs"));
 

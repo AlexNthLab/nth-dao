@@ -6,10 +6,16 @@ SCRIPT = (
 )
 
 
-def test_desktop_launcher_keeps_hermes_in_channel_team() -> None:
+def test_desktop_launcher_detects_agents_without_auto_joining() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
-    assert '$JoinKinds = "codex,hermes,mock"' in text
-    assert '$ChannelAgentKinds = "codex,hermes,mock"' in text
+    assert '$AutoAgents = ""' in text
+    assert '$JoinKinds = ""' in text
+    assert '$ChannelAgentKinds = "codex,claude-code,hermes"' in text
+    assert '$LanFederation = $true' in text
+    assert '$env:NTH_LAN_DISCOVERY = "1"' in text
+    assert '"`$env:NTH_LAN_DISCOVERY = ' in text
+    assert '$env:NTH_AUTO_AGENT_PERSIST = "0"' in text
+    assert '"mock"' not in text
     assert '$CodexModel = "gpt-5.4"' in text
     assert '$HermesModel = "deepseek-v4-flash"' in text
     assert '$HermesToolsets = "safe"' in text

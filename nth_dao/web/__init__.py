@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import hashlib
+import ipaddress
 import logging
 import os
 import hmac
@@ -62,8 +63,6 @@ from nth_dao.execution_receipt import ReceiptStore as _ReceiptStore
 # inside the search hot loop. sys.modules already caches the module,
 # but a stable top-level binding eliminates the per-call frame setup.
 from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
-from nth_dao.demo_responder import DEFAULT_AGENT_ID as ECHO_AGENT_ID
-from nth_dao.demo_responder import maybe_reply as _demo_maybe_reply
 from nth_dao.discovery import AgentRegistry, LANDiscovery, PeerFinder
 from nth_dao.groups import DEFAULT_CHANNEL_ID, GroupManager, TaskStatus
 from nth_dao.group_registry import (
@@ -1053,6 +1052,31 @@ def create_app(
         ):
             return True
         return path.startswith("/tasks/")
+
+    def _request_client_is_loopback(request: Request) -> bool:
+        host = str(request.client.host if request.client else "").strip()
+        if host.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    def _is_public_v2_protocol_read(path: str) -> bool:
+        """Allow only read endpoints required by federation protocols."""
+
+        if path in {
+            "/api/v2/health",
+            "/api/v2/market/open",
+            "/api/v2/market/categories",
+            "/api/v2/market/federation/digest",
+            "/api/v2/market/federation/pull",
+            "/api/v2/market/federation/peers",
+            "/api/v2/social/federation/pull",
+        }:
+            return True
+        return path.startswith("/api/v2/commerce/federation/listings/")
+
     @app.middleware("http")
     async def _console_auth_middleware(request: Request, call_next):
         # Public identity card (2026-06-08): the ``.well-known`` family
@@ -1099,6 +1123,9 @@ def create_app(
         # checks" the read-surface comment promised.
         if request.url.path.startswith("/api/v2/") and request.method in (
             "GET", "HEAD", "OPTIONS",
+        ) and (
+            _request_client_is_loopback(request)
+            or _is_public_v2_protocol_read(request.url.path)
         ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
@@ -2003,29 +2030,7 @@ def create_app(
         if prefix and not channel_id.startswith(prefix):
             raise HTTPException(status_code=400, detail=f"channel_id must start with '{prefix}' for DAO '{slug}'")
         msg = state.groups.post_message(channel_id, sender_id=payload.agent_id, body=payload.body)
-        # v0.9.8: fire the responder for this DAO too. Policy / description
-        # come from the GroupRecord when present so opt-in heuristics
-        # ("demo" in name, "open" policy) work per DAO.
-        dao_policy = ""
-        dao_description = ""
-        if record is not None:
-            dao_policy = record.policy.value if hasattr(record.policy, "value") else str(record.policy)
-            dao_description = getattr(record, "description", "")
-        else:
-            dao_policy = state.membership.load_config().join_policy
-        reply = _demo_maybe_reply(
-            state.groups,
-            dao_slug=slug,
-            channel_id=channel_id,
-            sender_id=payload.agent_id,
-            body=payload.body,
-            dao_policy=dao_policy,
-            dao_description=dao_description,
-        )
-        result = msg.to_dict()
-        if reply:
-            result["echo_reply"] = reply
-        return result
+        return msg.to_dict()
 
     @app.get("/api/daos/{slug}/state")
     def dao_scoped_state(
@@ -2103,20 +2108,7 @@ def create_app(
             sender_id=payload.agent_id,
             body=payload.body,
         )
-        # v0.9.8: fire the demo responder so the home DAO is conversational
-        # out of the box. Skipped silently when the DAO opts out.
-        reply = _demo_maybe_reply(
-            state.groups,
-            dao_slug=HOME_DAO_SLUG,
-            channel_id=payload.channel_id,
-            sender_id=payload.agent_id,
-            body=payload.body,
-            dao_policy=state.membership.load_config().join_policy,
-        )
-        result = msg.to_dict()
-        if reply:
-            result["echo_reply"] = reply
-        return result
+        return msg.to_dict()
 
     @app.post("/api/announcements")
     def post_announcement(payload: AnnouncementPayload) -> dict[str, Any]:
@@ -3214,13 +3206,49 @@ def create_app(
             },
         )
 
-    def _serve_console(file_name: str):
+    def _request_is_direct_loopback_console(request: Request) -> bool:
+        """Return true only for a direct browser request to a loopback host.
+
+        A same-host reverse proxy also appears as a loopback TCP client. Never
+        inject the operator token when the public Host is non-loopback or when
+        proxy forwarding headers are present.
+        """
+
+        if not _request_client_is_loopback(request):
+            return False
+        if any(
+            request.headers.get(name)
+            for name in (
+                "forwarded",
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-real-ip",
+                "via",
+                "cf-connecting-ip",
+                "true-client-ip",
+            )
+        ):
+            return False
+        host = str(request.url.hostname or "").strip()
+        if host.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    def _serve_console(file_name: str, request: Request):
         f = STATIC_DIR / file_name
         if f.exists():
             return _html_shell(
                 _render_console_html(
                     f, app.state.nth_console_token,
-                    embed_token=app.state.nth_embed_console_token))
+                    embed_token=(
+                        app.state.nth_embed_console_token
+                        and _request_is_direct_loopback_console(request)
+                    ),
+                )
+            )
         return _html_shell(_frontend_missing_html(), 503)
 
     # 默认入口 = v2 聊天优先控制台（2026-06-14）。此前 `/` 服务的是 v1
@@ -3230,17 +3258,17 @@ def create_app(
     @app.get("/", response_class=HTMLResponse, response_model=None)
     @app.get("/v2", response_class=HTMLResponse, response_model=None)
     @app.get("/v2.html", response_class=HTMLResponse, response_model=None)
-    def index():
-        return _serve_console("v2.html")
+    def index(request: Request):
+        return _serve_console("v2.html", request)
 
     @app.get("/v1", response_class=HTMLResponse, response_model=None)
     @app.get("/v1.html", response_class=HTMLResponse, response_model=None)
-    def console_v1():
+    def console_v1(request: Request):
         # 旧版（决策队列）控制台,保留备用。
-        return _serve_console("index.html")
+        return _serve_console("index.html", request)
 
     @app.get("/{path:path}", include_in_schema=False, response_model=None)
-    def frontend_fallback(path: str):
+    def frontend_fallback(path: str, request: Request):
         if path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
         # 根目录静态资源(favicon / brand images 等):/assets 已挂载,但根级
@@ -3261,13 +3289,23 @@ def create_app(
                 return _html_shell(
                     _render_console_html(
                         f, app.state.nth_console_token,
-                        embed_token=app.state.nth_embed_console_token))
+                        embed_token=(
+                            app.state.nth_embed_console_token
+                            and _request_is_direct_loopback_console(request)
+                        ),
+                    )
+                )
         v2_file = STATIC_DIR / "v2.html"
         if v2_file.exists():
             return _html_shell(
                 _render_console_html(
                     v2_file, app.state.nth_console_token,
-                    embed_token=app.state.nth_embed_console_token))
+                    embed_token=(
+                        app.state.nth_embed_console_token
+                        and _request_is_direct_loopback_console(request)
+                    ),
+                )
+            )
         return JSONResponse(
             {"detail": "frontend assets are not built; run npm --prefix frontend run build"},
             status_code=503,
@@ -3478,13 +3516,12 @@ def _bootstrap(state: WebState) -> None:
             channel_id=DEFAULT_CHANNEL_ID,
             topic="Default DAO channel",
         )
+    try:
+        from .legacy_demo_cleanup import purge_legacy_demo_state
 
-    # v0.9.8: register the demo responder as a workspace member so its
-    # auto-replies pass the membership gate. Skipped if it's already in.
-    if ECHO_AGENT_ID not in config.member_ids:
-        ok, _ = state.membership.ensure_member(ECHO_AGENT_ID)
-        if not ok:
-            logger.debug("echo-agent join skipped (membership policy)")
+        purge_legacy_demo_state(state)
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("legacy demo cleanup did not complete: %s", exc)
 
 
 
@@ -4144,18 +4181,35 @@ def _render_console_html(
     return snippet + html
 
 
-app = create_app(require_console_auth=True)
+class _LazyASGIApp:
+    """Preserve ``nth_dao.web:app`` without import-time workspace writes."""
+
+    def __init__(self) -> None:
+        self._instance: Optional[FastAPI] = None
+        self._lock = threading.Lock()
+
+    def _get(self) -> FastAPI:
+        instance = self._instance
+        if instance is not None:
+            return instance
+        with self._lock:
+            if self._instance is None:
+                self._instance = create_app(require_console_auth=True)
+            return self._instance
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self._get()(scope, receive, send)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
 
 
-# Architect audit R-1 (2026-06-07): the dashboard has ZERO request
-# authentication - the ``actor_id`` query parameter is a CLAIM, not a
-# verified identity. As long as that is the case, exposing the API to
-# anything other than the loopback interface trivially leaks every
-# member's role / pubkey / endorsement graph to whoever can reach the
-# port. We refuse to start under such a configuration unless the
-# operator explicitly opts in via NTH_ALLOW_REMOTE_BIND=1, in which
-# case the responsibility for putting an auth proxy in front of us
-# is theirs. Loopback bind is the only safe default.
+app = _LazyASGIApp()
+
+
+# Remote binding is explicit because federation makes anonymous signed-read
+# endpoints reachable beyond this host. Console writes require the operator
+# bearer token, and non-loopback HTML responses never embed that token.
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -4183,10 +4237,10 @@ def _resolve_safe_bind_host() -> str:
     if allow_remote != "1":
         raise RuntimeError(
             f"refusing to bind NTH DAO web console to non-loopback "
-            f"host {requested!r}: the API has no request authentication, "
-            f"so any reachable client can enumerate the social graph. "
-            f"Set NTH_ALLOW_REMOTE_BIND=1 to override AFTER putting an "
-            f"auth proxy / TLS terminator in front of this process, "
+            f"host {requested!r}: remote binding exposes federation and "
+            f"read-only discovery surfaces to reachable clients. "
+            f"Set NTH_ALLOW_REMOTE_BIND=1 only for a trusted LAN or after "
+            f"putting an auth proxy / TLS terminator in front of this process, "
             f"or unset NTH_HOST to use the safe loopback default."
         )
     # Loud warning on every cold start so a misconfigured-but-opted-in
@@ -4194,8 +4248,8 @@ def _resolve_safe_bind_host() -> str:
     import logging as _logging
     _logging.getLogger("nth_dao.web").warning(
         "NTH DAO web console binding to non-loopback host %r with "
-        "NTH_ALLOW_REMOTE_BIND=1 - no request authentication is "
-        "enforced; ensure an external auth proxy is in front",
+        "NTH_ALLOW_REMOTE_BIND=1; console tokens are not embedded for remote "
+        "clients, but federation/read surfaces are network reachable",
         requested,
     )
     return requested

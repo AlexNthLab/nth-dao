@@ -398,6 +398,18 @@ Start the local-first DAO group UI:
 python -m nth_dao.web
 ```
 
+For task discovery between computers on the same trusted LAN, install the LAN
+extra and start each node in LAN mode:
+
+```bash
+pip install -e ".[lan]"
+python -m nth_dao.web --lan
+```
+
+On Windows, `.\tools\start_nth_dao.ps1` enables LAN federation by default.
+It detects supported local Agents but does not add or start them automatically;
+the operator decides which detected Agent joins from the **Agents** view.
+
 Then open:
 
 ```text

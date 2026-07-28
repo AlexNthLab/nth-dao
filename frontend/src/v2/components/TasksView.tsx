@@ -166,6 +166,34 @@ export function TasksView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
+  // Ask for an immediate discovery snapshot on entry. Periodic discovery is
+  // owned by the server lifecycle so it continues without an open browser.
+  useEffect(() => {
+    let cancelled = false;
+    const discover = async () => {
+      if (cancelled) return;
+      try {
+        const status = await discoverFederationPeers({
+          actorId: "admin",
+          timeoutSeconds: 1.25,
+          add: true,
+          refresh: true,
+        });
+        if (cancelled) return;
+        if ((status.imported_peers?.length ?? 0) > 0) {
+          setFedStatus(status);
+          setReloadKey((key) => key + 1);
+        }
+      } catch {
+        // Keep the local task market usable without mDNS.
+      }
+    };
+    void discover();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // 可认领身份:拉可驱动的 supervised agent(supervised+alive+有 a2a_port)。
   useEffect(() => {
     const ac = new AbortController();

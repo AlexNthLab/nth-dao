@@ -82,7 +82,6 @@ from nth_dao.execution_receipt import (
     TYPE_STEP_STARTED,
     TimelineEntry,
     now_ms,
-    sign_receipt,
 )
 
 if TYPE_CHECKING:
@@ -755,10 +754,9 @@ class A2ARPCHandler:
                     },
                 ),
             ]
-            receipt = sign_receipt(
+            receipt = self.receipts.sign_and_save(
                 timeline, self.identity, goal_id=task["id"],
             )
-            self.receipts.save(receipt)
             # F1 (2026-06-08): metadata write goes through the store's
             # lock-protected setter, not a direct dict mutation.
             _mark("nth_receipt_id", receipt["receipt_id"])
@@ -802,10 +800,9 @@ class A2ARPCHandler:
                     },
                 ),
             ]
-            receipt = sign_receipt(
+            receipt = self.receipts.sign_and_save(
                 timeline, self.identity, goal_id=task["id"],
             )
-            self.receipts.save(receipt)
             _mark("nth_cancel_receipt_id", receipt["receipt_id"])
         except _RECOVERABLE_RECEIPT_EMIT_ERRORS as exc:
             logger.error(

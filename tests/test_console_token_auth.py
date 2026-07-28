@@ -17,7 +17,7 @@ def _assert_supervisor_stopped(app) -> None:
 
 def test_api_requires_console_bearer_token(tmp_path: Path):
     app = create_app(tmp_path, require_console_auth=True)
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         missing = client.get("/api/summary", params={"actor_id": "admin"})
         assert missing.status_code == 401
 
@@ -49,7 +49,11 @@ def test_actor_id_remains_authorization_not_authentication(tmp_path: Path):
 
 def test_frontend_html_injects_console_token(tmp_path: Path):
     app = create_app(tmp_path, require_console_auth=True)
-    with TestClient(app) as client:
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    ) as client:
         response = client.get("/")
         assert response.status_code == 200
         assert "window.__NTH_CONSOLE_TOKEN__" in response.text
@@ -101,11 +105,15 @@ def test_render_console_html_embed_flag(tmp_path: Path):
     assert "nthSetToken" in omitted
 
 
-def test_v2_read_open_but_action_gated_under_auth(tmp_path: Path):
-    """Anonymous reads stay open while every agent-driving action is gated."""
+def test_loopback_v2_read_open_but_action_gated_under_auth(tmp_path: Path):
+    """Loopback reads stay open while every Agent-driving action is gated."""
     app = create_app(tmp_path, require_console_auth=True)
 
-    with TestClient(app) as client:
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    ) as client:
         read = client.get("/api/v2/agents")
         assert read.status_code == 200, read.text
 

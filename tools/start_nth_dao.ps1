@@ -1,12 +1,10 @@
 param(
     [int] $Port = 8080,
-    [string] $AutoAgents = "codex,hermes,mock",
+    [string] $AutoAgents = "",
     [string] $JoinChannels = "general",
-    # Hermes is part of the default local team. It must be both a channel
-    # member and an allowed channel responder; otherwise the process can be
-    # healthy while every Channel dispatch silently excludes it.
-    [string] $JoinKinds = "codex,hermes,mock",
-    [string] $ChannelAgentKinds = "codex,hermes,mock",
+    [string] $JoinKinds = "",
+    [string] $ChannelAgentKinds = "codex,claude-code,hermes",
+    [bool] $LanFederation = $true,
     [string] $CodexModel = "gpt-5.4",
     [int] $CodexTimeoutSeconds = 240,
     [string] $HermesModel = "deepseek-v4-flash",
@@ -22,6 +20,20 @@ Set-Location $RepoRoot
 if (-not $env:NTH_PORT) {
     $env:NTH_PORT = [string] $Port
 }
+if ($LanFederation) {
+    if (-not $env:NTH_HOST) {
+        $env:NTH_HOST = "0.0.0.0"
+    }
+    if (-not $env:NTH_ALLOW_REMOTE_BIND) {
+        $env:NTH_ALLOW_REMOTE_BIND = "1"
+    }
+    if (-not $env:NTH_LAN_PUBLISH) {
+        $env:NTH_LAN_PUBLISH = "1"
+    }
+    if (-not $env:NTH_LAN_DISCOVERY) {
+        $env:NTH_LAN_DISCOVERY = "1"
+    }
+}
 if (-not $env:NTH_AUTO_AGENTS) {
     $env:NTH_AUTO_AGENTS = $AutoAgents
 }
@@ -35,7 +47,7 @@ if (-not $env:NTH_CHANNEL_AGENT_KINDS) {
     $env:NTH_CHANNEL_AGENT_KINDS = $ChannelAgentKinds
 }
 if (-not $env:NTH_AUTO_AGENT_PERSIST) {
-    $env:NTH_AUTO_AGENT_PERSIST = "1"
+    $env:NTH_AUTO_AGENT_PERSIST = "0"
 }
 if (-not $env:NTH_HERMES_ASK_TIMEOUT_S) {
     $env:NTH_HERMES_ASK_TIMEOUT_S = "300"
@@ -123,6 +135,10 @@ function Quote-PowerShellLiteral([string] $Value) {
 
 $childCommands = @(
     "`$env:NTH_PORT = $(Quote-PowerShellLiteral $env:NTH_PORT)",
+    "`$env:NTH_HOST = $(Quote-PowerShellLiteral $env:NTH_HOST)",
+    "`$env:NTH_ALLOW_REMOTE_BIND = $(Quote-PowerShellLiteral $env:NTH_ALLOW_REMOTE_BIND)",
+    "`$env:NTH_LAN_PUBLISH = $(Quote-PowerShellLiteral $env:NTH_LAN_PUBLISH)",
+    "`$env:NTH_LAN_DISCOVERY = $(Quote-PowerShellLiteral $env:NTH_LAN_DISCOVERY)",
     "`$env:NTH_AUTO_AGENTS = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENTS)",
     "`$env:NTH_AUTO_AGENT_JOIN_CHANNELS = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENT_JOIN_CHANNELS)",
     "`$env:NTH_AUTO_AGENT_JOIN_KINDS = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENT_JOIN_KINDS)",

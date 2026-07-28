@@ -1,73 +1,8 @@
-"""
-v2 console endpoints — local-hub read/write API surface.
+"""Live HTTP API for the NTH DAO v2 operator console.
 
-The v2 frontend (``frontend/src/v2/``) currently sources every view
-from ``mock.ts``. This module is the wire that flips that single
-seed file into a real HTTP API so the same UI can render either
-mock data OR live disk state — depending on which the hub finds.
-
-╔═══════════════════════════ DRIFT WATCH ═══════════════════════════╗
-║  The ``_seed_*`` functions below MUST stay structurally aligned   ║
-║  with the corresponding ``mock*`` exports in                      ║
-║  ``frontend/src/v2/mock.ts`` (same ids, same titles, same DIDs,   ║
-║  same array ordering). When the hub is unreachable the v2 console ║
-║  uses mock.ts; when the hub is up but a single endpoint fails the ║
-║  UI mixes live + mock for OTHER endpoints. If the two seeds drift ║
-║  the user sees different decisions / processes / agents depending ║
-║  on which side answered.                                          ║
-║                                                                   ║
-║  Timestamps are allowed to drift (mock.ts uses Date.now() to keep ║
-║  "5m ago" labels fresh; Python uses datetime.now() each request)  ║
-║  — those generate different values by design, fine.               ║
-║                                                                   ║
-║  Phase 2: extract a single seed.json at frontend/src/v2/seed.json ║
-║  that both sides import, eliminating the drift class entirely.    ║
-║  Tracking: review pass#1 finding N1 (2026-06-10).                 ║
-╚═══════════════════════════════════════════════════════════════════╝
-
-Design contract (matches ``frontend/src/v2/types-v2.ts`` exactly):
-
-    GET /api/v2/identity        → IdentityHeader
-    GET /api/v2/decisions       → Decision[]
-    GET /api/v2/missions        → MissionSummary[]
-    GET /api/v2/processes       → ProcessCard[]
-    POST /api/v2/processes      → ProcessCard
-    GET /api/v2/receipts        → ReceiptSummary[]
-    GET /api/v2/rules           → Rule[]
-    GET /api/v2/agents          → AgentEntry[]
-    GET /api/v2/cap_tokens      → CapTokenSummary[]
-    GET /api/v2/conversations   → Conversation[]
-    GET /api/v2/messages/{cid}  → ChatMessage[]
-
-Data sources (per endpoint):
-
-  - ``processes``: tries ``team_layer/blackboard/`` first via the
-    existing :class:`Blackboard.list` API; falls back to the seed
-    when the dir is empty. This is the FIRST endpoint that proves
-    "v2 UI shows real blackboard" — the user's stated Phase 1 goal.
-  - ``receipts``: scans ``team_receipts/`` for JSON files when
-    present.
-  - ``cap_tokens``: scans ``team_cap_tokens/``.
-  - ``agents``: reads ``team_agents/`` then falls back to seed.
-  - all other endpoints: serve the seed until Phase 2 lands real
-    backends.
-
-The seed is intentionally a near-exact translation of the v2
-``mock.ts`` so that a user starting the hub with empty disk sees
-the same UI they saw under HMR-only. Once Blackboard / receipts /
-agents have real entries the live data takes priority.
-
-Phase boundaries (per the local-hub plan, 2026-06-10):
-  Phase 1 (this file)      — v2 API surface: live reads plus scoped writes
-  Phase 2                  — POST / WS for decisions, missions,
-                             cap_tokens, receipt signing
-  Phase 3                  — supervised agent runtime: multiple
-                             backends, A2A routing, real receipts
-
-This module deliberately does NOT register the routes itself —
-``__init__.py`` calls :func:`register_v2_routes` once the rest of
-the app is wired so the catch-all ``/{path:path}`` route stays
-last in the routing table.
+Operational views expose only workspace-backed or supervised runtime state.
+An unavailable store returns an explicit empty/error response; this module
+never substitutes demonstration records for live data.
 """
 
 from __future__ import annotations
@@ -156,21 +91,6 @@ def _env_float(
         return maximum
     return value
 
-
-# ─────────────────────────────────────────────────────────────
-# Seed data — structurally aligned with frontend/src/v2/mock.ts
-# (review fix N1, 2026-06-10). IDs, titles, DIDs, ordering all
-# match the TypeScript exports so a side-by-side comparison
-# stays consistent. Timestamps are deliberately allowed to drift
-# (mock.ts uses Date.now() to keep "5m ago" labels fresh; here
-# we generate fresh ISO strings each request).
-# ─────────────────────────────────────────────────────────────
-
-# DID aliases — match mock.ts top-of-file constants for parity.
-_HELPER_A = "did:key:z6MkqHKGkA1NXG2DWjsa7GAgrn4D7Dm57GwjeFm568311A"
-_HELPER_B = "did:key:z6MkpQ8eF1xRzL3tJyN5sWvD9XbA2C7uYkP4hM8kT6f3B"
-_OPERATOR_DID = "did:key:z6MkmRxmBi9p9ziBz2JzBwd8Y5iMzzhPXAi95MPZiLEJJqjL"
-
 MISSION_CREATED = "mission.created"
 MISSION_ACTIVATED = "mission.activated"
 MISSION_STEP_BOOTSTRAPPED = "mission.step.bootstrapped"
@@ -196,103 +116,6 @@ MISSION_EVENT_TYPES = (
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
-def _iso_offset(seconds: float) -> str:
-    """ISO timestamp at `now + seconds` (negative for past). """
-    return datetime.fromtimestamp(
-        datetime.now(timezone.utc).timestamp() + seconds, timezone.utc,
-    ).isoformat()
-
-
-def _seed_identity() -> Dict[str, Any]:
-    return {
-        "agent_id": "admin",
-        "did": _OPERATOR_DID,
-        "code": "a3ff-62eb",
-    }
-
-
-def _seed_decisions() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockDecisions (3 entries: dec-001 to dec-003).
-
-    Ordering matches: dec-001 first = Sign payment mandate (medium),
-    NOT the prior Cross-DAO vote ordering — drift fix N1. """
-    return [
-        {
-            "id": "dec-001",
-            "title": "Sign payment mandate to Acme Cloud — ¥3,500",
-            "rationale": (
-                "Monthly compute bill for the launch infrastructure. Within "
-                "budget envelope of ¥5,000/mo set in mission charter. Acme "
-                "is in the verified vendor list. No anomaly in the invoice "
-                "amount versus last 3 months."
-            ),
-            "impact": "medium",
-            "proposer_did": _HELPER_A,
-            "proposer_label": "billing-helper",
-            "mission_id": "mission-launch-2026",
-            "preview_receipt": {
-                "kind": "nth-execution-receipt-v1",
-                "signer_did": _HELPER_A,
-                "goal_id": "mission-launch-2026",
-                "timeline": [
-                    {
-                        "timestamp": 1717840800000,
-                        "type": "nth.mandate_signed",
-                        "payload": {
-                            "vendor": "acme-cloud",
-                            "amount_cny": 3500,
-                            "mandate_id": "mandate-2026-06-09-001",
-                        },
-                    },
-                ],
-            },
-            "raised_at": "2026-06-09T18:42:00Z",
-            "cap_expires_at": "2026-06-10T02:42:00Z",
-        },
-        {
-            "id": "dec-002",
-            "title": "Delegate code-refactor task to helper-B for 4 hours",
-            "rationale": (
-                "Backlog item BL-1247 hit blocker. helper-B specialises in "
-                "refactoring with a 92% acceptance rate on similar tasks in "
-                "the last 30 days. Requested cap_token: a2a:message_send + "
-                "nth:receipt_sign, scope_task_id=task-bl-1247, ttl=4h."
-            ),
-            "impact": "low",
-            "proposer_did": _HELPER_A,
-            "proposer_label": "planner",
-            "preview_receipt": {
-                "kind": "nth-cap-token-v1",
-                "subject_did": _HELPER_B,
-                "capabilities": ["a2a:message_send", "nth:receipt_sign"],
-                "scope_task_id": "task-bl-1247",
-                "ttl_ms": 14_400_000,
-            },
-            "raised_at": "2026-06-09T17:15:00Z",
-        },
-        {
-            "id": "dec-003",
-            "title": "Cross-DAO vote: ratify governance proposal in mumolawos",
-            "rationale": (
-                "Outside your home DAO — voting in mumolawos consortium on "
-                "proposal MGV-2026-07: adopt motebit execution-ledger@1.0 "
-                "as wire-format standard. Aligns with our DESIGN_TRADE_OFFS "
-                "§2 commitment. Other 4 founders have signed. Your vote "
-                "tips quorum."
-            ),
-            "impact": "high",
-            "proposer_did": _OPERATOR_DID,
-            "proposer_label": "self-prompt",
-            "preview_receipt": {
-                "kind": "nth-vote-receipt-v1",
-                "proposal_id": "MGV-2026-07",
-                "vote": "yes",
-                "cross_dao": "mumolawos",
-            },
-            "raised_at": "2026-06-09T14:08:00Z",
-        },
-    ]
 
 
 def _mission_step_to_view(step: Any) -> Dict[str, Any]:
@@ -706,392 +529,6 @@ def _reflect_claim_to_mission(
         return {"reflected": False, "reason": "reflect_failed"}
 
 
-def _seed_missions() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockMissions — 2 entries. """
-    return [
-        {
-            "id": "mission-launch-2026",
-            "title": "NTH DAO 1.0 launch",
-            "goal": "Ship 1.0 with announce + post-mortem doc",
-            "status": "active",
-            "steps_total": 3,
-            "steps_done": 1,
-            "steps_in_progress": 1,
-            "driver_label": "billing-helper",
-            "driver_did": _HELPER_A,
-            "cap_token_id": "cap-bnHs82Lq",
-            "started_at": "2026-06-08T09:00:00Z",
-            "next_actionable": "Send draft to early users for review",
-        },
-        {
-            "id": "mission-refactor-billing",
-            "title": "Refactor billing module",
-            "goal": "Replace BL-1247 + companion fixtures",
-            "status": "active",
-            "steps_total": 5,
-            "steps_done": 0,
-            "steps_in_progress": 2,
-            "driver_label": "code-helper",
-            "driver_did": _HELPER_B,
-            "cap_token_id": "cap-3xQ1pTaM",
-            "started_at": "2026-06-09T15:30:00Z",
-            "next_actionable": "Extract pricing service from monolith",
-        },
-    ]
-
-
-def _seed_processes() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockProcesses — 5 orders ord-1240 to ord-1248. """
-    return [
-        {
-            "id": "ord-1247",
-            "title": "Order #1247",
-            "subtitle": "2× Mechanical keyboard · Tokyo",
-            "workflow": "shopping",
-            "stage": "in_progress",
-            "current_agent": "fulfillment-bot",
-            "next_agent": "shipping-bot",
-            "cap_token_id": "cap-bnHs82Lq",
-            "amount": "¥3,400",
-            "updated_at": _iso_offset(-22 * 60),
-            "auto": True,
-        },
-        {
-            "id": "ord-1248",
-            "title": "Order #1248",
-            "subtitle": "1× Standing desk · Osaka",
-            "workflow": "shopping",
-            "stage": "received",
-            "current_agent": "intake-bot",
-            "next_agent": "fulfillment-bot",
-            "cap_token_id": "cap-bnHs82Lq",
-            "amount": "¥8,900",
-            "updated_at": _iso_offset(-4 * 60),
-            "auto": True,
-        },
-        {
-            "id": "ord-1246",
-            "title": "Order #1246",
-            "subtitle": "1× Cable kit · Kyoto",
-            "workflow": "shopping",
-            "stage": "done",
-            "current_agent": "shipping-bot",
-            "amount": "¥240",
-            "updated_at": _iso_offset(-2 * 3600),
-            "auto": True,
-        },
-        {
-            "id": "ord-1244",
-            "title": "Order #1244 — refund request",
-            "subtitle": "Customer claims damaged on arrival",
-            "workflow": "support",
-            "stage": "awaiting_external",
-            "current_agent": "support-bot",
-            "next_agent": "refund-bot",
-            "cap_token_id": "cap-supportLong",
-            "amount": "¥1,200",
-            "updated_at": _iso_offset(-35 * 60),
-            "auto": True,
-        },
-        {
-            "id": "ord-1240",
-            "title": "Order #1240 — chargeback flagged",
-            "subtitle": "Bank dispute received, needs manual review",
-            "workflow": "support",
-            "stage": "blocked",
-            "current_agent": "support-bot",
-            "cap_token_id": "cap-supportLong",
-            "amount": "¥4,500",
-            "updated_at": _iso_offset(-12 * 3600),
-            "auto": False,
-        },
-    ]
-
-
-def _seed_receipts() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockReceipts — 2 entries. """
-    return [
-        {
-            "id": "rcpt-aaa1",
-            "signer_did": _HELPER_A,
-            "signer_label": "billing-helper",
-            "goal_id": "mission-launch-2026",
-            "content_hash": "0a9c0bf3e89b6901cdab12345678cafe...",
-            "prev_content_hash": "",
-            "has_cap_token": True,
-            "summary": "Drafted launch announcement v1",
-            "issued_at": "2026-06-09T11:20:00Z",
-        },
-        {
-            "id": "rcpt-aaa2",
-            "signer_did": _HELPER_A,
-            "signer_label": "billing-helper",
-            "goal_id": "mission-launch-2026",
-            "content_hash": "a7f8ab3c5b93c83a...",
-            "prev_content_hash": "0a9c0bf3e89b6901cdab12345678cafe...",
-            "has_cap_token": True,
-            "summary": "Sent to 3 early users",
-            "issued_at": "2026-06-09T13:45:00Z",
-        },
-    ]
-
-
-def _seed_rules() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockRules — 4 entries rule-001 to rule-004. """
-    return [
-        {
-            "id": "rule-001",
-            "title": "Auto-pack and ship orders under ¥5,000",
-            "when": "New order received, amount < ¥5,000, item in stock",
-            "then": (
-                "fulfillment-bot packs → shipping-bot dispatches → "
-                "notification-bot mails tracking number"
-            ),
-            "workflow": "shopping",
-            "cap_token_id": "cap-bnHs82Lq",
-            "status": "active",
-            "fired_30d": 87,
-            "updated_at": "2026-05-15T10:00:00Z",
-        },
-        {
-            "id": "rule-002",
-            "title": "Auto-refund within 30 days of purchase",
-            "when": "Refund request received, within 30d, no fraud flag",
-            "then": (
-                "support-bot confirms → refund-bot processes → "
-                "ledger-bot reconciles"
-            ),
-            "workflow": "support",
-            "cap_token_id": "cap-supportLong",
-            "status": "active",
-            "fired_30d": 12,
-            "updated_at": "2026-05-20T14:30:00Z",
-        },
-        {
-            "id": "rule-003",
-            "title": "Hold chargebacks for manual review",
-            "when": "Bank chargeback notification received",
-            "then": "Raise Decision (do not auto-process)",
-            "workflow": "support",
-            "cap_token_id": "cap-supportLong",
-            "status": "active",
-            "fired_30d": 1,
-            "updated_at": "2026-05-22T09:15:00Z",
-        },
-        {
-            "id": "rule-004",
-            "title": "Auto-sign vendor invoices from verified vendors",
-            "when": (
-                "Mandate request from vendor in verified-list, amount "
-                "< ¥10,000"
-            ),
-            "then": "mandate-bot signs → ledger-bot records",
-            "workflow": "finance",
-            "cap_token_id": "cap-financeLong",
-            "status": "draft",
-            "fired_30d": 0,
-            "updated_at": "2026-06-08T18:00:00Z",
-        },
-    ]
-
-
-def _seed_agents() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockAgents — 5 entries. """
-    return [
-        {
-            "did": _HELPER_A,
-            "code": "7e3a-91b2",
-            "label": "billing-helper",
-            "source": "local",
-            "capabilities": ["nth-dao.chat", "nth-dao.mandate"],
-            "last_seen": _iso_offset(-5 * 60),
-            "has_active_cap": True,
-        },
-        {
-            "did": _HELPER_B,
-            "code": "1f9c-44de",
-            "label": "code-helper",
-            "source": "local",
-            "capabilities": ["nth-dao.chat", "nth-dao.tasks"],
-            "last_seen": _iso_offset(-30 * 60),
-            "has_active_cap": True,
-        },
-        {
-            "did": "did:key:z6MkrTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH",
-            "code": "a3d8-c5fa",
-            "label": "Alice (Acme Cloud rep)",
-            "source": "contact",
-            "capabilities": ["nth-dao.chat", "nth-dao.mandate"],
-            "last_seen": _iso_offset(-2 * 86400),
-            "has_active_cap": False,
-        },
-        {
-            "did": "did:key:z6Mk5p1H3kT9YqXqMpL7Wm2N6bV8jK4cD5fE3hQ9rZxAtPq",
-            "code": "62b1-08e4",
-            "label": "mumolawos-coordinator",
-            "source": "lan",
-            "capabilities": [
-                "nth-dao.chat",
-                "nth-dao.dao-management",
-                "nth-dao.governance",
-                "nth-dao.a2a-protocol",
-            ],
-            "last_seen": _iso_offset(-12 * 60),
-            "has_active_cap": False,
-        },
-        {
-            "did": "did:key:z6MkjyN3aP2qLkR8wEsTvB4nMc6dF9gXuYhAvKkH7tQ4rPsM",
-            "code": "ff04-7c3b",
-            "label": "fulfillment-bot",
-            "source": "local",
-            "capabilities": ["nth-dao.chat", "nth-dao.tasks"],
-            "last_seen": _iso_offset(-90),
-            "has_active_cap": True,
-        },
-    ]
-
-
-def _seed_cap_tokens() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockCapTokens — 2 entries cap-bnHs82Lq, cap-3xQ1pTaM. """
-    now_ms = int(time.time() * 1000)
-    return [
-        {
-            "token_id": "cap-bnHs82Lq",
-            "subject_did": _HELPER_A,
-            "subject_label": "billing-helper",
-            "capabilities": ["a2a:message_send", "nth:receipt_sign"],
-            "scope_task_id": "mission-launch-2026",
-            "not_before": now_ms - 9 * 3600_000,
-            "not_after": now_ms + 3 * 3600_000,
-            "revoked": False,
-            "use_count": 12,
-        },
-        {
-            "token_id": "cap-3xQ1pTaM",
-            "subject_did": _HELPER_B,
-            "subject_label": "code-helper",
-            "capabilities": [
-                "a2a:message_send",
-                "a2a:task_split",
-                "nth:receipt_sign",
-            ],
-            "scope_task_id": "task-bl-1247",
-            "not_before": now_ms - 2 * 3600_000,
-            "not_after": now_ms + 2 * 3600_000,
-            "revoked": False,
-            "use_count": 4,
-        },
-    ]
-
-
-def _seed_conversations() -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockConversations — 4 entries. """
-    return [
-        {
-            "id": "ch-general",
-            "title": "#general",
-            "subtitle": "Home DAO · 4 members",
-            "last_preview": (
-                "billing-helper: Acme invoice queued for your "
-                "approval — see Decisions"
-            ),
-            "last_at": _iso_offset(-8 * 60),
-            "unread": 1,
-            "kind": "channel",
-        },
-        {
-            "id": "dm-billing-helper",
-            "title": "DM: billing-helper",
-            "subtitle": "Direct line to your AI accountant",
-            "last_preview": (
-                "I drafted the launch announcement. Receipt id 0a9c0bf3…"
-            ),
-            "last_at": _iso_offset(-22 * 60),
-            "unread": 0,
-            "kind": "dm",
-        },
-        {
-            "id": "dm-code-helper",
-            "title": "DM: code-helper",
-            "subtitle": "Refactor sessions",
-            "last_preview": (
-                "Pricing service extracted. Tests pass. Ready for review."
-            ),
-            "last_at": _iso_offset(-4 * 3600),
-            "unread": 0,
-            "kind": "dm",
-        },
-        {
-            "id": "ch-launch",
-            "title": "#launch",
-            "subtitle": "Home DAO · 3 members",
-            "last_preview": "you: shipping it Friday. final QA tonight.",
-            "last_at": _iso_offset(-86400),
-            "unread": 0,
-            "kind": "channel",
-        },
-    ]
-
-
-def _seed_messages(conv_id: str) -> List[Dict[str, Any]]:
-    """Mirrors mock.ts mockChatMessages — ch-general + dm-billing-helper
-    have content, dm-code-helper + ch-launch are empty. """
-    if conv_id == "ch-general":
-        return [
-            {
-                "message_id": "m-1",
-                "sender_id": "admin",
-                "sender_label": "you",
-                "body": "morning. anyone seen the Acme invoice come through?",
-                "created_at": _iso_offset(-45 * 60),
-            },
-            {
-                "message_id": "m-2",
-                "sender_id": _HELPER_A,
-                "sender_label": "billing-helper",
-                "body": (
-                    "Yes — landed at 09:42. ¥3,500. Within your vendor "
-                    "allowlist. I queued it as a Decision so you can "
-                    "approve when ready."
-                ),
-                "created_at": _iso_offset(-8 * 60),
-                "nth_receipt_id": "0a9c0bf3e89b6901cdab12345678cafe",
-            },
-        ]
-    if conv_id == "dm-billing-helper":
-        return [
-            {
-                "message_id": "m-10",
-                "sender_id": "admin",
-                "sender_label": "you",
-                "body": "draft the launch announcement, low-key tone please",
-                "created_at": _iso_offset(-80 * 60),
-            },
-            {
-                "message_id": "m-11",
-                "sender_id": _HELPER_A,
-                "sender_label": "billing-helper",
-                "body": (
-                    "Drafted v1. Receipt id 0a9c0bf3… signed under your "
-                    "cap_token cap-bnHs82Lq. Want me to ping 3 early users?"
-                ),
-                "created_at": _iso_offset(-22 * 60),
-                "nth_receipt_id": "0a9c0bf3e89b6901cdab12345678cafe",
-            },
-        ]
-    return []
-
-
-# ─────────────────────────────────────────────────────────────
-# Disk readers — overlay seed when real data is present.
-# Each guarded by a try/except so a single broken disk entry
-# can't take down the API.
-# ─────────────────────────────────────────────────────────────
-
-def _project_root() -> Path:
-    """Repo root — nth_dao/web/v2_api.py → ../.. is the repo dir."""
-    return Path(__file__).resolve().parent.parent.parent
-
 
 _STAGE_FROM_BLACKBOARD = {
     "todo":      "received",
@@ -1201,40 +638,14 @@ def _blackboard_entry_to_process_card(e: Any) -> Dict[str, Any]:
     return out
 
 
-def _workspace_only_mode() -> bool:
-    """Honour ``NTH_V2_WORKSPACE_ONLY=true`` env flag.
-
-    Review fix N3 (2026-06-10): the repo-fixture fallback in
-    ``_candidate_dirs`` is useful for dev/demo but actively wrong
-    for users who deliberately deleted their workspace data and
-    expect a clean slate. The flag opts out of the fallback so
-    the disk readers see ONLY the workspace path. Accepts the
-    case-insensitive truthy strings "true"/"1"/"yes"/"on". """
-    raw = os.environ.get("NTH_V2_WORKSPACE_ONLY", "").strip().lower()
-    return raw in {"true", "1", "yes", "on"}
-
-
 def _candidate_dirs(workspace: Optional[Path], subdir: str) -> List[Path]:
-    """Return prioritized candidate paths for a disk-store dir.
+    """Return the single live workspace path for a disk-store directory.
 
-    Review fix C5 (2026-06-10): the previous version hardcoded the
-    repo root, but WebState persists data under ``workspace`` (the
-    default of which is ``~/.nth-dao/workspaces/default``). The
-    correct read order is:
-      1. workspace/{subdir}    — live data the running app wrote
-      2. <repo>/{subdir}       — pre-workspace layout / dev fixtures
-         (SKIPPED when NTH_V2_WORKSPACE_ONLY=true)
-
-    Both are checked; first NON-EMPTY result wins. Without the env
-    flag, deleted workspace data resurrects from repo fixtures —
-    intentional for the dev workflow, opt-out for production via
-    NTH_V2_WORKSPACE_ONLY (see review fix N3 2026-06-10). """
-    out: List[Path] = []
-    if workspace:
-        out.append(workspace / subdir)
-    if not _workspace_only_mode():
-        out.append(_project_root() / subdir)
-    return out
+    Production reads must never fall through to repository fixtures. A user
+    who clears a workspace expects an empty workspace, not resurrected sample
+    agents, receipts, or authority tokens from the source checkout.
+    """
+    return [workspace / subdir] if workspace else []
 
 
 def _safe_iter(root: Path, pattern: Optional[str] = None) -> List[Path]:
@@ -1294,7 +705,7 @@ def _read_from_disk(
             except Exception as ex:
                 logger.warning("v2_api: %s mapper failed for %s: %s", label, path, ex)
         if out:
-            break  # First non-empty source wins (_candidate_dirs order).
+            break
     return out
 
 
@@ -1752,36 +1163,37 @@ class SpawnResponseM(_Model):
 # ─────────────────────────────────────────────────────────────
 # Phase 2 — decision store + receipt-signing for POST endpoints.
 #
-# The decision queue is in-process: a dict on ``app.state`` seeded
-# from ``_seed_decisions()`` on first access. Mutations (approve /
-# reject / defer remove the id) live in process memory. Receipts
-# go to disk via ``state.receipts`` (the existing ReceiptStore).
-#
-# Phase 3 will replace the in-memory store with a real persistent
-# decision queue and add cap_token-gated authorization. For Phase
-# 2 the hub is 127.0.0.1-only and treats POST as operator-privileged
-# (same posture as v1's /api/cap_tokens/issue path).
+# Production decisions live in a workspace-local SQLite queue. Test suites may
+# inject a dict on ``app.state`` to isolate receipt-signing behavior.
 # ─────────────────────────────────────────────────────────────
 
 
-def _decisions_store(request: Request) -> Dict[str, Dict[str, Any]]:
-    """Lazy per-app singleton — keyed by decision id.
+_DECISION_STORE_BUILD_LOCK = threading.Lock()
 
-    Thread-safety (S4 note 2026-06-10): the check-then-set on
-    ``v2_decisions_store`` is NOT atomic — two concurrent first
-    requests could both build a fresh store and the second one
-    would clobber the first. The Phase 2 hub is single-user
-    local-bound, so the TOCTOU is academic; uvicorn's default
-    single-worker config also serialises requests within the
-    asyncio event loop. Phase 3 (multi-user / multi-worker) MUST
-    move this to a process-shared store (SQLite / Redis) with
-    proper locking. """
-    state = request.app.state
+
+def _decision_store_for_state(state: Any) -> Any:
+    """Return an injected test store or build the durable production store."""
+
     store = getattr(state, "v2_decisions_store", None)
-    if store is None:
-        store = {d["id"]: d for d in _seed_decisions()}
+    if store is not None:
+        return store
+    with _DECISION_STORE_BUILD_LOCK:
+        store = getattr(state, "v2_decisions_store", None)
+        if store is not None:
+            return store
+        from .decision_store import DecisionStore
+
+        try:
+            workspace = Path(state.nth.workspace)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("decision workspace is unavailable") from exc
+        store = DecisionStore(workspace)
         state.v2_decisions_store = store
-    return store
+        return store
+
+
+def _decisions_store(request: Request) -> Any:
+    return _decision_store_for_state(request.app.state)
 
 
 def _state_node_identity(request: Request) -> Optional[Any]:
@@ -1946,6 +1358,17 @@ def _state_receipts_store(request: Request) -> Optional[Any]:
         return None
 
 
+def _has_console_bearer(request: Request) -> bool:
+    """Return whether the request carries the current console Bearer token."""
+
+    expected = str(getattr(request.app.state, "nth_console_token", "") or "")
+    supplied = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    if not expected or not supplied.startswith(prefix):
+        return False
+    return hmac.compare_digest(supplied[len(prefix):].strip(), expected)
+
+
 def _require_console_bearer_for_sensitive_read(request: Request) -> None:
     """Gate sensitive GET payloads that include raw private-console data.
 
@@ -1954,13 +1377,7 @@ def _require_console_bearer_for_sensitive_read(request: Request) -> None:
     summary: they may embed authorizing cap_token material. Require the local
     console Bearer token here even when the global middleware bypasses GETs.
     """
-    expected = str(getattr(request.app.state, "nth_console_token", "") or "")
-    supplied = request.headers.get("Authorization", "")
-    prefix = "Bearer "
-    if not expected or not supplied.startswith(prefix):
-        raise HTTPException(status_code=401, detail="missing or invalid console token")
-    token = supplied[len(prefix):].strip()
-    if not hmac.compare_digest(token, expected):
+    if not _has_console_bearer(request):
         raise HTTPException(status_code=401, detail="missing or invalid console token")
 
 
@@ -2706,13 +2123,12 @@ def _emit_mission_evidence(
     receipt_store = _state_receipts_store(request)
     if signer is not None and receipt_store is not None:
         try:
-            from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
+            from nth_dao.execution_receipt import TimelineEntry, now_ms
 
             receipt_payload = dict(event_payload)
             receipt_payload["event_type"] = event_type
             signer_did = str(signer.as_did())
-            prev_hash = receipt_store.head_content_hash(signer_did)
-            receipt = sign_receipt(
+            receipt = receipt_store.sign_and_save(
                 [TimelineEntry(
                     timestamp=now_ms(),
                     type="nth.mission_event",
@@ -2720,9 +2136,7 @@ def _emit_mission_evidence(
                 )],
                 signer,
                 goal_id=str(event_payload.get("mission_id", "") or ""),
-                prev_content_hash=prev_hash,
             )
-            receipt_store.save(receipt)
             evidence["receipt_id"] = receipt.get("receipt_id", "")
             evidence["receipt_hash"] = receipt.get("content_hash", "")
             event_payload["receipt_id"] = evidence["receipt_id"]
@@ -3331,10 +2745,7 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                 # decision-raise wire works even on a freshly-built
                 # supervisor whose decisions endpoint hasn't been
                 # touched. Mirrors _decisions_store's seed pattern.
-                store = getattr(state, "v2_decisions_store", None)
-                if store is None:
-                    store = {d["id"]: d for d in _seed_decisions()}
-                    state.v2_decisions_store = store
+                store = _decision_store_for_state(state)
                 supervisor = getattr(state, "v2_supervisor", None)
                 rec = supervisor.get(agent_id) if supervisor is not None else None
                 proposer_did = rec.did if rec is not None else ""
@@ -3367,7 +2778,10 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                     "type": "agent", "agent_id": agent_id,
                 }
                 decision["raised_at"] = _iso_now()
-                store[decision_id] = decision
+                if hasattr(store, "put"):
+                    store.put(decision)
+                else:
+                    store[decision_id] = decision
 
             sup = build_default_supervisor(
                 cap_token_dir=cap_token_dir,
@@ -4278,11 +3692,267 @@ def _state_workspace(request: Request) -> Optional[Path]:
         return None
 
 
+def _complete_decision(
+    store: Any,
+    decision_id: str,
+    action: str,
+    *,
+    receipt_id: str = "",
+) -> None:
+    from .decision_store import DecisionNotFound
+
+    try:
+        if hasattr(store, "complete"):
+            store.complete(decision_id, action, receipt_id=receipt_id)
+        else:
+            store.pop(decision_id, None)
+    except DecisionNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail=f"decision {decision_id!r} is no longer pending",
+        ) from None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("decision outcome persistence failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="decision outcome could not be persisted",
+        ) from exc
+
+
+def _find_persisted_decision_receipt(
+    receipts_store: Any,
+    *,
+    decision_id: str,
+    signer_pubkey_hex: str,
+) -> Optional[Dict[str, Any]]:
+    """Find one valid receipt proving this decision was already approved."""
+
+    from nth_dao.execution_receipt import verify_receipt
+
+    matches: List[Dict[str, Any]] = []
+    for receipt_id in receipts_store.list_ids():
+        receipt = receipts_store.load(receipt_id)
+        if not isinstance(receipt, dict):
+            continue
+        if str(receipt.get("receipt_id") or "") != receipt_id:
+            continue
+        timeline = receipt.get("timeline")
+        if not isinstance(timeline, list) or not any(
+            isinstance(entry, dict)
+            and entry.get("type") == "nth.decision_approved"
+            and isinstance(entry.get("payload"), dict)
+            and entry["payload"].get("decision_id") == decision_id
+            for entry in timeline
+        ):
+            continue
+        if verify_receipt(
+            receipt,
+            expected_pubkey_hex=signer_pubkey_hex,
+        ):
+            matches.append(receipt)
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"decision {decision_id!r} has multiple valid approval "
+                "receipts; resolve the receipt-chain conflict manually"
+            ),
+        )
+    return matches[0] if matches else None
+
+
+def _decision_receipt_summary(
+    receipt: Dict[str, Any],
+    *,
+    decision: Dict[str, Any],
+    decision_id: str,
+    goal_id: str,
+    prev_content_hash: str,
+) -> Dict[str, Any]:
+    return {
+        "id": receipt.get("receipt_id", ""),
+        "signer_did": receipt.get("signer_did", ""),
+        "signer_label": "you",
+        "goal_id": goal_id,
+        "content_hash": receipt.get("content_hash", ""),
+        "prev_content_hash": prev_content_hash,
+        "has_cap_token": bool(receipt.get("authorizing_cap_token")),
+        "summary": decision.get("title", decision_id),
+        "issued_at": receipt.get("issued_at", ""),
+    }
+
+
+def _decision_payload_hash(decision: Dict[str, Any]) -> str:
+    """Hash the exact JSON-compatible decision projection stored by SQLite."""
+
+    encoded = json.dumps(
+        decision,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _fresh_verified_decision_spine(request: Request) -> Tuple[Any, List[Any]]:
+    """Return a freshly verified Spine for a security-sensitive write."""
+
+    spine = _state_spine(request)
+    if spine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="signed Spine unavailable; decision remains pending",
+        )
+    try:
+        ok, why = spine.verify_chain()
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"spine integrity check failed: {why}",
+            )
+        events = list(spine.read_all())
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("decision Spine verification failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="signed Spine could not be verified; decision remains pending",
+        ) from exc
+    return spine, events
+
+
+def _record_decision_outcome(
+    request: Request,
+    decision: Dict[str, Any],
+    *,
+    action: str,
+    receipt: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Idempotently append one signed Decision outcome to the Spine."""
+
+    if action not in {"approved", "rejected", "deferred"}:
+        raise ValueError(f"unsupported decision action: {action}")
+    identity = _state_node_identity(request)
+    if identity is None or not getattr(identity, "can_sign", False):
+        raise HTTPException(
+            status_code=503,
+            detail="signer identity unavailable; cannot audit decision outcome",
+        )
+    decision_id = str(decision.get("id") or "")
+    event_type = f"decision.{action}"
+    receipt_id = str((receipt or {}).get("receipt_id") or "")
+    receipt_hash = str((receipt or {}).get("content_hash") or "")
+    payload = {
+        "decision_id": decision_id,
+        "decision_payload_hash": _decision_payload_hash(decision),
+        "proposer_did": str(decision.get("proposer_did") or ""),
+        "mission_id": str(decision.get("mission_id") or ""),
+        "receipt_id": receipt_id,
+        "receipt_content_hash": receipt_hash,
+    }
+
+    spine, events = _fresh_verified_decision_spine(request)
+    for event in events:
+        event_payload = getattr(event, "payload", None)
+        if not isinstance(event_payload, dict):
+            continue
+        if event_payload.get("decision_id") != decision_id:
+            continue
+        if not str(getattr(event, "type", "")).startswith("decision."):
+            continue
+        if (
+            event.type != event_type
+            or event_payload.get("decision_payload_hash")
+            != payload["decision_payload_hash"]
+            or event_payload.get("receipt_id") != receipt_id
+            or event_payload.get("receipt_content_hash") != receipt_hash
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"decision {decision_id!r} already has a conflicting "
+                    "signed outcome in the Spine"
+                ),
+            )
+        return event
+
+    try:
+        return spine.append(event_type, payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("decision Spine append failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="decision outcome could not be written to the signed Spine",
+        ) from exc
+
+
+def _ensure_no_signed_decision_outcome(
+    request: Request,
+    decision_id: str,
+) -> None:
+    """Fail before creating a receipt when the Spine already resolved it."""
+
+    _spine, events = _fresh_verified_decision_spine(request)
+    for event in events:
+        payload = getattr(event, "payload", None)
+        if (
+            isinstance(payload, dict)
+            and payload.get("decision_id") == decision_id
+            and str(getattr(event, "type", "")).startswith("decision.")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"decision {decision_id!r} already has a signed outcome "
+                    "in the Spine"
+                ),
+            )
+
+
 def _resolve_decision(
     decision_id: str,
     request: Request,
     *,
     sign: bool,
+    action: str,
+) -> Dict[str, Any]:
+    """Serialize one decision outcome across threads and hub processes."""
+
+    if sign != (action == "approved"):
+        raise ValueError(
+            "approved decisions require a receipt; rejected/deferred "
+            "decisions must not create one"
+        )
+    workspace = _state_workspace(request)
+    if workspace is None:
+        raise HTTPException(status_code=503, detail="decision workspace unavailable")
+    # The receipt chain is signer-scoped, not decision-scoped. Serializing
+    # only equal IDs would let two different approvals read the same chain
+    # head and create a fork.
+    lock_target = workspace / "decisions" / "resolution"
+    try:
+        with InterProcessLock(lock_target, timeout=30.0):
+            return _resolve_decision_locked(
+                decision_id,
+                request,
+                sign=sign,
+                action=action,
+            )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"decision {decision_id!r} is already being resolved",
+        ) from exc
+
+
+def _resolve_decision_locked(
+    decision_id: str,
+    request: Request,
+    *,
+    sign: bool,
+    action: str,
 ) -> Dict[str, Any]:
     """Shared body for approve / reject / defer.
 
@@ -4299,16 +3969,15 @@ def _resolve_decision(
         which uses the console_token; the v2 routes are anonymous on
         the local-only bind so this is the same trust model in
         practice. Phase 3 will add cap_token gating.
-      - Decision store is in-process. A hub restart resets the queue
-        from seed. Persisting is Phase 3 (or whenever a real backend
-        emits decisions instead of seeding them).
+      - Decision resolution is serialized across hub processes. A receipt
+        saved before queue completion is detected and reused on retry.
       - Mission_id mapping: when the decision carries one, use it as
         ``goal_id`` so the receipt links to the mission. Else use
         the decision id itself.
     """
     # Lazy imports — execution_receipt module is heavy.
     from nth_dao.execution_receipt import (
-        TimelineEntry, sign_receipt,
+        TimelineEntry, extract_prev_content_hash,
     )
 
     store = _decisions_store(request)
@@ -4322,11 +3991,18 @@ def _resolve_decision(
 
     if not sign:
         # reject / defer — no receipt, just remove.
-        store.pop(decision_id, None)
+        audit_event = _record_decision_outcome(
+            request,
+            decision,
+            action=action,
+        )
+        _complete_decision(store, decision_id, action)
         return {
             "decision_id": decision_id,
             "removed": True,
             "signed": False,
+            "audit_signed": True,
+            "audit_event_id": audit_event.event_id,
         }
 
     # sign=True path
@@ -4353,11 +4029,41 @@ def _resolve_decision(
         )
 
     signer_did = identity.as_did() if hasattr(identity, "as_did") else ""
-    try:
-        prev_hash = receipts_store.head_content_hash(signer_did)
-    except Exception as ex:
-        logger.warning("v2_api: head_content_hash failed: %s", ex)
-        prev_hash = ""
+    goal_id = decision.get("mission_id") or decision_id
+    existing_receipt = _find_persisted_decision_receipt(
+        receipts_store,
+        decision_id=decision_id,
+        signer_pubkey_hex=str(getattr(identity, "pubkey_hex", "") or ""),
+    )
+    if existing_receipt is not None:
+        audit_event = _record_decision_outcome(
+            request,
+            decision,
+            action="approved",
+            receipt=existing_receipt,
+        )
+        _complete_decision(
+            store,
+            decision_id,
+            "approved",
+            receipt_id=str(existing_receipt.get("receipt_id", "")),
+        )
+        return {
+            "decision_id": decision_id,
+            "removed": True,
+            "signed": True,
+            "audit_signed": True,
+            "recovered": True,
+            "audit_event_id": audit_event.event_id,
+            "receipt": _decision_receipt_summary(
+                existing_receipt,
+                decision=decision,
+                decision_id=decision_id,
+                goal_id=goal_id,
+                prev_content_hash=extract_prev_content_hash(existing_receipt),
+            ),
+        }
+    _ensure_no_signed_decision_outcome(request, decision_id)
 
     # Build the timeline.
     # Required: at least one substantive entry beyond chain_link.
@@ -4380,55 +4086,50 @@ def _resolve_decision(
         ),
     ]
 
-    goal_id = decision.get("mission_id") or decision_id
-    receipt = sign_receipt(
-        timeline,
-        identity,
-        goal_id=goal_id,
-        prev_content_hash=prev_hash,
-    )
-
-    # Save BEFORE removing the decision: if save fails the user
-    # should be able to retry the same approval. (receipts_store
-    # is guaranteed non-None here by the 503 guard above.)
-    #
-    # Chain-gap caveat (review pass#2 note 2026-06-10): if save
-    # fails mid-batch (5 approves in a row, #3 fails) the chain
-    # has a gap — receipt #4's prev_content_hash points to #2.
-    # ``verify_receipt_chain`` still accepts this because every
-    # prev pointer resolves within the on-disk set, but the
-    # operator's audit log will show 4 receipts where they
-    # expected 5. Documenting; not fixing in Phase 2.
     try:
-        receipts_store.save(receipt)
+        receipt = receipts_store.sign_and_save(
+            timeline,
+            identity,
+            goal_id=goal_id,
+        )
     except Exception as exc:
-        logger.exception("v2_api: receipts_store.save failed: %s", exc)
+        logger.exception("v2_api: receipt sign-and-save failed: %s", exc)
         raise HTTPException(
             status_code=500,
             detail=f"signed receipt could not be persisted: {exc}",
         )
 
+    audit_event = _record_decision_outcome(
+        request,
+        decision,
+        action="approved",
+        receipt=receipt,
+    )
+
     # Remove the decision from the queue only after the receipt has
     # landed on disk.
-    store.pop(decision_id, None)
+    _complete_decision(
+        store,
+        decision_id,
+        "approved",
+        receipt_id=str(receipt.get("receipt_id", "")),
+    )
 
     # Shape matches ReceiptSummary so the frontend can splice it
     # into its receipts state without a /api/v2/receipts refetch.
-    summary: Dict[str, Any] = {
-        "id": receipt.get("receipt_id", ""),
-        "signer_did": receipt.get("signer_did", ""),
-        "signer_label": "you",
-        "goal_id": goal_id,
-        "content_hash": receipt.get("content_hash", ""),
-        "prev_content_hash": prev_hash,
-        "has_cap_token": bool(receipt.get("authorizing_cap_token")),
-        "summary": decision.get("title", decision_id),
-        "issued_at": receipt.get("issued_at", ""),
-    }
+    summary = _decision_receipt_summary(
+        receipt,
+        decision=decision,
+        decision_id=decision_id,
+        goal_id=goal_id,
+        prev_content_hash=extract_prev_content_hash(receipt),
+    )
     return {
         "decision_id": decision_id,
         "removed": True,
         "signed": True,
+        "audit_signed": True,
+        "audit_event_id": audit_event.event_id,
         "receipt": summary,
     }
 
@@ -6866,15 +6567,189 @@ def _ensure_market_fed_cache_for_update(request: Request):
     return cache
 
 
+def _discover_and_import_market_federation(
+    request: Request,
+    *,
+    actor_id: str,
+    timeout_seconds: float,
+    add: bool = True,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Discover, verify, and optionally persist nearby federation peers."""
+
+    ws = _state_workspace(request)
+    if ws is None:
+        raise RuntimeError("workspace unavailable")
+    discovered, errors = _discover_market_federation_peers(
+        request,
+        actor_id=actor_id,
+        timeout_seconds=timeout_seconds,
+    )
+    urls: List[str] = []
+    verified_rows: List[Dict[str, Any]] = []
+    skipped_rows: List[Dict[str, Any]] = []
+    verified_metadata: Dict[str, Dict[str, Any]] = {}
+    for discovered_row in discovered:
+        row = dict(discovered_row)
+        url = str(row.get("federation_peer_url") or "")
+        if not url:
+            row["identity_verified"] = False
+            row["identity_error"] = "peer did not advertise an HTTP federation URL"
+            skipped_rows.append(row)
+            continue
+        resolved_ip = _resolve_safe_discovered_federation_ip(url)
+        if not resolved_ip:
+            row["identity_verified"] = False
+            row["identity_error"] = (
+                "discovered federation URL targets a local or invalid address"
+            )
+            skipped_rows.append(row)
+            continue
+        resolved_address = ipaddress.ip_address(resolved_ip)
+        if resolved_address.is_private:
+            source_ip = _discovered_source_ip(str(row.get("source_addr") or ""))
+            if source_ip != str(resolved_address):
+                row["identity_verified"] = False
+                row["identity_error"] = (
+                    "private federation URL does not match discovery source"
+                )
+                skipped_rows.append(row)
+                continue
+        identity_meta, identity_error = _fetch_and_verify_federation_identity(
+            url,
+            timeout_seconds=min(float(timeout_seconds), 3.0),
+            expected_did=str(row.get("did") or ""),
+            resolved_ip=resolved_ip,
+        )
+        if identity_meta is None:
+            row["identity_verified"] = False
+            row["identity_error"] = identity_error
+            skipped_rows.append(row)
+            continue
+        row["identity_verified"] = True
+        row["identity_url"] = identity_meta["identity_url"]
+        row["peer_did"] = identity_meta["did"]
+        row["pubkey_prefix"] = identity_meta["pubkey_hex"][:16]
+        verified_rows.append(row)
+        verified_metadata[url] = identity_meta
+        if url not in urls:
+            urls.append(url)
+
+    imported: List[str] = []
+    if add and (urls or verified_rows):
+        with _FED_CONFIG_LOCK:
+            file_peers = _read_fed_peer_file(ws)
+            merged = list(file_peers)
+            for url in urls:
+                if url not in merged:
+                    merged.append(url)
+                    imported.append(url)
+            metadata = _read_fed_peer_metadata(ws)
+            metadata.update(verified_metadata)
+            if imported:
+                _write_fed_peer_file(ws, merged)
+            if metadata != _read_fed_peer_metadata(ws):
+                _write_fed_peer_metadata(ws, metadata)
+
+    cache = _ensure_market_fed_cache_for_update(request)
+    if refresh and (_read_fed_peers(ws) or _read_learned_fed_peers(ws)):
+        from .market_federation_poll import federate_once
+
+        peers = _read_fed_peers(ws)
+        try:
+            entries = federate_once(
+                peers,
+                untrusted_peers=_read_learned_fed_peers(ws),
+                verify_gossip_peer=_market_fed_gossip_identity_verifier(
+                    request, persist_learned=True,
+                ),
+                verify_seed_peer=_market_fed_gossip_identity_verifier(request),
+                max_duration_s=_market_fed_cycle_budget_s(),
+            )
+            cache.replace_all(
+                entries,
+                peer_count=len(set(peers) | set(_read_learned_fed_peers(ws))),
+            )
+        except Exception as exc:  # noqa: BLE001
+            cache.mark_error(
+                str(exc),
+                peer_count=len(set(peers) | set(_read_learned_fed_peers(ws))),
+            )
+
+    status = _market_fed_status(request)
+    status["discovered"] = True
+    status["discovered_peers"] = verified_rows + skipped_rows
+    status["imported_peers"] = imported
+    status["skipped_peers"] = skipped_rows
+    status["discovery_errors"] = errors
+    status["identity_verified_peers"] = [
+        row["federation_peer_url"] for row in verified_rows
+        if row.get("identity_verified")
+    ]
+    request.app.state.market_fed_last_discovery = dict(status)
+    return status
+
+
 def start_market_federation_runtime(app: FastAPI) -> None:
-    """Start federation at service startup, even when no UI is opened."""
+    """Start poll and LAN discovery runtimes without requiring the UI."""
     request = Request({"type": "http", "app": app})
     _state_market_fed_cache(request)
+    if not _env_bool("NTH_LAN_DISCOVERY", False):
+        return
+    state = app.state
+    thread = getattr(state, "market_fed_discovery_thread", None)
+    if thread is not None and thread.is_alive():
+        return
+    stop_event = threading.Event()
+    interval = _env_float(
+        "NTH_FED_DISCOVERY_INTERVAL_S", 30.0, minimum=5.0, maximum=3600.0,
+    )
+    timeout_seconds = _env_float(
+        "NTH_FED_DISCOVERY_TIMEOUT_S", 1.25, minimum=0.5, maximum=6.0,
+    )
+
+    def run_discovery() -> None:
+        while not stop_event.is_set():
+            try:
+                _discover_and_import_market_federation(
+                    request,
+                    actor_id="admin",
+                    timeout_seconds=timeout_seconds,
+                    add=True,
+                    refresh=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("background federation discovery failed: %s", exc)
+            stop_event.wait(interval)
+
+    thread = threading.Thread(
+        target=run_discovery,
+        name="nth-market-federation-discovery",
+        daemon=True,
+    )
+    state.market_fed_discovery_stop_event = stop_event
+    state.market_fed_discovery_thread = thread
+    thread.start()
 
 
 def stop_market_federation_runtime(app: FastAPI) -> None:
     """Signal and briefly join the lifecycle-owned federation thread."""
     state = app.state
+    discovery_stop = getattr(state, "market_fed_discovery_stop_event", None)
+    if discovery_stop is not None and hasattr(discovery_stop, "set"):
+        discovery_stop.set()
+    discovery_thread = getattr(state, "market_fed_discovery_thread", None)
+    if discovery_thread is not None and hasattr(discovery_thread, "join"):
+        discovery_thread.join(timeout=10.0)
+    if (
+        discovery_thread is not None
+        and hasattr(discovery_thread, "is_alive")
+        and discovery_thread.is_alive()
+    ):
+        logger.warning("federation discovery thread did not stop in time")
+    else:
+        state.market_fed_discovery_stop_event = None
+        state.market_fed_discovery_thread = None
     stop_event = getattr(state, "market_fed_poller_stop_event", None)
     if stop_event is not None and hasattr(stop_event, "set"):
         stop_event.set()
@@ -7045,8 +6920,18 @@ def register_v2_routes(app: FastAPI) -> None:
         logger.warning("v2_api: AgentLink startup recovery failed: %s", exc)
 
     @app.get("/api/v2/identity")
-    def v2_identity() -> Dict[str, Any]:
-        return _seed_identity()
+    def v2_identity(request: Request) -> Dict[str, Any]:
+        identity = _state_node_identity(request)
+        if identity is None or not hasattr(identity, "as_did"):
+            raise HTTPException(status_code=503, detail="node identity unavailable")
+        from nth_dao.agent_code import code_for_pubkey
+
+        pubkey_hex = str(getattr(identity, "pubkey_hex", "") or "")
+        return {
+            "agent_id": str(getattr(identity, "agent_id", "") or "admin"),
+            "did": str(identity.as_did()),
+            "code": code_for_pubkey(pubkey_hex),
+        }
 
     # ── 频道(收编自 8765 群聊,P1)────────────────────────────────
     # 复用 app.state.nth.groups(GroupManager,已挂在 state 上),不重造
@@ -7368,8 +7253,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/decisions", response_model=List[DecisionM])
     def v2_decisions(request: Request) -> List[Dict[str, Any]]:
-        # Phase 2: served from the mutable in-memory store so the
-        # queue shrinks as the user approves / rejects / defers.
+        # The durable queue shrinks as the user approves, rejects, or defers.
         return list(_decisions_store(request).values())
 
     @app.post("/api/v2/decisions/{decision_id}/approve")
@@ -7387,7 +7271,9 @@ def register_v2_routes(app: FastAPI) -> None:
                 NEVER return an unsigned receipt)
           500 — receipt save failed AFTER signing (unexpected;
                 the decision is NOT removed so the user can retry) """
-        return _resolve_decision(decision_id, request, sign=True)
+        return _resolve_decision(
+            decision_id, request, sign=True, action="approved",
+        )
 
     @app.post("/api/v2/decisions/{decision_id}/reject")
     def v2_decisions_reject(
@@ -7396,7 +7282,9 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """Drop the decision from the queue. No receipt is signed —
         rejection is non-actionable. Returns {removed: true}. """
-        return _resolve_decision(decision_id, request, sign=False)
+        return _resolve_decision(
+            decision_id, request, sign=False, action="rejected",
+        )
 
     @app.post("/api/v2/decisions/{decision_id}/defer")
     def v2_decisions_defer(
@@ -7406,21 +7294,22 @@ def register_v2_routes(app: FastAPI) -> None:
         """Drop the decision from the queue. Phase 3 will move it to
         a "deferred" bucket with a follow-up timer; Phase 2 just
         removes it. """
-        return _resolve_decision(decision_id, request, sign=False)
+        return _resolve_decision(
+            decision_id, request, sign=False, action="deferred",
+        )
 
     @app.get("/api/v2/missions", response_model=List[MissionSummaryM])
     def v2_missions(request: Request) -> List[Dict[str, Any]]:
-        # 2026-06-14:接真实 mission store(替掉 seed mock)。store 在 →
-        # 返回真实 missions(可能为空 []);store 不在(罕见)→ 退回 seed
-        # 保证视图不空。不再凭空塞两条假 active mission 误导用户。
         store = getattr(request.app.state.nth, "missions", None)
         if store is None:
-            return _seed_missions()
+            raise HTTPException(status_code=503, detail="mission store unavailable")
         try:
             missions = store.list_all()
         except Exception as exc:  # noqa: BLE001
             logger.warning("v2_missions: list_all failed: %s", exc)
-            return _seed_missions()
+            raise HTTPException(
+                status_code=500, detail="mission store read failed",
+            ) from exc
         return [_mission_to_summary(m, request) for m in missions]
 
     @app.post("/api/v2/missions", response_model=MissionSummaryM)
@@ -7901,8 +7790,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/processes", response_model=List[ProcessCardM])
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
-        live = _read_processes_from_blackboard(_state_blackboard(request))
-        return live if live else _seed_processes()
+        return _read_processes_from_blackboard(_state_blackboard(request))
 
 
     @app.post("/api/v2/processes", response_model=ProcessCardM)
@@ -7949,8 +7837,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/receipts", response_model=List[ReceiptSummaryM])
     def v2_receipts(request: Request) -> List[Dict[str, Any]]:
-        live = _read_receipts_from_disk(_state_workspace(request))
-        return live if live else _seed_receipts()
+        return _read_receipts_from_disk(_state_workspace(request))
 
     @app.get("/api/v2/receipts/{receipt_id}")
     def v2_receipt_detail(receipt_id: str, request: Request) -> Dict[str, Any]:
@@ -7968,8 +7855,9 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/rules")
     def v2_rules() -> List[Dict[str, Any]]:
-        # No disk source yet — rules editor is Phase 2.
-        return _seed_rules()
+        # No persistent rule store exists yet. An honest empty state is safer
+        # than presenting executable-looking sample policy as live authority.
+        return []
 
     @app.get("/api/v2/market/open")
     def v2_market_open(
@@ -8544,122 +8432,16 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
         actor_id = body.actor_id.strip()
         _require_federation_actor(request, actor_id)
-
-        discovered, errors = _discover_market_federation_peers(
-            request,
-            actor_id=actor_id,
-            timeout_seconds=float(body.timeout_seconds),
-        )
-        urls: List[str] = []
-        verified_rows: List[Dict[str, Any]] = []
-        skipped_rows: List[Dict[str, Any]] = []
-        verified_metadata: Dict[str, Dict[str, Any]] = {}
-        for discovered_row in discovered:
-            row = dict(discovered_row)
-            url = str(row.get("federation_peer_url") or "")
-            if not url:
-                row["identity_verified"] = False
-                row["identity_error"] = "peer did not advertise an HTTP federation URL"
-                skipped_rows.append(row)
-                continue
-            resolved_ip = _resolve_safe_discovered_federation_ip(url)
-            if not resolved_ip:
-                row["identity_verified"] = False
-                row["identity_error"] = (
-                    "discovered federation URL targets a local or invalid address"
-                )
-                skipped_rows.append(row)
-                continue
-            resolved_address = ipaddress.ip_address(resolved_ip)
-            if resolved_address.is_private:
-                source_ip = _discovered_source_ip(
-                    str(row.get("source_addr") or "")
-                )
-                if source_ip != str(resolved_address):
-                    row["identity_verified"] = False
-                    row["identity_error"] = (
-                        "private federation URL does not match discovery source"
-                    )
-                    skipped_rows.append(row)
-                    continue
-            identity_meta, identity_error = _fetch_and_verify_federation_identity(
-                url,
-                timeout_seconds=min(float(body.timeout_seconds), 3.0),
-                expected_did=str(row.get("did") or ""),
-                resolved_ip=resolved_ip,
+        try:
+            return _discover_and_import_market_federation(
+                request,
+                actor_id=actor_id,
+                timeout_seconds=float(body.timeout_seconds),
+                add=body.add,
+                refresh=body.refresh,
             )
-            if identity_meta is None:
-                row["identity_verified"] = False
-                row["identity_error"] = identity_error
-                skipped_rows.append(row)
-                continue
-            row["identity_verified"] = True
-            row["identity_url"] = identity_meta["identity_url"]
-            row["peer_did"] = identity_meta["did"]
-            row["pubkey_prefix"] = identity_meta["pubkey_hex"][:16]
-            verified_rows.append(row)
-            verified_metadata[url] = identity_meta
-            if url not in urls:
-                urls.append(url)
-
-        imported: List[str] = []
-        if body.add and (urls or verified_rows):
-            with _FED_CONFIG_LOCK:
-                file_peers = _read_fed_peer_file(ws)
-                merged = list(file_peers)
-                for url in urls:
-                    if url not in merged:
-                        merged.append(url)
-                        imported.append(url)
-                metadata = _read_fed_peer_metadata(ws)
-                metadata.update(verified_metadata)
-                try:
-                    if imported:
-                        _write_fed_peer_file(ws, merged)
-                    if metadata != _read_fed_peer_metadata(ws):
-                        _write_fed_peer_metadata(ws, metadata)
-                except (OSError, RuntimeError, ValueError) as exc:
-                    raise HTTPException(status_code=500, detail=str(exc))
-
-        cache = _ensure_market_fed_cache_for_update(request)
-        if body.refresh and (_read_fed_peers(ws) or _read_learned_fed_peers(ws)):
-            from .market_federation_poll import federate_once
-            peers = _read_fed_peers(ws)
-            try:
-                entries = federate_once(
-                    peers,
-                    untrusted_peers=_read_learned_fed_peers(ws),
-                    verify_gossip_peer=_market_fed_gossip_identity_verifier(
-                        request, persist_learned=True,
-                    ),
-                    verify_seed_peer=_market_fed_gossip_identity_verifier(request),
-                    max_duration_s=_market_fed_cycle_budget_s(),
-                )
-                cache.replace_all(
-                    entries,
-                    peer_count=len(
-                        set(peers) | set(_read_learned_fed_peers(ws))
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                cache.mark_error(
-                    str(exc),
-                    peer_count=len(
-                        set(peers) | set(_read_learned_fed_peers(ws))
-                    ),
-                )
-
-        status = _market_fed_status(request)
-        status["discovered"] = True
-        status["discovered_peers"] = verified_rows + skipped_rows
-        status["imported_peers"] = imported
-        status["skipped_peers"] = skipped_rows
-        status["discovery_errors"] = errors
-        status["identity_verified_peers"] = [
-            row["federation_peer_url"] for row in verified_rows
-            if row.get("identity_verified")
-        ]
-        return status
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.post("/api/v2/market/federation/refresh")
     def v2_market_fed_refresh(request: Request) -> Dict[str, Any]:
@@ -9951,10 +9733,10 @@ def register_v2_routes(app: FastAPI) -> None:
     @app.get("/api/v2/agents", response_model=List[AgentEntryM])
     def v2_agents(request: Request) -> List[Dict[str, Any]]:
         # Phase 3a: prepend supervised agents (kind=local, live) ahead
-        # of the disk-or-seed list so the UI surfaces them first.
+        # of the disk-backed list so the UI surfaces them first.
         # The supervisor view is the source-of-truth for "agents I
         # spawned this session"; disk reflects identities written by
-        # other parts of the stack; seed is the fallback for demo.
+        # other parts of the stack.
         sup = _state_supervisor(request)
         # Phase G: join cap_token scope on supervised agents so the
         # frontend can render a "scoped: <models>" badge inline with
@@ -9970,6 +9752,12 @@ def register_v2_routes(app: FastAPI) -> None:
                 for rec in sup.list_agents():
                     entry = rec.to_agent_entry()
                     entry["ask_timeout_s"] = _backend_ask_timeout(rec.kind)
+                    if not _has_console_bearer(request):
+                        # The Agents summary is anonymously readable on LAN
+                        # deployments. Never disclose a local filesystem path
+                        # to unauthenticated peers; scope_id/revision are enough
+                        # for public status and cross-node coordination.
+                        entry.pop("work_scope_root", None)
                     # Phase G: try to surface the agent's cap_token
                     # scope_model_allowlist into the listing. Failures
                     # are swallowed (store missing, token deleted, etc.)
@@ -10001,11 +9789,10 @@ def register_v2_routes(app: FastAPI) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("v2_api: supervisor list_agents failed: %s", exc)
         disk = _read_agents_from_disk(_state_workspace(request))
-        base = disk if disk else _seed_agents()
         # Dedup by did so a hub restart that re-reads a supervised
         # agent's identity from disk doesn't double-render it.
         seen_dids = {a["did"] for a in supervised}
-        merged = supervised + [a for a in base if a.get("did") not in seen_dids]
+        merged = supervised + [a for a in disk if a.get("did") not in seen_dids]
         return merged
 
     @app.get("/api/v2/agents/backends/status")
@@ -10018,6 +9805,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 "ask_timeout_s": _backend_ask_timeout(kind),
             }
             for kind, status in backend_runtime_status().items()
+            if kind != "mock" or _env_bool("NTH_ENABLE_TEST_BACKENDS", False)
         }
         return {"backends": _overlay_live_backend_status(statuses, request)}
 
@@ -11034,31 +10822,26 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/cap_tokens", response_model=List[CapTokenSummaryM])
     def v2_cap_tokens(request: Request) -> List[Dict[str, Any]]:
-        live = _read_cap_tokens_from_disk(_state_workspace(request))
-        return live if live else _seed_cap_tokens()
+        return _read_cap_tokens_from_disk(_state_workspace(request))
 
     @app.get("/api/v2/conversations")
     def v2_conversations() -> List[Dict[str, Any]]:
-        return _seed_conversations()
+        return []
 
     @app.get("/api/v2/messages/{conv_id}")
     def v2_messages(conv_id: str) -> List[Dict[str, Any]]:
-        return _seed_messages(conv_id)
+        del conv_id
+        return []
 
-    # Health probe so the frontend can tell whether the hub is up
-    # before falling back to mock data.
-    # P8 fix 2026-06-10: derive the endpoint list from app.routes so
-    # adding a new route doesn't require remembering to also update
-    # the health response.
     @app.get("/api/v2/health")
     def v2_health() -> Dict[str, Any]:
         prefix = "/api/v2/"
-        eps = sorted({
-            r.path[len(prefix):]  # type: ignore[attr-defined]
-            for r in app.routes
-            if getattr(r, "path", "").startswith(prefix)
-            and getattr(r, "path", "") != "/api/v2/health"
+        endpoints = sorted({
+            route.path[len(prefix):]  # type: ignore[attr-defined]
+            for route in app.routes
+            if getattr(route, "path", "").startswith(prefix)
+            and getattr(route, "path", "") != "/api/v2/health"
         })
-        return {"ok": True, "phase": 1, "endpoints": eps}
+        return {"ok": True, "phase": 1, "endpoints": endpoints}
 
-    logger.info("v2_api: registered /api/v2/* read endpoints (Phase 1)")
+    logger.info("v2_api: registered /api/v2/* live endpoints")

@@ -245,6 +245,42 @@ def test_app_lifespan_clamps_negative_federation_interval(
         assert intervals == [1.0]
 
 
+def test_app_lifespan_discovers_federation_without_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import nth_dao.web.v2_api as v2_api
+
+    called = threading.Event()
+    calls: list[dict] = []
+
+    def fake_discover(request, **kwargs):
+        calls.append(dict(kwargs))
+        called.set()
+        return {"discovered": True}
+
+    monkeypatch.setenv("NTH_LAN_DISCOVERY", "1")
+    monkeypatch.setenv("NTH_FED_DISCOVERY_INTERVAL_S", "3600")
+    monkeypatch.setattr(
+        v2_api, "_discover_and_import_market_federation", fake_discover,
+    )
+    app = create_app(tmp_path, require_console_auth=False)
+
+    with TestClient(app):
+        assert called.wait(timeout=2.0)
+        assert calls == [{
+            "actor_id": "admin",
+            "timeout_seconds": 1.25,
+            "add": True,
+            "refresh": False,
+        }]
+        assert app.state.market_fed_discovery_thread.is_alive()
+
+    assert app.state.market_fed_discovery_thread is None
+    assert app.state.market_fed_discovery_stop_event is None
+
+
 def test_stuck_poller_is_not_duplicated_and_restarts_after_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

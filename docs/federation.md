@@ -52,6 +52,39 @@ Private LAN nodes may use UDP or mDNS discovery with an optional PSK. Plain
 HTTP is accepted for explicit LAN/operator seeds, but automatically learned
 internet peers and reverse hello require HTTPS.
 
+### Same-LAN startup
+
+Each computer must listen on a LAN-reachable address and advertise that
+address. Installing NTH DAO on two computers is not enough by itself.
+
+Windows desktop launcher:
+
+```powershell
+.\tools\start_nth_dao.ps1
+```
+
+macOS or Linux:
+
+```bash
+python -m nth_dao.web --lan
+```
+
+Install the LAN extra on both nodes so mDNS is available:
+
+```bash
+pip install -e ".[lan]"
+```
+
+Opening **Tasks** performs one bounded discovery pass and imports only peers
+whose DID:key identity card, public key, signature, and advertised URL all
+verify. The manual **Discover nearby DAOs** action repeats the scan and shows
+diagnostics. Local firewalls must allow inbound TCP on the configured NTH DAO
+port (8080 by default) and mDNS/UDP traffic on the private network.
+
+LAN mode exposes signed federation and read-only discovery surfaces to the
+subnet. Console bearer tokens are injected only for loopback browser clients,
+never into HTML served to another computer.
+
 ## Durable Peer Graph
 
 Verified gossip peers are stored in
@@ -134,7 +167,8 @@ cloud-metadata destinations.
 ## Current Limits
 
 - At least one bootstrap seed is required; there is no mandatory central
-  directory and no DHT yet.
+  directory and no DHT yet. Same-LAN mDNS can supply that first peer when both
+  nodes use LAN mode; cross-network federation still needs a reachable seed.
 - Nodes behind NAT need a tunnel, reverse proxy, or another externally
   reachable transport before internet peers can dial them.
 - Self-signed DID:key identity prevents impersonation but not Sybil identities.

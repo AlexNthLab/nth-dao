@@ -408,9 +408,13 @@ def test_f2_appended_message_receipt_uses_step_started_not_goal_started(
     rid2 = task2["metadata"]["nth_receipt_id"]
     assert rid2 != rid1, "second message should produce a new receipt"
     receipt2 = client.app.state.nth.receipts.load(rid2)
-    assert receipt2["timeline"][0]["type"] == "step_started", (
-        f"appended-message receipt's first entry must be step_started; "
-        f"got {receipt2['timeline'][0]['type']!r}. Producing "
+    substantive = [
+        entry for entry in receipt2["timeline"]
+        if entry["type"] != "nth.chain_link"
+    ]
+    assert substantive[0]["type"] == "step_started", (
+        f"appended-message receipt's first substantive entry must be "
+        f"step_started; got {substantive[0]['type']!r}. Producing "
         f"goal_started for the Nth message implies the goal restarted, "
         f"which it didn't."
     )

@@ -780,6 +780,65 @@ class ReceiptStore:
             atomic_write_json(path, receipt, ensure_ascii=False, indent=2)
         return path
 
+    def sign_and_save(
+        self,
+        timeline: List[TimelineEntry],
+        identity: "AgentIdentity",
+        *,
+        goal_id: str = "",
+        receipt_id: str = "",
+        authorizing_cap_token: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Atomically extend one signer's receipt chain and persist it.
+
+        The signer-scoped inter-process lock covers head lookup, signing, and
+        file persistence. Callers that already hold a foreign signed receipt
+        must continue to use :meth:`save`; the hub must never re-sign another
+        Agent's statement merely to attach it to a local chain.
+        """
+
+        if not getattr(identity, "can_sign", False):
+            raise RuntimeError("receipt identity cannot sign")
+        signer_did = identity.as_did()
+        signer_key = hashlib.sha256(signer_did.encode("utf-8")).hexdigest()
+        lock_target = self.root / ".chain-locks" / signer_key
+        with InterProcessLock(lock_target, timeout=30.0):
+            prev_content_hash = self._verified_head_content_hash(signer_did)
+            receipt = sign_receipt(
+                timeline,
+                identity,
+                goal_id=goal_id,
+                receipt_id=receipt_id,
+                prev_content_hash=prev_content_hash,
+                authorizing_cap_token=authorizing_cap_token,
+            )
+            self.save(receipt)
+            return receipt
+
+    def _verified_head_content_hash(self, signer_did: str) -> str:
+        """Return a chain head only after validating every candidate receipt."""
+
+        latest_issued = ""
+        latest_hash = ""
+        for receipt_id in self.list_ids():
+            receipt = self.load(receipt_id)
+            if receipt is None or receipt.get("signer_did", "") != signer_did:
+                continue
+            if not verify_receipt(receipt):
+                raise RuntimeError(
+                    f"receipt {receipt_id!r} for {signer_did} failed "
+                    "verification; refusing to extend a poisoned chain"
+                )
+            issued_at = str(receipt.get("issued_at", ""))
+            content_hash = str(receipt.get("content_hash", ""))
+            if (
+                issued_at > latest_issued
+                or (issued_at == latest_issued and content_hash > latest_hash)
+            ):
+                latest_issued = issued_at
+                latest_hash = content_hash
+        return latest_hash
+
     def load(self, receipt_id: str) -> Optional[Dict[str, Any]]:
         """Return the receipt dict, or None if not found."""
         if not all(c.isalnum() or c == "-" for c in receipt_id):

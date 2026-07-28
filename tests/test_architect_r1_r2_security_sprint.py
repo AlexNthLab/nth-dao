@@ -61,7 +61,7 @@ def test_R1_non_loopback_without_opt_in_refuses(monkeypatch):
     API to anything reachable from another machine."""
     monkeypatch.setenv("NTH_HOST", "0.0.0.0")
     monkeypatch.delenv("NTH_ALLOW_REMOTE_BIND", raising=False)
-    with pytest.raises(RuntimeError, match="no request authentication"):
+    with pytest.raises(RuntimeError, match="remote binding exposes"):
         _resolve_safe_bind_host()
 
 
@@ -75,7 +75,8 @@ def test_R1_non_loopback_with_explicit_opt_in_proceeds(monkeypatch, caplog):
         host = _resolve_safe_bind_host()
     assert host == "0.0.0.0"
     assert any(
-        "no request authentication" in rec.message for rec in caplog.records
+        "federation/read surfaces are network reachable" in rec.message
+        for rec in caplog.records
     ), "expected a loud warning when remote bind is explicit"
 
 

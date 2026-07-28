@@ -1417,14 +1417,14 @@ def test_spawn_503_when_node_identity_missing(
     assert "signer identity unavailable" in r.json()["detail"]
 
 
-def test_supervisor_wins_dedup_against_seed(
+def test_supervisor_wins_dedup_against_disk_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review fix #3 (2026-06-11): the previous test only checked
-    the seed baseline; the actual dedup logic in v2_api.py at the
-    GET /agents handler was never exercised. Inject a supervised
-    agent whose DID exactly matches a seed entry, then assert the
+    """The actual dedup logic must prefer a supervised live Agent.
+
+    Create an explicit disk fixture, inject a supervised Agent whose DID
+    exactly matches it, then assert the
     merged response shows that DID exactly once and that the
     supervised version (with `supervised: True`) wins. """
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1440,10 +1440,20 @@ def test_supervisor_wins_dedup_against_seed(
     )
     client = TestClient(app)
 
-    # Get the first seed DID to use as the collision target.
-    seed_listing = client.get("/api/v2/agents").json()
-    target_did = seed_listing[0]["did"]
-    assert target_did
+    target_did = "did:key:zExplicitDiskFixture"
+    identity_path = (
+        tmp_path / ".nth-dao" / "workspaces" / "default"
+        / "team_agents" / "disk-agent" / "identity.json"
+    )
+    identity_path.parent.mkdir(parents=True)
+    identity_path.write_text(json.dumps({
+        "did": target_did,
+        "code": "disk-agent",
+        "label": "disk-fixture",
+        "source": "local",
+        "capabilities": ["x"],
+    }), encoding="utf-8")
+    assert client.get("/api/v2/agents").json()[0]["did"] == target_did
 
     # Seat a supervisor pre-loaded with a record whose DID matches.
     sup = AgentSupervisor(InMemoryRunner())

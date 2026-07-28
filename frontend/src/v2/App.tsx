@@ -15,10 +15,9 @@
  * status bar is the eye line for "what's true right now" without
  * having to dig.
  *
- * v1 of this app reads mock data from `./mock.ts`. The contract:
- * when the backend grows the matching endpoints (/api/decisions,
- * /api/missions/active, /api/receipts, /api/cap_tokens), the mock
- * module is the only file that needs to flip.
+ * Every operational view renders live hub state. An unavailable endpoint
+ * produces an explicit empty/error state; production UI never substitutes
+ * executable-looking demonstration records.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -27,7 +26,7 @@ import {
   a2aEchoApi, activateMission, addAgentByDid, createMission, createProcess,
   discoverLanAgents, fetchAgents, fetchBackendStatus, fetchCapTokens, fetchIdentity,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
-  fetchProcesses, fetchReceipts, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
+  fetchProcesses, fetchReceipts, fetchRules, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
   getAgentLink, reconcileAgentLink, resolveDecisionApi, runMissionStep, spawnAgent, stopAgent,
   submitAgentLink, summarizeAgent,
 } from "./api";
@@ -54,10 +53,6 @@ import { InboxView } from "./components/InboxView";
 import { StatusBar } from "./components/StatusBar";
 import { ToastProvider, useToast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
-import {
-  mockAgents, mockCapTokens, mockChatMessages, mockConversations,
-  mockDecisions, mockMissions, mockProcesses, mockReceipts, mockRules,
-} from "./mock";
 import type {
   AgentEntry,
   CapTokenSummary,
@@ -71,16 +66,16 @@ import type {
   NavId,
   ProcessCard,
   ReceiptSummary,
+  Rule,
   StatusBarState,
 } from "./types-v2";
 
 import "./styles.css";
 
-/* ── Identity bootstrap (placeholder — wires to /api/identity later) */
-const MOCK_IDENTITY: IdentityHeader = {
-  agent_id: "admin",
-  did: "did:key:z6MkmRxmBi9p9ziBz2JzBwd8Y5iMzzhPXAi95MPZiLEJJqjL",
-  code: "a3ff-62eb",
+const EMPTY_IDENTITY: IdentityHeader = {
+  agent_id: "",
+  did: "",
+  code: "",
 };
 
 /* Default-export App wraps the inner shell in ErrorBoundary (audit
@@ -167,7 +162,7 @@ function AppInner() {
       /* 配额满 / 隐私模式禁写 —— 静默降级,不影响导航本身 */
     }
   }, [active]);
-  const [decisions, setDecisions] = useState<Decision[]>(mockDecisions);
+  const [decisions, setDecisions] = useState<Decision[]>([]);
   // 待办角标的额外计数 = 待批授权请求 + 开放争议(统一「待办」也含这两类)。
   const [inboxExtra, setInboxExtra] = useState(0);
   /* S5 fix (2026-06-10): track in-flight resolves by id and pass
@@ -180,14 +175,12 @@ function AppInner() {
     () => new Set(),
   );
   const [cmdkOpen, setCmdkOpen] = useState(false);
-  // Chat state — local-only for v1; flips to /api/messages on
-  // backend integration. The shape (Record<convId, Message[]>)
-  // matches the mock seed so the swap is a one-liner.
+  // Chat hot-state is local-only and contains only real operator messages.
   /* 切片1(2026-06-14):chatMessages 从热层(localStorage)水合 —— 持久的
-   * 本地消息覆盖 mock 种子,使刷新/导航后对话**不消失**。热层带 TTL,过期
+   * 本地消息使刷新/导航后对话**不消失**。热层带 TTL,过期
    * 蒸发,不签名/不联邦/无长期负担(见 chatStore + 对话方案)。 */
   const [chatMessages, setChatMessages] = useState<Record<string, ChatMessage[]>>(
-    () => ({ ...mockChatMessages, ...loadChat().messages }),
+    () => loadChat().messages,
   );
   /** 当前选中的会话(持久 + 刷新后恢复)。 */
   const [chatSelectedId, setChatSelectedId] = useState<string | null>(
@@ -203,35 +196,24 @@ function AppInner() {
     jobId: string;
     replyId: string;
   }>>({});
-  /* Review fix C1 (2026-06-10): conversations was previously not
-   * given a setter — the bootstrap fetched the list but had no way
-   * to apply it, so the Chat sidebar was permanently stuck on the
-   * 4 mock conversations even when the hub returned more or fewer.
-   * Lifted to state with a setter and applied in the boot effect. */
   const [conversations, setConversations] =
-    useState<Conversation[]>(mockConversations);
-  /* Review fix C2 (2026-06-10): cap_tokens + receipts now lifted
-   * so the status bar reflects live hub data. Previously the bar
-   * permanently sourced from mockCapTokens / mockReceipts and lied
-   * about active cap count + chain head whenever the hub was up. */
+    useState<Conversation[]>([]);
   const [capTokens, setCapTokens] =
-    useState<CapTokenSummary[]>(mockCapTokens);
+    useState<CapTokenSummary[]>([]);
   const [receipts, setReceipts] =
-    useState<ReceiptSummary[]>(mockReceipts);
+    useState<ReceiptSummary[]>([]);
   const [identity, setIdentity] =
-    useState<IdentityHeader>(MOCK_IDENTITY);
-  /* Lifted for symmetry with the bootstrap fetcher — agents stayed
-   * mock before because the boot effect only toasted on success
-   * without applying. */
-  const [agents, setAgents] = useState<AgentEntry[]>(mockAgents);
+    useState<IdentityHeader>(EMPTY_IDENTITY);
+  const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [backendStatuses, setBackendStatuses] =
     useState<Record<string, BackendStatus>>({});
+  const [rules, setRules] = useState<Rule[]>([]);
   // Missions + processes lifted to state to support the "+ New
   // mission" / "+ New process" entry points (user audit 2026-06-10).
   // Local-only mutation in v1 — pointing at the matching backend
   // endpoints is a one-line swap inside the handlers.
-  const [missions, setMissions] = useState<MissionSummary[]>(mockMissions);
-  const [processes, setProcesses] = useState<ProcessCard[]>(mockProcesses);
+  const [missions, setMissions] = useState<MissionSummary[]>([]);
+  const [processes, setProcesses] = useState<ProcessCard[]>([]);
   /** Drives MissionList's selectedId on next render — set by the
    *  create handler so the user immediately sees the new mission
    *  selected in the sidebar + detail rail. MissionList resets it
@@ -256,19 +238,16 @@ function AppInner() {
 
   /* Hub bootstrap (Phase 1 of the local-hub plan, 2026-06-10):
    * On mount, probe ``/api/v2/health``. If reachable, fetch every
-   * read endpoint and replace the local mock state. If unreachable
-   * (hub not running, dev session with vite only) the mock data
-   * stays — UI works either way.
+   * read endpoint and replace the live state. If unreachable, views
+   * remain honestly empty and the status banner explains why.
    *
    * Why a single useEffect with sequential fetches rather than
    * SWR/Tanstack-Query: Phase 1 needs the surface, not the cache.
    * Phase 2's WebSocket subscription will replace the pull model
    * entirely. Adding a cache library now would be premature.
    *
-   * Per-view fetch failures are tolerated — if /api/v2/decisions
-   * 500s but /api/v2/missions succeeds, we keep mock decisions
-   * and live missions side-by-side. The toast banner makes the
-   * partial-failure visible.                                      */
+   * Per-view fetch failures are tolerated. The failed view stays empty
+   * instead of mixing fabricated and live records. */
   const [hubReady, setHubReady] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -291,6 +270,7 @@ function AppInner() {
         fetchConversations(ctrl.signal),
         fetchCapTokens(ctrl.signal),
         fetchReceipts(ctrl.signal),
+        fetchRules(ctrl.signal),
         // 统一「待办」角标:授权请求(待批)+ 争议(开放)+ 好友请求(待确认)
         // 也算"需要你拍板"。
         listCapRequests(ctrl.signal),
@@ -299,7 +279,7 @@ function AppInner() {
       ]);
       if (cancelled) return;
       const [
-        idRes, decRes, misRes, procRes, agRes, backendRes, convRes, capRes, recRes,
+        idRes, decRes, misRes, procRes, agRes, backendRes, convRes, capRes, recRes, rulesRes,
         capReqRes, dispRes, socialRes,
       ] = settled;
       if (idRes.status === "fulfilled")   setIdentity(idRes.value);
@@ -311,6 +291,7 @@ function AppInner() {
       if (convRes.status === "fulfilled") setConversations(convRes.value);
       if (capRes.status === "fulfilled")  setCapTokens(capRes.value);
       if (recRes.status === "fulfilled")  setReceipts(recRes.value);
+      if (rulesRes.status === "fulfilled") setRules(rulesRes.value);
       // 待办额外计数 = 待批授权 + 开放争议(取数失败则记 0,不阻断)。
       const pendingCaps = capReqRes.status === "fulfilled"
         ? capReqRes.value.filter((c) => c.status === "pending").length : 0;
@@ -340,7 +321,7 @@ function AppInner() {
       if (failures === totalEndpoints) {
         toast.push(
           `Hub reachable but all ${totalEndpoints} read endpoints failed — ` +
-          `showing mock data. Check the hub log.`,
+          `live data is unavailable. Check the hub log.`,
           "error",
         );
       } else if (failures > 0) {
@@ -380,7 +361,7 @@ function AppInner() {
               });
             }
           }
-        } catch { /* swallow — mock messages stay */ }
+        } catch { /* conversation list remains available; message load can retry */ }
       }
     })();
     return () => {
@@ -391,6 +372,27 @@ function AppInner() {
     // handle live updates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The Agents page is a fresh local scan, not a snapshot from application
+  // startup. Detection never joins an Agent; it only updates the choices the
+  // operator may explicitly add to this DAO.
+  useEffect(() => {
+    if (active !== "agents") return;
+    const ctrl = new AbortController();
+    void Promise.allSettled([
+      fetchBackendStatus(ctrl.signal),
+      fetchAgents(ctrl.signal),
+    ]).then(([backendResult, agentsResult]) => {
+      if (ctrl.signal.aborted) return;
+      if (backendResult.status === "fulfilled") {
+        setBackendStatuses(backendResult.value.backends);
+      }
+      if (agentsResult.status === "fulfilled") {
+        setAgents(agentsResult.value);
+      }
+    });
+    return () => ctrl.abort();
+  }, [active]);
 
   /* ── decision handlers (declared early so the keyboard handler
    *    below can reference them) ───────────────────────────────
@@ -548,9 +550,7 @@ function AppInner() {
       code: identity.code,
       did: identity.did,
       // Review fix C2 (2026-06-10): read from lifted state, not
-      // module-scope mocks. When the hub is online these track
-      // live caps + chain head; when offline they fall through to
-      // the same mocks because the state was seeded with them.
+      // live caps + chain head only.
       active_caps: capTokens.filter((c) => !c.revoked).length,
       caps_expiring_soon: capTokens.filter(
         (c) => !c.revoked && c.not_after - Date.now() < 4 * 3600_000,
@@ -1023,7 +1023,7 @@ function AppInner() {
     try {
       const res = await spawnAgent({
         kind,
-        label: `${kind} helper`,
+        label: kind,
         capabilities: ["a2a:message_send"],
         persist: true,
         ...(options ? {
@@ -1035,10 +1035,10 @@ function AppInner() {
         res.agent,
         ...prev.filter((a) => a.did !== res.agent.did),
       ]);
-      toast.push(`Started ${res.label || kind}.`, "success");
+      toast.push(`${res.label || kind} joined NTH DAO.`, "success");
     } catch (e) {
       toast.push(
-        `Could not start ${kind}: ${e instanceof Error ? e.message : String(e)}`,
+        `Could not add ${kind}: ${e instanceof Error ? e.message : String(e)}`,
         "error",
       );
     }
@@ -1268,7 +1268,7 @@ function AppInner() {
   } else if (active === "rules") {
     view = (
       <RulesView
-        rules={mockRules}
+        rules={rules}
         onPause={handlePauseRule}
         onResume={handleResumeRule}
         onActivate={handleActivateRule}

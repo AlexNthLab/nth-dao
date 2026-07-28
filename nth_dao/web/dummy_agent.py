@@ -4002,26 +4002,7 @@ def main(argv: list[str] | None = None) -> int:
                         agent_id=args.id,
                         receipt=receipt,
                     )
-                    # Phase 3d: also raise a decision asking the
-                    # operator to acknowledge the agent is live.
                     # Hub assigns id + source — child only proposes.
-                    _print_event(
-                        event="decision_raised",
-                        agent_id=args.id,
-                        decision={
-                            "title": (
-                                f"Acknowledge agent {args.id[:8]} is live "
-                                f"(kind={args.kind})"
-                            ),
-                            "impact": "low",
-                            "preview_receipt": {
-                                "kind": "nth.agent_attestation",
-                                "agent_id": args.id,
-                                "did": did,
-                            },
-                            "mission_id": "",
-                        },
-                    )
         # Sleep in small slices so SIGTERM is responsive — a long
         # sleep would leave the process alive for the whole window.
         deadline = time.time() + max(0.1, args.heartbeat)

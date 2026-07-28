@@ -8,7 +8,7 @@ Tests for Phase 2 POST endpoints:
 End-to-end: spin up a FastAPI TestClient that uses a real WebState
 with a tmp_path workspace (so the bootstrap creates a fresh Ed25519
 identity), then walk:
-  - GET /decisions returns 3 seeded
+  - GET /decisions returns 3 explicit test fixtures
   - POST /approve/dec-001 returns a signed receipt, queue shrinks
   - Receipt is on disk in team_receipts/
   - Subsequent approve of dec-002 chains to the first (prev_content_hash
@@ -22,11 +22,44 @@ Run: pytest tests/test_v2_decision_approve.py -q
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+def _test_decisions() -> Dict[str, Dict[str, Any]]:
+    """Return explicit queue fixtures; production starts with an empty queue."""
+    return {
+        f"dec-00{index}": {
+            "id": f"dec-00{index}",
+            "title": f"Test decision {index}",
+            "rationale": "Exercise the signed decision resolution path.",
+            "impact": "low",
+            "proposer_did": "did:key:zTestProposer",
+            "proposer_label": "test-proposer",
+            "preview_receipt": {
+                "kind": "nth-test-preview-v1",
+                "sequence": index,
+            },
+            "raised_at": f"2026-06-09T10:0{index}:00Z",
+        }
+        for index in range(1, 4)
+    }
+
+
+def _install_test_decisions(app: Any) -> None:
+    app.state.v2_decisions_store = _test_decisions()
+
+
+def _signed_decision_events(client: TestClient) -> list[Any]:
+    return [
+        event
+        for event in client.app.state.nth.spine.read_all()
+        if event.type.startswith("decision.")
+    ]
 
 
 @pytest.fixture
@@ -47,6 +80,7 @@ def hub_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
         require_console_auth=False,
     )
+    _install_test_decisions(app)
     return TestClient(app)
 
 
@@ -57,6 +91,140 @@ def test_get_decisions_initially_three(hub_client: TestClient) -> None:
     assert sorted(ids) == ["dec-001", "dec-002", "dec-003"]
 
 
+def test_pending_decision_survives_hub_restart(tmp_path: Path) -> None:
+    from nth_dao.web import create_app
+    from nth_dao.web.decision_store import DecisionStore
+
+    workspace = tmp_path / "workspace"
+    DecisionStore(workspace).put(_test_decisions()["dec-001"])
+
+    first = TestClient(create_app(workspace, require_console_auth=False))
+    assert [row["id"] for row in first.get("/api/v2/decisions").json()] == [
+        "dec-001"
+    ]
+
+    restarted = TestClient(create_app(workspace, require_console_auth=False))
+    assert [row["id"] for row in restarted.get("/api/v2/decisions").json()] == [
+        "dec-001"
+    ]
+
+
+def test_concurrent_approve_creates_exactly_one_receipt(tmp_path: Path) -> None:
+    from nth_dao.web import create_app
+    from nth_dao.web.decision_store import DecisionStore
+
+    workspace = tmp_path / "workspace"
+    store = DecisionStore(workspace)
+    store.put(_test_decisions()["dec-001"])
+    app = create_app(workspace, require_console_auth=False)
+    barrier = threading.Barrier(2)
+    statuses: list[int] = []
+
+    def approve() -> None:
+        with TestClient(app) as client:
+            barrier.wait()
+            statuses.append(
+                client.post("/api/v2/decisions/dec-001/approve").status_code
+            )
+
+    threads = [threading.Thread(target=approve) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(statuses) == [200, 404]
+    assert len(list((workspace / "team_receipts").glob("*.json"))) == 1
+    assert [event["event_kind"] for event in store.events()] == [
+        "decision.raised",
+        "decision.approved",
+    ]
+
+
+def test_concurrent_distinct_approvals_keep_one_receipt_chain(
+    tmp_path: Path,
+) -> None:
+    from nth_dao.web import create_app
+    from nth_dao.web.decision_store import DecisionStore
+
+    workspace = tmp_path / "workspace"
+    store = DecisionStore(workspace)
+    store.put(_test_decisions()["dec-001"])
+    store.put(_test_decisions()["dec-002"])
+    app = create_app(workspace, require_console_auth=False)
+    barrier = threading.Barrier(2)
+    responses: list[dict] = []
+
+    def approve(decision_id: str) -> None:
+        with TestClient(app) as client:
+            barrier.wait()
+            response = client.post(f"/api/v2/decisions/{decision_id}/approve")
+            assert response.status_code == 200, response.text
+            responses.append(response.json())
+
+    threads = [
+        threading.Thread(target=approve, args=("dec-001",)),
+        threading.Thread(target=approve, args=("dec-002",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(responses) == 2
+    summaries = [response["receipt"] for response in responses]
+    genesis = [
+        summary for summary in summaries if not summary["prev_content_hash"]
+    ]
+    chained = [
+        summary for summary in summaries if summary["prev_content_hash"]
+    ]
+    assert len(genesis) == len(chained) == 1
+    assert chained[0]["prev_content_hash"] == genesis[0]["content_hash"]
+
+
+def test_approve_retry_recovers_receipt_saved_before_queue_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web import create_app
+    from nth_dao.web.decision_store import DecisionStore
+
+    workspace = tmp_path / "workspace"
+    store = DecisionStore(workspace)
+    store.put(_test_decisions()["dec-001"])
+    app = create_app(workspace, require_console_auth=False)
+    app.state.v2_decisions_store = store
+    original_complete = store.complete
+    calls = 0
+
+    def fail_first_complete(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated SQLite completion failure")
+        return original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(store, "complete", fail_first_complete)
+    client = TestClient(app)
+
+    first = client.post("/api/v2/decisions/dec-001/approve")
+
+    assert first.status_code == 500
+    assert store.get("dec-001") is not None
+    assert len(list((workspace / "team_receipts").glob("*.json"))) == 1
+
+    second = client.post("/api/v2/decisions/dec-001/approve")
+
+    assert second.status_code == 200, second.text
+    assert second.json()["recovered"] is True
+    assert store.get("dec-001") is None
+    assert len(list((workspace / "team_receipts").glob("*.json"))) == 1
+    events = _signed_decision_events(client)
+    assert [event.type for event in events] == ["decision.approved"]
+
+
 def test_approve_signs_and_persists(hub_client: TestClient, tmp_path: Path) -> None:
     r = hub_client.post("/api/v2/decisions/dec-001/approve")
     assert r.status_code == 200, r.text
@@ -64,6 +232,8 @@ def test_approve_signs_and_persists(hub_client: TestClient, tmp_path: Path) -> N
     assert body["decision_id"] == "dec-001"
     assert body["removed"] is True
     assert body["signed"] is True
+    assert body["audit_signed"] is True
+    assert body["audit_event_id"]
 
     rcpt = body["receipt"]
     assert rcpt["content_hash"]
@@ -78,6 +248,15 @@ def test_approve_signs_and_persists(hub_client: TestClient, tmp_path: Path) -> N
     assert len(files) == 1
     on_disk = json.loads(files[0].read_text(encoding="utf-8"))
     assert on_disk["content_hash"] == rcpt["content_hash"]
+    events = _signed_decision_events(hub_client)
+    assert len(events) == 1
+    event = events[0]
+    assert event.type == "decision.approved"
+    assert event.event_id == body["audit_event_id"]
+    assert event.payload["decision_id"] == "dec-001"
+    assert event.payload["receipt_id"] == rcpt["id"]
+    assert event.payload["receipt_content_hash"] == rcpt["content_hash"]
+    assert hub_client.app.state.nth.spine.verify_chain() == (True, "ok")
 
 
 def test_approve_chains_subsequent_receipt(hub_client: TestClient) -> None:
@@ -126,12 +305,18 @@ def test_reject_drops_without_signing(hub_client: TestClient, tmp_path: Path) ->
     body = r.json()
     assert body["removed"] is True
     assert body["signed"] is False
+    assert body["audit_signed"] is True
+    assert body["audit_event_id"]
     assert "receipt" not in body
 
     # No receipt was written.
     receipts_dir = tmp_path / ".nth-dao" / "workspaces" / "default" / "team_receipts"
     if receipts_dir.exists():
         assert list(receipts_dir.glob("*.json")) == []
+    events = _signed_decision_events(hub_client)
+    assert [event.type for event in events] == ["decision.rejected"]
+    assert events[0].event_id == body["audit_event_id"]
+    assert events[0].payload["receipt_id"] == ""
 
 
 def test_defer_drops_without_signing(hub_client: TestClient) -> None:
@@ -140,6 +325,66 @@ def test_defer_drops_without_signing(hub_client: TestClient) -> None:
     body = r.json()
     assert body["removed"] is True
     assert body["signed"] is False
+    assert body["audit_signed"] is True
+    events = _signed_decision_events(hub_client)
+    assert [event.type for event in events] == ["decision.deferred"]
+    assert events[0].event_id == body["audit_event_id"]
+
+
+def test_missing_spine_keeps_rejection_pending(hub_client: TestClient) -> None:
+    hub_client.app.state.nth.spine = None
+
+    response = hub_client.post("/api/v2/decisions/dec-001/reject")
+
+    assert response.status_code == 503
+    pending = hub_client.get("/api/v2/decisions").json()
+    assert any(row["id"] == "dec-001" for row in pending)
+
+
+def test_cached_spine_view_cannot_hide_disk_tampering(
+    hub_client: TestClient,
+) -> None:
+    spine = hub_client.app.state.nth.spine
+    spine.append("test.preexisting", {"value": "original"})
+    cached_events = list(spine.read_all())
+    spine._v2_verified_cache = (spine.head_hash, cached_events)
+    lines = spine._path.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[-1])
+    tampered["payload"]["value"] = "tampered"
+    lines[-1] = json.dumps(tampered, separators=(",", ":"), sort_keys=True)
+    spine._path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    response = hub_client.post("/api/v2/decisions/dec-001/reject")
+
+    assert response.status_code == 503
+    assert "integrity" in response.json()["detail"].lower()
+    pending = hub_client.get("/api/v2/decisions").json()
+    assert any(row["id"] == "dec-001" for row in pending)
+
+
+def test_conflicting_signed_outcome_blocks_approval_before_receipt(
+    hub_client: TestClient,
+) -> None:
+    spine = hub_client.app.state.nth.spine
+    spine.append(
+        "decision.rejected",
+        {
+            "decision_id": "dec-001",
+            "decision_payload_hash": "0" * 64,
+            "proposer_did": "",
+            "mission_id": "",
+            "decided_by_did": hub_client.app.state.nth.node_identity.as_did(),
+            "receipt_id": "",
+            "receipt_content_hash": "",
+        },
+    )
+
+    response = hub_client.post("/api/v2/decisions/dec-001/approve")
+
+    assert response.status_code == 409
+    assert hub_client.app.state.nth.receipts.list_ids() == []
+    pending = hub_client.get("/api/v2/decisions").json()
+    assert any(row["id"] == "dec-001" for row in pending)
 
 
 def test_no_signer_503(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -153,6 +398,7 @@ def test_no_signer_503(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
         require_console_auth=False,
     )
+    _install_test_decisions(app)
     # Wipe the identity AFTER startup so the v2 routes see None.
     app.state.nth.node_identity = None
 
@@ -175,6 +421,7 @@ def test_no_receipts_store_503(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         workspace=tmp_path / ".nth-dao" / "workspaces" / "default",
         require_console_auth=False,
     )
+    _install_test_decisions(app)
     # Wipe the receipts store but leave identity intact — confirms
     # the receipts-store guard fires independently of the signer.
     app.state.nth.receipts = None

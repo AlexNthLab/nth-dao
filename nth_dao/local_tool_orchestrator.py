@@ -97,7 +97,6 @@ from nth_dao.execution_receipt import (
     TYPE_TOOL_RESULT,
     TimelineEntry,
     now_ms,
-    sign_receipt,
 )
 
 if TYPE_CHECKING:
@@ -476,12 +475,11 @@ class LocalToolOrchestrator:
 
         receipt_id = ""
         try:
-            receipt = sign_receipt(
+            receipt = self.receipts.sign_and_save(
                 [invocation_entry, result_entry],
                 self.identity,
                 goal_id=goal_id,
             )
-            self.receipts.save(receipt)
             receipt_id = receipt["receipt_id"]
         except (OSError, ValueError, RuntimeError) as exc:
             # The work-proof chain breaks for this invocation;
