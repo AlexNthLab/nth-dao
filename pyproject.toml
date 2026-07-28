@@ -81,6 +81,7 @@ namespaces = false
 [tool.setuptools.package-data]
 "nth_dao" = ["INTEGRATION_GUIDE.md"]
 "nth_dao.conformance" = ["vectors.json"]
+"nth_dao.trade_rules" = ["schemas/*.json", "vectors/*.json"]
 "nth_dao.web" = ["static/*.html", "static/*.svg", "static/assets/*"]
 
 [tool.setuptools.exclude-package-data]
