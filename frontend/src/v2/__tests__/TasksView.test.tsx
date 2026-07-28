@@ -444,8 +444,11 @@ describe("TasksView", () => {
       skipped_peers: [],
       discovery_errors: [],
     };
-    vi.mocked(getFederationStatus).mockResolvedValueOnce(status);
-    vi.mocked(discoverFederationPeers).mockResolvedValueOnce(status);
+    // The view may issue more than one bounded status/discovery read while
+    // mounting. Keep every response in this test coherent instead of letting a
+    // consumed one-shot mock fall back to another test's zero-value default.
+    vi.mocked(getFederationStatus).mockReset().mockResolvedValue(status);
+    vi.mocked(discoverFederationPeers).mockReset().mockResolvedValue(status);
 
     render(
       <LangProvider>
