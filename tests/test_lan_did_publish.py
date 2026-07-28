@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import atexit
 import threading
+import uuid
 from dataclasses import fields as dataclass_fields
 
 import pytest
@@ -247,6 +248,62 @@ def test_web_lifespan_registers_and_unregisters_one_shutdown_hook(
         assert len(registered) == 1
 
     assert unregistered == registered
+
+
+def test_mdns_two_live_responders_discover_signed_routing_metadata():
+    """Exercise a real zeroconf register/browse round trip on this host."""
+    from nth_dao.discovery.lan_mdns import (
+        MDNSDiscovery,
+        _local_ip,
+        is_available,
+    )
+
+    if not is_available():
+        pytest.skip("zeroconf is not installed")
+    suffix = uuid.uuid4().hex[:10]
+    local_ip = _local_ip()
+    first_url = f"http://{local_ip}:18181"
+    second_url = f"http://{local_ip}:18182"
+    first = MDNSDiscovery(
+        agent_id=f"first-{suffix}",
+        label="First live DAO",
+        ws_url=first_url,
+        pubkey_hex="11" * 32,
+        did=f"did:key:zFirst{suffix}",
+        metadata={"federation_url": first_url},
+    )
+    second = MDNSDiscovery(
+        agent_id=f"second-{suffix}",
+        label="Second live DAO",
+        ws_url=second_url,
+        pubkey_hex="22" * 32,
+        did=f"did:key:zSecond{suffix}",
+        metadata={"federation_url": second_url},
+    )
+
+    try:
+        first.start()
+        second.start()
+        first_peers = first.discover(timeout=2.0)
+        second_peers = second.discover(timeout=2.0)
+    finally:
+        second.stop()
+        first.stop()
+
+    seen_by_first = next(
+        peer for peer in first_peers if peer.agent_id == second.agent_id
+    )
+    seen_by_second = next(
+        peer for peer in second_peers if peer.agent_id == first.agent_id
+    )
+    assert seen_by_first.did == second.did
+    assert seen_by_first.metadata["federation_url"] == second_url
+    assert seen_by_first.source_addr.startswith(f"{local_ip}:")
+    assert seen_by_first.source_addr.endswith(":18182")
+    assert seen_by_second.did == first.did
+    assert seen_by_second.metadata["federation_url"] == first_url
+    assert seen_by_second.source_addr.startswith(f"{local_ip}:")
+    assert seen_by_second.source_addr.endswith(":18181")
 
 
 def test_slow_mdns_registration_is_cancelled_without_blocking_shutdown(

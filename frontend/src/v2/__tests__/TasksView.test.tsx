@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "../components/Toast";
 import { LangProvider } from "../i18n";
@@ -95,6 +95,107 @@ describe("TasksView", () => {
       add: true,
       refresh: true,
     }));
+  });
+
+  it("renders a failed initial peer import instead of hiding it", async () => {
+    vi.mocked(discoverFederationPeers).mockResolvedValueOnce({
+      peers: [],
+      file_peers: [],
+      env_peers: [],
+      poller_started: false,
+      cached_announcements: 0,
+      last_refresh_ms: 0,
+      last_error: "",
+      last_peer_count: 0,
+      discovered: true,
+      imported_peers: [],
+      identity_verified_peers: [],
+      skipped_peers: [{
+        agent_id: "remote-dao",
+        label: "Remote DAO",
+        source_addr: "192.168.1.20:9876",
+        federation_peer_url: "",
+        identity_error: "peer did not advertise an HTTP federation URL",
+      }],
+      discovery_errors: [],
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    expect(await screen.findByText(/peer did not advertise an HTTP federation URL/)).toBeTruthy();
+  });
+
+  it("does not let an older status response overwrite newer discovery", async () => {
+    const { getFederationStatus } = await import("../api");
+    let resolveStatus!: (status: Awaited<ReturnType<typeof getFederationStatus>>) => void;
+    let resolveDiscovery!: (
+      status: Awaited<ReturnType<typeof discoverFederationPeers>>,
+    ) => void;
+    vi.mocked(getFederationStatus).mockReturnValueOnce(
+      new Promise((resolve) => { resolveStatus = resolve; }),
+    );
+    vi.mocked(discoverFederationPeers).mockReturnValueOnce(
+      new Promise((resolve) => { resolveDiscovery = resolve; }),
+    );
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+    await waitFor(() => {
+      expect(getFederationStatus).toHaveBeenCalled();
+      expect(discoverFederationPeers).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      resolveDiscovery({
+        peers: [],
+        file_peers: [],
+        env_peers: [],
+        poller_started: false,
+        cached_announcements: 0,
+        last_refresh_ms: 2,
+        last_error: "",
+        last_peer_count: 0,
+        discovered: true,
+        imported_peers: [],
+        identity_verified_peers: [],
+        skipped_peers: [{
+          agent_id: "new-peer",
+          label: "New discovery",
+          source_addr: "192.168.1.20:9876",
+          federation_peer_url: "",
+          identity_error: "new discovery failure",
+        }],
+        discovery_errors: [],
+      });
+    });
+    expect(await screen.findByText(/new discovery failure/)).toBeTruthy();
+
+    await act(async () => {
+      resolveStatus({
+        peers: [],
+        file_peers: [],
+        env_peers: [],
+        poller_started: false,
+        cached_announcements: 0,
+        last_refresh_ms: 1,
+        last_error: "",
+        last_peer_count: 0,
+        skipped_peers: [],
+      });
+    });
+
+    expect(screen.getByText(/new discovery failure/)).toBeTruthy();
   });
 
   it("leaves periodic discovery to the server lifecycle", async () => {
@@ -317,7 +418,7 @@ describe("TasksView", () => {
 
   it("shows durable mesh peer sources and reverse discovery readiness", async () => {
     const { getFederationStatus } = await import("../api");
-    vi.mocked(getFederationStatus).mockResolvedValueOnce({
+    const status = {
       peers: ["https://seed.example", "https://learned.example"],
       seed_peers: ["https://seed.example"],
       learned_peers: {
@@ -337,7 +438,14 @@ describe("TasksView", () => {
       last_peer_count: 2,
       public_peer_url: "https://self.example",
       reverse_discovery_enabled: true,
-    });
+      discovered: true,
+      imported_peers: [],
+      identity_verified_peers: ["https://seed.example"],
+      skipped_peers: [],
+      discovery_errors: [],
+    };
+    vi.mocked(getFederationStatus).mockResolvedValueOnce(status);
+    vi.mocked(discoverFederationPeers).mockResolvedValueOnce(status);
 
     render(
       <LangProvider>
@@ -350,5 +458,48 @@ describe("TasksView", () => {
     expect(await screen.findByText(/Seeds: 1/)).toBeTruthy();
     expect(screen.getByText(/Learned: 1/)).toBeTruthy();
     expect(screen.getByText(/Reverse discovery: ready/)).toBeTruthy();
+  });
+
+  it("explains why a discovered node cannot exchange tasks", async () => {
+    const { getFederationStatus } = await import("../api");
+    const status = {
+      peers: [],
+      file_peers: [],
+      env_peers: [],
+      poller_started: false,
+      cached_announcements: 0,
+      last_refresh_ms: 0,
+      last_error: "",
+      last_peer_count: 0,
+      lan_federation_ready: false,
+      lan_diagnostics: [
+        "This node is local-only. Restart with `python -m nth_dao.web --lan`.",
+      ],
+      skipped_peers: [{
+        agent_id: "remote-dao",
+        label: "Remote DAO",
+        source_addr: "192.168.1.20:9876",
+        federation_peer_url: "",
+        identity_error: "peer did not advertise an HTTP federation URL",
+      }],
+      imported_peers: [],
+      identity_verified_peers: [],
+      discovery_errors: [],
+      discovered: true,
+    };
+    vi.mocked(getFederationStatus).mockResolvedValueOnce(status);
+    vi.mocked(discoverFederationPeers).mockResolvedValueOnce(status);
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    expect(await screen.findByText(/LAN federation: not advertising/)).toBeTruthy();
+    expect(screen.getByText(/python -m nth_dao.web --lan/)).toBeTruthy();
+    expect(screen.getByText(/peer did not advertise an HTTP federation URL/)).toBeTruthy();
   });
 });

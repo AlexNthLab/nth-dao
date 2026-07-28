@@ -33,6 +33,22 @@ if ($LanFederation) {
     if (-not $env:NTH_LAN_DISCOVERY) {
         $env:NTH_LAN_DISCOVERY = "1"
     }
+    $normalizedHost = $env:NTH_HOST.Trim().ToLowerInvariant()
+    if ($normalizedHost -in @("127.0.0.1", "::1", "localhost")) {
+        throw (
+            "LanFederation requires a non-loopback NTH_HOST. Clear NTH_HOST " +
+            "or set it to 0.0.0.0 before running this launcher."
+        )
+    }
+    if ($env:NTH_ALLOW_REMOTE_BIND -ne "1") {
+        throw "LanFederation requires NTH_ALLOW_REMOTE_BIND=1."
+    }
+    if ($env:NTH_LAN_PUBLISH -ne "1") {
+        throw "LanFederation requires NTH_LAN_PUBLISH=1."
+    }
+    if ($env:NTH_LAN_DISCOVERY -ne "1") {
+        throw "LanFederation requires NTH_LAN_DISCOVERY=1."
+    }
 }
 if (-not $env:NTH_AUTO_AGENTS) {
     $env:NTH_AUTO_AGENTS = $AutoAgents
@@ -100,16 +116,35 @@ $BaseUrl = "http://127.0.0.1:$($env:NTH_PORT)"
 $HealthUrl = "$BaseUrl/api/v2/health"
 $ConsoleUrl = "$BaseUrl/v2.html"
 
-function Test-NthDaoHealth {
+function Get-NthDaoHealth {
     try {
-        $response = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2
-        return [bool] $response
+        return Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2
     } catch {
-        return $false
+        return $null
     }
 }
 
-if (Test-NthDaoHealth) {
+function Test-NthDaoHealth {
+    $response = Get-NthDaoHealth
+    if ($null -eq $response -or -not [bool] $response.ok) {
+        return $false
+    }
+    if ($LanFederation -and -not [bool] $response.federation.lan_ready) {
+        return $false
+    }
+    return $true
+}
+
+$ExistingHealth = Get-NthDaoHealth
+if ($null -ne $ExistingHealth) {
+    if ($LanFederation -and -not [bool] $ExistingHealth.federation.lan_ready) {
+        throw (
+            "NTH DAO is already running on port $($env:NTH_PORT), but that " +
+            "process is local-only and cannot exchange tasks with another PC. " +
+            "Stop that process, then rerun this launcher (or start with " +
+            "'python -m nth_dao.web --lan')."
+        )
+    }
     Start-Process $ConsoleUrl
     return
 }
@@ -129,47 +164,20 @@ if ($null -eq $python) {
 
 $fileName = $python.Source
 
-function Quote-PowerShellLiteral([string] $Value) {
-    return "'" + $Value.Replace("'", "''") + "'"
-}
-
-$childCommands = @(
-    "`$env:NTH_PORT = $(Quote-PowerShellLiteral $env:NTH_PORT)",
-    "`$env:NTH_HOST = $(Quote-PowerShellLiteral $env:NTH_HOST)",
-    "`$env:NTH_ALLOW_REMOTE_BIND = $(Quote-PowerShellLiteral $env:NTH_ALLOW_REMOTE_BIND)",
-    "`$env:NTH_LAN_PUBLISH = $(Quote-PowerShellLiteral $env:NTH_LAN_PUBLISH)",
-    "`$env:NTH_LAN_DISCOVERY = $(Quote-PowerShellLiteral $env:NTH_LAN_DISCOVERY)",
-    "`$env:NTH_AUTO_AGENTS = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENTS)",
-    "`$env:NTH_AUTO_AGENT_JOIN_CHANNELS = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENT_JOIN_CHANNELS)",
-    "`$env:NTH_AUTO_AGENT_JOIN_KINDS = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENT_JOIN_KINDS)",
-    "`$env:NTH_CHANNEL_AGENT_KINDS = $(Quote-PowerShellLiteral $env:NTH_CHANNEL_AGENT_KINDS)",
-    "`$env:NTH_AUTO_AGENT_PERSIST = $(Quote-PowerShellLiteral $env:NTH_AUTO_AGENT_PERSIST)",
-    "`$env:NTH_HERMES_ASK_TIMEOUT_S = $(Quote-PowerShellLiteral $env:NTH_HERMES_ASK_TIMEOUT_S)",
-    "`$env:NTH_CODEX_MODEL = $(Quote-PowerShellLiteral $env:NTH_CODEX_MODEL)",
-    "`$env:NTH_CODEX_ASK_TIMEOUT_S = $(Quote-PowerShellLiteral $env:NTH_CODEX_ASK_TIMEOUT_S)",
-    "`$env:NTH_HERMES_MODEL = $(Quote-PowerShellLiteral $env:NTH_HERMES_MODEL)",
-    "`$env:NTH_HERMES_TOOLSETS = $(Quote-PowerShellLiteral $env:NTH_HERMES_TOOLSETS)",
-    "`$env:NTH_AGENT_WORKDIR = $(Quote-PowerShellLiteral $env:NTH_AGENT_WORKDIR)",
-    "`$env:NTH_DAO_NODE = $(Quote-PowerShellLiteral $env:NTH_DAO_NODE)",
-    "`$env:PATH = $(Quote-PowerShellLiteral $env:PATH)",
-    "Set-Location -LiteralPath $(Quote-PowerShellLiteral $RepoRoot)"
-)
-
-$pythonCommand = "& $(Quote-PowerShellLiteral $fileName)"
+$pythonArgs = @()
 if ((Split-Path -Leaf $fileName).ToLowerInvariant() -eq "py.exe") {
-    $pythonCommand += " -3"
+    $pythonArgs += "-3"
 }
-$pythonCommand += " -m nth_dao.web"
-$childCommands += $pythonCommand
-$childCommand = $childCommands -join "; "
+$pythonArgs += @("-m", "nth_dao.web")
 
-Start-Process `
-    -FilePath powershell.exe `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $childCommand) `
+$ServerProcess = Start-Process `
+    -FilePath $fileName `
+    -ArgumentList $pythonArgs `
     -WorkingDirectory $RepoRoot `
     -RedirectStandardOutput $OutLog `
     -RedirectStandardError $ErrLog `
-    -WindowStyle Hidden
+    -WindowStyle Hidden `
+    -PassThru
 
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
@@ -179,5 +187,10 @@ for ($i = 0; $i -lt 30; $i++) {
     }
 }
 
-Write-Warning "NTH DAO did not become healthy within 30 seconds. Logs: $OutLog ; $ErrLog"
-Start-Process $LogDir
+if (-not $ServerProcess.HasExited) {
+    Stop-Process -Id $ServerProcess.Id -Force -ErrorAction SilentlyContinue
+}
+throw (
+    "NTH DAO did not become LAN-ready within 30 seconds; the process started " +
+    "by this launcher was stopped. Logs: $OutLog ; $ErrLog"
+)

@@ -467,6 +467,13 @@ export interface FederationStatus {
   skipped_peers?: FederationDiscoveredPeer[];
   discovery_errors?: string[];
   public_peer_url?: string;
+  lan_federation_configured?: boolean;
+  lan_federation_ready?: boolean;
+  lan_publish_enabled?: boolean;
+  lan_discovery_enabled?: boolean;
+  lan_transport_available?: boolean;
+  lan_publisher_active?: boolean;
+  lan_diagnostics?: string[];
   reverse_discovery_enabled?: boolean;
 }
 

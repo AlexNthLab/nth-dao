@@ -63,6 +63,89 @@ def test_federation_status_empty_without_runtime_side_effects(tmp_path: Path) ->
     assert not (tmp_path / "federation" / "peers.json").exists()
 
 
+def test_health_and_status_expose_lan_dialability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", "http://192.168.1.20:8080")
+    monkeypatch.setenv("NTH_LAN_PUBLISH", "1")
+    monkeypatch.setenv("NTH_LAN_DISCOVERY", "1")
+    monkeypatch.setattr(
+        "nth_dao.discovery.mdns_available",
+        lambda: True,
+    )
+    app = create_app(tmp_path, require_console_auth=False)
+    app.state.nth.mdns_responder = object()
+    client = TestClient(app)
+
+    health = client.get("/api/v2/health").json()["federation"]
+    assert health == {
+        "public_peer_url": "http://192.168.1.20:8080",
+        "lan_configured": True,
+        "lan_publish_enabled": True,
+        "lan_discovery_enabled": True,
+        "transport_available": True,
+        "publisher_active": True,
+        "lan_ready": True,
+    }
+    status = client.get("/api/v2/market/federation/status").json()
+    assert status["lan_federation_ready"] is True
+    assert status["lan_federation_configured"] is True
+    assert status["lan_publisher_active"] is True
+    assert status["public_peer_url"] == "http://192.168.1.20:8080"
+    assert status["lan_diagnostics"] == []
+
+
+def test_lan_readiness_requires_live_publisher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", "http://192.168.1.20:8080")
+    monkeypatch.setenv("NTH_LAN_PUBLISH", "1")
+    monkeypatch.setenv("NTH_LAN_DISCOVERY", "1")
+    monkeypatch.setattr(
+        "nth_dao.discovery.mdns_available",
+        lambda: True,
+    )
+    app = create_app(tmp_path, require_console_auth=False)
+    app.state.nth.mdns_responder = None
+    client = TestClient(app)
+
+    health = client.get("/api/v2/health").json()["federation"]
+    status = client.get("/api/v2/market/federation/status").json()
+
+    assert health["lan_configured"] is True
+    assert health["publisher_active"] is False
+    assert health["lan_ready"] is False
+    assert status["lan_federation_ready"] is False
+    assert any(
+        "publication is configured but not active" in message
+        for message in status["lan_diagnostics"]
+    )
+
+
+def test_status_preserves_last_discovery_failure_for_operator(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    app.state.market_fed_last_discovery = {
+        "discovered": True,
+        "identity_verified_peers": [],
+        "imported_peers": [],
+        "skipped_peers": [{
+            "agent_id": "remote",
+            "identity_error": "peer did not advertise an HTTP federation URL",
+        }],
+        "discovery_errors": [],
+    }
+    client = TestClient(app)
+
+    status = client.get("/api/v2/market/federation/status").json()
+
+    assert status["discovered"] is True
+    assert status["skipped_peers"][0]["agent_id"] == "remote"
+    assert status["lan_federation_ready"] is False
+    assert "python -m nth_dao.web --lan" in status["lan_diagnostics"][0]
+
+
 def test_federation_status_requires_bearer_when_console_auth_is_enabled(
     tmp_path: Path,
 ) -> None:

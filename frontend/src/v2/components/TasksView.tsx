@@ -7,7 +7,7 @@
  *
  * 自取数(import api),不经 App 状态,保持视图自洽。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   announceTask, claimFederatedTask, claimTask, discoverFederationPeers, fetchAgents, getFederationStatus,
   listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
@@ -87,6 +87,21 @@ export function TasksView() {
   const [fedStatus, setFedStatus] = useState<FederationStatus | null>(null);
   const [fedPeerUrl, setFedPeerUrl] = useState("");
   const [fedBusy, setFedBusy] = useState(false);
+  const fedRequestSequence = useRef(0);
+
+  function beginFederationRequest(): number {
+    fedRequestSequence.current += 1;
+    return fedRequestSequence.current;
+  }
+
+  function commitFederationStatus(
+    requestSequence: number,
+    status: FederationStatus,
+  ): boolean {
+    if (requestSequence !== fedRequestSequence.current) return false;
+    setFedStatus(status);
+    return true;
+  }
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -131,8 +146,10 @@ export function TasksView() {
   }
 
   async function loadFederation(signal?: AbortSignal) {
+    const requestSequence = beginFederationRequest();
     try {
-      setFedStatus(await getFederationStatus(signal));
+      const status = await getFederationStatus(signal);
+      commitFederationStatus(requestSequence, status);
     } catch {
       // Federation status is operational context. Keep the market usable when
       // the status endpoint is temporarily unavailable.
@@ -172,6 +189,7 @@ export function TasksView() {
     let cancelled = false;
     const discover = async () => {
       if (cancelled) return;
+      const requestSequence = beginFederationRequest();
       try {
         const status = await discoverFederationPeers({
           actorId: "admin",
@@ -179,9 +197,11 @@ export function TasksView() {
           add: true,
           refresh: true,
         });
-        if (cancelled) return;
-        if ((status.imported_peers?.length ?? 0) > 0) {
-          setFedStatus(status);
+        if (cancelled || !commitFederationStatus(requestSequence, status)) return;
+        if (
+          (status.imported_peers?.length ?? 0) > 0
+          || (status.identity_verified_peers?.length ?? 0) > 0
+        ) {
           setReloadKey((key) => key + 1);
         }
       } catch {
@@ -311,9 +331,10 @@ export function TasksView() {
   async function handleFederationRefresh() {
     if (fedBusy) return;
     setFedBusy(true);
+    const requestSequence = beginFederationRequest();
     try {
       const status = await refreshFederation();
-      setFedStatus(status);
+      if (!commitFederationStatus(requestSequence, status)) return;
       setReloadKey((k) => k + 1);
       toast.push(t("Federation refreshed", "Federation refreshed"), "success");
     } catch (e) {
@@ -329,6 +350,7 @@ export function TasksView() {
   async function handleFederationDiscover() {
     if (fedBusy) return;
     setFedBusy(true);
+    const requestSequence = beginFederationRequest();
     try {
       const status = await discoverFederationPeers({
         actorId: "admin",
@@ -336,7 +358,7 @@ export function TasksView() {
         add: true,
         refresh: true,
       });
-      setFedStatus(status);
+      if (!commitFederationStatus(requestSequence, status)) return;
       setReloadKey((k) => k + 1);
       const imported = status.imported_peers?.length ?? 0;
       const skipped = status.skipped_peers?.length ?? 0;
@@ -389,13 +411,14 @@ export function TasksView() {
     const peer = fedPeerUrl.trim();
     if (!peer || fedBusy) return;
     setFedBusy(true);
+    const requestSequence = beginFederationRequest();
     try {
       const status = await updateFederationPeer(peer, "add");
-      setFedStatus(status);
+      if (!commitFederationStatus(requestSequence, status)) return;
       setFedPeerUrl("");
       try {
         const refreshed = await refreshFederation();
-        setFedStatus(refreshed);
+        commitFederationStatus(requestSequence, refreshed);
       } catch (refreshErr) {
         toast.push(
           `${t("Peer saved, refresh failed", "Peer saved, refresh failed")}:${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`,
@@ -417,12 +440,13 @@ export function TasksView() {
   async function handleFederationPeerRemove(peer: string) {
     if (!peer || fedBusy) return;
     setFedBusy(true);
+    const requestSequence = beginFederationRequest();
     try {
       const status = await updateFederationPeer(peer, "remove");
-      setFedStatus(status);
+      if (!commitFederationStatus(requestSequence, status)) return;
       try {
         const refreshed = await refreshFederation();
-        setFedStatus(refreshed);
+        commitFederationStatus(requestSequence, refreshed);
       } catch (refreshErr) {
         toast.push(
           `${t("Peer removed, refresh failed", "Peer removed, refresh failed")}:${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`,
@@ -594,6 +618,28 @@ export function TasksView() {
                 ? t("ready", "ready")
                 : t("local only", "local only")}
             </div>
+            <div
+              style={{
+                fontSize: 10,
+                color: fedStatus?.lan_federation_ready
+                  ? "var(--accent)"
+                  : "var(--warning)",
+                lineHeight: 1.5,
+              }}
+            >
+              {t("LAN federation", "LAN federation")}: {fedStatus?.lan_federation_ready
+                ? t("advertising", "advertising")
+                : t("not advertising", "not advertising")}
+              {fedStatus?.public_peer_url ? ` · ${fedStatus.public_peer_url}` : ""}
+            </div>
+            {fedStatus?.lan_diagnostics?.map((diagnostic) => (
+              <div
+                key={diagnostic}
+                style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}
+              >
+                {diagnostic}
+              </div>
+            ))}
             {fedStatus?.imported_peers?.length ? (
               <div style={{ fontSize: 10, color: "var(--accent)", lineHeight: 1.4 }}>
                 {t("Imported", "Imported")}: {fedStatus.imported_peers.length}
@@ -605,9 +651,24 @@ export function TasksView() {
               </div>
             ) : null}
             {fedStatus?.skipped_peers?.length ? (
-              <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
-                {t("Peers not imported", "Peers not imported")}: {fedStatus.skipped_peers.length}
-              </div>
+              <>
+                <div style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}>
+                  {t("Peers not imported", "Peers not imported")}: {fedStatus.skipped_peers.length}
+                </div>
+                {fedStatus.skipped_peers.slice(0, 3).map((peer) => (
+                  <div
+                    key={`${peer.did ?? peer.agent_id}:${peer.source_addr ?? ""}`}
+                    style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.4 }}
+                  >
+                    {peer.label || peer.agent_id || peer.did || t("Unknown peer", "Unknown peer")}
+                    {": "}
+                    {peer.identity_error || t(
+                      "The peer did not expose a verified federation endpoint.",
+                      "The peer did not expose a verified federation endpoint.",
+                    )}
+                  </div>
+                ))}
+              </>
             ) : null}
             {(fedStatus?.stale_announcements ?? 0) > 0 && (
               <div style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}>

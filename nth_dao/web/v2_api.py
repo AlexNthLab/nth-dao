@@ -6801,6 +6801,65 @@ def _market_announcement_compatibility_status(
     }
 
 
+def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
+    """Return configuration and live publication state for LAN federation."""
+    public_peer_url = str(
+        getattr(app.state, "nth_public_base_url", "") or ""
+    )
+    publish_enabled = _env_bool("NTH_LAN_PUBLISH", True)
+    discovery_enabled = _env_bool("NTH_LAN_DISCOVERY", False)
+    configured = bool(
+        public_peer_url and publish_enabled and discovery_enabled
+    )
+    try:
+        from nth_dao.discovery import mdns_available
+
+        transport_available = bool(mdns_available())
+    except (ImportError, RuntimeError):
+        transport_available = False
+    nth_state = getattr(app.state, "nth", None)
+    publisher_active = bool(
+        getattr(nth_state, "mdns_responder", None)
+    )
+    diagnostics: List[str] = []
+    if not public_peer_url:
+        diagnostics.append(
+            "This node is local-only. Restart with "
+            "`python -m nth_dao.web --lan` so peers can dial its signed "
+            "federation feed."
+        )
+    if not publish_enabled:
+        diagnostics.append(
+            "LAN publication is disabled (NTH_LAN_PUBLISH=0)."
+        )
+    if not discovery_enabled:
+        diagnostics.append(
+            "Background LAN discovery is disabled "
+            "(NTH_LAN_DISCOVERY is not 1)."
+        )
+    if configured and not transport_available:
+        diagnostics.append(
+            "mDNS transport is unavailable. Install `nth-dao[lan]`."
+        )
+    if configured and transport_available and not publisher_active:
+        diagnostics.append(
+            "mDNS publication is configured but not active; check the server "
+            "log for LAN DID publish failures."
+        )
+    return {
+        "public_peer_url": public_peer_url,
+        "lan_federation_configured": configured,
+        "lan_federation_ready": bool(
+            configured and transport_available and publisher_active
+        ),
+        "lan_publish_enabled": publish_enabled,
+        "lan_discovery_enabled": discovery_enabled,
+        "lan_transport_available": transport_available,
+        "lan_publisher_active": publisher_active,
+        "lan_diagnostics": diagnostics,
+    }
+
+
 def _market_fed_status(request: Request) -> Dict[str, Any]:
     _clear_finished_market_fed_poller(request.app.state)
     ws = _state_workspace(request)
@@ -6819,9 +6878,12 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
     learned_records = _read_learned_fed_peer_records(ws)
     learned_peers = [record.peer_url for record in learned_records]
     peers = list(dict.fromkeys(seed_peers + learned_peers))
-    public_peer_url = str(
-        getattr(request.app.state, "nth_public_base_url", "") or ""
+    lan_runtime = _lan_federation_runtime_status(request.app)
+    last_discovery = getattr(
+        request.app.state, "market_fed_last_discovery", {},
     )
+    if not isinstance(last_discovery, dict):
+        last_discovery = {}
     env_peers: List[str] = []
     for item in os.environ.get("NTH_FED_PEERS", "").split(","):
         if not item.strip():
@@ -6842,7 +6904,7 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
             }
             for record in learned_records
         },
-        "public_peer_url": public_peer_url,
+        **lan_runtime,
         "reverse_discovery_enabled": _market_fed_announce_self(request) is not None,
         "file_peers": _read_fed_peer_file(ws),
         "env_peers": env_peers,
@@ -6862,6 +6924,13 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
             ws,
             _state_node_identity(request),
         ),
+        "discovered": bool(last_discovery.get("discovered", False)),
+        "identity_verified_peers": list(
+            last_discovery.get("identity_verified_peers") or []
+        ),
+        "imported_peers": list(last_discovery.get("imported_peers") or []),
+        "skipped_peers": list(last_discovery.get("skipped_peers") or []),
+        "discovery_errors": list(last_discovery.get("discovery_errors") or []),
         **status,
     }
 
@@ -10842,6 +10911,20 @@ def register_v2_routes(app: FastAPI) -> None:
             if getattr(route, "path", "").startswith(prefix)
             and getattr(route, "path", "") != "/api/v2/health"
         })
-        return {"ok": True, "phase": 1, "endpoints": endpoints}
+        lan_runtime = _lan_federation_runtime_status(app)
+        return {
+            "ok": True,
+            "phase": 1,
+            "endpoints": endpoints,
+            "federation": {
+                "public_peer_url": lan_runtime["public_peer_url"],
+                "lan_configured": lan_runtime["lan_federation_configured"],
+                "lan_publish_enabled": lan_runtime["lan_publish_enabled"],
+                "lan_discovery_enabled": lan_runtime["lan_discovery_enabled"],
+                "transport_available": lan_runtime["lan_transport_available"],
+                "publisher_active": lan_runtime["lan_publisher_active"],
+                "lan_ready": lan_runtime["lan_federation_ready"],
+            },
+        }
 
     logger.info("v2_api: registered /api/v2/* live endpoints")
