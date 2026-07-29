@@ -34,6 +34,48 @@ The Core owns:
 - replay, size, time, and resource limits;
 - fail-closed handling of unsupported required rules.
 
+## Tasks and Market Offers
+
+Tasks remain the demand and collaboration entry point. A Task may be local,
+federated, unpaid, or carry a bounty. Claiming a Task creates or links exactly
+one Mission; the Mission owns execution state and the Blackboard exposes the
+human-visible process.
+
+Market Offers are separate. They describe products, services, or any mutually
+accepted exchange without treating money as a privileged resource:
+
+```text
+free service          provides=[service]       requests=[]
+paid product          provides=[product]       requests=[fiat or token]
+barter                provides=[product]       requests=[product]
+product for service   provides=[product]       requests=[service]
+asset swap            provides=[bitcoin:btc]   requests=[solana:spl:<mint>]
+```
+
+Trade Offer v2 therefore uses signed `provides` and `requests` resource legs
+rather than a mandatory price field. Resource types, identifiers, units, and
+Rule IDs are open namespaced strings. Descriptors and selected Rule Packages
+are bound by exact SHA-256 digest. UI categories such as Product and Service
+are projections for people, not closed protocol enums.
+
+Every resource leg requires a content-addressed descriptor. Resource IDs use a
+bounded URI-like namespace and reject executable or local-path schemes. An
+Offer is an immutable revision: revision 1 has no predecessor; each later
+revision binds the exact previous Offer digest. `withdrawn` is terminal.
+Registries key lifecycle chains by `(publisher_did, offer_id)` and must retain
+forks as conflicts rather than silently applying last-write-wins.
+
+An Offer is a signed claim, not proof that an item exists, a valuation is fair,
+or settlement is safe. Publishing or verifying an Offer never transfers an
+asset. Negotiation must later produce an immutable Order that binds the exact
+Offer and Rule Package digests. Funds-capable execution requires a separately
+installed, locally approved Adapter and a signed Mandate.
+
+Signature integrity and current activity are separate decisions. Integrity
+verification proves the publisher and immutable bytes. Activity evaluation
+also checks publication time, expiry, and withdrawal state. Neither decision
+grants local trust or confirms that referenced assets exist.
+
 ## Extension Boundary
 
 Rule Packages may describe pricing, quantity, fulfillment, acceptance, payment,
@@ -92,16 +134,18 @@ No Rule Package or Adapter may disable:
 - signed Receipts;
 - fail-closed required-rule negotiation.
 
-## Initial Delivery
+## Delivered Protocol Slices
 
-The first code slice contains only:
+The reviewed protocol kernel currently contains:
 
 - Rule Manifest v1;
+- Trade Offer v2;
 - NTH Trade Canonical JSON v1 validation;
 - signing and verification;
-- signed-manifest digest;
-- conformance vectors;
+- signed content digests;
+- schemas and deterministic conformance vectors;
 - focused tests.
 
-Registry, federation, negotiation, Orders, UI, payment, and executable Adapters
-are intentionally deferred to later independently reviewed slices.
+Package loading, registry, Offer federation, negotiation, Orders, UI, payment,
+and executable Adapters remain separate independently reviewed slices. Trade
+Offer v2 is declarative only and cannot execute settlement.

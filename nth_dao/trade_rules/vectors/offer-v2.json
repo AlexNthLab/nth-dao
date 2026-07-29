@@ -1,0 +1,512 @@
+{
+  "expected_offer_canonical_hex": "7b22657874656e73696f6e73223a7b7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032372d30372d32395430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e7265666572656e63652f6274632d666f722d736f6c616e612d746f6b656e222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30372d32395430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2270726f6f665f76616c7565223a226b6772784d5644585a6f59504675767632675576422d59514734614f387a30674c4e6571506c53634d4e64666f5067345963453944567076426d6f7a54396e664f4743774b4d502d4b4e5534502d4f4d755876644267222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764237a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a63646466363335366132333131306361396232333239356631383135633966393833653564616338333161373631633565663333313038306166636435356531222c226c65675f6964223a22626974636f696e222c227175616e74697479223a22302e3031222c227265736f757263655f6964223a22626974636f696e3a627463222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22627463227d5d2c227075626c69736865645f6174223a22323032362d30372d32395430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a37663363356631653666613737373734386138303034343338653030623334633330366138666565316233383437303832386661656666336433306563386235222c226c65675f6964223a22736f6c616e612d746f6b656e222c227175616e74697479223a2231303030222c227265736f757263655f6964223a22736f6c616e613a73706c3a4578616d706c654d696e74222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22746f6b656e227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b7b22646967657374223a227368613235363a30633636643662663230633631393564366135663634346134353632383438303965613336386466643534633734333061363462373562363461383836376136222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f61746f6d69632d73776170227d5d2c227374617465223a22616374697665222c2273756d6d617279223a225075626c696320636f6e666f726d616e6365206f666665723b206e65766572207573652074686973206b657920666f72207265616c2074727573742e222c227469746c65223a2242544320666f72206120536f6c616e6120746f6b656e227d",
+  "expected_offer_digest": "sha256:752fe89bfbb6fd8f6991acf57e136d6dea5c12d6d1c343ca1eb778550622ec3f",
+  "expected_signing_input_hex": "4e54482d54524144452d4f464645522d5632007b22657874656e73696f6e73223a7b7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032372d30372d32395430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e7265666572656e63652f6274632d666f722d736f6c616e612d746f6b656e222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30372d32395430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764237a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a63646466363335366132333131306361396232333239356631383135633966393833653564616338333161373631633565663333313038306166636435356531222c226c65675f6964223a22626974636f696e222c227175616e74697479223a22302e3031222c227265736f757263655f6964223a22626974636f696e3a627463222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22627463227d5d2c227075626c69736865645f6174223a22323032362d30372d32395430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a37663363356631653666613737373734386138303034343338653030623334633330366138666565316233383437303832386661656666336433306563386235222c226c65675f6964223a22736f6c616e612d746f6b656e222c227175616e74697479223a2231303030222c227265736f757263655f6964223a22736f6c616e613a73706c3a4578616d706c654d696e74222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22746f6b656e227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b7b22646967657374223a227368613235363a30633636643662663230633631393564366135663634346134353632383438303965613336386466643534633734333061363462373562363461383836376136222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f61746f6d69632d73776170227d5d2c227374617465223a22616374697665222c2273756d6d617279223a225075626c696320636f6e666f726d616e6365206f666665723b206e65766572207573652074686973206b657920666f72207265616c2074727573742e222c227469746c65223a2242544320666f72206120536f6c616e6120746f6b656e227d",
+  "expected_withdrawal_digest": "sha256:37f6dc28d049c2baab938860421aeb505093706f1c8e1fe2a7c2b39a8d98e7bd",
+  "format": "nth-trade-offer-conformance-v2",
+  "negative_offers": [
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "kgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "bitcoin:btc",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "1000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "tampered",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": false,
+      "expected_valid": false,
+      "id": "tampered-summary"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "kgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "bitcoin:btc",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "2000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": false,
+      "expected_valid": false,
+      "id": "tampered-quantity"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "AgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "bitcoin:btc",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "1000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": false,
+      "expected_valid": false,
+      "id": "tampered-proof-value"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "0AMGyphr-dkN3ZkeIsBGhA_r7SvakAH0zMfprAE9y1yfgc52oolK6J0BdUhCv8c-4AOfQBQq7_tLkqTop8T6Cw",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "1000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": true,
+      "expected_valid": false,
+      "id": "signed-empty-provides"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "xWuRR9RmYLcQ-HPX7MNAoOeq24Dbf3Apj0npj846_0t0zCLpIVBTTRY0OEBEhkKlqGVyTdg1X0hpMY19XwbLAQ",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "bitcoin:btc",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "0",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": true,
+      "expected_valid": false,
+      "id": "signed-zero-quantity"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "5kfPsQCkYFEi2g7HAjuy-0ZHkUQVqqaxUN95LQ6Got_DYzuUyv2S2h9KvFVQ56IY2h5Mpgl0n5iQyfgkejUYBw",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "../wallet.key",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "1000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": true,
+      "expected_valid": false,
+      "id": "signed-unsafe-resource-id"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "OJJV2zQDlvAmt58vJckEakotgru5VdoOc3_PG4kYtsLHbaoRKQ2-AvUYx3GM6XfJZcWMxN647a14qKILnsR5CA",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "bitcoin:btc",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "2026-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "1000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 2,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": true,
+      "expected_valid": false,
+      "id": "signed-broken-revision"
+    },
+    {
+      "document": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-07-29T00:00:00Z",
+        "offer_id": "org.nthdao.reference/btc-for-solana-token",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "0000-07-29T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "n45uSwqNv8VG9Z1d0VDq-bV1gBBTOi-0pSJf4X2qPlKCm0S8xSh2NS0SbiLZkp3J6DHWMJZeAboxUIuMLs-QBA",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "leg_id": "bitcoin",
+            "quantity": "0.01",
+            "resource_id": "bitcoin:btc",
+            "resource_type": "asset:fungible",
+            "unit": "btc"
+          }
+        ],
+        "published_at": "0000-07-29T00:00:00Z",
+        "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+        "requests": [
+          {
+            "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+            "leg_id": "solana-token",
+            "quantity": "1000",
+            "resource_id": "solana:spl:ExampleMint",
+            "resource_type": "asset:fungible",
+            "unit": "token"
+          }
+        ],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+            "rule_id": "org.nthdao.reference/atomic-swap"
+          }
+        ],
+        "state": "active",
+        "summary": "Public conformance offer; never use this key for real trust.",
+        "title": "BTC for a Solana token"
+      },
+      "expected_signature_valid": true,
+      "expected_valid": false,
+      "id": "signed-invalid-year"
+    }
+  ],
+  "offer": {
+    "extensions": {},
+    "kind": "org.nthdao.trade.offer",
+    "not_after": "2027-07-29T00:00:00Z",
+    "offer_id": "org.nthdao.reference/btc-for-solana-token",
+    "previous_offer_digest": null,
+    "proof": {
+      "created": "2026-07-29T00:00:01Z",
+      "proof_purpose": "assertionMethod",
+      "proof_value": "kgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+      "type": "NthEd25519SignatureV1",
+      "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+    },
+    "protocol_version": "2.0",
+    "provides": [
+      {
+        "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+        "leg_id": "bitcoin",
+        "quantity": "0.01",
+        "resource_id": "bitcoin:btc",
+        "resource_type": "asset:fungible",
+        "unit": "btc"
+      }
+    ],
+    "published_at": "2026-07-29T00:00:00Z",
+    "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+    "requests": [
+      {
+        "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+        "leg_id": "solana-token",
+        "quantity": "1000",
+        "resource_id": "solana:spl:ExampleMint",
+        "resource_type": "asset:fungible",
+        "unit": "token"
+      }
+    ],
+    "revision": 1,
+    "rule_refs": [
+      {
+        "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+        "rule_id": "org.nthdao.reference/atomic-swap"
+      }
+    ],
+    "state": "active",
+    "summary": "Public conformance offer; never use this key for real trust.",
+    "title": "BTC for a Solana token"
+  },
+  "schema_version": 1,
+  "warning": "The generator uses a deterministic public test seed only.",
+  "withdrawal_offer": {
+    "extensions": {},
+    "kind": "org.nthdao.trade.offer",
+    "not_after": "2027-07-30T00:00:00Z",
+    "offer_id": "org.nthdao.reference/btc-for-solana-token",
+    "previous_offer_digest": "sha256:752fe89bfbb6fd8f6991acf57e136d6dea5c12d6d1c343ca1eb778550622ec3f",
+    "proof": {
+      "created": "2026-07-30T00:00:01Z",
+      "proof_purpose": "assertionMethod",
+      "proof_value": "r2j0HGktgq7r6oaeHypuFF_ZAGDnc5Eo-uEz7M_QDbOvMCaRFM45PwC-1d28DTUYmycT06fMLDf6vEPnEPuvCQ",
+      "type": "NthEd25519SignatureV1",
+      "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
+    },
+    "protocol_version": "2.0",
+    "provides": [
+      {
+        "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+        "leg_id": "bitcoin",
+        "quantity": "0.01",
+        "resource_id": "bitcoin:btc",
+        "resource_type": "asset:fungible",
+        "unit": "btc"
+      }
+    ],
+    "published_at": "2026-07-30T00:00:00Z",
+    "publisher_did": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd",
+    "requests": [
+      {
+        "descriptor_digest": "sha256:7f3c5f1e6fa777748a8004438e00b34c306a8fee1b38470828faeff3d30ec8b5",
+        "leg_id": "solana-token",
+        "quantity": "1000",
+        "resource_id": "solana:spl:ExampleMint",
+        "resource_type": "asset:fungible",
+        "unit": "token"
+      }
+    ],
+    "revision": 2,
+    "rule_refs": [
+      {
+        "digest": "sha256:0c66d6bf20c6195d6a5f644a456284809ea368dfd54c7430a64b75b64a8867a6",
+        "rule_id": "org.nthdao.reference/atomic-swap"
+      }
+    ],
+    "state": "withdrawn",
+    "summary": "Public conformance offer; never use this key for real trust.",
+    "title": "BTC for a Solana token"
+  }
+}

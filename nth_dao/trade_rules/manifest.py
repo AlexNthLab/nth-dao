@@ -9,21 +9,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from nth_dao.b64u import b64u_decode, b64u_encode
-from nth_dao.did_key import DIDKeyError, decode_ed25519_did_key, is_did_key
+from nth_dao.did_key import is_did_key
 from nth_dao.identity import AgentIdentity
 from nth_dao.trade_rules.canonical import (
     TradeCanonicalJSONError,
     parse_trade_json,
     trade_canonical_json,
 )
-
-try:
-    from nacl.exceptions import BadSignatureError as _BadSignatureError
-    from nacl.signing import VerifyKey as _VerifyKey
-except ImportError:  # pragma: no cover - depends on optional crypto extra
-    _BadSignatureError = ValueError  # type: ignore[assignment,misc]
-    _VerifyKey = None  # type: ignore[assignment]
+from nth_dao.trade_rules.signing import (
+    TradeProofError,
+    decode_canonical_ed25519_signature,
+    encode_ed25519_signature,
+    signed_document_input,
+    verification_method_for_did,
+    verify_ed25519_did_signature,
+)
 
 MANIFEST_KIND = "org.nthdao.trade.rule-manifest"
 MANIFEST_PROTOCOL_VERSION = "1.0"
@@ -382,9 +382,7 @@ def _validate_complete(document: Any) -> dict[str, Any]:
         if not_after <= proof_created:
             _reject("not_after must be later than proof.created")
 
-    expected_method = (
-        f"{value['publisher_did']}#{value['publisher_did'].split(':', 2)[2]}"
-    )
+    expected_method = verification_method_for_did(value["publisher_did"])
     if proof["verification_method"] != expected_method:
         _reject("proof.verification_method does not match publisher_did")
 
@@ -392,24 +390,14 @@ def _validate_complete(document: Any) -> dict[str, Any]:
         proof["proof_value"], label="proof.proof_value", minimum=86, maximum=86
     )
     try:
-        signature = b64u_decode(proof_value)
-    except (TypeError, ValueError, UnicodeError) as exc:
-        raise ManifestRejected("proof.proof_value is not canonical base64url") from exc
-    if len(signature) != 64 or b64u_encode(signature) != proof_value:
-        _reject("proof.proof_value is not a canonical Ed25519 signature")
+        decode_canonical_ed25519_signature(proof_value)
+    except TradeProofError as exc:
+        raise ManifestRejected(str(exc)) from exc
     try:
         trade_canonical_json(value)
     except TradeCanonicalJSONError as exc:
         raise ManifestRejected(str(exc)) from exc
     return value
-
-
-def _signing_body(document: dict[str, Any]) -> dict[str, Any]:
-    body = copy.deepcopy(document)
-    proof = dict(body["proof"])
-    proof.pop("proof_value")
-    body["proof"] = proof
-    return body
 
 
 def _complete_snapshot(document: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
@@ -424,11 +412,10 @@ def _complete_snapshot(document: dict[str, Any]) -> tuple[bytes, dict[str, Any]]
 
 
 def _signing_input_from_snapshot(snapshot: dict[str, Any]) -> bytes:
-    return (
-        MANIFEST_SIGNING_DOMAIN
-        + b"\x00"
-        + trade_canonical_json(_signing_body(snapshot))
-    )
+    try:
+        return signed_document_input(MANIFEST_SIGNING_DOMAIN, snapshot)
+    except TradeProofError as exc:
+        raise ManifestRejected(str(exc)) from exc
 
 
 def manifest_signing_input(document: dict[str, Any]) -> bytes:
@@ -438,23 +425,17 @@ def manifest_signing_input(document: dict[str, Any]) -> bytes:
 
 
 def _verify_snapshot_signature(snapshot: dict[str, Any]) -> tuple[bool, str]:
-    if _VerifyKey is None:
-        return False, "crypto unavailable"
     try:
-        signature = b64u_decode(snapshot["proof"]["proof_value"])
-        pubkey = decode_ed25519_did_key(snapshot["publisher_did"])
-        _VerifyKey(pubkey).verify(_signing_input_from_snapshot(snapshot), signature)
-    except (
-        _BadSignatureError,
-        DIDKeyError,
-        ManifestRejected,
-        TradeCanonicalJSONError,
-        TypeError,
-        ValueError,
-        UnicodeError,
-    ):
+        signing_input = _signing_input_from_snapshot(snapshot)
+    except (ManifestRejected, TradeCanonicalJSONError, TypeError, ValueError):
         return False, "manifest signature invalid"
-    return True, "ok"
+    ok, reason = verify_ed25519_did_signature(
+        publisher_did=snapshot["publisher_did"],
+        proof_value=snapshot["proof"]["proof_value"],
+        signing_input=signing_input,
+    )
+    return (ok, "ok" if ok else ("crypto unavailable" if reason == "crypto unavailable"
+                                 else "manifest signature invalid"))
 
 
 def _verify_signature(document: dict[str, Any]) -> tuple[bool, str]:
@@ -581,9 +562,7 @@ def sign_manifest(
     proof = {
         "type": MANIFEST_PROOF_TYPE,
         "created": proof_created,
-        "verification_method": (
-            f"{identity.as_did()}#{identity.as_did().split(':', 2)[2]}"
-        ),
+        "verification_method": verification_method_for_did(identity.as_did()),
         "proof_purpose": MANIFEST_PROOF_PURPOSE,
     }
     unsigned = dict(document)
@@ -592,12 +571,10 @@ def sign_manifest(
     # placeholder has the same shape as a real Ed25519 signature.
     unsigned["proof"]["proof_value"] = "A" * 86
     _validate_complete(unsigned)
-    signing_input = (
-        MANIFEST_SIGNING_DOMAIN
-        + b"\x00"
-        + trade_canonical_json(_signing_body(unsigned))
+    signing_input = _signing_input_from_snapshot(unsigned)
+    unsigned["proof"]["proof_value"] = encode_ed25519_signature(
+        identity.sign(signing_input)
     )
-    unsigned["proof"]["proof_value"] = b64u_encode(identity.sign(signing_input))
     return TradeRuleManifest.from_dict(unsigned)
 
 

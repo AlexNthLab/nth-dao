@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-offer-v2.json",
+  "title": "NTH DAO Trade Offer v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "offer_id",
+    "revision",
+    "previous_offer_digest",
+    "state",
+    "publisher_did",
+    "title",
+    "summary",
+    "provides",
+    "requests",
+    "rule_refs",
+    "published_at",
+    "not_after",
+    "extensions",
+    "proof"
+  ],
+  "properties": {
+    "kind": {
+      "const": "org.nthdao.trade.offer"
+    },
+    "protocol_version": {
+      "const": "2.0"
+    },
+    "offer_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:\\/[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)?$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "previous_offer_digest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "enum": [
+        "active",
+        "withdrawn"
+      ]
+    },
+    "publisher_did": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "provides": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/leg"
+      }
+    },
+    "requests": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/leg"
+      }
+    },
+    "rule_refs": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/rule_ref"
+      }
+    },
+    "published_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "not_after": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\\/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?$"
+      },
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "proof": {
+      "$ref": "#/$defs/proof"
+    }
+  },
+  "$defs": {
+    "leg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leg_id",
+        "resource_type",
+        "resource_id",
+        "quantity",
+        "unit",
+        "descriptor_digest"
+      ],
+      "properties": {
+        "leg_id": {
+          "$ref": "#/$defs/token64"
+        },
+        "resource_type": {
+          "$ref": "#/$defs/token160"
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[a-z][a-z0-9+.-]{0,31}:[A-Za-z0-9._~!$&'()*+,;=:@%/?#\\[\\]-]+$",
+          "not": {
+            "pattern": "^(?:data|file|javascript|vbscript):"
+          }
+        },
+        "quantity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^(?:[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9])$"
+        },
+        "unit": {
+          "$ref": "#/$defs/token80"
+        },
+        "descriptor_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "rule_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "digest"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:\\/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?)?$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {
+          "const": "NthEd25519SignatureV1"
+        },
+        "created": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "verification_method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "proof_purpose": {
+          "const": "assertionMethod"
+        },
+        "proof_value": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
+    },
+    "token64": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._:/-]*$"
+    },
+    "token80": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9][a-z0-9._:/-]*$"
+    },
+    "token160": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9][a-z0-9._:/-]*$"
+    }
+  }
+}
