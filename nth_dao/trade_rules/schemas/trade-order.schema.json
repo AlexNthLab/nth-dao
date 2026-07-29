@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-order-v1.json",
+  "title": "NTH DAO Trade Order v1",
+  "$comment": "Nested signatures, digest equality, party binding, time ordering, and deterministic Order ID derivation require the protocol validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "order_id",
+    "proposal_digest",
+    "acceptance_digest",
+    "offer_digest",
+    "maker_did",
+    "taker_did",
+    "rule_bindings",
+    "policy_digests",
+    "created_at",
+    "snapshot"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.order"},
+    "protocol_version": {"const": "1"},
+    "order_id": {
+      "type": "string",
+      "pattern": "^nth-trade-order-sha256:[0-9a-f]{64}$"
+    },
+    "proposal_digest": {"$ref": "#/$defs/digest"},
+    "acceptance_digest": {"$ref": "#/$defs/digest"},
+    "offer_digest": {"$ref": "#/$defs/digest"},
+    "maker_did": {"$ref": "#/$defs/did"},
+    "taker_did": {"$ref": "#/$defs/did"},
+    "rule_bindings": {
+      "$ref": "https://nthdao.org/schemas/trade-proposal-v1.json#/$defs/ruleBindings"
+    },
+    "policy_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maker", "taker"],
+      "properties": {
+        "maker": {"$ref": "#/$defs/digest"},
+        "taker": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "created_at": {
+      "$ref": "https://nthdao.org/schemas/trade-proposal-v1.json#/$defs/timestamp"
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offer", "proposal", "acceptance"],
+      "properties": {
+        "offer": {
+          "$ref": "https://nthdao.org/schemas/trade-offer-v2.json"
+        },
+        "proposal": {
+          "$ref": "https://nthdao.org/schemas/trade-proposal-v1.json"
+        },
+        "acceptance": {
+          "$ref": "https://nthdao.org/schemas/trade-acceptance-v1.json"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    }
+  }
+}

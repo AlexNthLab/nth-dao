@@ -147,6 +147,12 @@ Canonical resolution returns an immutable binding to the selected Offer
 digest, revision, canonical lifecycle chain, evaluation time, exact Rule
 Package set, and canonical local-policy digest. A later Order can therefore
 consume one snapshot without re-reading mutable lifecycle or policy state.
+Proposal and Acceptance construction still query the local Offer resolver
+again before signing. A caller cannot turn a hand-constructed
+`CanonicalRuleResolution` into evidence that a stale or forked Offer was the
+current canonical head. The supported signing API does not accept a caller-
+supplied raw body, and it rechecks the canonical head after producing the
+signature.
 
 Package-store paths reject symlinks and Windows junctions inside the configured
 store. Crash residue is reported by a reconciliation operation. Reconciliation
@@ -161,6 +167,66 @@ Community, DAO, industry, or standards bodies may issue signed recognition,
 deprecation, or revocation statements. Those statements inform local policy and
 never become an unconditional Core whitelist.
 
+## Bilateral Agreement and Order
+
+Trade Agreement v1 adds a deliberately small bilateral consent sequence for
+Trade Offer v2:
+
+```text
+signed Offer
+    -> signed Proposal by the taker
+    -> signed Acceptance by the Offer publisher
+    -> deterministic immutable Order snapshot
+```
+
+The Proposal binds the exact Offer digest and revision, canonical lifecycle
+digests, selected Rule Package digests, the taker's canonical local-policy
+snapshot and digest, terms, and an expiry. It cannot outlive the signed Offer.
+The Acceptance binds the exact Proposal digest, the same Offer and Rule Package
+set, and the maker's independently evaluated canonical local-policy snapshot
+and digest. It must be created no earlier than the Proposal and before the
+Proposal expires. The supported creation APIs resolve and sign as one operation
+and re-read the current unambiguous canonical Offer head after signing, closing
+the raw-body and check/sign timing bypasses.
+
+Local creation defaults to a seven-day maximum Proposal lifetime and a
+five-minute signing-clock tolerance. Implementations may choose stricter
+values. These checks protect the local signer; `proof.created` remains a signed
+claim rather than a trusted global timestamp. A receiving node needs a durable
+receipt or timestamp witness before claiming when a remote signature was
+actually produced.
+
+The Order adds no fictitious third agreement signature. It is a deterministic,
+content-addressed snapshot of the already signed Offer, Proposal, and
+Acceptance. Any conforming node with those three objects must derive identical
+Order bytes and an Order ID derived from the Proposal digest. The local Order
+CAS cache uses inter-process locking, atomic writes, bounded storage, strict
+path validation, and idempotent compare-and-set. Multiple valid Acceptances for
+one Proposal are retained and exposed as an explicit conflict; they are never
+resolved by last-write-wins. Every Offer root Rule reference must appear in the
+Proposal and Order binding. Conflict lookup is scoped by Order prefix and all
+retained candidates count toward the configured record limit.
+
+The CAS cache is not an audit ledger and cannot independently detect an
+operator rolling back or replacing both data and local metadata. Durable Spine
+anchoring remains mandatory before a persisted Order is presented as
+rollback-evident.
+
+Crash reconciliation is dry-run by default. It reports temporary residue,
+corrupt records, and conflict candidates whose primary Order is missing.
+`prune=True` removes temporary files only; it never deletes signed Orders,
+conflict candidates, or corrupt evidence.
+
+These signatures prove which keys made the Offer, Proposal, and Acceptance and
+that the bytes have not changed. They do not prove that an asset exists, that a
+description is honest, that either party controls inventory or funds, that a
+Rule Package is socially trustworthy, or that delivery or settlement occurred.
+An Order is an agreed execution input, not a Receipt and not a payment record.
+
+The Agreement conformance vector uses deterministic public test keys and
+contains the exact Offer, Proposal, Acceptance, Order, and content digests.
+Those keys must never be reused or trusted.
+
 ## Compatibility
 
 Existing Commerce v1 remains a separate compatibility profile:
@@ -170,7 +236,12 @@ org.nthdao.legacy.single-paid-digital-service/1
 ```
 
 Its signed wire format is not rewritten in place. Trade Rule Protocol v2 is
-introduced through new modules and explicit versioned objects.
+introduced through new modules and explicit versioned objects. Commerce v1's
+`IntentMandate -> CartMandate -> PaymentMandate -> Order` path remains the
+compatibility and payment-oriented profile for the existing single paid
+digital-service flow. Trade Agreement v1 is the broader exchange agreement
+profile for barter, product-for-service, asset swap, and future Rule-defined
+transactions. The two profiles are not silently converted into one another.
 
 ## Security Invariants
 
@@ -202,17 +273,28 @@ The reviewed protocol kernel currently contains:
   resolution;
 - canonical Offer-head and policy-snapshot binding before Order-facing rule
   resolution;
+- signed bilateral Proposal and Acceptance statements with independent local
+  policy snapshots, exact policy digests, and strict local time limits;
+- deterministic, self-verifying Order snapshots containing the exact signed
+  Offer, Proposal, and Acceptance;
+- bounded, cross-process-safe Order CAS caching with retained equivocation
+  candidates, bounded reconciliation, and explicit non-audit semantics;
 - bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
-- schemas and deterministic conformance vectors;
+- schemas and deterministic positive and negative conformance vectors,
+  including Agreement v1;
 - focused tests.
 
-Offer federation, persistent/governed recognition policy, proposal and
-acceptance, Orders, UI, payment, and executable Adapters remain separate
-independently reviewed slices. The local HTTP endpoints are not yet a
-federation protocol. Trade Offer v2 and Rule Package loading are declarative
-only and cannot execute settlement.
+Agreement and Order objects are protocol-kernel primitives only. A durable
+transactional outbox is still required before Order persistence and Spine audit
+projection can be presented as one recoverable workflow; a best-effort
+store-then-append dual write is explicitly not accepted. Offer/Agreement
+federation, persistent/governed recognition policy, inventory or asset
+reservation, UI, fulfillment, payment, signed execution Receipts, and
+executable Adapters remain separate independently reviewed slices. The local
+HTTP endpoints are not yet a federation protocol. Trade Offer v2, Rule Package
+loading, Agreement creation, and Order storage cannot execute settlement.
 
 ## Deferred Repository Quality Sweep
 

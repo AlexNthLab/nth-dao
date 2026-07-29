@@ -1,0 +1,644 @@
+{
+  "acceptance": {
+    "created_at": "2026-08-01T01:00:00Z",
+    "kind": "nth.dao.trade.acceptance",
+    "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "maker_policy": {
+      "accepted_package_digests": [
+        "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+      ],
+      "accepted_publishers": [],
+      "allowed_execution_modes": [
+        "declarative"
+      ],
+      "allowed_permissions": [],
+      "approved_executable_digests": [],
+      "available_capabilities": [],
+      "kind": "nth.dao.trade.rule-resolution-policy",
+      "max_depth": 32,
+      "max_packages": 256,
+      "max_resource_bytes": 67108864,
+      "protocol_version": "1"
+    },
+    "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+    "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+    "proof": {
+      "created": "2026-08-01T01:00:00Z",
+      "proof_purpose": "tradeAcceptance",
+      "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+    "protocol_version": "1",
+    "rule_bindings": [
+      {
+        "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+        "rule_id": "org.nthdao.reference.delivery"
+      }
+    ],
+    "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+  },
+  "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+  "format": "nth-trade-agreement-conformance-v1",
+  "negative_cases": [
+    {
+      "case": "signed-order-omits-required-offer-root-rule",
+      "document": {
+        "acceptance_digest": "sha256:ac5d725b18df6d74ac9b5ccbd98a1923fca5ecf84e0fb3da97233ba6e6071316",
+        "created_at": "2026-08-01T01:00:00Z",
+        "kind": "nth.dao.trade.order",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "order_id": "nth-trade-order-sha256:fd3bc8e5f094149a1e0477b22b7ee5a887959e3e6ee7854d0d13bf859ed20797",
+        "policy_digests": {
+          "maker": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+          "taker": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+        },
+        "proposal_digest": "sha256:fd3bc8e5f094149a1e0477b22b7ee5a887959e3e6ee7854d0d13bf859ed20797",
+        "protocol_version": "1",
+        "rule_bindings": [],
+        "snapshot": {
+          "acceptance": {
+            "created_at": "2026-08-01T01:00:00Z",
+            "kind": "nth.dao.trade.acceptance",
+            "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "maker_policy": {
+              "accepted_package_digests": [
+                "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+              ],
+              "accepted_publishers": [],
+              "allowed_execution_modes": [
+                "declarative"
+              ],
+              "allowed_permissions": [],
+              "approved_executable_digests": [],
+              "available_capabilities": [],
+              "kind": "nth.dao.trade.rule-resolution-policy",
+              "max_depth": 32,
+              "max_packages": 256,
+              "max_resource_bytes": 67108864,
+              "protocol_version": "1"
+            },
+            "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "proof": {
+              "created": "2026-08-01T01:00:00Z",
+              "proof_purpose": "tradeAcceptance",
+              "proof_value": "KmBhHNgNW78SvvXKmDqThvvKydU0C-PXSNIqHnJWvO7j7S4KwWLK9cwy9kNI7dqeQfeoETSBPc9tCkWMH8KxCg",
+              "type": "Ed25519Signature2020",
+              "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+            },
+            "proposal_digest": "sha256:fd3bc8e5f094149a1e0477b22b7ee5a887959e3e6ee7854d0d13bf859ed20797",
+            "protocol_version": "1",
+            "rule_bindings": [],
+            "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+          },
+          "offer": {
+            "extensions": {},
+            "kind": "org.nthdao.trade.offer",
+            "not_after": "2027-01-01T00:00:00Z",
+            "offer_id": "org.nthdao.reference/agreement",
+            "previous_offer_digest": null,
+            "proof": {
+              "created": "2026-07-01T00:00:00Z",
+              "proof_purpose": "assertionMethod",
+              "proof_value": "F9CZWUlNUu0TfivGowK2Z_Jf6M1nj2lo5NhPRNIHZgdorPV7YkUWYV4N5E6Nbhm_J0E3uUIj59PqY2Qb_LD-CA",
+              "type": "NthEd25519SignatureV1",
+              "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+            },
+            "protocol_version": "2.0",
+            "provides": [
+              {
+                "descriptor_digest": "sha256:051e92fd386fe7d99b78dada15cc4894f235eb48a89b8dcf5a252135d2094d43",
+                "leg_id": "service",
+                "quantity": "1",
+                "resource_id": "urn:nth:conformance-service",
+                "resource_type": "service",
+                "unit": "unit"
+              }
+            ],
+            "published_at": "2026-07-01T00:00:00Z",
+            "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "requests": [],
+            "revision": 1,
+            "rule_refs": [
+              {
+                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "rule_id": "org.nthdao.reference.delivery"
+              }
+            ],
+            "state": "active",
+            "summary": "Never use these deterministic identities for trust.",
+            "title": "Public agreement conformance service"
+          },
+          "proposal": {
+            "canonical_chain_digests": [
+              "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+            ],
+            "created_at": "2026-08-01T00:00:00Z",
+            "kind": "nth.dao.trade.proposal",
+            "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "not_after": "2026-08-02T00:00:00Z",
+            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "offer_id": "org.nthdao.reference/agreement",
+            "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "offer_revision": 1,
+            "proof": {
+              "created": "2026-08-01T00:00:00Z",
+              "proof_purpose": "tradeProposal",
+              "proof_value": "97XyLEjtkEnTFScCVTJJD8pnxm8mAsjD4GHMJbstuqIavjamf-Tr1vuevMwgzxNB4IGnM92HSzxVfW4lGBOKCw",
+              "type": "Ed25519Signature2020",
+              "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+            },
+            "protocol_version": "1",
+            "rule_bindings": [],
+            "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+            "taker_policy": {
+              "accepted_package_digests": [],
+              "accepted_publishers": [
+                "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+              ],
+              "allowed_execution_modes": [
+                "declarative"
+              ],
+              "allowed_permissions": [],
+              "approved_executable_digests": [],
+              "available_capabilities": [],
+              "kind": "nth.dao.trade.rule-resolution-policy",
+              "max_depth": 32,
+              "max_packages": 256,
+              "max_resource_bytes": 67108864,
+              "protocol_version": "1"
+            },
+            "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
+            "terms": {
+              "requested_quantity": "1"
+            }
+          }
+        },
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+      },
+      "expected_valid": false,
+      "target": "order"
+    },
+    {
+      "case": "proposal-unknown-field",
+      "document": {
+        "canonical_chain_digests": [
+          "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+        ],
+        "created_at": "2026-08-01T00:00:00Z",
+        "kind": "nth.dao.trade.proposal",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "not_after": "2026-08-02T00:00:00Z",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "offer_id": "org.nthdao.reference/agreement",
+        "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "offer_revision": 1,
+        "proof": {
+          "created": "2026-08-01T00:00:00Z",
+          "proof_purpose": "tradeProposal",
+          "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "rule_bindings": [
+          {
+            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "taker_policy": {
+          "accepted_package_digests": [],
+          "accepted_publishers": [
+            "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          ],
+          "allowed_execution_modes": [
+            "declarative"
+          ],
+          "allowed_permissions": [],
+          "approved_executable_digests": [],
+          "available_capabilities": [],
+          "kind": "nth.dao.trade.rule-resolution-policy",
+          "max_depth": 32,
+          "max_packages": 256,
+          "max_resource_bytes": 67108864,
+          "protocol_version": "1"
+        },
+        "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
+        "terms": {
+          "requested_quantity": "1"
+        },
+        "unexpected": true
+      },
+      "expected_valid": false,
+      "target": "proposal"
+    },
+    {
+      "case": "acceptance-policy-digest-mismatch",
+      "document": {
+        "created_at": "2026-08-01T01:00:00Z",
+        "kind": "nth.dao.trade.acceptance",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "maker_policy": {
+          "accepted_package_digests": [
+            "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+          ],
+          "accepted_publishers": [],
+          "allowed_execution_modes": [
+            "declarative"
+          ],
+          "allowed_permissions": [],
+          "approved_executable_digests": [],
+          "available_capabilities": [],
+          "kind": "nth.dao.trade.rule-resolution-policy",
+          "max_depth": 32,
+          "max_packages": 256,
+          "max_resource_bytes": 67108864,
+          "protocol_version": "1"
+        },
+        "maker_policy_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "proof": {
+          "created": "2026-08-01T01:00:00Z",
+          "proof_purpose": "tradeAcceptance",
+          "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "protocol_version": "1",
+        "rule_bindings": [
+          {
+            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+      },
+      "expected_valid": false,
+      "target": "acceptance"
+    },
+    {
+      "case": "order-nested-proposal-tamper",
+      "document": {
+        "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+        "created_at": "2026-08-01T01:00:00Z",
+        "kind": "nth.dao.trade.order",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "policy_digests": {
+          "maker": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+          "taker": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+        },
+        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "protocol_version": "1",
+        "rule_bindings": [
+          {
+            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "snapshot": {
+          "acceptance": {
+            "created_at": "2026-08-01T01:00:00Z",
+            "kind": "nth.dao.trade.acceptance",
+            "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "maker_policy": {
+              "accepted_package_digests": [
+                "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+              ],
+              "accepted_publishers": [],
+              "allowed_execution_modes": [
+                "declarative"
+              ],
+              "allowed_permissions": [],
+              "approved_executable_digests": [],
+              "available_capabilities": [],
+              "kind": "nth.dao.trade.rule-resolution-policy",
+              "max_depth": 32,
+              "max_packages": 256,
+              "max_resource_bytes": 67108864,
+              "protocol_version": "1"
+            },
+            "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "proof": {
+              "created": "2026-08-01T01:00:00Z",
+              "proof_purpose": "tradeAcceptance",
+              "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+              "type": "Ed25519Signature2020",
+              "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+            },
+            "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+            "protocol_version": "1",
+            "rule_bindings": [
+              {
+                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "rule_id": "org.nthdao.reference.delivery"
+              }
+            ],
+            "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+          },
+          "offer": {
+            "extensions": {},
+            "kind": "org.nthdao.trade.offer",
+            "not_after": "2027-01-01T00:00:00Z",
+            "offer_id": "org.nthdao.reference/agreement",
+            "previous_offer_digest": null,
+            "proof": {
+              "created": "2026-07-01T00:00:00Z",
+              "proof_purpose": "assertionMethod",
+              "proof_value": "F9CZWUlNUu0TfivGowK2Z_Jf6M1nj2lo5NhPRNIHZgdorPV7YkUWYV4N5E6Nbhm_J0E3uUIj59PqY2Qb_LD-CA",
+              "type": "NthEd25519SignatureV1",
+              "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+            },
+            "protocol_version": "2.0",
+            "provides": [
+              {
+                "descriptor_digest": "sha256:051e92fd386fe7d99b78dada15cc4894f235eb48a89b8dcf5a252135d2094d43",
+                "leg_id": "service",
+                "quantity": "1",
+                "resource_id": "urn:nth:conformance-service",
+                "resource_type": "service",
+                "unit": "unit"
+              }
+            ],
+            "published_at": "2026-07-01T00:00:00Z",
+            "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "requests": [],
+            "revision": 1,
+            "rule_refs": [
+              {
+                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "rule_id": "org.nthdao.reference.delivery"
+              }
+            ],
+            "state": "active",
+            "summary": "Never use these deterministic identities for trust.",
+            "title": "Public agreement conformance service"
+          },
+          "proposal": {
+            "canonical_chain_digests": [
+              "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+            ],
+            "created_at": "2026-08-01T00:00:00Z",
+            "kind": "nth.dao.trade.proposal",
+            "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "not_after": "2026-08-02T00:00:00Z",
+            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "offer_id": "org.nthdao.reference/agreement",
+            "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+            "offer_revision": 1,
+            "proof": {
+              "created": "2026-08-01T00:00:00Z",
+              "proof_purpose": "tradeProposal",
+              "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+              "type": "Ed25519Signature2020",
+              "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+            },
+            "protocol_version": "1",
+            "rule_bindings": [
+              {
+                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "rule_id": "org.nthdao.reference.delivery"
+              }
+            ],
+            "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+            "taker_policy": {
+              "accepted_package_digests": [],
+              "accepted_publishers": [
+                "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+              ],
+              "allowed_execution_modes": [
+                "declarative"
+              ],
+              "allowed_permissions": [],
+              "approved_executable_digests": [],
+              "available_capabilities": [],
+              "kind": "nth.dao.trade.rule-resolution-policy",
+              "max_depth": 32,
+              "max_packages": 256,
+              "max_resource_bytes": 67108864,
+              "protocol_version": "1"
+            },
+            "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
+            "terms": {
+              "requested_quantity": "2"
+            }
+          }
+        },
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+      },
+      "expected_valid": false,
+      "target": "order"
+    }
+  ],
+  "order": {
+    "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+    "created_at": "2026-08-01T01:00:00Z",
+    "kind": "nth.dao.trade.order",
+    "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+    "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+    "policy_digests": {
+      "maker": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+      "taker": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+    },
+    "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+    "protocol_version": "1",
+    "rule_bindings": [
+      {
+        "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+        "rule_id": "org.nthdao.reference.delivery"
+      }
+    ],
+    "snapshot": {
+      "acceptance": {
+        "created_at": "2026-08-01T01:00:00Z",
+        "kind": "nth.dao.trade.acceptance",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "maker_policy": {
+          "accepted_package_digests": [
+            "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+          ],
+          "accepted_publishers": [],
+          "allowed_execution_modes": [
+            "declarative"
+          ],
+          "allowed_permissions": [],
+          "approved_executable_digests": [],
+          "available_capabilities": [],
+          "kind": "nth.dao.trade.rule-resolution-policy",
+          "max_depth": 32,
+          "max_packages": 256,
+          "max_resource_bytes": 67108864,
+          "protocol_version": "1"
+        },
+        "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "proof": {
+          "created": "2026-08-01T01:00:00Z",
+          "proof_purpose": "tradeAcceptance",
+          "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "protocol_version": "1",
+        "rule_bindings": [
+          {
+            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+      },
+      "offer": {
+        "extensions": {},
+        "kind": "org.nthdao.trade.offer",
+        "not_after": "2027-01-01T00:00:00Z",
+        "offer_id": "org.nthdao.reference/agreement",
+        "previous_offer_digest": null,
+        "proof": {
+          "created": "2026-07-01T00:00:00Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "F9CZWUlNUu0TfivGowK2Z_Jf6M1nj2lo5NhPRNIHZgdorPV7YkUWYV4N5E6Nbhm_J0E3uUIj59PqY2Qb_LD-CA",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "2.0",
+        "provides": [
+          {
+            "descriptor_digest": "sha256:051e92fd386fe7d99b78dada15cc4894f235eb48a89b8dcf5a252135d2094d43",
+            "leg_id": "service",
+            "quantity": "1",
+            "resource_id": "urn:nth:conformance-service",
+            "resource_type": "service",
+            "unit": "unit"
+          }
+        ],
+        "published_at": "2026-07-01T00:00:00Z",
+        "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "requests": [],
+        "revision": 1,
+        "rule_refs": [
+          {
+            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "state": "active",
+        "summary": "Never use these deterministic identities for trust.",
+        "title": "Public agreement conformance service"
+      },
+      "proposal": {
+        "canonical_chain_digests": [
+          "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+        ],
+        "created_at": "2026-08-01T00:00:00Z",
+        "kind": "nth.dao.trade.proposal",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "not_after": "2026-08-02T00:00:00Z",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "offer_id": "org.nthdao.reference/agreement",
+        "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "offer_revision": 1,
+        "proof": {
+          "created": "2026-08-01T00:00:00Z",
+          "proof_purpose": "tradeProposal",
+          "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "rule_bindings": [
+          {
+            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "taker_policy": {
+          "accepted_package_digests": [],
+          "accepted_publishers": [
+            "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          ],
+          "allowed_execution_modes": [
+            "declarative"
+          ],
+          "allowed_permissions": [],
+          "approved_executable_digests": [],
+          "available_capabilities": [],
+          "kind": "nth.dao.trade.rule-resolution-policy",
+          "max_depth": 32,
+          "max_packages": 256,
+          "max_resource_bytes": 67108864,
+          "protocol_version": "1"
+        },
+        "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
+        "terms": {
+          "requested_quantity": "1"
+        }
+      }
+    },
+    "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+  },
+  "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
+  "proposal": {
+    "canonical_chain_digests": [
+      "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+    ],
+    "created_at": "2026-08-01T00:00:00Z",
+    "kind": "nth.dao.trade.proposal",
+    "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "not_after": "2026-08-02T00:00:00Z",
+    "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+    "offer_id": "org.nthdao.reference/agreement",
+    "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "offer_revision": 1,
+    "proof": {
+      "created": "2026-08-01T00:00:00Z",
+      "proof_purpose": "tradeProposal",
+      "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    "protocol_version": "1",
+    "rule_bindings": [
+      {
+        "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+        "rule_id": "org.nthdao.reference.delivery"
+      }
+    ],
+    "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "taker_policy": {
+      "accepted_package_digests": [],
+      "accepted_publishers": [
+        "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+      ],
+      "allowed_execution_modes": [
+        "declarative"
+      ],
+      "allowed_permissions": [],
+      "approved_executable_digests": [],
+      "available_capabilities": [],
+      "kind": "nth.dao.trade.rule-resolution-policy",
+      "max_depth": 32,
+      "max_packages": 256,
+      "max_resource_bytes": 67108864,
+      "protocol_version": "1"
+    },
+    "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
+    "terms": {
+      "requested_quantity": "1"
+    }
+  },
+  "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+  "schema_version": 1,
+  "warning": "Deterministic public test keys; never trust or reuse them."
+}
