@@ -436,6 +436,39 @@
       },
       "expected_valid": false,
       "target": "order"
+    },
+    {
+      "case": "order-audit-id-proposal-binding-mismatch",
+      "document": {
+        "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+        "created_at": "2026-08-01T01:00:00Z",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
+        "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "proposal_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "protocol_version": "1",
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+      },
+      "expected_valid": false,
+      "target": "order_audit_payload"
+    },
+    {
+      "case": "order-audit-unknown-field",
+      "document": {
+        "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+        "created_at": "2026-08-01T01:00:00Z",
+        "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
+        "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "protocol_version": "1",
+        "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "unexpected": true
+      },
+      "expected_valid": false,
+      "target": "order_audit_payload"
     }
   ],
   "order": {
@@ -587,6 +620,20 @@
       }
     },
     "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+  },
+  "order_audit": {
+    "event_type": "trade.order.accepted",
+    "payload": {
+      "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+      "created_at": "2026-08-01T01:00:00Z",
+      "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+      "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+      "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
+      "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+      "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+      "protocol_version": "1",
+      "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    }
   },
   "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
   "proposal": {

@@ -31,6 +31,10 @@ from nth_dao.trade_rules.negotiation import (
     RuleResolutionPolicy,
     resolve_canonical_offer_rules,
 )
+from nth_dao.trade_rules.order_audit import (
+    EVENT_TRADE_ORDER_ACCEPTED,
+    order_audit_payload,
+)
 from nth_dao.trade_rules.offer import offer_body, sign_offer
 from nth_dao.trade_rules.package_store import RulePackageStore
 from nth_dao.trade_rules.store import OfferStore
@@ -44,6 +48,10 @@ ACCEPTANCE_SCHEMA_PATH = (
 )
 ORDER_SCHEMA_PATH = (
     Path(__file__).with_name("schemas") / "trade-order.schema.json"
+)
+ORDER_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-order-audit-payload.schema.json"
 )
 
 
@@ -217,6 +225,11 @@ def generate_vectors() -> dict[str, Any]:
         order_nested_tamper["snapshot"]["proposal"]["terms"][
             "requested_quantity"
         ] = "2"
+        audit_payload = order_audit_payload(order)
+        audit_bad_binding = copy.deepcopy(audit_payload)
+        audit_bad_binding["proposal_digest"] = "sha256:" + ("0" * 64)
+        audit_unknown_field = copy.deepcopy(audit_payload)
+        audit_unknown_field["unexpected"] = True
     return {
         "format": "nth-trade-agreement-conformance-v1",
         "schema_version": 1,
@@ -227,6 +240,10 @@ def generate_vectors() -> dict[str, Any]:
         "acceptance_digest": acceptance_digest(acceptance),
         "order": order.to_dict(),
         "order_digest": trade_order_digest(order),
+        "order_audit": {
+            "event_type": EVENT_TRADE_ORDER_ACCEPTED,
+            "payload": audit_payload,
+        },
         "negative_cases": [
             {
                 "case": "signed-order-omits-required-offer-root-rule",
@@ -251,6 +268,18 @@ def generate_vectors() -> dict[str, Any]:
                 "target": "order",
                 "expected_valid": False,
                 "document": order_nested_tamper,
+            },
+            {
+                "case": "order-audit-id-proposal-binding-mismatch",
+                "target": "order_audit_payload",
+                "expected_valid": False,
+                "document": audit_bad_binding,
+            },
+            {
+                "case": "order-audit-unknown-field",
+                "target": "order_audit_payload",
+                "expected_valid": False,
+                "document": audit_unknown_field,
             },
         ],
     }
@@ -281,6 +310,7 @@ def write_vectors(path: str | Path = VECTORS_PATH) -> Path:
 __all__ = [
     "ACCEPTANCE_SCHEMA_PATH",
     "ORDER_SCHEMA_PATH",
+    "ORDER_AUDIT_SCHEMA_PATH",
     "PROPOSAL_SCHEMA_PATH",
     "VECTORS_PATH",
     "generate_vectors",

@@ -208,9 +208,15 @@ Proposal and Order binding. Conflict lookup is scoped by Order prefix and all
 retained candidates count toward the configured record limit.
 
 The CAS cache is not an audit ledger and cannot independently detect an
-operator rolling back or replacing both data and local metadata. Durable Spine
-anchoring remains mandatory before a persisted Order is presented as
-rollback-evident.
+operator rolling back or replacing both data and local metadata. Accepted
+Orders therefore use a bounded write-ahead audit outbox. The recoverable state
+machine is `prepared -> cached -> anchored`: the full verified Order is
+persisted before the CAS write, while the Spine event contains only exact
+digests, party DIDs, and the agreement timestamp. Recovery can recreate a
+missing cache entry, find an exact already-appended anchor, and finish the
+state transition without duplicating the event. A claimed `anchored` state is
+never trusted by itself; it is rechecked against the verified Spine chain.
+Conflicting or malformed anchors fail closed.
 
 Crash reconciliation is dry-run by default. It reports temporary residue,
 corrupt records, and conflict candidates whose primary Order is missing.
@@ -222,6 +228,15 @@ that the bytes have not changed. They do not prove that an asset exists, that a
 description is honest, that either party controls inventory or funds, that a
 Rule Package is socially trustworthy, or that delivery or settlement occurred.
 An Order is an agreed execution input, not a Receipt and not a payment record.
+
+Before execution, a node must call the Rule execution-readiness gate with its
+current local policy. The gate reloads every content-addressed package,
+recursively resolves all dependencies under both signed party-policy snapshots
+and the executor's current policy, and requires each result to match the exact
+Order bindings. Package manifests are also reevaluated at execution time.
+Offer activity is replayed at the signed acceptance time: expiry of a market
+listing does not erase an already accepted Order, while expiry of an executable
+Rule Package still blocks execution.
 
 The Agreement conformance vector uses deterministic public test keys and
 contains the exact Offer, Proposal, Acceptance, Order, and content digests.
@@ -279,22 +294,27 @@ The reviewed protocol kernel currently contains:
   Offer, Proposal, and Acceptance;
 - bounded, cross-process-safe Order CAS caching with retained equivocation
   candidates, bounded reconciliation, and explicit non-audit semantics;
+- bounded write-ahead Order audit records with recoverable CAS persistence,
+  exact idempotent `trade.order.accepted` Spine anchoring, and cross-log
+  validation;
+- execution-time transitive Rule Package re-resolution under both signed
+  party policies and a mandatory current executor policy;
 - bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - schemas and deterministic positive and negative conformance vectors,
-  including Agreement v1;
+  including Agreement v1 and the `trade.order.accepted` payload;
 - focused tests.
 
-Agreement and Order objects are protocol-kernel primitives only. A durable
-transactional outbox is still required before Order persistence and Spine audit
-projection can be presented as one recoverable workflow; a best-effort
-store-then-append dual write is explicitly not accepted. Offer/Agreement
-federation, persistent/governed recognition policy, inventory or asset
-reservation, UI, fulfillment, payment, signed execution Receipts, and
-executable Adapters remain separate independently reviewed slices. The local
-HTTP endpoints are not yet a federation protocol. Trade Offer v2, Rule Package
-loading, Agreement creation, and Order storage cannot execute settlement.
+Agreement and Order objects remain protocol-kernel primitives. The audit
+outbox makes local Order persistence and Spine projection recoverable, but it
+does not make separate files atomically committed and it is not a settlement
+ledger. Offer/Agreement federation, persistent/governed recognition policy,
+inventory or asset reservation, UI, fulfillment, payment, signed execution
+Receipts, and executable Adapters remain separate independently reviewed
+slices. The local HTTP endpoints are not yet a federation protocol. Trade Offer
+v2, Rule Package loading, Agreement creation, and Order storage cannot execute
+settlement.
 
 ## Deferred Repository Quality Sweep
 

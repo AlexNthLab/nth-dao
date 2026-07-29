@@ -242,34 +242,12 @@ def _policy_snapshot(
     label: str,
 ) -> RuleResolutionPolicy:
     document = _exact_fields(value, _POLICY_FIELDS, label)
-    if (
-        document["kind"] != "nth.dao.trade.rule-resolution-policy"
-        or document["protocol_version"] != "1"
-    ):
-        _reject(f"{label} version is invalid")
     try:
-        policy = RuleResolutionPolicy(
-            accepted_publishers=document["accepted_publishers"],
-            accepted_package_digests=document[
-                "accepted_package_digests"
-            ],
-            available_capabilities=document["available_capabilities"],
-            allowed_permissions=document["allowed_permissions"],
-            allowed_execution_modes=document["allowed_execution_modes"],
-            approved_executable_digests=document[
-                "approved_executable_digests"
-            ],
-            max_depth=document["max_depth"],
-            max_packages=document["max_packages"],
-            max_resource_bytes=document["max_resource_bytes"],
-        )
-        canonical = trade_canonical_json(document)
+        policy = RuleResolutionPolicy.from_dict(document)
     except (TradeCanonicalJSONError, TypeError, ValueError) as exc:
         raise TradeAgreementRejected(
             f"{label} is invalid: {exc}"
         ) from exc
-    if policy.canonical_bytes != canonical:
-        _reject(f"{label} is not canonical")
     return policy
 
 

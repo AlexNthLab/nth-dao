@@ -94,6 +94,47 @@ class RuleResolutionPolicy:
     max_packages: int = DEFAULT_MAX_RESOLVED_PACKAGES
     max_resource_bytes: int = DEFAULT_MAX_RESOLVED_RESOURCE_BYTES
 
+    @classmethod
+    def from_dict(cls, document: dict[str, Any]) -> "RuleResolutionPolicy":
+        fields = {
+            "kind",
+            "protocol_version",
+            "accepted_publishers",
+            "accepted_package_digests",
+            "available_capabilities",
+            "allowed_permissions",
+            "allowed_execution_modes",
+            "approved_executable_digests",
+            "max_depth",
+            "max_packages",
+            "max_resource_bytes",
+        }
+        if not isinstance(document, dict) or set(document) != fields:
+            raise ValueError(
+                "rule resolution policy has missing or unknown fields"
+            )
+        if (
+            document["kind"] != "nth.dao.trade.rule-resolution-policy"
+            or document["protocol_version"] != "1"
+        ):
+            raise ValueError("rule resolution policy version is invalid")
+        policy = cls(
+            accepted_publishers=document["accepted_publishers"],
+            accepted_package_digests=document["accepted_package_digests"],
+            available_capabilities=document["available_capabilities"],
+            allowed_permissions=document["allowed_permissions"],
+            allowed_execution_modes=document["allowed_execution_modes"],
+            approved_executable_digests=document[
+                "approved_executable_digests"
+            ],
+            max_depth=document["max_depth"],
+            max_packages=document["max_packages"],
+            max_resource_bytes=document["max_resource_bytes"],
+        )
+        if policy.canonical_bytes != trade_canonical_json(document):
+            raise ValueError("rule resolution policy is not canonical")
+        return policy
+
     def __post_init__(self) -> None:
         object.__setattr__(
             self,

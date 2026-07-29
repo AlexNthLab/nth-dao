@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from nth_dao.spine import (
     sign_event,
     verify_event,
 )
+from nth_dao.spine.log import MAX_SPINE_LINE_BYTES
 
 
 def _id() -> AgentIdentity:
@@ -28,6 +30,18 @@ def _rewrite_line(path: Path, idx: int, obj: dict) -> None:
     lines[idx] = json.dumps(
         obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _append_in_process(path: str, index: int, output) -> None:
+    try:
+        event = SignedEventLog(
+            path,
+            AgentIdentity.generate(),
+            lock_timeout=20,
+        ).append("test.concurrent", {"index": index})
+        output.put(("ok", event.seq))
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
 
 
 def test_append_chains_and_verifies(tmp_path: Path) -> None:
@@ -82,6 +96,62 @@ def test_tamper_prev_hash_breaks_chain(tmp_path: Path) -> None:
     _rewrite_line(p, 1, second)
     ok, why = SignedEventLog(p, _id()).verify_chain()
     assert not ok
+
+
+def test_append_refuses_structurally_valid_tampered_chain(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "events.jsonl"
+    log = SignedEventLog(p, _id())
+    log.append("test.original", {"amount": 5})
+    first = json.loads(p.read_text(encoding="utf-8").splitlines()[0])
+    first["payload"]["amount"] = 9999
+    _rewrite_line(p, 0, first)
+
+    diagnostic = SignedEventLog(p, _id())
+    ok, why = diagnostic.verify_chain()
+    assert not ok and "content_hash mismatch" in why
+    with pytest.raises(ValueError, match="cannot be appended"):
+        diagnostic.append("test.must-not-append", {})
+    assert len(p.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_cross_process_append_serializes_and_reloads_chain(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "events.jsonl")
+    context = multiprocessing.get_context("spawn")
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_append_in_process,
+            args=(path, index, output),
+        )
+        for index in range(6)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    results = [output.get(timeout=5) for _ in processes]
+    assert all(result[0] == "ok" for result in results), results
+    assert sorted(result[1] for result in results) == list(range(6))
+    log = SignedEventLog(path, _id())
+    ok, why = log.verify_chain()
+    assert ok, why
+    assert len(list(log.read_all())) == 6
+
+
+def test_spine_rejects_oversized_line_without_unbounded_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b"{" + b"x" * MAX_SPINE_LINE_BYTES)
+
+    with pytest.raises(ValueError, match="exceeds byte limit"):
+        SignedEventLog(path, _id())
 
 
 def test_corrupt_line_fails_closed_not_crash(tmp_path: Path) -> None:

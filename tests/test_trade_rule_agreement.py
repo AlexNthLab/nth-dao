@@ -5,11 +5,14 @@ import multiprocessing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 import nth_dao.trade_rules as trade_rules_api
 
+from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity, crypto_available
+from nth_dao.spine import SignedEventLog
 from nth_dao.trade_rules import (
     RulePackageStore,
     RuleResolutionPolicy,
@@ -38,6 +41,7 @@ from nth_dao.trade_rules import (
 from nth_dao.trade_rules.store import OfferStore
 from nth_dao.trade_rules.agreement_conformance import (
     ACCEPTANCE_SCHEMA_PATH,
+    ORDER_AUDIT_SCHEMA_PATH,
     ORDER_SCHEMA_PATH,
     PROPOSAL_SCHEMA_PATH,
     VECTORS_PATH,
@@ -46,6 +50,21 @@ from nth_dao.trade_rules.agreement_conformance import (
 from nth_dao.trade_rules.agreement import (
     _sign_acceptance_body,
     _sign_proposal_body,
+)
+from nth_dao.trade_rules.order_audit import (
+    EVENT_TRADE_ORDER_ACCEPTED,
+    MAX_ORDER_AUDIT_RECORD_BYTES,
+    ORDER_AUDIT_ERROR_SPINE,
+    TradeOrderAuditCapacity,
+    TradeOrderAuditCoordinator,
+    TradeOrderAuditError,
+    TradeOrderAuditOutbox,
+    order_audit_payload,
+    validate_order_audit_payload,
+)
+from nth_dao.trade_rules.order_execution import (
+    TradeOrderExecutionRejected,
+    verify_trade_order_execution,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -74,12 +93,70 @@ def _process_put_order(root, order, output):
         output.put(("error", type(exc).__name__, str(exc)))
 
 
+def _process_accept_audited_order(
+    root,
+    identity_path,
+    order,
+    now_ms,
+    output,
+):
+    try:
+        identity = AgentIdentity.load(identity_path)
+        coordinator = TradeOrderAuditCoordinator(
+            TradeOrderAuditOutbox(root, lock_timeout=20),
+            TradeOrderStore(root, lock_timeout=20),
+            SignedEventLog(
+                Path(root) / "spine.jsonl",
+                identity,
+                lock_timeout=20,
+            ),
+        )
+        result = coordinator.accept(order, now_ms=now_ms)
+        output.put(
+            (
+                "ok",
+                result.created,
+                result.cache_created,
+                result.anchor_created,
+                result.record.event_id,
+            )
+        )
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
+
+
 def _setup(tmp_path):
     maker = AgentIdentity.generate()
     taker = AgentIdentity.generate()
     rule_publisher = AgentIdentity.generate()
     package_store = RulePackageStore(tmp_path)
     offer_store = OfferStore(tmp_path)
+    dependency_resource = b'{"rule":"settlement"}'
+    dependency_resource_digest = _digest(dependency_resource)
+    dependency_manifest = sign_manifest(
+        rule_publisher,
+        manifest_body(
+            rule_id="org.nthdao.test.settlement",
+            version="1.0.0",
+            publisher_did=rule_publisher.as_did(),
+            summary="Settlement dependency test rule",
+            applies_to=["service"],
+            families=["settlement"],
+            resources=[{
+                "purpose": "terms",
+                "media_type": "application/json",
+                "digest": dependency_resource_digest,
+                "size": len(dependency_resource),
+            }],
+            published_at="2026-07-01T00:00:00Z",
+            not_after="2027-01-01T00:00:00Z",
+        ),
+        created="2026-07-01T00:00:00Z",
+    )
+    dependency_digest = package_store.install(
+        dependency_manifest,
+        {dependency_resource_digest: dependency_resource},
+    ).digest
     resource = b'{"rule":"delivery"}'
     resource_digest = _digest(resource)
     manifest = sign_manifest(
@@ -91,6 +168,10 @@ def _setup(tmp_path):
             summary="Delivery agreement test rule",
             applies_to=["service"],
             families=["fulfillment"],
+            dependencies=[{
+                "rule_id": dependency_manifest.rule_id,
+                "digest": dependency_digest,
+            }],
             resources=[{
                 "purpose": "terms",
                 "media_type": "application/json",
@@ -136,7 +217,7 @@ def _setup(tmp_path):
         accepted_publishers={rule_publisher.as_did()}
     )
     maker_policy = RuleResolutionPolicy(
-        accepted_package_digests={package_digest}
+        accepted_package_digests={package_digest, dependency_digest}
     )
     taker_resolution = resolve_canonical_offer_rules(
         maker.as_did(),
@@ -159,6 +240,10 @@ def _setup(tmp_path):
         "taker": taker,
         "offer": offer,
         "offer_store": offer_store,
+        "package_store": package_store,
+        "dependency_digest": dependency_digest,
+        "taker_policy": taker_policy,
+        "maker_policy": maker_policy,
         "taker_resolution": taker_resolution,
         "maker_resolution": maker_resolution,
     }
@@ -987,6 +1072,10 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
     assert acceptance_digest(acceptance) == stored["acceptance_digest"]
     assert trade_order_digest(order) == stored["order_digest"]
     assert verify_acceptance_binding(proposal, acceptance) == (True, "ok")
+    assert stored["order_audit"]["event_type"] == EVENT_TRADE_ORDER_ACCEPTED
+    assert validate_order_audit_payload(
+        stored["order_audit"]["payload"]
+    ) == order_audit_payload(order)
 
 
 def test_negative_agreement_vectors_fail_closed():
@@ -995,12 +1084,19 @@ def test_negative_agreement_vectors_fail_closed():
         "proposal": TradeProposal.from_dict,
         "acceptance": TradeAcceptance.from_dict,
         "order": TradeOrder.from_dict,
+        "order_audit_payload": validate_order_audit_payload,
     }
 
     assert len(stored["negative_cases"]) >= 4
     for case in stored["negative_cases"]:
         assert case["expected_valid"] is False
-        with pytest.raises((TradeAgreementRejected, TradeOrderRejected)):
+        with pytest.raises(
+            (
+                TradeAgreementRejected,
+                TradeOrderAuditError,
+                TradeOrderRejected,
+            )
+        ):
             parsers[case["target"]](case["document"])
 
 
@@ -1010,6 +1106,9 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
         ACCEPTANCE_SCHEMA_PATH.read_text(encoding="utf-8")
     )
     order = json.loads(ORDER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    order_audit = json.loads(
+        ORDER_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
 
     assert proposal["$schema"].endswith("2020-12/schema")
     assert proposal["properties"]["kind"]["const"] == (
@@ -1038,4 +1137,464 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert snapshot["acceptance"]["$ref"] == acceptance["$id"]
     assert order["properties"]["rule_bindings"]["$ref"].split("#", 1)[0] == (
         proposal["$id"]
+    )
+    assert order_audit["additionalProperties"] is False
+    assert order_audit["properties"]["protocol_version"]["const"] == "1"
+    assert order_audit["properties"]["order_id"]["pattern"].startswith(
+        "^nth-trade-order-sha256:"
+    )
+    assert (
+        order_audit["$id"]
+        == "https://nthdao.org/schemas/trade-order-audit-payload-v1.json"
+    )
+
+
+def _order(context):
+    proposal = _proposal(context)
+    return create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+
+
+def _audit_runtime(tmp_path):
+    identity = AgentIdentity.generate()
+    outbox = TradeOrderAuditOutbox(tmp_path)
+    order_store = TradeOrderStore(tmp_path)
+    spine = SignedEventLog(tmp_path / "spine.jsonl", identity)
+    coordinator = TradeOrderAuditCoordinator(outbox, order_store, spine)
+    return outbox, order_store, spine, coordinator
+
+
+def test_order_audit_accept_is_write_ahead_and_idempotent(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox, order_store, spine, coordinator = _audit_runtime(tmp_path)
+
+    first = coordinator.accept(order, now_ms=1_800_000_000_000)
+    second = coordinator.accept(order, now_ms=1_800_000_000_001)
+
+    assert first.created is True
+    assert first.cache_created is True
+    assert first.anchor_created is True
+    assert second.created is False
+    assert second.cache_created is False
+    assert second.anchor_created is False
+    assert second.record.status == "anchored"
+    assert order_store.get(order.order_id) == order
+    assert outbox.get(trade_order_digest(order)).status == "anchored"
+    events = [
+        event
+        for event in spine.read_all()
+        if event.type == EVENT_TRADE_ORDER_ACCEPTED
+    ]
+    assert len(events) == 1
+    assert events[0].payload == order_audit_payload(order)
+    assert events[0].content_hash == second.record.event_id
+
+
+@pytest.mark.parametrize("crash_point", ["prepared", "cached", "appended"])
+def test_order_audit_recovers_each_cross_file_crash_window(
+    tmp_path,
+    crash_point,
+):
+    order = _order(_setup(tmp_path))
+    outbox, order_store, spine, coordinator = _audit_runtime(tmp_path)
+    record, created = outbox.prepare(order, now_ms=1_800_000_000_000)
+    assert created is True
+    if crash_point in {"cached", "appended"}:
+        order_store.put(order)
+        record = outbox.transition(
+            record.order_digest,
+            expected=frozenset({"prepared"}),
+            status="cached",
+            now_ms=1_800_000_000_001,
+        )
+    if crash_point == "appended":
+        spine.append(
+            EVENT_TRADE_ORDER_ACCEPTED,
+            order_audit_payload(order),
+            ts_ms=1_800_000_000_002,
+        )
+
+    report = coordinator.reconcile(
+        limit=10,
+        now_ms=1_800_000_000_003,
+    )
+
+    assert report.scanned == 1
+    assert report.anchored == 1
+    assert report.blocked == 0
+    assert report.failed == 0
+    stored = outbox.get(record.order_digest)
+    assert stored.status == "anchored"
+    assert order_store.get(order.order_id) == order
+    assert len([
+        event
+        for event in spine.read_all()
+        if event.type == EVENT_TRADE_ORDER_ACCEPTED
+    ]) == 1
+
+
+def test_order_audit_fails_closed_on_conflicting_spine_anchor(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox, order_store, spine, coordinator = _audit_runtime(tmp_path)
+    record, _created = outbox.prepare(order, now_ms=1_800_000_000_000)
+    order_store.put(order)
+    outbox.transition(
+        record.order_digest,
+        expected=frozenset({"prepared"}),
+        status="cached",
+        now_ms=1_800_000_000_001,
+    )
+    conflicting = order_audit_payload(order)
+    conflicting["acceptance_digest"] = "sha256:" + "0" * 64
+    spine.append(
+        EVENT_TRADE_ORDER_ACCEPTED,
+        conflicting,
+        ts_ms=1_800_000_000_002,
+    )
+
+    with pytest.raises(TradeOrderAuditError, match="conflicting anchor"):
+        coordinator.accept(order, now_ms=1_800_000_000_003)
+
+    retained = outbox.get(record.order_digest)
+    assert retained.status == "cached"
+    assert retained.last_error == ORDER_AUDIT_ERROR_SPINE
+    assert retained.attempts == 1
+
+
+def test_order_audit_outbox_detects_record_tampering(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox = TradeOrderAuditOutbox(tmp_path)
+    record, _created = outbox.prepare(order, now_ms=1_800_000_000_000)
+    path = outbox._path(record.order_digest)
+    value = json.loads(path.read_bytes())
+    value["order_digest"] = "sha256:" + "f" * 64
+    path.write_bytes(canonical_json(value))
+
+    with pytest.raises(
+        TradeOrderAuditError,
+        match="filename does not match|digest binding mismatch",
+    ):
+        outbox.get(record.order_digest)
+
+
+def test_order_audit_outbox_bounds_existing_oversized_record(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox = TradeOrderAuditOutbox(tmp_path)
+    record, _created = outbox.prepare(order, now_ms=1_800_000_000_000)
+    path = outbox._path(record.order_digest)
+    path.write_bytes(b"x" * (MAX_ORDER_AUDIT_RECORD_BYTES + 1))
+
+    with pytest.raises(
+        TradeOrderAuditError,
+        match="record exceeds byte limit",
+    ):
+        outbox.get(record.order_digest)
+
+    bounded = TradeOrderAuditOutbox(
+        tmp_path,
+        max_bytes=MAX_ORDER_AUDIT_RECORD_BYTES,
+    )
+    with pytest.raises(
+        TradeOrderAuditCapacity,
+        match="existing audit outbox exceeds max_bytes",
+    ):
+        bounded.get(record.order_digest)
+
+
+def test_order_audit_concurrent_accept_appends_one_anchor(tmp_path):
+    order = _order(_setup(tmp_path))
+    _outbox, _order_store, spine, coordinator = _audit_runtime(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(
+            executor.map(
+                lambda index: coordinator.accept(
+                    order,
+                    now_ms=1_800_000_000_000 + index,
+                ),
+                range(8),
+            )
+        )
+
+    assert sum(result.created for result in results) == 1
+    assert sum(result.cache_created for result in results) == 1
+    assert sum(result.anchor_created for result in results) == 1
+    assert len([
+        event
+        for event in spine.read_all()
+        if event.type == EVENT_TRADE_ORDER_ACCEPTED
+    ]) == 1
+
+
+def test_order_audit_cross_process_accept_is_exactly_once(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    runtime_root = tmp_path / "runtime"
+    identity_path = tmp_path / "node-identity.json"
+    identity = AgentIdentity.generate(save_path=identity_path)
+    process_context = multiprocessing.get_context("spawn")
+    output = process_context.Queue()
+    processes = [
+        process_context.Process(
+            target=_process_accept_audited_order,
+            args=(
+                str(runtime_root),
+                str(identity_path),
+                order.to_dict(),
+                1_800_000_000_000 + index,
+                output,
+            ),
+        )
+        for index in range(5)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=45)
+        assert process.exitcode == 0
+    results = [output.get(timeout=5) for _ in processes]
+    assert all(result[0] == "ok" for result in results), results
+    assert sum(result[1] for result in results) == 1
+    assert sum(result[2] for result in results) == 1
+    assert sum(result[3] for result in results) == 1
+    assert len({result[4] for result in results}) == 1
+
+    outbox = TradeOrderAuditOutbox(runtime_root)
+    stored = outbox.get(trade_order_digest(order))
+    assert stored.status == "anchored"
+    assert TradeOrderStore(runtime_root).get(order.order_id) == order
+    spine = SignedEventLog(runtime_root / "spine.jsonl", identity)
+    events = [
+        event
+        for event in spine.read_all()
+        if event.type == EVENT_TRADE_ORDER_ACCEPTED
+    ]
+    assert len(events) == 1
+    assert spine.verify_chain() == (True, "ok")
+
+
+def test_order_audit_revalidates_anchored_status_against_spine(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox, _order_store, _spine, coordinator = _audit_runtime(tmp_path)
+    accepted = coordinator.accept(order, now_ms=1_800_000_000_000)
+    path = outbox._path(accepted.record.order_digest)
+    value = json.loads(path.read_bytes())
+    value["event_id"] = "f" * 64
+    path.write_bytes(canonical_json(value))
+
+    with pytest.raises(
+        TradeOrderAuditError,
+        match="does not match the Spine event",
+    ):
+        coordinator.accept(order, now_ms=1_800_000_000_001)
+
+    report = coordinator.reconcile(now_ms=1_800_000_000_002)
+    assert report.scanned == 1
+    assert report.verified_anchored == 0
+    assert report.failed == 1
+
+
+def test_order_audit_state_machine_cannot_regress_anchored_record(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox, _store, _spine, coordinator = _audit_runtime(tmp_path)
+    accepted = coordinator.accept(order, now_ms=1_800_000_000_000)
+
+    with pytest.raises(TradeOrderAuditError, match="invalid audit transition"):
+        outbox.transition(
+            accepted.record.order_digest,
+            expected=frozenset({"anchored"}),
+            status="prepared",
+            now_ms=1_800_000_000_001,
+        )
+    assert outbox.get(accepted.record.order_digest).status == "anchored"
+
+
+def test_order_audit_rejects_anchor_time_before_signed_acceptance(tmp_path):
+    order = _order(_setup(tmp_path))
+    outbox, order_store, spine, coordinator = _audit_runtime(tmp_path)
+
+    with pytest.raises(
+        TradeOrderAuditError,
+        match="precedes the signed Acceptance",
+    ):
+        coordinator.accept(order, now_ms=1)
+    assert outbox.get(trade_order_digest(order)) is None
+    assert order_store.get(order.order_id) is None
+    assert list(spine.read_all()) == []
+
+
+def test_order_audit_restores_rolled_back_cache_before_trusting_anchor(
+    tmp_path,
+):
+    order = _order(_setup(tmp_path))
+    _outbox, order_store, spine, coordinator = _audit_runtime(tmp_path)
+    coordinator.accept(order, now_ms=1_800_000_000_000)
+    order_store._path(order.order_id).unlink()
+    assert order_store.get(order.order_id) is None
+
+    recovered = coordinator.accept(order, now_ms=1_800_000_000_001)
+
+    assert recovered.cache_created is True
+    assert recovered.anchor_created is False
+    assert order_store.get(order.order_id) == order
+    assert len([
+        event
+        for event in spine.read_all()
+        if event.type == EVENT_TRADE_ORDER_ACCEPTED
+    ]) == 1
+
+
+def test_order_audit_rejects_any_malformed_order_anchor(tmp_path):
+    order = _order(_setup(tmp_path))
+    _outbox, _store, spine, coordinator = _audit_runtime(tmp_path)
+    spine.append(
+        EVENT_TRADE_ORDER_ACCEPTED,
+        {"order_id": "not-a-complete-anchor"},
+        ts_ms=1_800_000_000_000,
+    )
+
+    with pytest.raises(
+        TradeOrderAuditError,
+        match="missing or unknown fields",
+    ):
+        coordinator.accept(order, now_ms=1_800_000_000_001)
+
+
+def test_order_audit_rejects_anchor_with_invalid_agreement_timestamp(
+    tmp_path,
+):
+    order = _order(_setup(tmp_path))
+    _outbox, _store, spine, coordinator = _audit_runtime(tmp_path)
+    malformed = order_audit_payload(order)
+    malformed["created_at"] = "not-rfc3339"
+    spine.append(
+        EVENT_TRADE_ORDER_ACCEPTED,
+        malformed,
+        ts_ms=1_800_000_000_000,
+    )
+
+    with pytest.raises(
+        TradeOrderAuditError,
+        match="UTC RFC3339",
+    ):
+        coordinator.accept(order, now_ms=1_800_000_000_001)
+
+
+def test_order_execution_gate_replays_all_transitive_dependencies(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+
+    readiness = verify_trade_order_execution(
+        order,
+        context["package_store"],
+        context["taker_policy"],
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    assert readiness.order_digest == trade_order_digest(order)
+    assert readiness.executor_policy_digest == context["taker_policy"].digest
+    assert context["dependency_digest"] in readiness.ordered_package_digests
+    assert len(readiness.ordered_package_digests) == 2
+    assert readiness.evaluated_at == "2026-09-01T00:00:00Z"
+
+
+def test_order_execution_gate_rejects_missing_transitive_dependency(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+
+    class MissingDependencyResolver:
+        def load(self, digest):
+            if digest == context["dependency_digest"]:
+                return None
+            return context["package_store"].load(digest)
+
+    with pytest.raises(
+        TradeOrderExecutionRejected,
+        match="required rule package is unavailable",
+    ):
+        verify_trade_order_execution(
+            order,
+            MissingDependencyResolver(),
+            context["taker_policy"],
+            at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+
+def test_order_execution_gate_honors_current_executor_revocation(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    revoked_policy = RuleResolutionPolicy()
+
+    with pytest.raises(
+        TradeOrderExecutionRejected,
+        match="current executor policy.*not accepted",
+    ):
+        verify_trade_order_execution(
+            order,
+            context["package_store"],
+            revoked_policy,
+            at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+
+def test_order_execution_gate_rejects_package_expired_after_agreement(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+
+    with pytest.raises(
+        TradeOrderExecutionRejected,
+        match="not execution-current",
+    ):
+        verify_trade_order_execution(
+            order,
+            context["package_store"],
+            context["taker_policy"],
+            at=datetime(2027, 2, 1, tzinfo=timezone.utc),
+        )
+
+
+def test_order_execution_gate_rejects_backdated_execution_time(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+
+    with pytest.raises(
+        TradeOrderExecutionRejected,
+        match="precedes the signed Acceptance",
+    ):
+        verify_trade_order_execution(
+            order,
+            context["package_store"],
+            context["taker_policy"],
+            at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        )
+
+
+def test_rule_resolution_policy_snapshot_parser_is_exact_and_canonical():
+    policy = RuleResolutionPolicy(
+        allowed_permissions={"network.read"},
+        available_capabilities={"http"},
+    )
+    document = json.loads(policy.canonical_bytes)
+    assert RuleResolutionPolicy.from_dict(document) == policy
+
+    document["unknown"] = True
+    with pytest.raises(ValueError, match="missing or unknown"):
+        RuleResolutionPolicy.from_dict(document)
+
+
+def test_order_audit_and_execution_gate_are_public_trade_rule_apis():
+    assert trade_rules_api.TradeOrderAuditCoordinator is (
+        TradeOrderAuditCoordinator
+    )
+    assert trade_rules_api.verify_trade_order_execution is (
+        verify_trade_order_execution
+    )
+    assert (
+        trade_rules_api.EVENT_TRADE_ORDER_ACCEPTED
+        == EVENT_TRADE_ORDER_ACCEPTED
     )

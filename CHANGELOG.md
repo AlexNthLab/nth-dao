@@ -5,6 +5,24 @@ All notable changes to **NTH DAO** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Recoverable Trade Order audit outbox with `prepared -> cached -> anchored`
+  state transitions and exact, idempotent `trade.order.accepted` Spine events.
+- Execution-readiness verification that reloads and resolves every transitive
+  Trade Rule dependency under both signed party policies and the executor's
+  current local policy.
+
+### Fixed
+
+- Spine append now serializes across processes, refreshes the chain head under
+  lock, validates the complete chain before writing, and rejects oversized or
+  structurally ambiguous events.
+- Order audit retries no longer trust a mutable `anchored` status file and can
+  restore a rolled-back CAS cache from the write-ahead signed Order.
+
 ## [0.10.0b1] - 2026-06-07 - Beta release: signed mandates, A2A server, hardened collaboration runtime
 
 This beta is the first v0.10 preview. It is intended for testers and
