@@ -124,6 +124,36 @@ publisher-signature-verified snapshot and may produce the package identity
 `sha256:` digest. Both Python and TypeScript verification freeze the exact
 canonical bytes before any cryptographic operation.
 
+Verified Rule Packages are cached locally by the exact signed manifest digest.
+Every declared resource must be present, and its byte length and SHA-256 digest
+must match the manifest. Resources are written before the manifest; the
+manifest is the package commit marker. Loading re-verifies the publisher
+signature and every resource. The cache never imports or executes Python,
+JavaScript, shell code, WASM, or remote services.
+
+Rule resolution is policy-driven and exact-digest only. The resolver walks
+bounded dependency graphs, rejects missing packages, conflicting packages,
+multiple digests for one Rule ID, inactive manifests, unavailable
+capabilities, and disallowed execution modes or permissions. Publisher trust
+does not grant executable authority: every non-declarative package also needs
+approval of its exact digest. Order-facing resolution selects only the
+canonical Offer lifecycle head; forked and orphan revisions cannot proceed.
+Resolver-returned package objects are not trusted assertions: resolution
+rebuilds each package from its signed manifest and exact resource bytes before
+applying recognition policy. The aggregate resource-byte budget is part of the
+canonical local policy snapshot.
+
+Canonical resolution returns an immutable binding to the selected Offer
+digest, revision, canonical lifecycle chain, evaluation time, exact Rule
+Package set, and canonical local-policy digest. A later Order can therefore
+consume one snapshot without re-reading mutable lifecycle or policy state.
+
+Package-store paths reject symlinks and Windows junctions inside the configured
+store. Crash residue is reported by a reconciliation operation. Reconciliation
+is dry-run by default; orphan resources and temporary files are removed only
+after an explicit `prune=True` request. Missing resources are reported and do
+not cause the signed manifest to be deleted.
+
 ## Trust and Recognition
 
 Package trust is a local projection. A package cannot declare itself trusted.
@@ -167,26 +197,44 @@ The reviewed protocol kernel currently contains:
 - signing and verification;
 - signed content digests;
 - append-only local Offer storage and deterministic revision projections;
+- content-addressed, non-executing Rule Package storage;
+- explicit local recognition policy and bounded exact-digest dependency
+  resolution;
+- canonical Offer-head and policy-snapshot binding before Order-facing rule
+  resolution;
+- bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - schemas and deterministic conformance vectors;
 - focused tests.
 
-Package loading, Offer federation, negotiation, Orders, UI, payment, and
-executable Adapters remain separate independently reviewed slices. The local
-HTTP endpoints are not yet a federation protocol. Trade Offer v2 is
-declarative only and cannot execute settlement.
+Offer federation, persistent/governed recognition policy, proposal and
+acceptance, Orders, UI, payment, and executable Adapters remain separate
+independently reviewed slices. The local HTTP endpoints are not yet a
+federation protocol. Trade Offer v2 and Rule Package loading are declarative
+only and cannot execute settlement.
 
 ## Deferred Repository Quality Sweep
 
 The repository-wide Ruff baseline recorded on 2026-07-29 contains 319
-historical findings, primarily in legacy examples and tests. The files changed
-for the reviewed Offer Store slice pass their focused Ruff gate, and the full
-Python and frontend test suites pass. After the transaction framework reaches
-its planned protocol boundary, run a dedicated cleanup series that:
+historical findings, primarily in legacy examples and tests. Files changed by
+the reviewed trade slices pass their focused Ruff gate. The latest full Python
+run passed except for the explicitly deselected historical concurrency test
+described below; this is not represented as an unqualified full-suite pass.
+After the transaction framework reaches its planned protocol boundary, run a
+dedicated cleanup series that:
 
 1. freezes and publishes the Ruff configuration used for the baseline;
 2. fixes findings by module in reviewable commits, without mechanical behavior
    changes;
 3. reruns each affected module's tests after every batch; and
 4. makes repository-wide Ruff success a required merge gate.
+
+The same cleanup phase must repair
+`test_concurrent_writers_do_not_lose_decisions`: its workers construct SQLite
+stores before entering a 12-party barrier, so one initialization delay or
+failure can strand every worker at the barrier. On the 2026-07-29 Python 3.14
+run this node was independently reproducible as a hang and was explicitly
+deselected from the otherwise passing full-suite run. The test needs
+failure-aware barrier cancellation and a single bounded join deadline; this is
+test-infrastructure debt, not a waived product failure.

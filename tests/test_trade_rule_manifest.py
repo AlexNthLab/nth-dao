@@ -1,5 +1,6 @@
 import copy
 import hashlib
+from datetime import datetime, timezone
 
 import pytest
 
@@ -11,6 +12,7 @@ from nth_dao.trade_rules import (
     InspectedTradeRuleManifest,
     ManifestRejected,
     TradeRuleManifest,
+    evaluate_manifest,
     inspection_digest,
     manifest_body,
     manifest_digest,
@@ -82,6 +84,27 @@ def test_manifest_sign_verify_digest_and_json_round_trip():
     loaded = TradeRuleManifest.from_json(manifest.canonical_bytes)
     assert loaded.canonical_bytes == manifest.canonical_bytes
     assert manifest_digest(loaded) == digest
+
+
+@pytest.mark.parametrize(
+    "at, expected",
+    [
+        (datetime(2026, 7, 27, tzinfo=timezone.utc), "not_yet_active"),
+        (datetime(2026, 8, 1, tzinfo=timezone.utc), "active"),
+        (datetime(2027, 7, 28, tzinfo=timezone.utc), "expired"),
+    ],
+)
+def test_manifest_activity_is_separate_from_signature_integrity(at, expected):
+    _, manifest = _signed()
+    active, reason = evaluate_manifest(manifest, at=at)
+    assert active is (expected == "active")
+    assert reason == expected
+
+
+def test_manifest_activity_requires_timezone_aware_time():
+    _, manifest = _signed()
+    with pytest.raises(ValueError, match="timezone-aware"):
+        evaluate_manifest(manifest, at=datetime(2026, 8, 1))
 
 
 def test_manifest_wrapper_is_immutable_from_returned_dict():

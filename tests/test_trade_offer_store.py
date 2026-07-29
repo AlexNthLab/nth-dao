@@ -658,3 +658,19 @@ def test_signed_import_anchors_bind_sequence_hash_and_offer_digest(tmp_path):
     ok, why = store.verify_import_anchors([forged])
     assert ok is False
     assert "mismatch" in why
+
+
+def test_canonical_snapshot_returns_view_and_head_from_one_projection(tmp_path):
+    store = OfferStore(tmp_path)
+    identity = AgentIdentity.generate()
+    offer = _offer(identity)
+    result = store.publish(offer)
+
+    view, head = store.canonical_snapshot(
+        offer.publisher_did, offer.offer_id
+    )
+
+    assert view.status == "canonical"
+    assert view.canonical_head_digest == result.digest
+    assert head is not None
+    assert offer_digest(head) == result.digest

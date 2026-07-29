@@ -78,7 +78,7 @@ _HOOK_FIELDS = frozenset(
     }
 )
 _EXECUTION_FIELDS = frozenset({"mode", "permissions"})
-_EXECUTION_MODES = frozenset(
+MANIFEST_EXECUTION_MODES = frozenset(
     {"declarative", "adapter", "sandboxed_wasm", "external_service"}
 )
 _SIDE_EFFECTS = frozenset({"none", "local", "external", "funds"})
@@ -324,7 +324,7 @@ def _validate_common(document: dict[str, Any]) -> None:
     execution = _exact_fields(document["execution"], _EXECUTION_FIELDS, "execution")
     if (
         not isinstance(execution["mode"], str)
-        or execution["mode"] not in _EXECUTION_MODES
+        or execution["mode"] not in MANIFEST_EXECUTION_MODES
     ):
         _reject("execution.mode is invalid")
     permissions = _unique_strings(
@@ -593,6 +593,37 @@ def verify_manifest(
     return _verify_signature(document)
 
 
+def evaluate_manifest(
+    manifest: TradeRuleManifest | dict[str, Any],
+    *,
+    at: datetime | None = None,
+) -> tuple[bool, str]:
+    """Evaluate signature integrity and signed publication/expiry bounds."""
+
+    try:
+        verified = (
+            TradeRuleManifest.from_json(manifest.canonical_bytes)
+            if isinstance(manifest, TradeRuleManifest)
+            else TradeRuleManifest.from_dict(manifest)
+        )
+    except (ManifestRejected, TradeCanonicalJSONError, TypeError, ValueError) as exc:
+        return False, f"invalid: {exc}"
+    moment = at or datetime.now(timezone.utc)
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("at must be timezone-aware")
+    moment = moment.astimezone(timezone.utc)
+    moment_value = (moment.replace(microsecond=0), moment.microsecond * 1_000)
+    document = verified.to_dict()
+    published = _timestamp_value(document["published_at"], label="published_at")
+    if moment_value < published:
+        return False, "not_yet_active"
+    if document["not_after"] is not None:
+        not_after = _timestamp_value(document["not_after"], label="not_after")
+        if moment_value >= not_after:
+            return False, "expired"
+    return True, "active"
+
+
 def manifest_digest(
     manifest: TradeRuleManifest | dict[str, Any],
 ) -> str:
@@ -711,7 +742,10 @@ def manifest_body(
 
 
 __all__ = [
+    "MAX_PACKAGE_RESOURCE_BYTES",
+    "MAX_RESOURCE_BYTES",
     "MANIFEST_KIND",
+    "MANIFEST_EXECUTION_MODES",
     "MANIFEST_PROOF_PURPOSE",
     "MANIFEST_PROOF_TYPE",
     "MANIFEST_PROTOCOL_VERSION",
@@ -720,6 +754,7 @@ __all__ = [
     "ManifestRejected",
     "TradeRuleManifest",
     "inspection_digest",
+    "evaluate_manifest",
     "manifest_body",
     "manifest_digest",
     "manifest_signing_input",

@@ -943,14 +943,26 @@ class OfferStore:
         active_only: bool = False,
         at: datetime | None = None,
     ) -> TradeOffer | None:
-        records, _ = self._read_records()
-        view = self._project(records, publisher_did, offer_id)
-        if view.canonical_head_digest is None:
+        _, head = self.canonical_snapshot(publisher_did, offer_id)
+        if head is None:
             return None
-        head = self._deduplicate(records)[view.canonical_head_digest].offer
         if active_only and not evaluate_offer(head, at=at)[0]:
             return None
         return head
+
+    def canonical_snapshot(
+        self,
+        publisher_did: str,
+        offer_id: str,
+    ) -> tuple[OfferChainView, TradeOffer | None]:
+        """Return one self-consistent lifecycle projection and selected head."""
+
+        records, _ = self._read_records()
+        view = self._project(records, publisher_did, offer_id)
+        if view.canonical_head_digest is None:
+            return view, None
+        head = self._deduplicate(records)[view.canonical_head_digest].offer
+        return view, head
 
     def poll(self, since_seq: int = -1, *, limit: int = 500) -> OfferPollResult:
         if isinstance(since_seq, bool) or not isinstance(since_seq, int):
