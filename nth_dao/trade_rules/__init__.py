@@ -42,6 +42,22 @@ from nth_dao.trade_rules.offer import (
     verify_offer_integrity,
     verify_offer_successor,
 )
+from nth_dao.trade_rules.store import (
+    DEFAULT_MAX_RECORDS,
+    DEFAULT_MAX_STORE_BYTES,
+    MAX_STORED_LINE_BYTES,
+    OfferChainView,
+    OfferPollResult,
+    OfferPublishResult,
+    OfferRecord,
+    OfferStore,
+    OfferStoreBusyError,
+    OfferStoreCapacityError,
+    OfferStoreCorruptionError,
+    OfferStoreCryptoUnavailableError,
+    OfferStoreError,
+    OfferStoreValidationError,
+)
 
 __all__ = [
     "MAX_SAFE_INTEGER",
@@ -80,4 +96,18 @@ __all__ = [
     "verify_offer",
     "verify_offer_integrity",
     "verify_offer_successor",
+    "DEFAULT_MAX_RECORDS",
+    "DEFAULT_MAX_STORE_BYTES",
+    "MAX_STORED_LINE_BYTES",
+    "OfferChainView",
+    "OfferPollResult",
+    "OfferPublishResult",
+    "OfferRecord",
+    "OfferStore",
+    "OfferStoreBusyError",
+    "OfferStoreCapacityError",
+    "OfferStoreCorruptionError",
+    "OfferStoreCryptoUnavailableError",
+    "OfferStoreError",
+    "OfferStoreValidationError",
 ]

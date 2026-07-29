@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from starlette.concurrency import run_in_threadpool
 
 from nth_dao.util import InterProcessLock, atomic_write_json, safe_id, safe_load_json
 
@@ -1246,6 +1247,71 @@ def _verified_spine_events(request: Request) -> Optional[list]:
     # 用读完后的 head 作键(若校验期间有并发 append,键与事件更一致)。
     spine._v2_verified_cache = (spine.head_hash, events)
     return events
+
+
+def _verify_trade_offer_spine_anchors(request: Request, store: Any) -> None:
+    """Fail closed if a signed import event no longer matches local storage."""
+
+    try:
+        events = _verified_spine_events(request)
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"trade offer Spine could not be verified: {exc}",
+        ) from exc
+    if events is None:
+        return
+    anchors: list[dict[str, Any]] = []
+    for event in events:
+        if event.type != "trade.offer.imported":
+            continue
+        payload = event.payload
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=503,
+                detail="trade offer Spine anchor has an invalid payload",
+            )
+        if (
+            payload.get("source_kind") != "local-operator"
+            or payload.get("source_id") != event.author_did
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="trade offer Spine anchor has invalid source authority",
+            )
+        anchors.append(payload)
+    ok, why = store.verify_import_anchors(anchors)
+    if not ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"trade offer cross-log integrity failure: {why}",
+        )
+
+
+def _find_trade_offer_spine_anchor(
+    request: Request,
+    result: Any,
+) -> Optional[Any]:
+    """Return the exact existing import event for an idempotent retry."""
+
+    events = _verified_spine_events(request)
+    if events is None:
+        return None
+    expected = {
+        "seq": result.seq,
+        "offer_digest": result.digest,
+        "entry_hash": result.entry_hash,
+        "publisher_did": result.chain.publisher_did,
+        "offer_id": result.chain.offer_id,
+        "source_kind": result.source_kind,
+        "source_id": result.source_id,
+    }
+    for event in reversed(events):
+        if event.type == "trade.offer.imported" and event.payload == expected:
+            return event
+    return None
 
 
 _MARKET_LISTING_TYPE_FIELD = "__nth_listing_type"
@@ -3692,6 +3758,64 @@ def _state_workspace(request: Request) -> Optional[Path]:
         return None
 
 
+def _state_trade_offer_store(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_offers
+    except AttributeError:
+        return None
+
+
+def _trade_offer_chain_to_wire(view: Any) -> Dict[str, Any]:
+    return {
+        "publisher_did": view.publisher_did,
+        "offer_id": view.offer_id,
+        "status": view.status,
+        "revision_count": len(view.all_digests),
+        "all_digests": list(view.all_digests),
+        "root_digests": list(view.root_digests),
+        "canonical_digests": list(view.canonical_digests),
+        "canonical_head_digest": view.canonical_head_digest,
+        "fork_digests": list(view.fork_digests),
+        "orphan_digests": list(view.orphan_digests),
+        "invalid_digests": list(view.invalid_digests),
+    }
+
+
+def _encode_trade_offer_cursor(view: Any) -> str:
+    from nth_dao.b64u import b64u_encode
+    from nth_dao.canonical_json import canonical_json
+
+    return b64u_encode(
+        canonical_json(
+            {
+                "publisher_did": view.publisher_did,
+                "offer_id": view.offer_id,
+            }
+        )
+    )
+
+
+def _decode_trade_offer_cursor(value: str) -> tuple[str, str]:
+    from nth_dao.b64u import b64u_decode
+
+    if not isinstance(value, str) or not 1 <= len(value) <= 1_024:
+        raise ValueError("trade offer cursor is invalid")
+    try:
+        document = json.loads(b64u_decode(value).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("trade offer cursor is invalid") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"publisher_did", "offer_id"}
+        or not isinstance(document["publisher_did"], str)
+        or not 1 <= len(document["publisher_did"]) <= 256
+        or not isinstance(document["offer_id"], str)
+        or not 1 <= len(document["offer_id"]) <= 256
+    ):
+        raise ValueError("trade offer cursor is invalid")
+    return document["publisher_did"], document["offer_id"]
+
+
 def _complete_decision(
     store: Any,
     decision_id: str,
@@ -4028,7 +4152,6 @@ def _resolve_decision_locked(
                    "Bootstrap the workspace receipts dir first.",
         )
 
-    signer_did = identity.as_did() if hasattr(identity, "as_did") else ""
     goal_id = decision.get("mission_id") or decision_id
     existing_receipt = _find_persisted_decision_receipt(
         receipts_store,
@@ -7928,6 +8051,217 @@ def register_v2_routes(app: FastAPI) -> None:
         # than presenting executable-looking sample policy as live authority.
         return []
 
+    @app.post("/api/v2/trade/offers")
+    async def v2_trade_offer_publish(request: Request) -> Dict[str, Any]:
+        """Verify and append one already-signed Trade Offer v2 document."""
+        from nth_dao.trade_rules import (
+            InspectedTradeOffer,
+            OfferStoreBusyError,
+            OfferStoreCapacityError,
+            OfferStoreCorruptionError,
+            OfferStoreCryptoUnavailableError,
+            OfferStoreError,
+            OfferStoreValidationError,
+        )
+
+        store = _state_trade_offer_store(request)
+        if store is None:
+            raise HTTPException(status_code=503, detail="trade offer store unavailable")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail="trade offer requires Content-Type application/json",
+            )
+        identity = _state_node_identity(request)
+        source_id = (
+            identity.as_did()
+            if identity is not None and hasattr(identity, "as_did")
+            else ""
+        )
+        spine = _state_spine(request)
+        try:
+            raw_body = await request.body()
+
+            def _verify_and_publish() -> Any:
+                # Parse exact transport bytes in the worker. Letting
+                # FastAPI/json.loads build a dict first would collapse
+                # duplicate keys before the signed-document validator sees
+                # them. Signature verification, lock waits, and fsync are all
+                # blocking work and must not run on the ASGI event loop.
+                inspected = InspectedTradeOffer.from_json(raw_body)
+                result = store.publish(
+                    inspected.to_dict(),
+                    source_kind="local-operator",
+                    source_id=source_id,
+                )
+                audit_event_id = ""
+                audit_warning = ""
+                if spine is None:
+                    audit_warning = "signed spine unavailable"
+                else:
+                    try:
+                        existing_anchor = (
+                            None
+                            if result.appended
+                            else _find_trade_offer_spine_anchor(request, result)
+                        )
+                        if existing_anchor is not None:
+                            audit_event_id = existing_anchor.event_id
+                        elif (
+                            result.source_kind == "local-operator"
+                            and result.source_id == source_id
+                        ):
+                            event = spine.append(
+                                "trade.offer.imported",
+                                {
+                                    "seq": result.seq,
+                                    "offer_digest": result.digest,
+                                    "entry_hash": result.entry_hash,
+                                    "publisher_did": inspected.publisher_did,
+                                    "offer_id": inspected.offer_id,
+                                    "source_kind": result.source_kind,
+                                    "source_id": result.source_id,
+                                },
+                            )
+                            audit_event_id = event.event_id
+                        else:
+                            audit_warning = (
+                                "existing offer provenance is not local-operator"
+                            )
+                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                        logger.warning(
+                            "trade offer spine audit failed: %s", exc
+                        )
+                        audit_warning = "signed spine append failed"
+                return result, audit_event_id, audit_warning
+
+            result, audit_event_id, audit_warning = await run_in_threadpool(
+                _verify_and_publish
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OfferStoreCryptoUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except OfferStoreBusyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OfferStoreCapacityError as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except OfferStoreCorruptionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer store integrity failure: {exc}",
+            ) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"trade offer persistence failed: {exc}"
+            ) from exc
+        return {
+            "digest": result.digest,
+            "appended": result.appended,
+            "classification": result.classification,
+            "entry_hash": result.entry_hash,
+            "chain": _trade_offer_chain_to_wire(result.chain),
+            "audit_event_id": audit_event_id,
+            "audit_warning": audit_warning,
+        }
+
+    @app.get("/api/v2/trade/offers")
+    def v2_trade_offer_list(
+        request: Request,
+        cursor: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Return lifecycle projections; conflicts are visible, never hidden."""
+        from nth_dao.trade_rules import (
+            OfferStoreBusyError,
+            OfferStoreCryptoUnavailableError,
+            OfferStoreError,
+        )
+
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be in 1..500")
+        try:
+            after_key = _decode_trade_offer_cursor(cursor) if cursor else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store = _state_trade_offer_store(request)
+        if store is None:
+            raise HTTPException(status_code=503, detail="trade offer store unavailable")
+        try:
+            views = store.list_chains()
+            _verify_trade_offer_spine_anchors(request, store)
+            if after_key is not None:
+                views = tuple(
+                    view
+                    for view in views
+                    if (view.publisher_did, view.offer_id) > after_key
+                )
+            selected = views[:limit + 1]
+            page = selected[:limit]
+            return {
+                "items": [
+                _trade_offer_chain_to_wire(view)
+                    for view in page
+                ],
+                "next_cursor": (
+                    _encode_trade_offer_cursor(page[-1])
+                    if len(selected) > limit and page
+                    else ""
+                ),
+            }
+        except (OfferStoreBusyError, OfferStoreCryptoUnavailableError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer store integrity failure: {exc}",
+            ) from exc
+
+    @app.get("/api/v2/trade/offers/{digest}")
+    def v2_trade_offer_get(
+        digest: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Return one exact content-addressed signed offer."""
+        from nth_dao.trade_rules import (
+            OfferStoreBusyError,
+            OfferStoreCryptoUnavailableError,
+            OfferStoreError,
+        )
+
+        store = _state_trade_offer_store(request)
+        if store is None:
+            raise HTTPException(status_code=503, detail="trade offer store unavailable")
+        try:
+            offer = store.get(digest)
+            _verify_trade_offer_spine_anchors(request, store)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (OfferStoreBusyError, OfferStoreCryptoUnavailableError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer store integrity failure: {exc}",
+            ) from exc
+        if offer is None:
+            raise HTTPException(status_code=404, detail="trade offer not found")
+        return {"digest": digest, "offer": offer.to_dict()}
+
     @app.get("/api/v2/market/open")
     def v2_market_open(
         request: Request,
@@ -9557,7 +9891,6 @@ def register_v2_routes(app: FastAPI) -> None:
         agent 自己的 spawn cap_token 做调用方鉴权)→ agent 用自己私钥
         claim_announcement 并签 ClaimReceipt → 原样回传(含 409 冲突/403 拒)。
         """
-        import asyncio
         import urllib.error
         import urllib.request
 

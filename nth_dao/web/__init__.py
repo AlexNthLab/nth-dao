@@ -98,6 +98,7 @@ _FEDERATION_HELLO_MAX_BODY_BYTES = 16 * 1024
 _COMMERCE_CART_MAX_BODY_BYTES = 256 * 1024
 _COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
 _COMMERCE_WRITE_MAX_BODY_BYTES = 768 * 1024
+_TRADE_OFFER_MAX_BODY_BYTES = 256 * 1024
 
 
 class _RequestBodyTooLarge(Exception):
@@ -138,10 +139,16 @@ class _FederationBodyLimitMiddleware:
             and scope.get("method") in {"POST", "PUT", "PATCH"}
             and path.startswith("/api/v2/commerce/")
         )
+        is_trade_offer_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/trade/offers"
+        )
         if not (
             is_foreign_claim
             or is_federation_hello
             or is_commerce_write
+            or is_trade_offer_write
         ):
             await self.app(scope, receive, send)
             return
@@ -158,6 +165,9 @@ class _FederationBodyLimitMiddleware:
         elif is_commerce_sync:
             max_body_bytes = _COMMERCE_SYNC_MAX_BODY_BYTES
             body_label = "commerce sync"
+        elif is_trade_offer_write:
+            max_body_bytes = _TRADE_OFFER_MAX_BODY_BYTES
+            body_label = "trade offer"
         else:
             max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
             body_label = "commerce write"
@@ -649,6 +659,11 @@ class WebState:
             max_per_window=300,
             window_seconds=60.0,
         )
+        # Trade Offer v2 is intentionally separate from the legacy, rigid
+        # Commerce v1 listing model. The append-only store retains signed
+        # revisions and conflicts for local projection and later federation.
+        from ..trade_rules import OfferStore
+        self.trade_offers = OfferStore(workspace)
         # v0.10 V-30: per-actor rate limiters for the two crypto-heavy
         # /api/mandates/* routes. The verify endpoint is more sensitive
         # (free oracle + timing side-channel) so its window is tighter.

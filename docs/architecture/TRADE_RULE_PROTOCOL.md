@@ -65,6 +65,29 @@ revision binds the exact previous Offer digest. `withdrawn` is terminal.
 Registries key lifecycle chains by `(publisher_did, offer_id)` and must retain
 forks as conflicts rather than silently applying last-write-wins.
 
+The local Offer Store is an append-only JSONL fact source. It stores each
+signature-valid content digest once and derives lifecycle views without
+rewriting signed records. Out-of-order revisions remain `incomplete` until
+their predecessor arrives. Equivocating roots or successors remain `forked`;
+known-invalid edges remain `invalid`. No conflicted chain is promoted to a
+canonical head. A malformed, oversized, empty, or duplicate stored line blocks
+the projection instead of silently restoring an older active revision.
+
+Each local envelope binds its sequence, predecessor envelope hash, Offer
+digest, receipt time, and import provenance into a SHA-256 hash chain. A
+durable checkpoint detects tail truncation; after a crash, a fully fsynced and
+valid tail may advance a stale checkpoint. Record count, total bytes, and line
+size are bounded. Local API imports also emit a signed
+`trade.offer.imported` Spine event binding the exact sequence, envelope hash,
+Offer digest, publisher, Offer ID, and source. Read APIs fail closed if an
+existing signed import anchor no longer matches the Offer log.
+
+These controls detect corruption, one-sided rollback, and many accidental
+recovery errors. They are not external consensus or immutable storage. An
+operator with write access who rolls back both the Offer log and the signed
+Spine can still erase local history. Federation must retain and compare signed
+heads across nodes before stronger rollback-resistance can be claimed.
+
 An Offer is a signed claim, not proof that an item exists, a valuation is fair,
 or settlement is safe. Publishing or verifying an Offer never transfers an
 asset. Negotiation must later produce an immutable Order that binds the exact
@@ -143,9 +166,27 @@ The reviewed protocol kernel currently contains:
 - NTH Trade Canonical JSON v1 validation;
 - signing and verification;
 - signed content digests;
+- append-only local Offer storage and deterministic revision projections;
+- strict local operator APIs for signed publish, paginated chain listing, and
+  exact digest retrieval;
 - schemas and deterministic conformance vectors;
 - focused tests.
 
-Package loading, registry, Offer federation, negotiation, Orders, UI, payment,
-and executable Adapters remain separate independently reviewed slices. Trade
-Offer v2 is declarative only and cannot execute settlement.
+Package loading, Offer federation, negotiation, Orders, UI, payment, and
+executable Adapters remain separate independently reviewed slices. The local
+HTTP endpoints are not yet a federation protocol. Trade Offer v2 is
+declarative only and cannot execute settlement.
+
+## Deferred Repository Quality Sweep
+
+The repository-wide Ruff baseline recorded on 2026-07-29 contains 319
+historical findings, primarily in legacy examples and tests. The files changed
+for the reviewed Offer Store slice pass their focused Ruff gate, and the full
+Python and frontend test suites pass. After the transaction framework reaches
+its planned protocol boundary, run a dedicated cleanup series that:
+
+1. freezes and publishes the Ruff configuration used for the baseline;
+2. fixes findings by module in reviewable commits, without mechanical behavior
+   changes;
+3. reruns each affected module's tests after every batch; and
+4. makes repository-wide Ruff success a required merge gate.
