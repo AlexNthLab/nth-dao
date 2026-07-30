@@ -233,14 +233,86 @@ Before execution, a node must call the Rule execution-readiness gate with its
 current local policy. The gate reloads every content-addressed package,
 recursively resolves all dependencies under both signed party-policy snapshots
 and the executor's current policy, and requires each result to match the exact
-Order bindings. Package manifests are also reevaluated at execution time.
+Order bindings. The resulting readiness snapshot includes the union of
+required capabilities, permissions, and execution modes across the complete
+dependency closure. Package manifests are also reevaluated at execution time.
 Offer activity is replayed at the signed acceptance time: expiry of a market
 listing does not erase an already accepted Order, while expiry of an executable
 Rule Package still blocks execution.
 
+An executor may then issue a Trade Execution Receipt v1. The Receipt binds the
+exact Order digest and ID, the complete execution-readiness snapshot and
+digest, the executor's current policy digest, the ordered Rule Package
+digests, a content-addressed Adapter identity, a content-addressed result, and
+zero or more content-addressed evidence items. The execution ID is derived
+only from the immutable Order digest, operation ID, and executor DID. One
+bilaterally signed operation grant therefore has one terminal Receipt identity.
+Multiple separately auditable attempts require separately granted operation
+IDs; a signer cannot evade conflict detection by inventing a new opaque
+idempotency commitment.
+
+Version 1 accepts only the Order maker or taker as the Receipt signer and
+requires the declared role to match the signed Order. Third-party Agent
+execution is intentionally rejected until a signed, revocable delegation
+capability can be verified. The creation API re-runs the execution-readiness
+gate at `started_at`; an Adapter execution mode outside that result is
+rejected. The Adapter descriptor is loaded through a local resolver by exact
+content digest. Its ID, version, execution mode, supported Rule Hook, and
+permission set must match both the signed Receipt/Rule and explicit local
+Adapter policy. The descriptor is an allowlisted identity for executable
+code; it is not itself an execution sandbox.
+
+Permissions are scoped twice. The readiness snapshot retains the union across
+the complete dependency closure so local policy can see the total requirement.
+Each Hook contract separately declares the exact permissions granted to its
+Adapter, and that set must be a subset of its own Manifest
+`execution.permissions`. An unrelated dependency cannot enlarge the current
+Hook's Adapter authority.
+
+Both operation input and result descriptors must resolve to exact bytes under
+their declared digest and size before signing or receiver acceptance. The Hook
+input and output schemas must be immutable resources embedded in the same Rule
+Package. Input is always validated; a successful result is also validated
+against the output schema. The core exposes an injected schema-validator
+contract and the optional `nth-dao[trade-validation]` extra supplies a JSON
+Schema 2020-12 adapter.
+
+Receipt timestamps use one canonical UTC representation: whole seconds omit
+the fractional component, and nonzero fractions contain exactly six
+microsecond digits. Nanosecond-looking strings are rejected rather than
+silently truncated and reattached as false precision.
+
+A Trade Execution Receipt is a signed claim, not an oracle. Its signature
+proves who made the claim and that its bytes are unchanged. Content digests
+make results and evidence addressable, but do not prove that those bytes are
+truthful, complete, available, or sufficient. Receipt creation does not run an
+Adapter, transfer an asset, mutate an Order, settle payment, or grant
+reputation. A receiving node must call
+`verify_execution_receipt_under_policy()` with its own Rule Package resolver
+and local Rule and Adapter policies, content resolver, and schema validator
+before relying on the claimed readiness; a valid party signature cannot bypass
+that replay. Receipt issuance is exposed through
+`TradeExecutionCoordinator`, which writes through the conflict-retaining CAS
+before returning. The CAS retains the first contradictory signed candidate and
+records a durable conflict marker before capacity checks, so later reads fail
+closed even if the full candidate cannot fit. `conflict_status()` exposes the
+marker digest, retained Receipt digests, and whether retention is complete.
+This makes Receipt publication idempotent; it does not make an Adapter's
+external side effects exactly-once. Recoverable Spine projection, delegation,
+sandboxed Adapter execution, and transactional side-effect outboxes remain
+separate reviewed slices.
+
+`nth_dao.execution_receipt.ExecutionReceipt` is a different wire protocol for
+an Agent's generic goal timeline. A Trade Execution Receipt is specifically
+bound to a bilateral Trade Order, operation grant, Rule Hook, and Adapter
+policy. The two signed objects have different purposes and are never
+implicitly converted.
+
 The Agreement conformance vector uses deterministic public test keys and
-contains the exact Offer, Proposal, Acceptance, Order, and content digests.
-Those keys must never be reused or trusted.
+contains the exact Offer, Proposal, Acceptance, Order, Rule Package and
+resources, verifier and Adapter policies, Adapter artifact, execution content,
+expected readiness, execution Receipt, and content digests. Those keys must
+never be reused or trusted.
 
 ## Compatibility
 
@@ -299,22 +371,27 @@ The reviewed protocol kernel currently contains:
   validation;
 - execution-time transitive Rule Package re-resolution under both signed
   party policies and a mandatory current executor policy;
+- signed, content-addressed Trade Execution Receipt v1 claims with deterministic
+  per-Order/per-operation/per-executor identity, strict party-role and
+  operation-grant binding, content-addressed Adapter resolution, and
+  conflict-retaining local CAS storage;
 - bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - schemas and deterministic positive and negative conformance vectors,
-  including Agreement v1 and the `trade.order.accepted` payload;
+  including Agreement v1, Execution Receipt v1, and the
+  `trade.order.accepted` payload;
 - focused tests.
 
 Agreement and Order objects remain protocol-kernel primitives. The audit
 outbox makes local Order persistence and Spine projection recoverable, but it
 does not make separate files atomically committed and it is not a settlement
 ledger. Offer/Agreement federation, persistent/governed recognition policy,
-inventory or asset reservation, UI, fulfillment, payment, signed execution
-Receipts, and executable Adapters remain separate independently reviewed
-slices. The local HTTP endpoints are not yet a federation protocol. Trade Offer
-v2, Rule Package loading, Agreement creation, and Order storage cannot execute
-settlement.
+inventory or asset reservation, UI, fulfillment, payment, Receipt Spine
+projection, delegation, and sandboxed executable Adapters remain separate
+independently reviewed slices. The local HTTP endpoints are not yet a
+federation protocol. Trade Offer v2, Rule Package loading, Agreement creation,
+Order storage, and Receipt creation cannot execute settlement.
 
 ## Deferred Repository Quality Sweep
 

@@ -263,6 +263,7 @@ class RuleResolution:
     ordered_digests: tuple[str, ...]
     packages: tuple[RulePackage, ...]
     required_capabilities: tuple[str, ...]
+    required_permissions: tuple[str, ...]
     execution_modes: tuple[str, ...]
     resolved_resource_bytes: int
 
@@ -340,7 +341,15 @@ def resolve_offer_rules(
         for reference in offer_document["rule_refs"]
     )
     if not root_refs:
-        return RuleResolution((), (), (), (), (), 0)
+        return RuleResolution(
+            root_digests=(),
+            ordered_digests=(),
+            packages=(),
+            required_capabilities=(),
+            required_permissions=(),
+            execution_modes=(),
+            resolved_resource_bytes=0,
+        )
 
     visiting: set[str] = set()
     loaded: dict[str, RulePackage] = {}
@@ -507,11 +516,21 @@ def resolve_offer_rules(
             for package in ordered
         }
     )
+    permissions = sorted(
+        {
+            permission
+            for package in ordered
+            for permission in package.manifest.to_dict()["execution"][
+                "permissions"
+            ]
+        }
+    )
     return RuleResolution(
         root_digests=tuple(digest for _, digest in root_refs),
         ordered_digests=tuple(package.digest for package in ordered),
         packages=tuple(ordered),
         required_capabilities=tuple(capabilities),
+        required_permissions=tuple(permissions),
         execution_modes=tuple(modes),
         resolved_resource_bytes=resolved_resource_bytes,
     )
@@ -585,6 +604,7 @@ def resolve_canonical_offer_rules(
         ordered_digests=resolution.ordered_digests,
         packages=resolution.packages,
         required_capabilities=resolution.required_capabilities,
+        required_permissions=resolution.required_permissions,
         execution_modes=resolution.execution_modes,
         resolved_resource_bytes=resolution.resolved_resource_bytes,
         offer_publisher_did=selected.publisher_did,

@@ -54,6 +54,7 @@ def _body(identity: AgentIdentity, **overrides):
                 "input_schema_digest": _digest(b"input"),
                 "output_schema_digest": _digest(b"output"),
                 "side_effect": "none",
+                "permissions": [],
             }
         ],
         "published_at": "2026-07-28T00:00:00Z",
@@ -409,6 +410,18 @@ def test_manifest_rejects_ambiguous_hook_version():
     hooks = copy.deepcopy(_body(identity)["hook_contracts"])
     hooks[0]["version"] = "version 1"
     with pytest.raises(ManifestRejected, match="namespaced token"):
+        _body(identity, hook_contracts=hooks)
+
+
+def test_manifest_rejects_hook_permission_not_declared_by_execution():
+    identity = AgentIdentity.generate()
+    hooks = copy.deepcopy(_body(identity)["hook_contracts"])
+    hooks[0]["permissions"] = ["network.read"]
+
+    with pytest.raises(
+        ManifestRejected,
+        match="must be declared by execution.permissions",
+    ):
         _body(identity, hook_contracts=hooks)
 
 

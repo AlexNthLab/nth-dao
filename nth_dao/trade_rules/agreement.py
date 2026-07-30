@@ -637,6 +637,8 @@ def _resolution_binding(
         or replayed.ordered_digests != resolution.ordered_digests
         or replayed.required_capabilities
         != resolution.required_capabilities
+        or replayed.required_permissions
+        != resolution.required_permissions
         or replayed.execution_modes != resolution.execution_modes
         or replayed.resolved_resource_bytes
         != resolution.resolved_resource_bytes

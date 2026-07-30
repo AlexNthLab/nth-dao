@@ -14,6 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Execution-readiness verification that reloads and resolves every transitive
   Trade Rule dependency under both signed party policies and the executor's
   current local policy.
+- Signed Trade Execution Receipt v1 claims that bind an accepted Order,
+  bilateral operation grant, Rule Hook and schemas, execution-readiness
+  snapshot, current executor policy, content-addressed Adapter descriptor and
+  artifact, stable operation-scoped execution identity, result, and evidence without
+  enabling payment or settlement side effects.
+- Cross-process Trade Execution Receipt CAS storage that returns byte-identical
+  retries, retains contradictory signed candidates, and leaves a durable
+  fail-closed conflict marker when capacity prevents full retention.
+- Mandatory `TradeExecutionCoordinator` issuance through that CAS, plus public
+  conflict status that distinguishes complete retention from marker-only loss.
+- Content resolver and optional JSON Schema 2020-12 validation for exact
+  operation input and result bytes at both signing and receiver verification.
+- Hook-scoped Adapter permissions bounded by each Rule Manifest's declared
+  execution permissions, preventing dependency permissions from leaking into
+  unrelated Hook execution.
+- Public Execution Adapter schema and deterministic positive/negative
+  conformance vectors that reconstruct Rule Packages, policies, Adapter
+  artifacts, execution content, readiness, and Receipt verification.
 
 ### Fixed
 
@@ -22,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   structurally ambiguous events.
 - Order audit retries no longer trust a mutable `anchored` status file and can
   restore a rolled-back CAS cache from the write-ahead signed Order.
+- Trade Receipt timestamps no longer accept or reattach precision beyond
+  Python's microsecond clock.
 
 ## [0.10.0b1] - 2026-06-07 - Beta release: signed mandates, A2A server, hardened collaboration runtime
 

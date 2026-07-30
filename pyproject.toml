@@ -34,12 +34,18 @@ dependencies = []
 
 [project.optional-dependencies]
 # Optional extensions:
-dev = ["pytest>=7.0", "ruff>=0.1.0", "mypy>=1.0"]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "jsonschema>=4.22",
+]
 contracts = ["pydantic>=2.0"]    # stricter EvoLoop contract validation
 retries = ["tenacity>=8.0"]      # better retry primitives in generated skills
 crypto = ["pynacl>=1.5"]         # optional Ed25519 agent identity/signing
 lan = ["zeroconf>=0.131"]        # optional mDNS/Bonjour LAN discovery backend
 p2p = ["websockets>=13.0,<17.0"] # optional signed WebSocket gossip transport
+trade-validation = ["jsonschema>=4.22"] # execute Rule Hook JSON Schemas
 ux = ["qrcode[pil]>=7.4"]        # optional QR code rendering for invitations
 
 # Backend-specific (only install what you use):

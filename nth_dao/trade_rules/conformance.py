@@ -66,6 +66,7 @@ def generate_vectors() -> dict[str, Any]:
                     "sha256:" + hashlib.sha256(b"acceptance-output-v1").hexdigest()
                 ),
                 "side_effect": "none",
+                "permissions": [],
             }
         ],
         published_at="2026-07-28T00:00:00Z",

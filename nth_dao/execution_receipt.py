@@ -13,6 +13,12 @@ Why this is separate from ``agent_ledger``:
 * receipt canonicalization signs a newline-joined timeline digest, while the
   agent ledger has different reducer and storage semantics.
 
+This is also separate from
+``nth_dao.trade_rules.execution_receipt.TradeExecutionReceipt``. This module
+records an Agent's generic goal timeline. The Trade Rule object is a bilateral
+Order-bound claim with Rule, Adapter, operation-authority, and local-policy
+verification. Neither wire type is implicitly converted into the other.
+
 Per-entry canonical JSON:
 
 * keys sorted lexicographically;

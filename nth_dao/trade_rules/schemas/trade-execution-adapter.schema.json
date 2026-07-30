@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-execution-adapter-v1.json",
+  "title": "NTH DAO Trade Execution Adapter v1",
+  "$comment": "The descriptor is content-addressed and must be accepted by exact digest under local policy. A conforming resolver must also load artifact_digest bytes and recompute that digest before execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "adapter_id",
+    "adapter_version",
+    "artifact_digest",
+    "execution_modes",
+    "hooks",
+    "permissions"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.execution-adapter"},
+    "protocol_version": {"const": "1"},
+    "adapter_id": {
+      "type": "string",
+      "maxLength": 192,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:/[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)?$"
+    },
+    "adapter_version": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "artifact_digest": {"$ref": "#/$defs/digest"},
+    "execution_modes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "adapter",
+          "declarative",
+          "external_service",
+          "sandboxed_wasm"
+        ]
+      }
+    },
+    "hooks": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/hook"}
+    },
+    "permissions": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/token"}
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9][a-z0-9._:/-]*$"
+    },
+    "ruleId": {
+      "type": "string",
+      "maxLength": 192,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?)?$"
+    },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "hook_name", "hook_version"],
+      "properties": {
+        "rule_id": {"$ref": "#/$defs/ruleId"},
+        "hook_name": {"$ref": "#/$defs/token"},
+        "hook_version": {"$ref": "#/$defs/token"}
+      }
+    }
+  }
+}

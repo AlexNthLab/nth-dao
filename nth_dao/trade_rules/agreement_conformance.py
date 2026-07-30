@@ -23,6 +23,20 @@ from nth_dao.trade_rules.agreement_order import (
     create_trade_order,
     trade_order_digest,
 )
+from nth_dao.trade_rules.execution_receipt import (
+    EXECUTION_TERMS_KEY,
+    _create_trade_execution_receipt,
+    execution_receipt_digest,
+)
+from nth_dao.trade_rules.execution_adapter import (
+    TradeExecutionAdapterPolicy,
+    build_execution_adapter,
+)
+from nth_dao.trade_rules.execution_content import (
+    JsonSchema202012Validator,
+    MappingTradeExecutionContentResolver,
+)
+from nth_dao.trade_rules.canonical import trade_canonical_json
 from nth_dao.trade_rules.manifest import (
     manifest_body,
     sign_manifest,
@@ -53,6 +67,30 @@ ORDER_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-order-audit-payload.schema.json"
 )
+EXECUTION_RECEIPT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-execution-receipt.schema.json"
+)
+EXECUTION_ADAPTER_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-execution-adapter.schema.json"
+)
+
+
+class _AdapterResolver:
+    def __init__(self, adapter, artifact):
+        self._adapter = adapter
+        self._artifact = artifact
+
+    def load(self, digest):
+        return self._adapter if digest == self._adapter.digest else None
+
+    def load_artifact(self, digest):
+        return (
+            self._artifact
+            if digest == self._adapter.to_dict()["artifact_digest"]
+            else None
+        )
 
 
 def _identity(label: bytes) -> AgentIdentity:
@@ -80,6 +118,26 @@ def generate_vectors() -> dict[str, Any]:
     )
     resource = b'{"rule":"delivery"}'
     resource_digest = "sha256:" + hashlib.sha256(resource).hexdigest()
+    input_schema = trade_canonical_json({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["order"],
+        "properties": {"order": {"const": "deliver"}},
+    })
+    output_schema = trade_canonical_json({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["status"],
+        "properties": {"status": {"const": "completed"}},
+    })
+    input_schema_digest = (
+        "sha256:" + hashlib.sha256(input_schema).hexdigest()
+    )
+    output_schema_digest = (
+        "sha256:" + hashlib.sha256(output_schema).hexdigest()
+    )
     manifest = sign_manifest(
         rule_publisher,
         manifest_body(
@@ -89,12 +147,34 @@ def generate_vectors() -> dict[str, Any]:
             summary="Public bilateral agreement conformance rule.",
             applies_to=["service"],
             families=["fulfillment"],
-            resources=[{
-                "purpose": "terms",
-                "media_type": "application/json",
-                "digest": resource_digest,
-                "size": len(resource),
+            hook_contracts=[{
+                "name": "fulfillment.deliver",
+                "version": "1",
+                "input_schema_digest": input_schema_digest,
+                "output_schema_digest": output_schema_digest,
+                "side_effect": "none",
+                "permissions": [],
             }],
+            resources=[
+                {
+                    "purpose": "execution-input-schema",
+                    "media_type": "application/schema+json",
+                    "digest": input_schema_digest,
+                    "size": len(input_schema),
+                },
+                {
+                    "purpose": "execution-output-schema",
+                    "media_type": "application/schema+json",
+                    "digest": output_schema_digest,
+                    "size": len(output_schema),
+                },
+                {
+                    "purpose": "terms",
+                    "media_type": "application/json",
+                    "digest": resource_digest,
+                    "size": len(resource),
+                },
+            ],
             published_at="2026-07-01T00:00:00Z",
             not_after="2027-01-01T00:00:00Z",
         ),
@@ -105,7 +185,11 @@ def generate_vectors() -> dict[str, Any]:
         offer_store = OfferStore(directory)
         package_digest = package_store.install(
             manifest,
-            {resource_digest: resource},
+            {
+                resource_digest: resource,
+                input_schema_digest: input_schema,
+                output_schema_digest: output_schema,
+            },
         ).digest
         offer = sign_offer(
             maker,
@@ -160,7 +244,19 @@ def generate_vectors() -> dict[str, Any]:
             resolution=taker_resolution,
             offer=offer,
             offer_resolver=offer_store,
-            terms={"requested_quantity": "1"},
+            terms={
+                "requested_quantity": "1",
+                EXECUTION_TERMS_KEY: {
+                    "grants": [{
+                        "operation_id": "deliver-service",
+                        "rule_id": manifest.rule_id,
+                        "package_digest": package_digest,
+                        "hook_name": "fulfillment.deliver",
+                        "hook_version": "1",
+                        "executor_role": "maker",
+                    }]
+                },
+            },
             created_at="2026-08-01T00:00:00Z",
             not_after="2026-08-02T00:00:00Z",
             now=_utc("2026-08-01T00:00:00Z"),
@@ -178,6 +274,77 @@ def generate_vectors() -> dict[str, Any]:
             offer=offer,
             proposal=proposal,
             acceptance=acceptance,
+        )
+        adapter_artifact = b"public declarative adapter artifact v1"
+        adapter = build_execution_adapter(
+            adapter_id="org.nthdao.reference/declarative",
+            adapter_version="1.0.0",
+            artifact_digest=(
+                "sha256:"
+                + hashlib.sha256(
+                    adapter_artifact
+                ).hexdigest()
+            ),
+            execution_modes=["declarative"],
+            hooks=[{
+                "rule_id": manifest.rule_id,
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+            }],
+        )
+        execution_result = b'{"status":"completed"}'
+        execution_input = b'{"order":"deliver"}'
+        verifier_policy = RuleResolutionPolicy(
+            accepted_package_digests={package_digest}
+        )
+        adapter_policy = TradeExecutionAdapterPolicy(
+            accepted_adapter_digests={adapter.digest},
+        )
+        execution_content = {
+            (
+                "sha256:" + hashlib.sha256(execution_input).hexdigest()
+            ): execution_input,
+            (
+                "sha256:" + hashlib.sha256(execution_result).hexdigest()
+            ): execution_result,
+        }
+        execution_receipt = _create_trade_execution_receipt(
+            maker,
+            order=order,
+            package_resolver=package_store,
+            executor_policy=verifier_policy,
+            adapter_resolver=_AdapterResolver(adapter, adapter_artifact),
+            adapter_policy=adapter_policy,
+            content_resolver=MappingTradeExecutionContentResolver(
+                execution_content
+            ),
+            schema_validator=JsonSchema202012Validator(),
+            executor_role="maker",
+            adapter_id=adapter.to_dict()["adapter_id"],
+            adapter_version=adapter.to_dict()["adapter_version"],
+            adapter_digest=adapter.digest,
+            execution_mode="declarative",
+            operation_id="deliver-service",
+            operation_input={
+                "media_type": "application/json",
+                "digest": (
+                    "sha256:"
+                    + hashlib.sha256(execution_input).hexdigest()
+                ),
+                "size_bytes": len(execution_input),
+            },
+            outcome="succeeded",
+            result={
+                "media_type": "application/json",
+                "digest": (
+                    "sha256:" + hashlib.sha256(execution_result).hexdigest()
+                ),
+                "size_bytes": len(execution_result),
+            },
+            evidence=[],
+            started_at="2026-08-01T02:00:00Z",
+            completed_at="2026-08-01T02:01:00Z",
+            now=_utc("2026-08-01T02:01:00Z"),
         )
         omitted_rules_body = proposal.to_dict()
         omitted_rules_body.pop("proof")
@@ -230,6 +397,18 @@ def generate_vectors() -> dict[str, Any]:
         audit_bad_binding["proposal_digest"] = "sha256:" + ("0" * 64)
         audit_unknown_field = copy.deepcopy(audit_payload)
         audit_unknown_field["unexpected"] = True
+        execution_result_tamper = execution_receipt.to_dict()
+        execution_result_tamper["result"]["digest"] = (
+            "sha256:" + ("0" * 64)
+        )
+        execution_unknown_field = execution_receipt.to_dict()
+        execution_unknown_field["unexpected"] = True
+        execution_operation_tamper = execution_receipt.to_dict()
+        execution_operation_tamper["operation"]["hook_name"] = (
+            "fulfillment.cancel"
+        )
+        adapter_unknown_field = adapter.to_dict()
+        adapter_unknown_field["unexpected"] = True
     return {
         "format": "nth-trade-agreement-conformance-v1",
         "schema_version": 1,
@@ -240,6 +419,50 @@ def generate_vectors() -> dict[str, Any]:
         "acceptance_digest": acceptance_digest(acceptance),
         "order": order.to_dict(),
         "order_digest": trade_order_digest(order),
+        "execution_adapter": adapter.to_dict(),
+        "execution_adapter_digest": adapter.digest,
+        "execution_adapter_artifact_hex": adapter_artifact.hex(),
+        "rule_package": {
+            "digest": package_digest,
+            "manifest": manifest.to_dict(),
+            "resources": [
+                {
+                    "digest": digest,
+                    "bytes_hex": payload.hex(),
+                }
+                for digest, payload in sorted({
+                    resource_digest: resource,
+                    input_schema_digest: input_schema,
+                    output_schema_digest: output_schema,
+                }.items())
+            ],
+        },
+        "verifier_policy": json.loads(verifier_policy.canonical_bytes),
+        "adapter_policy": {
+            "accepted_adapter_digests": sorted(
+                adapter_policy.accepted_adapter_digests
+            ),
+            "allowed_execution_modes": sorted(
+                adapter_policy.allowed_execution_modes
+            ),
+            "allowed_permissions": sorted(
+                adapter_policy.allowed_permissions
+            ),
+        },
+        "execution_content": [
+            {
+                "digest": digest,
+                "bytes_hex": payload.hex(),
+            }
+            for digest, payload in sorted(execution_content.items())
+        ],
+        "execution_receipt": execution_receipt.to_dict(),
+        "execution_receipt_digest": execution_receipt_digest(
+            execution_receipt
+        ),
+        "expected_execution_readiness": (
+            execution_receipt.to_dict()["readiness"]
+        ),
         "order_audit": {
             "event_type": EVENT_TRADE_ORDER_ACCEPTED,
             "payload": audit_payload,
@@ -281,6 +504,30 @@ def generate_vectors() -> dict[str, Any]:
                 "expected_valid": False,
                 "document": audit_unknown_field,
             },
+            {
+                "case": "execution-receipt-result-tamper",
+                "target": "execution_receipt",
+                "expected_valid": False,
+                "document": execution_result_tamper,
+            },
+            {
+                "case": "execution-receipt-unknown-field",
+                "target": "execution_receipt",
+                "expected_valid": False,
+                "document": execution_unknown_field,
+            },
+            {
+                "case": "execution-receipt-operation-tamper",
+                "target": "execution_receipt",
+                "expected_valid": False,
+                "document": execution_operation_tamper,
+            },
+            {
+                "case": "execution-adapter-unknown-field",
+                "target": "execution_adapter",
+                "expected_valid": False,
+                "document": adapter_unknown_field,
+            },
         ],
     }
 
@@ -309,6 +556,8 @@ def write_vectors(path: str | Path = VECTORS_PATH) -> Path:
 
 __all__ = [
     "ACCEPTANCE_SCHEMA_PATH",
+    "EXECUTION_RECEIPT_SCHEMA_PATH",
+    "EXECUTION_ADAPTER_SCHEMA_PATH",
     "ORDER_SCHEMA_PATH",
     "ORDER_AUDIT_SCHEMA_PATH",
     "PROPOSAL_SCHEMA_PATH",

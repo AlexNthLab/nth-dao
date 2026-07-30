@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-execution-receipt-v1.json",
+  "title": "NTH DAO Trade Execution Receipt v1",
+  "$comment": "The signature proves the executor's claim and byte integrity, not that the claimed outcome is true. Order, readiness, execution-id, sorting, and role bindings require the protocol validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "execution_id",
+    "order_id",
+    "order_digest",
+    "executor_did",
+    "executor_role",
+    "readiness",
+    "readiness_digest",
+    "adapter",
+    "operation",
+    "outcome",
+    "result",
+    "evidence",
+    "started_at",
+    "completed_at",
+    "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.execution-receipt"},
+    "protocol_version": {"const": "1"},
+    "execution_id": {
+      "type": "string",
+      "pattern": "^nth-trade-execution-sha256:[0-9a-f]{64}$"
+    },
+    "order_id": {
+      "type": "string",
+      "pattern": "^nth-trade-order-sha256:[0-9a-f]{64}$"
+    },
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "executor_did": {"$ref": "#/$defs/did"},
+    "executor_role": {"enum": ["maker", "taker"]},
+    "readiness": {"$ref": "#/$defs/readiness"},
+    "readiness_digest": {"$ref": "#/$defs/digest"},
+    "adapter": {"$ref": "#/$defs/adapter"},
+    "operation": {"$ref": "#/$defs/operation"},
+    "outcome": {"enum": ["succeeded", "failed", "cancelled"]},
+    "result": {"$ref": "#/$defs/content"},
+    "evidence": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "started_at": {"$ref": "#/$defs/timestamp"},
+    "completed_at": {"$ref": "#/$defs/timestamp"},
+    "proof": {"$ref": "#/$defs/proof"}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.(?!000000)\\d{6})?Z$"
+    },
+    "stringSet": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[\\x21-\\x7e]+$"
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "protocol_version",
+        "order_digest",
+        "executor_policy_digest",
+        "ordered_package_digests",
+        "required_capabilities",
+        "required_permissions",
+        "execution_modes",
+        "resolved_resource_bytes",
+        "evaluated_at"
+      ],
+      "properties": {
+        "kind": {"const": "nth.dao.trade.execution-readiness"},
+        "protocol_version": {"const": "1"},
+        "order_digest": {"$ref": "#/$defs/digest"},
+        "executor_policy_digest": {"$ref": "#/$defs/digest"},
+        "ordered_package_digests": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        },
+        "required_capabilities": {"$ref": "#/$defs/stringSet"},
+        "required_permissions": {"$ref": "#/$defs/stringSet"},
+        "execution_modes": {"$ref": "#/$defs/stringSet"},
+        "resolved_resource_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "evaluated_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_id",
+        "adapter_version",
+        "adapter_digest",
+        "execution_mode"
+      ],
+      "properties": {
+        "adapter_id": {
+          "type": "string",
+          "maxLength": 192,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:/[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)?$"
+        },
+        "adapter_version": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+        },
+        "adapter_digest": {"$ref": "#/$defs/digest"},
+        "execution_mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "rule_id",
+        "package_digest",
+        "hook_name",
+        "hook_version",
+        "executor_role",
+        "input",
+        "input_schema_digest",
+        "output_schema_digest",
+        "side_effect"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._:-]{0,127}$"
+        },
+        "rule_id": {"$ref": "#/$defs/ruleId"},
+        "package_digest": {"$ref": "#/$defs/digest"},
+        "hook_name": {"$ref": "#/$defs/token"},
+        "hook_version": {"$ref": "#/$defs/token"},
+        "executor_role": {"enum": ["maker", "taker"]},
+        "input": {"$ref": "#/$defs/content"},
+        "input_schema_digest": {"$ref": "#/$defs/digest"},
+        "output_schema_digest": {"$ref": "#/$defs/digest"},
+        "side_effect": {"enum": ["none", "local", "external"]}
+      }
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9][a-z0-9._:/-]*$"
+    },
+    "ruleId": {
+      "type": "string",
+      "maxLength": 192,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?)?$"
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["media_type", "digest", "size_bytes"],
+      "properties": {
+        "media_type": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$"
+        },
+        "digest": {"$ref": "#/$defs/digest"},
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_type", "media_type", "digest", "size_bytes"],
+      "properties": {
+        "evidence_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$"
+        },
+        "digest": {"$ref": "#/$defs/digest"},
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "Ed25519Signature2020"},
+        "created": {"$ref": "#/$defs/timestamp"},
+        "verification_method": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "proof_purpose": {"const": "tradeExecution"},
+        "proof_value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  }
+}

@@ -212,7 +212,8 @@
         "version",
         "input_schema_digest",
         "output_schema_digest",
-        "side_effect"
+        "side_effect",
+        "permissions"
       ],
       "properties": {
         "name": {
@@ -237,6 +238,14 @@
             "external",
             "funds"
           ]
+        },
+        "permissions": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/namespacedToken"
+          }
         }
       }
     },

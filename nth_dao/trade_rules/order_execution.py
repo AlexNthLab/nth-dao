@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from nth_dao.trade_rules.canonical import trade_canonical_json
 from nth_dao.trade_rules.agreement_order import (
     TradeOrder,
     trade_order_digest,
@@ -20,6 +22,9 @@ from nth_dao.trade_rules.negotiation import (
 )
 from nth_dao.trade_rules.offer import TradeOffer
 
+EXECUTION_READINESS_KIND = "nth.dao.trade.execution-readiness"
+EXECUTION_READINESS_PROTOCOL_VERSION = "1"
+
 
 class TradeOrderExecutionRejected(ValueError):
     """The signed Order is not safe to execute under current local policy."""
@@ -31,9 +36,30 @@ class TradeOrderExecutionReadiness:
     executor_policy_digest: str
     ordered_package_digests: tuple[str, ...]
     required_capabilities: tuple[str, ...]
+    required_permissions: tuple[str, ...]
     execution_modes: tuple[str, ...]
     resolved_resource_bytes: int
     evaluated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": EXECUTION_READINESS_KIND,
+            "protocol_version": EXECUTION_READINESS_PROTOCOL_VERSION,
+            "order_digest": self.order_digest,
+            "executor_policy_digest": self.executor_policy_digest,
+            "ordered_package_digests": list(self.ordered_package_digests),
+            "required_capabilities": list(self.required_capabilities),
+            "required_permissions": list(self.required_permissions),
+            "execution_modes": list(self.execution_modes),
+            "resolved_resource_bytes": self.resolved_resource_bytes,
+            "evaluated_at": self.evaluated_at,
+        }
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + hashlib.sha256(
+            trade_canonical_json(self.to_dict())
+        ).hexdigest()
 
 
 def _utc(value: datetime, *, label: str) -> datetime:
@@ -192,6 +218,8 @@ def verify_trade_order_execution(
             or resolution.ordered_digests != baseline.ordered_digests
             or resolution.required_capabilities
             != baseline.required_capabilities
+            or resolution.required_permissions
+            != baseline.required_permissions
             or resolution.execution_modes != baseline.execution_modes
             or resolution.resolved_resource_bytes
             != baseline.resolved_resource_bytes
@@ -213,6 +241,7 @@ def verify_trade_order_execution(
         executor_policy_digest=executor_policy.digest,
         ordered_package_digests=baseline.ordered_digests,
         required_capabilities=baseline.required_capabilities,
+        required_permissions=baseline.required_permissions,
         execution_modes=baseline.execution_modes,
         resolved_resource_bytes=baseline.resolved_resource_bytes,
         evaluated_at=execution_at.isoformat().replace("+00:00", "Z"),
@@ -220,6 +249,8 @@ def verify_trade_order_execution(
 
 
 __all__ = [
+    "EXECUTION_READINESS_KIND",
+    "EXECUTION_READINESS_PROTOCOL_VERSION",
     "TradeOrderExecutionReadiness",
     "TradeOrderExecutionRejected",
     "verify_trade_order_execution",

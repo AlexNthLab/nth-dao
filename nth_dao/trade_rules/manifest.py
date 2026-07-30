@@ -75,6 +75,7 @@ _HOOK_FIELDS = frozenset(
         "input_schema_digest",
         "output_schema_digest",
         "side_effect",
+        "permissions",
     }
 )
 _EXECUTION_FIELDS = frozenset({"mode", "permissions"})
@@ -254,11 +255,12 @@ def _validate_resources(value: Any) -> None:
         _reject("resources must be sorted by purpose and digest")
 
 
-def _validate_hooks(value: Any) -> None:
+def _validate_hooks(value: Any) -> set[str]:
     if not isinstance(value, list) or len(value) > 32:
         _reject("hook_contracts must be a list with at most 32 entries")
     seen: set[tuple[str, str]] = set()
     order: list[tuple[str, str]] = []
+    required_permissions: set[str] = set()
     for index, raw in enumerate(value):
         item = _exact_fields(raw, _HOOK_FIELDS, f"hook_contracts[{index}]")
         name = _token(item["name"], label=f"hook_contracts[{index}].name")
@@ -280,6 +282,13 @@ def _validate_hooks(value: Any) -> None:
             or item["side_effect"] not in _SIDE_EFFECTS
         ):
             _reject(f"hook_contracts[{index}].side_effect is invalid")
+        hook_permissions = _unique_strings(
+            item["permissions"],
+            label=f"hook_contracts[{index}].permissions",
+            minimum=0,
+            maximum=64,
+        )
+        required_permissions.update(hook_permissions)
         key = (name, version)
         if key in seen:
             _reject("hook_contracts contains duplicate name/version entries")
@@ -287,6 +296,7 @@ def _validate_hooks(value: Any) -> None:
         order.append(key)
     if order != sorted(order):
         _reject("hook_contracts must be sorted by name and version")
+    return required_permissions
 
 
 def _validate_common(document: dict[str, Any]) -> None:
@@ -319,7 +329,7 @@ def _validate_common(document: dict[str, Any]) -> None:
         minimum=0,
         maximum=64,
     )
-    _validate_hooks(document["hook_contracts"])
+    hook_permissions = _validate_hooks(document["hook_contracts"])
 
     execution = _exact_fields(document["execution"], _EXECUTION_FIELDS, "execution")
     if (
@@ -335,6 +345,10 @@ def _validate_common(document: dict[str, Any]) -> None:
     )
     if execution["mode"] == "declarative" and permissions:
         _reject("declarative manifests cannot request permissions")
+    if not hook_permissions <= set(permissions):
+        _reject(
+            "hook_contracts permissions must be declared by execution.permissions"
+        )
 
     published = _timestamp_value(document["published_at"], label="published_at")
     not_after_raw = document["not_after"]

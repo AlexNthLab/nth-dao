@@ -5,7 +5,7 @@
     "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
     "maker_policy": {
       "accepted_package_digests": [
-        "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+        "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
       ],
       "accepted_publishers": [],
       "allowed_execution_modes": [
@@ -20,42 +20,162 @@
       "max_resource_bytes": 67108864,
       "protocol_version": "1"
     },
-    "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
-    "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+    "maker_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+    "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
     "proof": {
       "created": "2026-08-01T01:00:00Z",
       "proof_purpose": "tradeAcceptance",
-      "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+      "proof_value": "Zq4Dq2_KADNr2mvPGGYAv6DYxa2w2TRyAjDRc84WeBh_Sx23XS_21srEbHrikjTOZ3rbJLo5FlmQqfCuAzK-Ag",
       "type": "Ed25519Signature2020",
       "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
     },
-    "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+    "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
     "protocol_version": "1",
     "rule_bindings": [
       {
-        "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+        "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
         "rule_id": "org.nthdao.reference.delivery"
       }
     ],
     "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
   },
-  "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+  "acceptance_digest": "sha256:b43a6ac22acac7d0a956bcad41a49b013fa5b9f4ccab5f7d569ab722d1961735",
+  "adapter_policy": {
+    "accepted_adapter_digests": [
+      "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19"
+    ],
+    "allowed_execution_modes": [
+      "declarative"
+    ],
+    "allowed_permissions": []
+  },
+  "execution_adapter": {
+    "adapter_id": "org.nthdao.reference/declarative",
+    "adapter_version": "1.0.0",
+    "artifact_digest": "sha256:aa072db09f2d057276d82f2559ec90ae6722cad2784827e0c48eafa20c53a903",
+    "execution_modes": [
+      "declarative"
+    ],
+    "hooks": [
+      {
+        "hook_name": "fulfillment.deliver",
+        "hook_version": "1",
+        "rule_id": "org.nthdao.reference.delivery"
+      }
+    ],
+    "kind": "nth.dao.trade.execution-adapter",
+    "permissions": [],
+    "protocol_version": "1"
+  },
+  "execution_adapter_artifact_hex": "7075626c6963206465636c617261746976652061646170746572206172746966616374207631",
+  "execution_adapter_digest": "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19",
+  "execution_content": [
+    {
+      "bytes_hex": "7b226f72646572223a2264656c69766572227d",
+      "digest": "sha256:9841fad5606c5b643f2bc95bc9636470cf28cd2bbf7ee9e6b914e0047396b7f2"
+    },
+    {
+      "bytes_hex": "7b22737461747573223a22636f6d706c65746564227d",
+      "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c"
+    }
+  ],
+  "execution_receipt": {
+    "adapter": {
+      "adapter_digest": "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19",
+      "adapter_id": "org.nthdao.reference/declarative",
+      "adapter_version": "1.0.0",
+      "execution_mode": "declarative"
+    },
+    "completed_at": "2026-08-01T02:01:00Z",
+    "evidence": [],
+    "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+    "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "executor_role": "maker",
+    "kind": "nth.dao.trade.execution-receipt",
+    "operation": {
+      "executor_role": "maker",
+      "hook_name": "fulfillment.deliver",
+      "hook_version": "1",
+      "input": {
+        "digest": "sha256:9841fad5606c5b643f2bc95bc9636470cf28cd2bbf7ee9e6b914e0047396b7f2",
+        "media_type": "application/json",
+        "size_bytes": 19
+      },
+      "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+      "operation_id": "deliver-service",
+      "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+      "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+      "rule_id": "org.nthdao.reference.delivery",
+      "side_effect": "none"
+    },
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+    "outcome": "succeeded",
+    "proof": {
+      "created": "2026-08-01T02:01:00Z",
+      "proof_purpose": "tradeExecution",
+      "proof_value": "Uwu-HCnD63mpqM-msc1Nfmz5HzSZVUxvE9mHUSpMOVisGh__b4Av0lzoZ3WwFgFhdRpAHfi78azTA3QO_MOIDw",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    "protocol_version": "1",
+    "readiness": {
+      "evaluated_at": "2026-08-01T02:00:00Z",
+      "execution_modes": [
+        "declarative"
+      ],
+      "executor_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+      "kind": "nth.dao.trade.execution-readiness",
+      "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+      "ordered_package_digests": [
+        "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
+      ],
+      "protocol_version": "1",
+      "required_capabilities": [],
+      "required_permissions": [],
+      "resolved_resource_bytes": 357
+    },
+    "readiness_digest": "sha256:ccf000c2cc9899c50b9402ecb5810f3e75ef9775b634e8a6d498aef6ba666c49",
+    "result": {
+      "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+      "media_type": "application/json",
+      "size_bytes": 22
+    },
+    "started_at": "2026-08-01T02:00:00Z"
+  },
+  "execution_receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+  "expected_execution_readiness": {
+    "evaluated_at": "2026-08-01T02:00:00Z",
+    "execution_modes": [
+      "declarative"
+    ],
+    "executor_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+    "kind": "nth.dao.trade.execution-readiness",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "ordered_package_digests": [
+      "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
+    ],
+    "protocol_version": "1",
+    "required_capabilities": [],
+    "required_permissions": [],
+    "resolved_resource_bytes": 357
+  },
   "format": "nth-trade-agreement-conformance-v1",
   "negative_cases": [
     {
       "case": "signed-order-omits-required-offer-root-rule",
       "document": {
-        "acceptance_digest": "sha256:ac5d725b18df6d74ac9b5ccbd98a1923fca5ecf84e0fb3da97233ba6e6071316",
+        "acceptance_digest": "sha256:29f7a534385a48e0c3bae8d273a066962e54383b0cf6ecc22ee6605df0924e84",
         "created_at": "2026-08-01T01:00:00Z",
         "kind": "nth.dao.trade.order",
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
-        "order_id": "nth-trade-order-sha256:fd3bc8e5f094149a1e0477b22b7ee5a887959e3e6ee7854d0d13bf859ed20797",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "order_id": "nth-trade-order-sha256:dd76f24e3b8fac561b258d82e9ff3e908e5fe6735170ea8e393ee623923375a1",
         "policy_digests": {
-          "maker": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+          "maker": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
           "taker": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
         },
-        "proposal_digest": "sha256:fd3bc8e5f094149a1e0477b22b7ee5a887959e3e6ee7854d0d13bf859ed20797",
+        "proposal_digest": "sha256:dd76f24e3b8fac561b258d82e9ff3e908e5fe6735170ea8e393ee623923375a1",
         "protocol_version": "1",
         "rule_bindings": [],
         "snapshot": {
@@ -65,7 +185,7 @@
             "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
             "maker_policy": {
               "accepted_package_digests": [
-                "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+                "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
               ],
               "accepted_publishers": [],
               "allowed_execution_modes": [
@@ -80,16 +200,16 @@
               "max_resource_bytes": 67108864,
               "protocol_version": "1"
             },
-            "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
-            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "maker_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+            "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
             "proof": {
               "created": "2026-08-01T01:00:00Z",
               "proof_purpose": "tradeAcceptance",
-              "proof_value": "KmBhHNgNW78SvvXKmDqThvvKydU0C-PXSNIqHnJWvO7j7S4KwWLK9cwy9kNI7dqeQfeoETSBPc9tCkWMH8KxCg",
+              "proof_value": "kwPaGrA0FgJNprZ0jVwQ1meQSw1YD6gAe1y3ac8FGeBLE-zC3Mp50XVBvAiwn9KK9OnMSMMIJyumqhyBHxVEDA",
               "type": "Ed25519Signature2020",
               "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
             },
-            "proposal_digest": "sha256:fd3bc8e5f094149a1e0477b22b7ee5a887959e3e6ee7854d0d13bf859ed20797",
+            "proposal_digest": "sha256:dd76f24e3b8fac561b258d82e9ff3e908e5fe6735170ea8e393ee623923375a1",
             "protocol_version": "1",
             "rule_bindings": [],
             "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
@@ -103,7 +223,7 @@
             "proof": {
               "created": "2026-07-01T00:00:00Z",
               "proof_purpose": "assertionMethod",
-              "proof_value": "F9CZWUlNUu0TfivGowK2Z_Jf6M1nj2lo5NhPRNIHZgdorPV7YkUWYV4N5E6Nbhm_J0E3uUIj59PqY2Qb_LD-CA",
+              "proof_value": "Ncnkp7kdLkcZz43n5rhxcGfXw5nONDoPriBxBxXD9v5zMsgxwHBN4CqviWsGEoyQ6OlbDYaZg7ah1SQDoP5oBA",
               "type": "NthEd25519SignatureV1",
               "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
             },
@@ -124,7 +244,7 @@
             "revision": 1,
             "rule_refs": [
               {
-                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
                 "rule_id": "org.nthdao.reference.delivery"
               }
             ],
@@ -134,20 +254,20 @@
           },
           "proposal": {
             "canonical_chain_digests": [
-              "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+              "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae"
             ],
             "created_at": "2026-08-01T00:00:00Z",
             "kind": "nth.dao.trade.proposal",
             "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
             "not_after": "2026-08-02T00:00:00Z",
-            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
             "offer_id": "org.nthdao.reference/agreement",
             "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
             "offer_revision": 1,
             "proof": {
               "created": "2026-08-01T00:00:00Z",
               "proof_purpose": "tradeProposal",
-              "proof_value": "97XyLEjtkEnTFScCVTJJD8pnxm8mAsjD4GHMJbstuqIavjamf-Tr1vuevMwgzxNB4IGnM92HSzxVfW4lGBOKCw",
+              "proof_value": "rXEi9IpUSpG4F3r_Sj3KQ0yEascrMeBwX3R79xCkNMxa0xiBUt7zFx9SvSZ4_BclSDqeh82EN01zl3ZaKehVAA",
               "type": "Ed25519Signature2020",
               "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
             },
@@ -173,6 +293,18 @@
             },
             "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
             "terms": {
+              "org.nthdao.execution/v1": {
+                "grants": [
+                  {
+                    "executor_role": "maker",
+                    "hook_name": "fulfillment.deliver",
+                    "hook_version": "1",
+                    "operation_id": "deliver-service",
+                    "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+                    "rule_id": "org.nthdao.reference.delivery"
+                  }
+                ]
+              },
               "requested_quantity": "1"
             }
           }
@@ -186,27 +318,27 @@
       "case": "proposal-unknown-field",
       "document": {
         "canonical_chain_digests": [
-          "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+          "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae"
         ],
         "created_at": "2026-08-01T00:00:00Z",
         "kind": "nth.dao.trade.proposal",
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
         "not_after": "2026-08-02T00:00:00Z",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
         "offer_id": "org.nthdao.reference/agreement",
         "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
         "offer_revision": 1,
         "proof": {
           "created": "2026-08-01T00:00:00Z",
           "proof_purpose": "tradeProposal",
-          "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+          "proof_value": "6VXCTM-ieqzFAwRF--C_bBJDmwPAayfBXMJczjNgKelB6Bgfw2-fiMncstY-xhBNzINbJfytS3mR1-aquFRaAg",
           "type": "Ed25519Signature2020",
           "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
         },
         "protocol_version": "1",
         "rule_bindings": [
           {
-            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
             "rule_id": "org.nthdao.reference.delivery"
           }
         ],
@@ -230,6 +362,18 @@
         },
         "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
         "terms": {
+          "org.nthdao.execution/v1": {
+            "grants": [
+              {
+                "executor_role": "maker",
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+                "operation_id": "deliver-service",
+                "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+                "rule_id": "org.nthdao.reference.delivery"
+              }
+            ]
+          },
           "requested_quantity": "1"
         },
         "unexpected": true
@@ -245,7 +389,7 @@
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
         "maker_policy": {
           "accepted_package_digests": [
-            "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+            "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
           ],
           "accepted_publishers": [],
           "allowed_execution_modes": [
@@ -261,19 +405,19 @@
           "protocol_version": "1"
         },
         "maker_policy_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
         "proof": {
           "created": "2026-08-01T01:00:00Z",
           "proof_purpose": "tradeAcceptance",
-          "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+          "proof_value": "Zq4Dq2_KADNr2mvPGGYAv6DYxa2w2TRyAjDRc84WeBh_Sx23XS_21srEbHrikjTOZ3rbJLo5FlmQqfCuAzK-Ag",
           "type": "Ed25519Signature2020",
           "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
         },
-        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "protocol_version": "1",
         "rule_bindings": [
           {
-            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
             "rule_id": "org.nthdao.reference.delivery"
           }
         ],
@@ -285,21 +429,21 @@
     {
       "case": "order-nested-proposal-tamper",
       "document": {
-        "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+        "acceptance_digest": "sha256:b43a6ac22acac7d0a956bcad41a49b013fa5b9f4ccab5f7d569ab722d1961735",
         "created_at": "2026-08-01T01:00:00Z",
         "kind": "nth.dao.trade.order",
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
-        "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "policy_digests": {
-          "maker": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+          "maker": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
           "taker": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
         },
-        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "protocol_version": "1",
         "rule_bindings": [
           {
-            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
             "rule_id": "org.nthdao.reference.delivery"
           }
         ],
@@ -310,7 +454,7 @@
             "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
             "maker_policy": {
               "accepted_package_digests": [
-                "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+                "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
               ],
               "accepted_publishers": [],
               "allowed_execution_modes": [
@@ -325,20 +469,20 @@
               "max_resource_bytes": 67108864,
               "protocol_version": "1"
             },
-            "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
-            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "maker_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+            "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
             "proof": {
               "created": "2026-08-01T01:00:00Z",
               "proof_purpose": "tradeAcceptance",
-              "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+              "proof_value": "Zq4Dq2_KADNr2mvPGGYAv6DYxa2w2TRyAjDRc84WeBh_Sx23XS_21srEbHrikjTOZ3rbJLo5FlmQqfCuAzK-Ag",
               "type": "Ed25519Signature2020",
               "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
             },
-            "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+            "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
             "protocol_version": "1",
             "rule_bindings": [
               {
-                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
                 "rule_id": "org.nthdao.reference.delivery"
               }
             ],
@@ -353,7 +497,7 @@
             "proof": {
               "created": "2026-07-01T00:00:00Z",
               "proof_purpose": "assertionMethod",
-              "proof_value": "F9CZWUlNUu0TfivGowK2Z_Jf6M1nj2lo5NhPRNIHZgdorPV7YkUWYV4N5E6Nbhm_J0E3uUIj59PqY2Qb_LD-CA",
+              "proof_value": "Ncnkp7kdLkcZz43n5rhxcGfXw5nONDoPriBxBxXD9v5zMsgxwHBN4CqviWsGEoyQ6OlbDYaZg7ah1SQDoP5oBA",
               "type": "NthEd25519SignatureV1",
               "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
             },
@@ -374,7 +518,7 @@
             "revision": 1,
             "rule_refs": [
               {
-                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
                 "rule_id": "org.nthdao.reference.delivery"
               }
             ],
@@ -384,27 +528,27 @@
           },
           "proposal": {
             "canonical_chain_digests": [
-              "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+              "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae"
             ],
             "created_at": "2026-08-01T00:00:00Z",
             "kind": "nth.dao.trade.proposal",
             "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
             "not_after": "2026-08-02T00:00:00Z",
-            "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+            "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
             "offer_id": "org.nthdao.reference/agreement",
             "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
             "offer_revision": 1,
             "proof": {
               "created": "2026-08-01T00:00:00Z",
               "proof_purpose": "tradeProposal",
-              "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+              "proof_value": "6VXCTM-ieqzFAwRF--C_bBJDmwPAayfBXMJczjNgKelB6Bgfw2-fiMncstY-xhBNzINbJfytS3mR1-aquFRaAg",
               "type": "Ed25519Signature2020",
               "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
             },
             "protocol_version": "1",
             "rule_bindings": [
               {
-                "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+                "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
                 "rule_id": "org.nthdao.reference.delivery"
               }
             ],
@@ -428,6 +572,18 @@
             },
             "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
             "terms": {
+              "org.nthdao.execution/v1": {
+                "grants": [
+                  {
+                    "executor_role": "maker",
+                    "hook_name": "fulfillment.deliver",
+                    "hook_version": "1",
+                    "operation_id": "deliver-service",
+                    "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+                    "rule_id": "org.nthdao.reference.delivery"
+                  }
+                ]
+              },
               "requested_quantity": "2"
             }
           }
@@ -440,12 +596,12 @@
     {
       "case": "order-audit-id-proposal-binding-mismatch",
       "document": {
-        "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+        "acceptance_digest": "sha256:b43a6ac22acac7d0a956bcad41a49b013fa5b9f4ccab5f7d569ab722d1961735",
         "created_at": "2026-08-01T01:00:00Z",
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
-        "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
-        "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "proposal_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         "protocol_version": "1",
         "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
@@ -456,37 +612,269 @@
     {
       "case": "order-audit-unknown-field",
       "document": {
-        "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+        "acceptance_digest": "sha256:b43a6ac22acac7d0a956bcad41a49b013fa5b9f4ccab5f7d569ab722d1961735",
         "created_at": "2026-08-01T01:00:00Z",
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
-        "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
-        "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
-        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "protocol_version": "1",
         "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
         "unexpected": true
       },
       "expected_valid": false,
       "target": "order_audit_payload"
+    },
+    {
+      "case": "execution-receipt-result-tamper",
+      "document": {
+        "adapter": {
+          "adapter_digest": "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19",
+          "adapter_id": "org.nthdao.reference/declarative",
+          "adapter_version": "1.0.0",
+          "execution_mode": "declarative"
+        },
+        "completed_at": "2026-08-01T02:01:00Z",
+        "evidence": [],
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "executor_role": "maker",
+        "kind": "nth.dao.trade.execution-receipt",
+        "operation": {
+          "executor_role": "maker",
+          "hook_name": "fulfillment.deliver",
+          "hook_version": "1",
+          "input": {
+            "digest": "sha256:9841fad5606c5b643f2bc95bc9636470cf28cd2bbf7ee9e6b914e0047396b7f2",
+            "media_type": "application/json",
+            "size_bytes": 19
+          },
+          "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "operation_id": "deliver-service",
+          "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "rule_id": "org.nthdao.reference.delivery",
+          "side_effect": "none"
+        },
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "outcome": "succeeded",
+        "proof": {
+          "created": "2026-08-01T02:01:00Z",
+          "proof_purpose": "tradeExecution",
+          "proof_value": "Uwu-HCnD63mpqM-msc1Nfmz5HzSZVUxvE9mHUSpMOVisGh__b4Av0lzoZ3WwFgFhdRpAHfi78azTA3QO_MOIDw",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "readiness": {
+          "evaluated_at": "2026-08-01T02:00:00Z",
+          "execution_modes": [
+            "declarative"
+          ],
+          "executor_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+          "kind": "nth.dao.trade.execution-readiness",
+          "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+          "ordered_package_digests": [
+            "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
+          ],
+          "protocol_version": "1",
+          "required_capabilities": [],
+          "required_permissions": [],
+          "resolved_resource_bytes": 357
+        },
+        "readiness_digest": "sha256:ccf000c2cc9899c50b9402ecb5810f3e75ef9775b634e8a6d498aef6ba666c49",
+        "result": {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "media_type": "application/json",
+          "size_bytes": 22
+        },
+        "started_at": "2026-08-01T02:00:00Z"
+      },
+      "expected_valid": false,
+      "target": "execution_receipt"
+    },
+    {
+      "case": "execution-receipt-unknown-field",
+      "document": {
+        "adapter": {
+          "adapter_digest": "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19",
+          "adapter_id": "org.nthdao.reference/declarative",
+          "adapter_version": "1.0.0",
+          "execution_mode": "declarative"
+        },
+        "completed_at": "2026-08-01T02:01:00Z",
+        "evidence": [],
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "executor_role": "maker",
+        "kind": "nth.dao.trade.execution-receipt",
+        "operation": {
+          "executor_role": "maker",
+          "hook_name": "fulfillment.deliver",
+          "hook_version": "1",
+          "input": {
+            "digest": "sha256:9841fad5606c5b643f2bc95bc9636470cf28cd2bbf7ee9e6b914e0047396b7f2",
+            "media_type": "application/json",
+            "size_bytes": 19
+          },
+          "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "operation_id": "deliver-service",
+          "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "rule_id": "org.nthdao.reference.delivery",
+          "side_effect": "none"
+        },
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "outcome": "succeeded",
+        "proof": {
+          "created": "2026-08-01T02:01:00Z",
+          "proof_purpose": "tradeExecution",
+          "proof_value": "Uwu-HCnD63mpqM-msc1Nfmz5HzSZVUxvE9mHUSpMOVisGh__b4Av0lzoZ3WwFgFhdRpAHfi78azTA3QO_MOIDw",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "readiness": {
+          "evaluated_at": "2026-08-01T02:00:00Z",
+          "execution_modes": [
+            "declarative"
+          ],
+          "executor_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+          "kind": "nth.dao.trade.execution-readiness",
+          "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+          "ordered_package_digests": [
+            "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
+          ],
+          "protocol_version": "1",
+          "required_capabilities": [],
+          "required_permissions": [],
+          "resolved_resource_bytes": 357
+        },
+        "readiness_digest": "sha256:ccf000c2cc9899c50b9402ecb5810f3e75ef9775b634e8a6d498aef6ba666c49",
+        "result": {
+          "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+          "media_type": "application/json",
+          "size_bytes": 22
+        },
+        "started_at": "2026-08-01T02:00:00Z",
+        "unexpected": true
+      },
+      "expected_valid": false,
+      "target": "execution_receipt"
+    },
+    {
+      "case": "execution-receipt-operation-tamper",
+      "document": {
+        "adapter": {
+          "adapter_digest": "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19",
+          "adapter_id": "org.nthdao.reference/declarative",
+          "adapter_version": "1.0.0",
+          "execution_mode": "declarative"
+        },
+        "completed_at": "2026-08-01T02:01:00Z",
+        "evidence": [],
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "executor_role": "maker",
+        "kind": "nth.dao.trade.execution-receipt",
+        "operation": {
+          "executor_role": "maker",
+          "hook_name": "fulfillment.cancel",
+          "hook_version": "1",
+          "input": {
+            "digest": "sha256:9841fad5606c5b643f2bc95bc9636470cf28cd2bbf7ee9e6b914e0047396b7f2",
+            "media_type": "application/json",
+            "size_bytes": 19
+          },
+          "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "operation_id": "deliver-service",
+          "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "rule_id": "org.nthdao.reference.delivery",
+          "side_effect": "none"
+        },
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "outcome": "succeeded",
+        "proof": {
+          "created": "2026-08-01T02:01:00Z",
+          "proof_purpose": "tradeExecution",
+          "proof_value": "Uwu-HCnD63mpqM-msc1Nfmz5HzSZVUxvE9mHUSpMOVisGh__b4Av0lzoZ3WwFgFhdRpAHfi78azTA3QO_MOIDw",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "readiness": {
+          "evaluated_at": "2026-08-01T02:00:00Z",
+          "execution_modes": [
+            "declarative"
+          ],
+          "executor_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+          "kind": "nth.dao.trade.execution-readiness",
+          "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+          "ordered_package_digests": [
+            "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
+          ],
+          "protocol_version": "1",
+          "required_capabilities": [],
+          "required_permissions": [],
+          "resolved_resource_bytes": 357
+        },
+        "readiness_digest": "sha256:ccf000c2cc9899c50b9402ecb5810f3e75ef9775b634e8a6d498aef6ba666c49",
+        "result": {
+          "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+          "media_type": "application/json",
+          "size_bytes": 22
+        },
+        "started_at": "2026-08-01T02:00:00Z"
+      },
+      "expected_valid": false,
+      "target": "execution_receipt"
+    },
+    {
+      "case": "execution-adapter-unknown-field",
+      "document": {
+        "adapter_id": "org.nthdao.reference/declarative",
+        "adapter_version": "1.0.0",
+        "artifact_digest": "sha256:aa072db09f2d057276d82f2559ec90ae6722cad2784827e0c48eafa20c53a903",
+        "execution_modes": [
+          "declarative"
+        ],
+        "hooks": [
+          {
+            "hook_name": "fulfillment.deliver",
+            "hook_version": "1",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ],
+        "kind": "nth.dao.trade.execution-adapter",
+        "permissions": [],
+        "protocol_version": "1",
+        "unexpected": true
+      },
+      "expected_valid": false,
+      "target": "execution_adapter"
     }
   ],
   "order": {
-    "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+    "acceptance_digest": "sha256:b43a6ac22acac7d0a956bcad41a49b013fa5b9f4ccab5f7d569ab722d1961735",
     "created_at": "2026-08-01T01:00:00Z",
     "kind": "nth.dao.trade.order",
     "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
-    "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
-    "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+    "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+    "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
     "policy_digests": {
-      "maker": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
+      "maker": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
       "taker": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
     },
-    "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+    "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
     "protocol_version": "1",
     "rule_bindings": [
       {
-        "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+        "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
         "rule_id": "org.nthdao.reference.delivery"
       }
     ],
@@ -497,7 +885,7 @@
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
         "maker_policy": {
           "accepted_package_digests": [
-            "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77"
+            "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
           ],
           "accepted_publishers": [],
           "allowed_execution_modes": [
@@ -512,20 +900,20 @@
           "max_resource_bytes": 67108864,
           "protocol_version": "1"
         },
-        "maker_policy_digest": "sha256:f311512fed3ac341830092af32acaaaa2136729f216aebf5d7c9704098b92960",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "maker_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
         "proof": {
           "created": "2026-08-01T01:00:00Z",
           "proof_purpose": "tradeAcceptance",
-          "proof_value": "YeSO-bvrvKH15Q0lK8B3iImjalH2Aa9goTv-E9PwVSBzjs9PtHwyUFM45GFeREmwFzW32uYvSi8bcoHMzIAiCA",
+          "proof_value": "Zq4Dq2_KADNr2mvPGGYAv6DYxa2w2TRyAjDRc84WeBh_Sx23XS_21srEbHrikjTOZ3rbJLo5FlmQqfCuAzK-Ag",
           "type": "Ed25519Signature2020",
           "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
         },
-        "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+        "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "protocol_version": "1",
         "rule_bindings": [
           {
-            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
             "rule_id": "org.nthdao.reference.delivery"
           }
         ],
@@ -540,7 +928,7 @@
         "proof": {
           "created": "2026-07-01T00:00:00Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "F9CZWUlNUu0TfivGowK2Z_Jf6M1nj2lo5NhPRNIHZgdorPV7YkUWYV4N5E6Nbhm_J0E3uUIj59PqY2Qb_LD-CA",
+          "proof_value": "Ncnkp7kdLkcZz43n5rhxcGfXw5nONDoPriBxBxXD9v5zMsgxwHBN4CqviWsGEoyQ6OlbDYaZg7ah1SQDoP5oBA",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
         },
@@ -561,7 +949,7 @@
         "revision": 1,
         "rule_refs": [
           {
-            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
             "rule_id": "org.nthdao.reference.delivery"
           }
         ],
@@ -571,27 +959,27 @@
       },
       "proposal": {
         "canonical_chain_digests": [
-          "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+          "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae"
         ],
         "created_at": "2026-08-01T00:00:00Z",
         "kind": "nth.dao.trade.proposal",
         "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
         "not_after": "2026-08-02T00:00:00Z",
-        "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
         "offer_id": "org.nthdao.reference/agreement",
         "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
         "offer_revision": 1,
         "proof": {
           "created": "2026-08-01T00:00:00Z",
           "proof_purpose": "tradeProposal",
-          "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+          "proof_value": "6VXCTM-ieqzFAwRF--C_bBJDmwPAayfBXMJczjNgKelB6Bgfw2-fiMncstY-xhBNzINbJfytS3mR1-aquFRaAg",
           "type": "Ed25519Signature2020",
           "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
         },
         "protocol_version": "1",
         "rule_bindings": [
           {
-            "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+            "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
             "rule_id": "org.nthdao.reference.delivery"
           }
         ],
@@ -615,6 +1003,18 @@
         },
         "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
         "terms": {
+          "org.nthdao.execution/v1": {
+            "grants": [
+              {
+                "executor_role": "maker",
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+                "operation_id": "deliver-service",
+                "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+                "rule_id": "org.nthdao.reference.delivery"
+              }
+            ]
+          },
           "requested_quantity": "1"
         }
       }
@@ -624,41 +1024,41 @@
   "order_audit": {
     "event_type": "trade.order.accepted",
     "payload": {
-      "acceptance_digest": "sha256:7b4790e84da79aa7bf0698e68685ab558a18f95989a5aad2aeecb23dc4327a4f",
+      "acceptance_digest": "sha256:b43a6ac22acac7d0a956bcad41a49b013fa5b9f4ccab5f7d569ab722d1961735",
       "created_at": "2026-08-01T01:00:00Z",
       "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
-      "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
-      "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
-      "order_id": "nth-trade-order-sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
-      "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+      "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+      "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+      "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+      "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
       "protocol_version": "1",
       "taker_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
     }
   },
-  "order_digest": "sha256:e666d61c2d85fd6898663208021568abb17525153f1116f5904825a8474a9236",
+  "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
   "proposal": {
     "canonical_chain_digests": [
-      "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a"
+      "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae"
     ],
     "created_at": "2026-08-01T00:00:00Z",
     "kind": "nth.dao.trade.proposal",
     "maker_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
     "not_after": "2026-08-02T00:00:00Z",
-    "offer_digest": "sha256:9c55f84e0b1b3eeda11999a8eb46b5aade3a65a1d4c0a08e7fc5f4a49168cc6a",
+    "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
     "offer_id": "org.nthdao.reference/agreement",
     "offer_publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
     "offer_revision": 1,
     "proof": {
       "created": "2026-08-01T00:00:00Z",
       "proof_purpose": "tradeProposal",
-      "proof_value": "jXTvgv0TvJklF1XeSPrs_jooJhU-uqbAoWwpv9gryhKZDkxa22Bk4a3vKFlc4yOwr99VoL9oRtQkwVJq0Mi5DA",
+      "proof_value": "6VXCTM-ieqzFAwRF--C_bBJDmwPAayfBXMJczjNgKelB6Bgfw2-fiMncstY-xhBNzINbJfytS3mR1-aquFRaAg",
       "type": "Ed25519Signature2020",
       "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
     },
     "protocol_version": "1",
     "rule_bindings": [
       {
-        "digest": "sha256:1ca207c2bdb47a7106657dcdd16c49a592ab82941215501b4ecca35430602b77",
+        "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
         "rule_id": "org.nthdao.reference.delivery"
       }
     ],
@@ -682,10 +1082,117 @@
     },
     "taker_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934",
     "terms": {
+      "org.nthdao.execution/v1": {
+        "grants": [
+          {
+            "executor_role": "maker",
+            "hook_name": "fulfillment.deliver",
+            "hook_version": "1",
+            "operation_id": "deliver-service",
+            "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+            "rule_id": "org.nthdao.reference.delivery"
+          }
+        ]
+      },
       "requested_quantity": "1"
     }
   },
-  "proposal_digest": "sha256:26c29a0c0b4c33f505d8365482aad469adc9d6cf105fca91270e5a2c3940f4aa",
+  "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+  "rule_package": {
+    "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+    "manifest": {
+      "applies_to": [
+        "service"
+      ],
+      "conflicts": [],
+      "dependencies": [],
+      "execution": {
+        "mode": "declarative",
+        "permissions": []
+      },
+      "extensions": {},
+      "families": [
+        "fulfillment"
+      ],
+      "hook_contracts": [
+        {
+          "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "name": "fulfillment.deliver",
+          "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "permissions": [],
+          "side_effect": "none",
+          "version": "1"
+        }
+      ],
+      "kind": "org.nthdao.trade.rule-manifest",
+      "not_after": "2027-01-01T00:00:00Z",
+      "proof": {
+        "created": "2026-07-01T00:00:00Z",
+        "proof_purpose": "assertionMethod",
+        "proof_value": "z7vVb8yowXaoDCHgnRvKLZvNsQtj1xAo0toiYv7FprlWuaY1x3u-Vso7_JpBTtIKkPtsUN6jgCJCOwc39kuACg",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N#z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+      },
+      "protocol_version": "1.0",
+      "published_at": "2026-07-01T00:00:00Z",
+      "publisher_did": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N",
+      "required_capabilities": [],
+      "resources": [
+        {
+          "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "media_type": "application/schema+json",
+          "purpose": "execution-input-schema",
+          "size": 167
+        },
+        {
+          "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "media_type": "application/schema+json",
+          "purpose": "execution-output-schema",
+          "size": 171
+        },
+        {
+          "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7",
+          "media_type": "application/json",
+          "purpose": "terms",
+          "size": 19
+        }
+      ],
+      "rule_id": "org.nthdao.reference.delivery",
+      "summary": "Public bilateral agreement conformance rule.",
+      "version": "1.0.0"
+    },
+    "resources": [
+      {
+        "bytes_hex": "7b2224736368656d61223a2268747470733a2f2f6a736f6e2d736368656d612e6f72672f64726166742f323032302d31322f736368656d61222c226164646974696f6e616c50726f70657274696573223a66616c73652c2270726f70657274696573223a7b226f72646572223a7b22636f6e7374223a2264656c69766572227d7d2c227265717569726564223a5b226f72646572225d2c2274797065223a226f626a656374227d",
+        "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59"
+      },
+      {
+        "bytes_hex": "7b2224736368656d61223a2268747470733a2f2f6a736f6e2d736368656d612e6f72672f64726166742f323032302d31322f736368656d61222c226164646974696f6e616c50726f70657274696573223a66616c73652c2270726f70657274696573223a7b22737461747573223a7b22636f6e7374223a22636f6d706c65746564227d7d2c227265717569726564223a5b22737461747573225d2c2274797065223a226f626a656374227d",
+        "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693"
+      },
+      {
+        "bytes_hex": "7b2272756c65223a2264656c6976657279227d",
+        "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
+      }
+    ]
+  },
   "schema_version": 1,
+  "verifier_policy": {
+    "accepted_package_digests": [
+      "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"
+    ],
+    "accepted_publishers": [],
+    "allowed_execution_modes": [
+      "declarative"
+    ],
+    "allowed_permissions": [],
+    "approved_executable_digests": [],
+    "available_capabilities": [],
+    "kind": "nth.dao.trade.rule-resolution-policy",
+    "max_depth": 32,
+    "max_packages": 256,
+    "max_resource_bytes": 67108864,
+    "protocol_version": "1"
+  },
   "warning": "Deterministic public test keys; never trust or reuse them."
 }
