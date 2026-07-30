@@ -28,6 +28,10 @@ from nth_dao.trade_rules.execution_receipt import (
     _create_trade_execution_receipt,
     execution_receipt_digest,
 )
+from nth_dao.trade_rules.execution_audit import (
+    EVENT_TRADE_EXECUTION_RECORDED,
+    execution_audit_payload,
+)
 from nth_dao.trade_rules.execution_adapter import (
     TradeExecutionAdapterPolicy,
     build_execution_adapter,
@@ -70,6 +74,10 @@ ORDER_AUDIT_SCHEMA_PATH = (
 EXECUTION_RECEIPT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-execution-receipt.schema.json"
+)
+EXECUTION_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-execution-audit-payload.schema.json"
 )
 EXECUTION_ADAPTER_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -397,6 +405,16 @@ def generate_vectors() -> dict[str, Any]:
         audit_bad_binding["proposal_digest"] = "sha256:" + ("0" * 64)
         audit_unknown_field = copy.deepcopy(audit_payload)
         audit_unknown_field["unexpected"] = True
+        execution_audit = execution_audit_payload(
+            execution_receipt,
+            order=order,
+        )
+        execution_audit_bad_order = copy.deepcopy(execution_audit)
+        execution_audit_bad_order["order_id"] = (
+            ORDER_ID_PREFIX + ("0" * 64)
+        )
+        execution_audit_unknown_field = copy.deepcopy(execution_audit)
+        execution_audit_unknown_field["unexpected"] = True
         execution_result_tamper = execution_receipt.to_dict()
         execution_result_tamper["result"]["digest"] = (
             "sha256:" + ("0" * 64)
@@ -467,6 +485,10 @@ def generate_vectors() -> dict[str, Any]:
             "event_type": EVENT_TRADE_ORDER_ACCEPTED,
             "payload": audit_payload,
         },
+        "execution_audit": {
+            "event_type": EVENT_TRADE_EXECUTION_RECORDED,
+            "payload": execution_audit,
+        },
         "negative_cases": [
             {
                 "case": "signed-order-omits-required-offer-root-rule",
@@ -509,6 +531,18 @@ def generate_vectors() -> dict[str, Any]:
                 "target": "execution_receipt",
                 "expected_valid": False,
                 "document": execution_result_tamper,
+            },
+            {
+                "case": "execution-audit-order-binding-mismatch",
+                "target": "execution_audit_binding",
+                "expected_valid": False,
+                "document": execution_audit_bad_order,
+            },
+            {
+                "case": "execution-audit-unknown-field",
+                "target": "execution_audit_payload",
+                "expected_valid": False,
+                "document": execution_audit_unknown_field,
             },
             {
                 "case": "execution-receipt-unknown-field",
@@ -557,6 +591,7 @@ def write_vectors(path: str | Path = VECTORS_PATH) -> Path:
 __all__ = [
     "ACCEPTANCE_SCHEMA_PATH",
     "EXECUTION_RECEIPT_SCHEMA_PATH",
+    "EXECUTION_AUDIT_SCHEMA_PATH",
     "EXECUTION_ADAPTER_SCHEMA_PATH",
     "ORDER_SCHEMA_PATH",
     "ORDER_AUDIT_SCHEMA_PATH",

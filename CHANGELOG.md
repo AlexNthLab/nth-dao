@@ -24,20 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   fail-closed conflict marker when capacity prevents full retention.
 - Mandatory `TradeExecutionCoordinator` issuance through that CAS, plus public
   conflict status that distinguishes complete retention from marker-only loss.
+- Recoverable Trade Execution audit records that prepare before Receipt CAS,
+  project exact idempotent `trade.execution.recorded` events into the signed
+  Spine, verify established anchors and blocked conflict evidence on replay,
+  survive wall-clock rollback, and page every audit state under one limit.
 - Content resolver and optional JSON Schema 2020-12 validation for exact
   operation input and result bytes at both signing and receiver verification.
 - Hook-scoped Adapter permissions bounded by each Rule Manifest's declared
   execution permissions, preventing dependency permissions from leaking into
   unrelated Hook execution.
-- Public Execution Adapter schema and deterministic positive/negative
-  conformance vectors that reconstruct Rule Packages, policies, Adapter
-  artifacts, execution content, readiness, and Receipt verification.
+- Public Execution Adapter and execution-audit payload schemas, plus
+  deterministic positive/negative conformance vectors that reconstruct Rule
+  Packages, policies, Adapter artifacts, execution content, readiness,
+  Receipt verification, and its signed Spine projection.
 
 ### Fixed
 
 - Spine append now serializes across processes, refreshes the chain head under
   lock, validates the complete chain before writing, and rejects oversized or
   structurally ambiguous events.
+- Spine consumers can obtain a lock-consistent verified snapshot, while
+  semantic append performs uniqueness checks and writes under the same process
+  lock so concurrent writers cannot create an unverified read window.
 - Order audit retries no longer trust a mutable `anchored` status file and can
   restore a rolled-back CAS cache from the write-ahead signed Order.
 - Trade Receipt timestamps no longer accept or reattach precision beyond

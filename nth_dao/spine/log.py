@@ -90,14 +90,14 @@ class SignedEventLog:
                     )
                 yield line_number, raw
 
-    def _scan_verified(
+    def _verified_events_unlocked(
         self,
-    ) -> tuple[bool, str, Optional[SpineEvent]]:
+    ) -> tuple[bool, str, tuple[SpineEvent, ...]]:
         if not self._path.exists():
-            return True, "ok", None
+            return True, "ok", ()
         expected_prev = GENESIS_PREV
         expected_seq = 0
-        last: Optional[SpineEvent] = None
+        events: list[SpineEvent] = []
         try:
             for line_number, raw in self._raw_lines():
                 if not raw.strip():
@@ -107,19 +107,33 @@ class SignedEventLog:
                     return (
                         False,
                         f"seq gap at {event.seq} (expected {expected_seq})",
-                        last,
+                        tuple(events),
                     )
                 if event.prev_hash != expected_prev:
-                    return False, f"chain break at seq {event.seq}", last
+                    return (
+                        False,
+                        f"chain break at seq {event.seq}",
+                        tuple(events),
+                    )
                 ok, reason = verify_event(event)
                 if not ok:
-                    return False, f"event {event.seq}: {reason}", last
+                    return (
+                        False,
+                        f"event {event.seq}: {reason}",
+                        tuple(events),
+                    )
                 expected_prev = event.content_hash
                 expected_seq += 1
-                last = event
+                events.append(event)
         except (OSError, TypeError, ValueError) as exc:
-            return False, str(exc), last
-        return True, "ok", last
+            return False, str(exc), tuple(events)
+        return True, "ok", tuple(events)
+
+    def _scan_verified(
+        self,
+    ) -> tuple[bool, str, Optional[SpineEvent]]:
+        ok, reason, events = self._verified_events_unlocked()
+        return ok, reason, events[-1] if events else None
 
     def read_all(self) -> Iterator[SpineEvent]:
         """按落盘顺序产出全部事件(不校验,校验走 verify_chain)。"""
@@ -148,39 +162,143 @@ class SignedEventLog:
             ):
                 # A second process may have advanced the chain since this
                 # instance was constructed.
-                ok, reason, last = self._scan_verified()
+                ok, reason, events = self._verified_events_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"appended: {reason}"
                     )
-                self._head_hash = (
-                    last.content_hash if last is not None else GENESIS_PREV
+                return self._append_after_verified(
+                    event_type,
+                    payload,
+                    ts_ms=ts_ms,
+                    last=events[-1] if events else None,
                 )
-                self._head_seq = last.seq if last is not None else -1
-                ev = sign_event(
-                    seq=self._head_seq + 1,
-                    prev_hash=self._head_hash,
-                    event_type=event_type,
-                    payload=payload,
-                    identity=self._identity,
-                    ts_ms=ts_ms if ts_ms is not None else now_ms(),
+
+    def _append_after_verified(
+        self,
+        event_type: str,
+        payload: dict,
+        *,
+        ts_ms: Optional[int],
+        last: Optional[SpineEvent],
+    ) -> SpineEvent:
+        self._head_hash = (
+            last.content_hash if last is not None else GENESIS_PREV
+        )
+        self._head_seq = last.seq if last is not None else -1
+        event = sign_event(
+            seq=self._head_seq + 1,
+            prev_hash=self._head_hash,
+            event_type=event_type,
+            payload=payload,
+            identity=self._identity,
+            ts_ms=ts_ms if ts_ms is not None else now_ms(),
+        )
+        line = json.dumps(
+            event.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        if len(line) > MAX_SPINE_LINE_BYTES:
+            raise ValueError("spine event exceeds line byte limit")
+        with self._path.open("ab") as stream:
+            stream.write(line + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        self._head_hash = event.content_hash
+        self._head_seq = event.seq
+        return event
+
+    def verified_snapshot(self) -> tuple[SpineEvent, ...]:
+        """Return one lock-consistent, signature-verified event snapshot."""
+
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                ok, reason, events = self._verified_events_unlocked()
+                if not ok:
+                    raise ValueError(
+                        f"spine log at {self._path} is corrupt and cannot be "
+                        f"read as a verified snapshot: {reason}"
+                    )
+                return events
+
+    def append_unique(
+        self,
+        event_type: str,
+        payload: dict,
+        *,
+        unique_payload_fields: tuple[str, ...],
+        ts_ms: Optional[int] = None,
+    ) -> tuple[SpineEvent, bool]:
+        """Append once, rejecting any event that reuses a semantic key."""
+
+        if (
+            not isinstance(unique_payload_fields, tuple)
+            or not unique_payload_fields
+            or any(
+                not isinstance(field, str) or not field
+                for field in unique_payload_fields
+            )
+            or len(set(unique_payload_fields)) != len(unique_payload_fields)
+        ):
+            raise ValueError(
+                "unique_payload_fields must be unique non-empty strings"
+            )
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        for field in unique_payload_fields:
+            if (
+                field not in payload
+                or not isinstance(payload[field], str)
+                or not payload[field]
+            ):
+                raise ValueError(
+                    f"unique payload field {field!r} must be a non-empty string"
                 )
-                line = json.dumps(
-                    ev.to_dict(),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                ).encode("ascii")
-                if len(line) > MAX_SPINE_LINE_BYTES:
-                    raise ValueError("spine event exceeds line byte limit")
-                with self._path.open("ab") as stream:
-                    stream.write(line + b"\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                self._head_hash = ev.content_hash
-                self._head_seq = ev.seq
-                return ev
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                ok, reason, events = self._verified_events_unlocked()
+                if not ok:
+                    raise ValueError(
+                        f"spine log at {self._path} is corrupt and cannot be "
+                        f"appended: {reason}"
+                    )
+                matches = [
+                    event
+                    for event in events
+                    if event.type == event_type
+                    and any(
+                        event.payload.get(field) == payload[field]
+                        for field in unique_payload_fields
+                    )
+                ]
+                if len(matches) > 1:
+                    raise ValueError(
+                        "spine contains duplicate semantic event keys"
+                    )
+                if matches:
+                    if matches[0].payload != payload:
+                        raise ValueError(
+                            "spine semantic event key has conflicting payload"
+                        )
+                    return matches[0], False
+                return (
+                    self._append_after_verified(
+                        event_type,
+                        payload,
+                        ts_ms=ts_ms,
+                        last=events[-1] if events else None,
+                    ),
+                    True,
+                )
 
     def verify_chain(self) -> Tuple[bool, str]:
         """整段重放校验:seq 从 0 单调、prev_hash 逐条链上、每条签名有效。

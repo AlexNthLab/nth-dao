@@ -69,6 +69,20 @@
   },
   "execution_adapter_artifact_hex": "7075626c6963206465636c617261746976652061646170746572206172746966616374207631",
   "execution_adapter_digest": "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19",
+  "execution_audit": {
+    "event_type": "trade.execution.recorded",
+    "payload": {
+      "completed_at": "2026-08-01T02:01:00Z",
+      "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+      "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+      "operation_id": "deliver-service",
+      "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+      "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+      "outcome": "succeeded",
+      "protocol_version": "1",
+      "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318"
+    }
+  },
   "execution_content": [
     {
       "bytes_hex": "7b226f72646572223a2264656c69766572227d",
@@ -694,6 +708,39 @@
       },
       "expected_valid": false,
       "target": "execution_receipt"
+    },
+    {
+      "case": "execution-audit-order-binding-mismatch",
+      "document": {
+        "completed_at": "2026-08-01T02:01:00Z",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "operation_id": "deliver-service",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "outcome": "succeeded",
+        "protocol_version": "1",
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318"
+      },
+      "expected_valid": false,
+      "target": "execution_audit_binding"
+    },
+    {
+      "case": "execution-audit-unknown-field",
+      "document": {
+        "completed_at": "2026-08-01T02:01:00Z",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "executor_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "operation_id": "deliver-service",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "outcome": "succeeded",
+        "protocol_version": "1",
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "unexpected": true
+      },
+      "expected_valid": false,
+      "target": "execution_audit_payload"
     },
     {
       "case": "execution-receipt-unknown-field",

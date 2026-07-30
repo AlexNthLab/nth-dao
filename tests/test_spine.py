@@ -44,6 +44,26 @@ def _append_in_process(path: str, index: int, output) -> None:
         output.put(("error", type(exc).__name__, str(exc)))
 
 
+def _append_unique_in_process(path: str, output) -> None:
+    try:
+        event, created = SignedEventLog(
+            path,
+            AgentIdentity.generate(),
+            lock_timeout=20,
+        ).append_unique(
+            "trade.execution.recorded",
+            {
+                "execution_id": "exec-one",
+                "receipt_digest": "digest-one",
+            },
+            unique_payload_fields=("execution_id", "receipt_digest"),
+            ts_ms=1,
+        )
+        output.put(("ok", event.event_id, created))
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
+
+
 def test_append_chains_and_verifies(tmp_path: Path) -> None:
     log = SignedEventLog(tmp_path / "events.jsonl", _id())
     e0 = log.append("market.announce", {"id": "a"})
@@ -116,6 +136,56 @@ def test_append_refuses_structurally_valid_tampered_chain(
     assert len(p.read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_verified_snapshot_never_returns_unverified_events(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    log.append("test.original", {"id": "one"})
+    event = json.loads(path.read_text(encoding="utf-8"))
+    event["payload"]["id"] = "tampered"
+    _rewrite_line(path, 0, event)
+
+    with pytest.raises(ValueError, match="verified snapshot"):
+        log.verified_snapshot()
+
+
+def test_append_unique_is_idempotent_and_rejects_key_reuse(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    first_log = SignedEventLog(path, _id())
+    payload = {"execution_id": "exec-1", "receipt_digest": "digest-1"}
+
+    first, first_created = first_log.append_unique(
+        "trade.execution.recorded",
+        payload,
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=1,
+    )
+    second, second_created = SignedEventLog(path, _id()).append_unique(
+        "trade.execution.recorded",
+        payload,
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=2,
+    )
+
+    assert first_created is True
+    assert second_created is False
+    assert second == first
+    with pytest.raises(ValueError, match="conflicting payload"):
+        first_log.append_unique(
+            "trade.execution.recorded",
+            {
+                "execution_id": "exec-1",
+                "receipt_digest": "digest-2",
+            },
+            unique_payload_fields=("execution_id", "receipt_digest"),
+            ts_ms=3,
+        )
+    assert len(first_log.verified_snapshot()) == 1
+
+
 def test_cross_process_append_serializes_and_reloads_chain(
     tmp_path: Path,
 ) -> None:
@@ -142,6 +212,33 @@ def test_cross_process_append_serializes_and_reloads_chain(
     ok, why = log.verify_chain()
     assert ok, why
     assert len(list(log.read_all())) == 6
+
+
+def test_cross_process_append_unique_writes_one_semantic_event(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "events.jsonl")
+    context = multiprocessing.get_context("spawn")
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_append_unique_in_process,
+            args=(path, output),
+        )
+        for _ in range(6)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    results = [output.get(timeout=5) for _ in processes]
+    assert all(result[0] == "ok" for result in results), results
+    assert len({result[1] for result in results}) == 1
+    assert sum(result[2] for result in results) == 1
+    log = SignedEventLog(path, _id())
+    assert len(log.verified_snapshot()) == 1
 
 
 def test_spine_rejects_oversized_line_without_unbounded_read(

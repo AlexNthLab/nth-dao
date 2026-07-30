@@ -293,14 +293,42 @@ and local Rule and Adapter policies, content resolver, and schema validator
 before relying on the claimed readiness; a valid party signature cannot bypass
 that replay. Receipt issuance is exposed through
 `TradeExecutionCoordinator`, which writes through the conflict-retaining CAS
-before returning. The CAS retains the first contradictory signed candidate and
-records a durable conflict marker before capacity checks, so later reads fail
-closed even if the full candidate cannot fit. `conflict_status()` exposes the
-marker digest, retained Receipt digests, and whether retention is complete.
-This makes Receipt publication idempotent; it does not make an Adapter's
-external side effects exactly-once. Recoverable Spine projection, delegation,
-sandboxed Adapter execution, and transactional side-effect outboxes remain
-separate reviewed slices.
+before returning. Before touching that CAS, the coordinator prepares a bounded
+write-ahead execution-audit record containing the exact signed Receipt and
+Order bytes. It then stores the Receipt and projects one exact
+`trade.execution.recorded` event into the signed Spine. Startup or operator
+code can explicitly call reconciliation after a failure at any of those
+boundaries; it recognizes an already committed exact event without duplicating
+it and rechecks established anchors against a lock-consistent, signature-
+verified Spine snapshot. The semantic uniqueness check and append execute
+under the same Spine lock, closing the gap between verification and reading.
+Automatic Web or daemon startup scheduling is not part of this
+protocol-kernel slice.
+
+A later contradictory Receipt blocks the audit record even when its first
+candidate was already anchored. Blocked is not trusted as a local status flag:
+reconciliation must prove that Receipt CAS retains a distinct candidate marker,
+that the original Receipt digest remains present, and that any recorded
+event ID matches the exact Spine anchor. Reconciliation uses one stable
+execution-ID cursor and applies its limit across prepared, stored, anchored,
+and blocked records. Persisted update time is a monotonic floor so wall-clock
+rollback cannot strand an otherwise valid recovery.
+
+The CAS retains the first contradictory signed candidate and records a durable
+conflict marker before capacity checks, so later reads fail closed even if the
+full candidate cannot fit. `conflict_status()` exposes the marker digest,
+retained Receipt digests, and whether retention is complete. This makes local
+Receipt publication and Spine projection recoverable and idempotent; it does
+not make an Adapter's external effects exactly-once, prove the claim true, or
+create a cross-node settlement ledger. Delegation, sandboxed Adapter
+execution, and transactional side-effect outboxes remain separate reviewed
+slices.
+
+The v1 execution Spine payload contains only protocol version, execution and
+Receipt digests, Order identity and digest, executor DID, operation ID,
+outcome, and completion time. Receivers must bind it back to the exact signed
+Receipt and Order; schema-valid fields alone are not evidence that execution
+succeeded.
 
 `nth_dao.execution_receipt.ExecutionReceipt` is a different wire protocol for
 an Agent's generic goal timeline. A Trade Execution Receipt is specifically
@@ -375,20 +403,24 @@ The reviewed protocol kernel currently contains:
   per-Order/per-operation/per-executor identity, strict party-role and
   operation-grant binding, content-addressed Adapter resolution, and
   conflict-retaining local CAS storage;
+- bounded write-ahead execution-audit records with recoverable Receipt CAS
+  persistence, exact idempotent `trade.execution.recorded` Spine anchoring,
+  verified-snapshot replay, bounded cursor reconciliation, and externally
+  checked fail-closed equivocation state;
 - bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Execution Receipt v1, and the
-  `trade.order.accepted` payload;
+  `trade.order.accepted` and `trade.execution.recorded` payloads;
 - focused tests.
 
 Agreement and Order objects remain protocol-kernel primitives. The audit
 outbox makes local Order persistence and Spine projection recoverable, but it
 does not make separate files atomically committed and it is not a settlement
 ledger. Offer/Agreement federation, persistent/governed recognition policy,
-inventory or asset reservation, UI, fulfillment, payment, Receipt Spine
-projection, delegation, and sandboxed executable Adapters remain separate
+inventory or asset reservation, UI, fulfillment, payment, federation of
+Receipt anchors, delegation, and sandboxed executable Adapters remain separate
 independently reviewed slices. The local HTTP endpoints are not yet a
 federation protocol. Trade Offer v2, Rule Package loading, Agreement creation,
 Order storage, and Receipt creation cannot execute settlement.

@@ -22,9 +22,13 @@ from nth_dao.trade_rules import (
     TradeExecutionAdapterPolicy,
     TradeExecutionAdapter,
     TradeExecutionAdapterRejected,
+    TradeExecutionAuditError,
+    TradeExecutionAuditCapacity,
     TradeExecutionReceiptConflict,
+    TradeExecutionAuditOutbox,
     TradeExecutionCoordinator,
     TradeExecutionReceiptStore,
+    TradeExecutionReceiptStoreError,
     TradeOrder,
     TradeOrderConflict,
     TradeOrderRejected,
@@ -41,6 +45,7 @@ from nth_dao.trade_rules import (
     create_trade_acceptance,
     create_trade_proposal,
     execution_receipt_digest,
+    execution_audit_payload,
     manifest_body,
     offer_body,
     offer_digest,
@@ -49,6 +54,8 @@ from nth_dao.trade_rules import (
     sign_manifest,
     sign_offer,
     trade_order_digest,
+    validate_execution_audit_binding,
+    validate_execution_audit_payload,
     verify_acceptance_binding,
     verify_execution_receipt_order_binding,
     verify_execution_receipt_under_policy,
@@ -59,6 +66,7 @@ from nth_dao.trade_rules.execution_receipt import (
 from nth_dao.trade_rules.store import OfferStore
 from nth_dao.trade_rules.agreement_conformance import (
     ACCEPTANCE_SCHEMA_PATH,
+    EXECUTION_AUDIT_SCHEMA_PATH,
     EXECUTION_ADAPTER_SCHEMA_PATH,
     EXECUTION_RECEIPT_SCHEMA_PATH,
     ORDER_AUDIT_SCHEMA_PATH,
@@ -1279,6 +1287,11 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
     assert execution_receipt.to_dict()["adapter"]["adapter_digest"] == (
         adapter.digest
     )
+    assert validate_execution_audit_binding(
+        stored["execution_audit"]["payload"],
+        receipt=execution_receipt,
+        order=order,
+    ) == execution_audit_payload(execution_receipt, order=order)
     package_vector = stored["rule_package"]
     with tempfile.TemporaryDirectory() as directory:
         package_store = RulePackageStore(directory)
@@ -1338,6 +1351,14 @@ def test_negative_agreement_vectors_fail_closed():
                 order=stored["order"],
             )
         ),
+        "execution_audit_payload": validate_execution_audit_payload,
+        "execution_audit_binding": lambda document: (
+            validate_execution_audit_binding(
+                document,
+                receipt=stored["execution_receipt"],
+                order=stored["order"],
+            )
+        ),
         "execution_adapter": TradeExecutionAdapter.from_dict,
     }
 
@@ -1351,6 +1372,7 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeOrderRejected,
                 TradeExecutionReceiptRejected,
                 TradeExecutionAdapterRejected,
+                TradeExecutionAuditError,
             )
         ):
             parsers[case["target"]](case["document"])
@@ -1367,6 +1389,9 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     )
     execution_receipt = json.loads(
         EXECUTION_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    execution_audit = json.loads(
+        EXECUTION_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
     )
     execution_adapter = json.loads(
         EXECUTION_ADAPTER_SCHEMA_PATH.read_text(encoding="utf-8")
@@ -1419,6 +1444,15 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert execution_receipt["$defs"]["proof"]["properties"][
         "proof_purpose"
     ]["const"] == "tradeExecution"
+    assert execution_audit["additionalProperties"] is False
+    assert execution_audit["properties"]["protocol_version"]["const"] == "1"
+    assert execution_audit["properties"]["execution_id"][
+        "pattern"
+    ].startswith("^nth-trade-execution-sha256:")
+    assert execution_audit["$id"] == (
+        "https://nthdao.org/schemas/"
+        "trade-execution-audit-payload-v1.json"
+    )
     assert execution_adapter["additionalProperties"] is False
     assert execution_adapter["properties"]["kind"]["const"] == (
         "nth.dao.trade.execution-adapter"
@@ -1437,16 +1471,24 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     adapter_schema = json.loads(
         EXECUTION_ADAPTER_SCHEMA_PATH.read_text(encoding="utf-8")
     )
+    audit_schema = json.loads(
+        EXECUTION_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
     receipt_validator = jsonschema.validators.validator_for(receipt_schema)
     adapter_validator = jsonschema.validators.validator_for(adapter_schema)
+    audit_validator = jsonschema.validators.validator_for(audit_schema)
     receipt_validator.check_schema(receipt_schema)
     adapter_validator.check_schema(adapter_schema)
+    audit_validator.check_schema(audit_schema)
 
     receipt_validator(receipt_schema).validate(
         stored["execution_receipt"]
     )
     adapter_validator(adapter_schema).validate(
         stored["execution_adapter"]
+    )
+    audit_validator(audit_schema).validate(
+        stored["execution_audit"]["payload"]
     )
 
     bad_time = copy.deepcopy(stored["execution_receipt"])
@@ -1457,10 +1499,33 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     bad_adapter["execution_modes"].append("declarative")
     with pytest.raises(jsonschema.ValidationError):
         adapter_validator(adapter_schema).validate(bad_adapter)
+    bad_audit = copy.deepcopy(stored["execution_audit"]["payload"])
+    bad_audit["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        audit_validator(audit_schema).validate(bad_audit)
 
 
 def _order(context):
     proposal = _proposal(context)
+    return create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+
+
+def _order_for_operation(context, operation_id):
+    proposal = _proposal(
+        context,
+        grants=[{
+            "operation_id": operation_id,
+            "rule_id": "org.nthdao.test.delivery",
+            "package_digest": context["package_digest"],
+            "hook_name": "fulfillment.deliver",
+            "hook_version": "1",
+            "executor_role": "maker",
+        }],
+    )
     return create_trade_order(
         offer=context["offer"],
         proposal=proposal,
@@ -2229,7 +2294,15 @@ def test_execution_coordinator_makes_cas_mandatory(tmp_path):
     context = _setup(tmp_path)
     order = _order(context)
     store = TradeExecutionReceiptStore(tmp_path)
-    coordinator = TradeExecutionCoordinator(store)
+    audit_outbox = TradeExecutionAuditOutbox(tmp_path)
+    coordinator = TradeExecutionCoordinator(
+        store,
+        audit_outbox,
+        SignedEventLog(
+            tmp_path / "execution-spine.jsonl",
+            context["maker"],
+        ),
+    )
 
     first = _execution_receipt(
         context,
@@ -2256,6 +2329,441 @@ def test_execution_coordinator_makes_cas_mandatory(tmp_path):
         )
     with pytest.raises(TradeExecutionReceiptConflict):
         store.get(first.execution_id, order=order)
+    record = audit_outbox.get(first.execution_id)
+    assert record is not None
+    assert record.status == "blocked"
+    assert record.event_id
+    report = coordinator.reconcile(
+        now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+    )
+    assert report.blocked == 1
+    assert report.verified_blocked == 1
+    assert report.failed == 0
+
+
+def _execution_audit_components(tmp_path, context):
+    store = TradeExecutionReceiptStore(tmp_path)
+    outbox = TradeExecutionAuditOutbox(tmp_path)
+    spine = SignedEventLog(
+        tmp_path / "execution-spine.jsonl",
+        context["maker"],
+    )
+    return store, outbox, spine, TradeExecutionCoordinator(
+        store,
+        outbox,
+        spine,
+    )
+
+
+def test_execution_coordinator_anchors_once_and_is_idempotent(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    store, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+
+    first = _execution_receipt(context, order, coordinator=coordinator)
+    second = _execution_receipt(context, order, coordinator=coordinator)
+
+    assert second == first
+    assert store.get(first.execution_id, order=order) == first
+    record = outbox.get(first.execution_id)
+    assert record is not None
+    assert record.status == "anchored"
+    events = list(spine.read_all())
+    assert len(events) == 1
+    assert events[0].payload == execution_audit_payload(first, order=order)
+    assert events[0].event_id == record.event_id
+
+
+@pytest.mark.parametrize("crash_after", ["prepare", "store", "spine"])
+def test_execution_audit_reconciles_each_crash_window(
+    tmp_path,
+    crash_after,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    store, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    now_ms = int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+    outbox.prepare(receipt, order=order, now_ms=now_ms)
+    if crash_after in {"store", "spine"}:
+        store.put(receipt, order=order)
+    if crash_after == "spine":
+        spine.append(
+            trade_rules_api.EVENT_TRADE_EXECUTION_RECORDED,
+            execution_audit_payload(receipt, order=order),
+            ts_ms=now_ms,
+        )
+
+    report = coordinator.reconcile(now_ms=now_ms)
+
+    assert report.failed == 0
+    assert report.anchored == 1
+    record = outbox.get(receipt.execution_id)
+    assert record is not None
+    assert record.status == "anchored"
+    assert store.get(receipt.execution_id, order=order) == receipt
+    assert len(list(spine.read_all())) == 1
+
+
+def test_execution_audit_recovery_survives_wall_clock_rollback(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    _, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    prepared_at = int(
+        _utc("2026-09-01T00:02:00Z").timestamp() * 1000
+    )
+    outbox.prepare(receipt, order=order, now_ms=prepared_at)
+
+    report = coordinator.reconcile(now_ms=1)
+
+    assert report.anchored == 1
+    assert report.failed == 0
+    record = outbox.get(receipt.execution_id)
+    assert record is not None
+    assert record.status == "anchored"
+    assert record.updated_at_ms == prepared_at
+    assert list(spine.read_all())[0].ts_ms == prepared_at
+
+
+def test_execution_audit_recovers_when_append_commits_then_raises(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    _, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    now_ms = int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+    outbox.prepare(receipt, order=order, now_ms=now_ms)
+    append_unique = spine.append_unique
+
+    def append_then_raise(*args, **kwargs):
+        append_unique(*args, **kwargs)
+        raise OSError("simulated post-append crash")
+
+    monkeypatch.setattr(spine, "append_unique", append_then_raise)
+    first = coordinator.reconcile(now_ms=now_ms)
+
+    assert first.failed == 1
+    pending = outbox.get(receipt.execution_id)
+    assert pending is not None
+    assert pending.status == "stored"
+    assert pending.last_error == "spine-anchor-failed"
+    assert len(list(spine.read_all())) == 1
+
+    monkeypatch.setattr(spine, "append_unique", append_unique)
+    second = coordinator.reconcile(now_ms=now_ms)
+
+    assert second.anchored == 1
+    assert second.failed == 0
+    assert outbox.get(receipt.execution_id).status == "anchored"
+    assert len(list(spine.read_all())) == 1
+
+
+def test_execution_audit_ignores_bounded_crash_temporary_file(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    outbox = TradeExecutionAuditOutbox(tmp_path)
+    now_ms = int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+    outbox.prepare(receipt, order=order, now_ms=now_ms)
+    root = tmp_path / "trade" / "execution_audit_outbox_v1"
+    record_path = next(root.glob("*.json"))
+    temporary = root / f"{record_path.name}.deadbeef.tmp"
+    temporary.write_bytes(b'{"incomplete":')
+
+    assert outbox.get(receipt.execution_id) is not None
+    with pytest.raises(TradeExecutionAuditCapacity, match="max_records"):
+        TradeExecutionAuditOutbox(
+            tmp_path,
+            max_records=1,
+        ).get(receipt.execution_id)
+
+
+def test_execution_audit_prepare_counts_temporary_files_in_capacity(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    record_root = tmp_path / "record-cap" / "trade" / (
+        "execution_audit_outbox_v1"
+    )
+    record_root.mkdir(parents=True)
+    for index in range(2):
+        (record_root / f"{index:064x}.json.deadbeef{index}.tmp").write_bytes(
+            b"x"
+        )
+    record_limited = TradeExecutionAuditOutbox(
+        tmp_path / "record-cap",
+        max_records=2,
+    )
+
+    with pytest.raises(TradeExecutionAuditCapacity, match="max_records"):
+        record_limited.prepare(
+            receipt,
+            order=order,
+            now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
+        )
+    assert not tuple(record_root.glob("*.json"))
+
+    measure_root = tmp_path / "measure"
+    measured = TradeExecutionAuditOutbox(measure_root)
+    measured.prepare(
+        receipt,
+        order=order,
+        now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
+    )
+    record_size = next(
+        (
+            measure_root
+            / "trade"
+            / "execution_audit_outbox_v1"
+        ).glob("*.json")
+    ).stat().st_size
+    byte_root = tmp_path / "byte-cap" / "trade" / (
+        "execution_audit_outbox_v1"
+    )
+    byte_root.mkdir(parents=True)
+    (byte_root / f"{0:064x}.json.deadbeef.tmp").write_bytes(b"x" * 11)
+    byte_limited = TradeExecutionAuditOutbox(
+        tmp_path / "byte-cap",
+        max_bytes=record_size + 10,
+    )
+
+    with pytest.raises(TradeExecutionAuditCapacity, match="max_bytes"):
+        byte_limited.prepare(
+            receipt,
+            order=order,
+            now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
+        )
+    assert not tuple(byte_root.glob("*.json"))
+
+
+def test_execution_audit_reconcile_limit_pages_all_statuses(tmp_path):
+    context = _setup(tmp_path)
+    _, _, _, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    for index in range(3):
+        operation_id = f"deliver-service-{index}"
+        order = _order_for_operation(context, operation_id)
+        _execution_receipt(
+            context,
+            order,
+            coordinator=coordinator,
+            operation_id=operation_id,
+        )
+
+    cursor = None
+    reports = []
+    while True:
+        report = coordinator.reconcile(
+            limit=1,
+            after_execution_id=cursor,
+            now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
+        )
+        reports.append(report)
+        assert report.scanned <= 1
+        if not report.has_more:
+            break
+        assert report.next_cursor
+        cursor = report.next_cursor
+
+    assert len(reports) == 3
+    assert sum(report.scanned for report in reports) == 3
+    assert sum(report.verified_anchored for report in reports) == 3
+    assert reports[-1].next_cursor is None
+
+
+def test_execution_audit_concurrent_issue_has_one_anchor(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    _, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        receipts = list(
+            executor.map(
+                lambda _: _execution_receipt(
+                    context,
+                    order,
+                    coordinator=coordinator,
+                ),
+                range(8),
+            )
+        )
+
+    assert all(receipt == receipts[0] for receipt in receipts)
+    assert outbox.get(receipts[0].execution_id).status == "anchored"
+    assert len(list(spine.read_all())) == 1
+
+
+def test_execution_audit_does_not_claim_unretained_cas_conflict(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    store, outbox, _, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    first = _execution_receipt(context, order, coordinator=coordinator)
+
+    def fail_before_retention(*args, **kwargs):
+        raise TradeExecutionReceiptStoreError("simulated CAS damage")
+
+    monkeypatch.setattr(store, "put", fail_before_retention)
+    with pytest.raises(
+        TradeExecutionAuditError,
+        match="without retaining conflict evidence",
+    ):
+        _execution_receipt(
+            context,
+            order,
+            coordinator=coordinator,
+            outcome="failed",
+            result_payload=b'{"error":"contradiction"}',
+            result={
+                "media_type": "application/problem+json",
+                "digest": _digest(b'{"error":"contradiction"}'),
+                "size_bytes": len(b'{"error":"contradiction"}'),
+            },
+        )
+
+    record = outbox.get(first.execution_id)
+    assert record is not None
+    assert record.status == "anchored"
+
+
+def test_execution_audit_rejects_forged_blocked_status(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    _, outbox, _, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    receipt = _execution_receipt(
+        context,
+        order,
+        coordinator=coordinator,
+    )
+    root = tmp_path / "trade" / "execution_audit_outbox_v1"
+    record_path = next(root.glob("*.json"))
+    document = json.loads(record_path.read_text(encoding="utf-8"))
+    document["status"] = "blocked"
+    document["last_error"] = "receipt-conflict"
+    record_path.write_bytes(canonical_json(document))
+
+    report = coordinator.reconcile(
+        now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+    )
+
+    assert report.scanned == 1
+    assert report.blocked == 0
+    assert report.verified_blocked == 0
+    assert report.failed == 1
+    assert outbox.get(receipt.execution_id).status == "blocked"
+
+
+def test_execution_audit_rejects_corrupt_record_and_duplicate_anchor(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    _, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    now_ms = int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+    outbox.prepare(receipt, order=order, now_ms=now_ms)
+    payload = execution_audit_payload(receipt, order=order)
+    spine.append(
+        trade_rules_api.EVENT_TRADE_EXECUTION_RECORDED,
+        payload,
+        ts_ms=now_ms,
+    )
+    spine.append(
+        trade_rules_api.EVENT_TRADE_EXECUTION_RECORDED,
+        payload,
+        ts_ms=now_ms,
+    )
+
+    with pytest.raises(
+        TradeExecutionAuditError,
+        match="duplicate or conflicting",
+    ):
+        coordinator.reconcile(now_ms=now_ms)
+
+    record_path = next(
+        (tmp_path / "trade" / "execution_audit_outbox_v1").glob("*.json")
+    )
+    document = json.loads(record_path.read_text(encoding="utf-8"))
+    record_path.write_text(
+        json.dumps(document, indent=2),
+        encoding="utf-8",
+    )
+    with pytest.raises(TradeExecutionAuditError, match="not canonical"):
+        outbox.get(receipt.execution_id)
+
+    original_status = document["status"]
+    document["status"] = []
+    record_path.write_bytes(canonical_json(document))
+    with pytest.raises(TradeExecutionAuditError, match="status is invalid"):
+        outbox.get(receipt.execution_id)
+
+    document["status"] = original_status
+    document["receipt_digest"] = "sha256:" + ("0" * 64)
+    record_path.write_bytes(canonical_json(document))
+    with pytest.raises(TradeExecutionAuditError, match="digest binding"):
+        outbox.get(receipt.execution_id)
+    with pytest.raises(TradeExecutionAuditError, match="execution_id"):
+        outbox.get("invalid")
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("order_id", "nth-trade-order-sha256:short"),
+        ("operation_id", "Uppercase"),
+        ("execution_id", 1),
+        ("executor_did", 1),
+        ("outcome", []),
+        ("completed_at", "2026-02-30T00:00:00Z"),
+        ("completed_at", "2026-09-01T00:00:00.000000Z"),
+    ],
+)
+def test_execution_audit_payload_validation_is_strict(
+    tmp_path,
+    field,
+    invalid,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    payload = execution_audit_payload(receipt, order=order)
+    payload[field] = invalid
+
+    with pytest.raises(TradeExecutionAuditError):
+        validate_execution_audit_payload(payload)
 
 
 def test_execution_receipt_store_cross_process_same_bytes_is_once(tmp_path):
@@ -3036,7 +3544,12 @@ def test_execution_receipt_creation_honors_current_policy(tmp_path):
         match="current executor policy.*not accepted",
     ):
         TradeExecutionCoordinator(
-            TradeExecutionReceiptStore(tmp_path)
+            TradeExecutionReceiptStore(tmp_path),
+            TradeExecutionAuditOutbox(tmp_path),
+            SignedEventLog(
+                tmp_path / "execution-spine.jsonl",
+                context["maker"],
+            ),
         ).issue(
             context["maker"],
             order=order,
