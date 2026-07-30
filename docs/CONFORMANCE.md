@@ -40,6 +40,12 @@ Without them, "I implemented the spec" is a guess. With them, "I pass all
 
 **Total: 39 vectors.** This grows with the protocol.
 
+The Trade Rule Protocol also ships independently versioned vectors under
+`nth_dao/trade_rules/vectors/`. Rule Recognition v1 includes canonical bytes,
+domain-separated signing bytes, valid recognition/revocation chains, and
+negative semantic cases. Both the Python reference tests and the TypeScript
+frontend verifier consume the same checked-in vector.
+
 ## What's NOT covered yet (planned for v0.9.5+)
 
 - Channel message signature verification end-to-end

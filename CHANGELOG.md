@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Signed Trade Rule Recognition v1 chains for community, DAO, or individual
+  recognition, deprecation, and revocation of exact Rule Package digests,
+  including mandatory bounded expiry, issuer Rule-ID scopes, local observed
+  quorum projection, content-addressed persistence, metadata-only invalid-input
+  quarantine, and TypeScript verification vectors. Recognition never grants
+  executable or funds authority automatically and does not claim globally
+  fresh revocation.
 - Recoverable Trade Order audit outbox with `prepared -> cached -> anchored`
   state transitions and exact, idempotent `trade.order.accepted` Spine events.
 - Execution-readiness verification that reloads and resolves every transitive

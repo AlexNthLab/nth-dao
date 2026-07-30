@@ -167,6 +167,42 @@ Community, DAO, industry, or standards bodies may issue signed recognition,
 deprecation, or revocation statements. Those statements inform local policy and
 never become an unconditional Core whitelist.
 
+Trade Rule Recognition v1 binds one issuer, Rule ID, and exact Rule Package
+digest into a signed, sequence-linked statement chain. A successor must bind
+the exact predecessor digest. Forks and missing predecessors fail closed.
+Future successors do not replace the latest statement effective at the local
+evaluation time. Every statement has a mandatory expiry, and local policy
+bounds its maximum lifetime.
+
+Each node chooses trusted recognition issuers, a threshold, and explicit Rule
+ID scopes for every issuer. The projection reports
+`observed_quorum_met`, never global acceptance: a decentralized node cannot
+prove that an unavailable newer revocation does not exist. It also reports the
+time through which the currently observed quorum can survive without renewal.
+Invalid federation input is quarantined independently and cannot suppress a
+valid observed view; strict replay remains available for detecting corruption
+inside a locally verified store.
+
+Recognition is advisory and deliberately separate from execution authority. A
+recognized package is not automatically inserted into
+`approved_executable_digests`, does not grant Adapter permissions, and cannot
+authorize funds. Operators may use the projection as one input when building
+their local `RuleResolutionPolicy`, but the protocol kernel does not silently
+mutate that policy. This preserves the intended model: communities publish
+Trade Skills and opinions about them, while each user or DAO decides which
+rules it will accept and which executable artifacts it will separately
+approve.
+
+Verified Recognition statements may be imported into a bounded,
+content-addressed local CAS. Invalid input bytes are not retained; the
+quarantine stores only a digest, reason code, and observation time. Store reads
+reverify signatures, package bindings, filenames, and path safety. Spine
+projection, signed issuer-head exchange, and federation transport remain
+separate future slices, so this release does not claim globally fresh
+revocation. The CAS is not an audit ledger: deleting both local facts and any
+future checkpoint can still erase local history until another node presents a
+signed conflicting head.
+
 ## Bilateral Agreement and Order
 
 Trade Agreement v1 adds a deliberately small bilateral consent sequence for
@@ -420,6 +456,10 @@ The reviewed protocol kernel currently contains:
 - content-addressed, non-executing Rule Package storage;
 - explicit local recognition policy and bounded exact-digest dependency
   resolution;
+- signed, sequence-linked Rule Recognition v1 statements and deterministic
+  scoped local quorum projection, bounded expiry, durable CAS import, and
+  metadata-only invalid-input quarantine, without automatic execution
+  authority or claims of globally fresh revocation;
 - canonical Offer-head and policy-snapshot binding before Order-facing rule
   resolution;
 - signed bilateral Proposal and Acceptance statements with independent local

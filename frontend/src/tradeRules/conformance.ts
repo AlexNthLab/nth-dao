@@ -7,6 +7,8 @@ const MAX_KEY_BYTES = 256;
 
 export const TRADE_RULE_MANIFEST_DOMAIN = "NTH-TRADE-RULE-MANIFEST-V1";
 export const TRADE_OFFER_DOMAIN = "NTH-TRADE-OFFER-V2";
+export const TRADE_RULE_RECOGNITION_DOMAIN =
+  "nth-dao/trade-rule-recognition/v1";
 
 type JsonObject = { [key: string]: JsonValue };
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
@@ -458,6 +460,13 @@ export function offerSigningInput(
   return manifestSigningInput(offer, domain);
 }
 
+export function recognitionSigningInput(
+  recognition: unknown,
+  domain = TRADE_RULE_RECOGNITION_DOMAIN
+): Uint8Array {
+  return manifestSigningInput(recognition, domain);
+}
+
 function decodeBase58(value: string): Uint8Array {
   const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
   let number = 0n;
@@ -583,6 +592,50 @@ export async function verifyOfferSourceSignature(
       key,
       asArrayBuffer(signature),
       asArrayBuffer(offerSigningInput(document, domain))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyRuleRecognitionSignature(
+  recognition: unknown,
+  subtle: SubtleCrypto = globalThis.crypto.subtle,
+  domain = TRADE_RULE_RECOGNITION_DOMAIN
+): Promise<boolean> {
+  try {
+    const document = asObject(
+      JSON.parse(new TextDecoder().decode(tradeCanonicalBytes(recognition))),
+      "recognition"
+    );
+    const proof = asObject(document.proof, "proof");
+    if (
+      document.kind !== "nth.dao.trade.rule-recognition" ||
+      document.protocol_version !== "1" ||
+      proof.type !== "NthEd25519SignatureV1" ||
+      proof.proof_purpose !== "tradeRuleRecognition" ||
+      typeof document.issuer_did !== "string" ||
+      typeof proof.verification_method !== "string" ||
+      proof.verification_method !==
+        `${document.issuer_did}#${document.issuer_did.slice("did:key:".length)}` ||
+      typeof proof.proof_value !== "string"
+    ) {
+      return false;
+    }
+    const keyBytes = decodeDidKey(document.issuer_did);
+    const signature = decodeBase64Url(proof.proof_value);
+    const key = await subtle.importKey(
+      "raw",
+      asArrayBuffer(keyBytes),
+      { name: "Ed25519" },
+      false,
+      ["verify"]
+    );
+    return await subtle.verify(
+      { name: "Ed25519" },
+      key,
+      asArrayBuffer(signature),
+      asArrayBuffer(recognitionSigningInput(document, domain))
     );
   } catch {
     return false;

@@ -1,0 +1,188 @@
+{
+  "expected_recognized_canonical_hex": "7b226465636973696f6e223a227265636f676e697a6564222c226973737565645f6174223a22323032362d30382d30315430303a30303a30305a222c226973737565725f646964223a226469643a6b65793a7a364d6b726439347239794a70675a3148457469587332354c363766436a3462524c4270796e77633672736e54705445222c226b696e64223a226e74682e64616f2e74726164652e72756c652d7265636f676e6974696f6e222c226e6f745f6166746572223a22323032362d30382d32305430303a30303a30305a222c227061636b6167655f646967657374223a227368613235363a63353237663232613861663839316235323965373134393334326633363164363861633664386538333934626335333931323130343037366330333431363265222c2270726576696f75735f73746174656d656e745f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30382d30315430303a30303a30305a222c2270726f6f665f707572706f7365223a22747261646552756c655265636f676e6974696f6e222c2270726f6f665f76616c7565223a22725763766968766b492d354f377447314255356c646e594a4350756848322d74506c39746956385149545450515a2d664e6870444d724463665648464d705a4b4a6f544f6535314d317a654a696d7a6c327551314241222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b726439347239794a70675a3148457469587332354c363766436a3462524c4270796e77633672736e54705445237a364d6b726439347239794a70675a3148457469587332354c363766436a3462524c4270796e77633672736e54705445227d2c2270726f746f636f6c5f76657273696f6e223a2231222c22726561736f6e5f636f646573223a5b5d2c227265636f676e6974696f6e5f6964223a226e74682d74726164652d7265636f676e6974696f6e2d7368613235363a31616466336334383163643937333237613037646238633562383161363262326266353132383134373130353135383162633738613762353031333433363564222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f6469676974616c2d64656c6976657279222c2273657175656e6365223a317d",
+  "expected_recognized_signing_input_hex": "6e74682d64616f2f74726164652d72756c652d7265636f676e6974696f6e2f7631007b226465636973696f6e223a227265636f676e697a6564222c226973737565645f6174223a22323032362d30382d30315430303a30303a30305a222c226973737565725f646964223a226469643a6b65793a7a364d6b726439347239794a70675a3148457469587332354c363766436a3462524c4270796e77633672736e54705445222c226b696e64223a226e74682e64616f2e74726164652e72756c652d7265636f676e6974696f6e222c226e6f745f6166746572223a22323032362d30382d32305430303a30303a30305a222c227061636b6167655f646967657374223a227368613235363a63353237663232613861663839316235323965373134393334326633363164363861633664386538333934626335333931323130343037366330333431363265222c2270726576696f75735f73746174656d656e745f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30382d30315430303a30303a30305a222c2270726f6f665f707572706f7365223a22747261646552756c655265636f676e6974696f6e222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b726439347239794a70675a3148457469587332354c363766436a3462524c4270796e77633672736e54705445237a364d6b726439347239794a70675a3148457469587332354c363766436a3462524c4270796e77633672736e54705445227d2c2270726f746f636f6c5f76657273696f6e223a2231222c22726561736f6e5f636f646573223a5b5d2c227265636f676e6974696f6e5f6964223a226e74682d74726164652d7265636f676e6974696f6e2d7368613235363a31616466336334383163643937333237613037646238633562383161363262326266353132383134373130353135383162633738613762353031333433363564222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f6469676974616c2d64656c6976657279222c2273657175656e6365223a317d",
+  "format": "nth-trade-rule-recognition-conformance-v1",
+  "invalid": {
+    "bad_predecessor": {
+      "decision": "revoked",
+      "issued_at": "2026-08-02T00:00:00Z",
+      "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      "kind": "nth.dao.trade.rule-recognition",
+      "not_after": "2026-08-20T00:00:00Z",
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "previous_statement_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "proof": {
+        "created": "2026-08-02T00:00:00Z",
+        "proof_purpose": "tradeRuleRecognition",
+        "proof_value": "jHMmFycGKYwl_rO8cURbBQdZFvO2ux3VWCgmhb8Jkyr94kMR1O3P1PDREi_JZbH_K1DzXFaNwBhpOGkQWrI8AA",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE#z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE"
+      },
+      "protocol_version": "1",
+      "reason_codes": [
+        "security.withdrawn"
+      ],
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 2
+    },
+    "missing_expiry": {
+      "decision": "recognized",
+      "issued_at": "2026-08-01T00:00:00Z",
+      "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      "kind": "nth.dao.trade.rule-recognition",
+      "not_after": null,
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "previous_statement_digest": null,
+      "proof": {
+        "created": "2026-08-01T00:00:00Z",
+        "proof_purpose": "tradeRuleRecognition",
+        "proof_value": "8ttsNrIOCMomIFFhtrkOn7QEZNPx0oJGH740uDIqXK3fUs-vZa20cpE-imiPdMvKFFQ9aZTGPgtdZH8zhVYVCA",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE#z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE"
+      },
+      "protocol_version": "1",
+      "reason_codes": [],
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 1
+    },
+    "missing_reason": {
+      "decision": "revoked",
+      "issued_at": "2026-08-02T00:00:00Z",
+      "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      "kind": "nth.dao.trade.rule-recognition",
+      "not_after": "2026-08-20T00:00:00Z",
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "previous_statement_digest": "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+      "proof": {
+        "created": "2026-08-02T00:00:00Z",
+        "proof_purpose": "tradeRuleRecognition",
+        "proof_value": "yP0Cqz3_BSzcIdqmFek4mx8lSNEpnfXabGuWSHaTKqRlmqGV4VuU9pu3gOC-WXx-vnSu6nb_4rfnDTGx_sGKAw",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE#z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE"
+      },
+      "protocol_version": "1",
+      "reason_codes": [],
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 2
+    },
+    "tampered_decision": {
+      "decision": "revoked",
+      "issued_at": "2026-08-01T00:00:00Z",
+      "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      "kind": "nth.dao.trade.rule-recognition",
+      "not_after": "2026-08-20T00:00:00Z",
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "previous_statement_digest": null,
+      "proof": {
+        "created": "2026-08-01T00:00:00Z",
+        "proof_purpose": "tradeRuleRecognition",
+        "proof_value": "rWcvihvkI-5O7tG1BU5ldnYJCPuhH2-tPl9tiV8QITTPQZ-fNhpDMrDcfVHFMpZKJoTOe51M1zeJimzl2uQ1BA",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE#z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE"
+      },
+      "protocol_version": "1",
+      "reason_codes": [
+        "security.withdrawn"
+      ],
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 1
+    }
+  },
+  "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+  "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+  "package_manifest": {
+    "applies_to": [
+      "service"
+    ],
+    "conflicts": [],
+    "dependencies": [],
+    "execution": {
+      "mode": "declarative",
+      "permissions": []
+    },
+    "extensions": {},
+    "families": [
+      "acceptance",
+      "fulfillment"
+    ],
+    "hook_contracts": [],
+    "kind": "org.nthdao.trade.rule-manifest",
+    "not_after": "2027-07-31T00:00:00Z",
+    "proof": {
+      "created": "2026-07-31T00:00:00Z",
+      "proof_purpose": "assertionMethod",
+      "proof_value": "Fk0p-FCqVv6lJWiCEbKfO_Bet2Az36V967SeMHESSwK5LqDzC4VVBw0DT4rNU-gSwhyWN6Jh8DUAYsVPXASlCw",
+      "type": "NthEd25519SignatureV1",
+      "verification_method": "did:key:z6MknbWFKLhNARWdKtxvoHHusEGys6oKaWkMm2pbZWhE4yxS#z6MknbWFKLhNARWdKtxvoHHusEGys6oKaWkMm2pbZWhE4yxS"
+    },
+    "protocol_version": "1.0",
+    "published_at": "2026-07-31T00:00:00Z",
+    "publisher_did": "did:key:z6MknbWFKLhNARWdKtxvoHHusEGys6oKaWkMm2pbZWhE4yxS",
+    "required_capabilities": [],
+    "resources": [
+      {
+        "digest": "sha256:ae78d525e04e141aa080a28f9e11a6a9fb3587d96942b37cf9d432fac5b05c15",
+        "media_type": "application/schema+json",
+        "purpose": "terms",
+        "size": 41
+      }
+    ],
+    "rule_id": "org.nthdao.reference/digital-delivery",
+    "summary": "Public conformance package; never trust this test key.",
+    "version": "1.0.0"
+  },
+  "package_resources_hex": {
+    "sha256:ae78d525e04e141aa080a28f9e11a6a9fb3587d96942b37cf9d432fac5b05c15": "7b2274797065223a226f626a656374222c227265717569726564223a5b2264656c6976657279225d7d"
+  },
+  "recognized": {
+    "decision": "recognized",
+    "issued_at": "2026-08-01T00:00:00Z",
+    "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+    "kind": "nth.dao.trade.rule-recognition",
+    "not_after": "2026-08-20T00:00:00Z",
+    "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+    "previous_statement_digest": null,
+    "proof": {
+      "created": "2026-08-01T00:00:00Z",
+      "proof_purpose": "tradeRuleRecognition",
+      "proof_value": "rWcvihvkI-5O7tG1BU5ldnYJCPuhH2-tPl9tiV8QITTPQZ-fNhpDMrDcfVHFMpZKJoTOe51M1zeJimzl2uQ1BA",
+      "type": "NthEd25519SignatureV1",
+      "verification_method": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE#z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE"
+    },
+    "protocol_version": "1",
+    "reason_codes": [],
+    "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+    "rule_id": "org.nthdao.reference/digital-delivery",
+    "sequence": 1
+  },
+  "revoked": {
+    "decision": "revoked",
+    "issued_at": "2026-08-02T00:00:00Z",
+    "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+    "kind": "nth.dao.trade.rule-recognition",
+    "not_after": "2026-08-20T00:00:00Z",
+    "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+    "previous_statement_digest": "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+    "proof": {
+      "created": "2026-08-02T00:00:00Z",
+      "proof_purpose": "tradeRuleRecognition",
+      "proof_value": "nmkTysaoLltMGMncpQOEHiHhl3EOUqro_K6dDPSmH9FXvzclNJBoOvIZY80Zzh7OOE0ByJMuQMZBBY6PymGFBg",
+      "type": "NthEd25519SignatureV1",
+      "verification_method": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE#z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE"
+    },
+    "protocol_version": "1",
+    "reason_codes": [
+      "security.withdrawn"
+    ],
+    "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+    "rule_id": "org.nthdao.reference/digital-delivery",
+    "sequence": 2
+  },
+  "rule_id": "org.nthdao.reference/digital-delivery",
+  "schema_version": 1,
+  "warning": "Deterministic public test keys; never trust or reuse them."
+}
