@@ -47,7 +47,9 @@
     "allowed_execution_modes": [
       "declarative"
     ],
-    "allowed_permissions": []
+    "allowed_permissions": [],
+    "kind": "nth.dao.trade.execution-adapter-policy",
+    "protocol_version": "1"
   },
   "execution_adapter": {
     "adapter_id": "org.nthdao.reference/declarative",
@@ -904,6 +906,54 @@
       },
       "expected_valid": false,
       "target": "execution_adapter"
+    },
+    {
+      "case": "receipt-review-signed-decision-tamper",
+      "document": {
+        "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+        "decision": "disputed",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "kind": "nth.dao.trade.receipt-review",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "proof": {
+          "created": "2026-08-01T02:02:00Z",
+          "proof_purpose": "tradeReceiptReview",
+          "proof_value": "PkQ14wrCPWInUoT2D6fo_cY9wK1B_ZRNJUf8OuDSXRgAatso6xrQRYp0jkzXdO0Nxtv0ZtvWuAjdgA0c0DB3Dw",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "result.mismatch"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "reviewed_at": "2026-08-01T02:02:00Z",
+        "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "reviewer_role": "taker",
+        "verifier_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4"
+      },
+      "expected_valid": false,
+      "target": "receipt_review"
+    },
+    {
+      "case": "receipt-review-audit-binding-tamper",
+      "document": {
+        "decision": "accepted",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "protocol_version": "1",
+        "receipt_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "reviewed_at": "2026-08-01T02:02:00Z",
+        "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "reviewer_role": "taker"
+      },
+      "expected_valid": false,
+      "target": "receipt_review_audit_binding"
     }
   ],
   "order": {
@@ -1145,6 +1195,64 @@
     }
   },
   "proposal_digest": "sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+  "receipt_review": {
+    "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+    "decision": "accepted",
+    "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+    "kind": "nth.dao.trade.receipt-review",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+    "proof": {
+      "created": "2026-08-01T02:02:00Z",
+      "proof_purpose": "tradeReceiptReview",
+      "proof_value": "PkQ14wrCPWInUoT2D6fo_cY9wK1B_ZRNJUf8OuDSXRgAatso6xrQRYp0jkzXdO0Nxtv0ZtvWuAjdgA0c0DB3Dw",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    "protocol_version": "1",
+    "reason_codes": [],
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+    "reviewed_at": "2026-08-01T02:02:00Z",
+    "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "reviewer_role": "taker",
+    "verifier_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4"
+  },
+  "receipt_review_audit": {
+    "event_type": "trade.receipt.reviewed",
+    "payload": {
+      "decision": "accepted",
+      "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+      "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+      "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+      "protocol_version": "1",
+      "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+      "review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+      "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+      "reviewed_at": "2026-08-01T02:02:00Z",
+      "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+      "reviewer_role": "taker"
+    }
+  },
+  "receipt_review_conflict_audit": {
+    "event_type": "trade.receipt.review.conflicted",
+    "payload": {
+      "candidate_decision": "disputed",
+      "candidate_review_digest": "sha256:db7a749de3e67178ce8b93579f39744fbb738ed7e5d79cb1919a14f61ea0982b",
+      "candidate_reviewed_at": "2026-08-01T02:03:00Z",
+      "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+      "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+      "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+      "primary_review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+      "protocol_version": "1",
+      "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+      "retention_complete": true,
+      "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+      "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+      "reviewer_role": "taker"
+    }
+  },
+  "receipt_review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
   "rule_package": {
     "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
     "manifest": {

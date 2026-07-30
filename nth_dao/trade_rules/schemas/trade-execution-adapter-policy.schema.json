@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-execution-adapter-policy-v1.json",
+  "title": "NTH DAO Trade Execution Adapter Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "accepted_adapter_digests",
+    "allowed_execution_modes",
+    "allowed_permissions"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.execution-adapter-policy"},
+    "protocol_version": {"const": "1"},
+    "accepted_adapter_digests": {
+      "type": "array",
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/digest"}
+    },
+    "allowed_execution_modes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "declarative",
+          "adapter",
+          "sandboxed_wasm",
+          "external_service"
+        ]
+      }
+    },
+    "allowed_permissions": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._:/-]{0,159}$"
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

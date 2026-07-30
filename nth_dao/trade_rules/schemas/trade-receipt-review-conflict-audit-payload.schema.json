@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-receipt-review-conflict-audit-payload-v1.json",
+  "title": "NTH DAO Trade Receipt Review Conflict Spine Payload v1",
+  "$comment": "The protocol validator must additionally bind both digests to distinct signed Review candidates for the same review_id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "review_id",
+    "primary_review_digest",
+    "candidate_review_digest",
+    "order_id",
+    "order_digest",
+    "execution_id",
+    "receipt_digest",
+    "reviewer_did",
+    "reviewer_role",
+    "candidate_decision",
+    "candidate_reviewed_at",
+    "retention_complete"
+  ],
+  "properties": {
+    "protocol_version": {"const": "1"},
+    "review_id": {
+      "type": "string",
+      "pattern": "^nth-trade-review-sha256:[0-9a-f]{64}$"
+    },
+    "primary_review_digest": {"$ref": "#/$defs/digest"},
+    "candidate_review_digest": {"$ref": "#/$defs/digest"},
+    "order_id": {
+      "type": "string",
+      "pattern": "^nth-trade-order-sha256:[0-9a-f]{64}$"
+    },
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "execution_id": {
+      "type": "string",
+      "pattern": "^nth-trade-execution-sha256:[0-9a-f]{64}$"
+    },
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "reviewer_did": {"$ref": "#/$defs/did"},
+    "reviewer_role": {"enum": ["maker", "taker"]},
+    "candidate_decision": {
+      "enum": ["accepted", "rejected", "disputed"]
+    },
+    "candidate_reviewed_at": {"$ref": "#/$defs/timestamp"},
+    "retention_complete": {"type": "boolean"}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.(?!000000)\\d{6})?Z$"
+    }
+  }
+}

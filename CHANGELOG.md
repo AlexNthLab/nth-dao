@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   deterministic positive/negative conformance vectors that reconstruct Rule
   Packages, policies, Adapter artifacts, execution content, readiness,
   Receipt verification, and its signed Spine projection.
+- Counterparty-signed Trade Receipt Review v1 with mandatory independent
+  policy replay, exact Order/Receipt/policy binding, negative reason codes,
+  conflict-retaining CAS persistence, and recoverable idempotent
+  `trade.receipt.reviewed` Spine projection.
+- Receipt Review and Spine payload schemas plus deterministic positive and
+  negative conformance vectors.
+- Receipt Review write-ahead audit records that recover normal and conflicting
+  Spine projections after restart without object resubmission, plus explicit
+  idempotent `trade.receipt.review.conflicted` events.
+- Canonical Trade Execution Adapter Policy v1 objects with a public wire
+  schema and digest shared by Receipt Review and conformance implementations.
 
 ### Fixed
 
@@ -50,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restore a rolled-back CAS cache from the write-ahead signed Order.
 - Trade Receipt timestamps no longer accept or reattach precision beyond
   Python's microsecond clock.
+- Receipt Review conflicts are isolated by semantic Review ID, marker-only
+  evidence can be completed after capacity increases, self-referential markers
+  are not reported complete, and partial Receipt/Order digest binding is
+  rejected.
 
 ## [0.10.0b1] - 2026-06-07 - Beta release: signed mandates, A2A server, hardened collaboration runtime
 

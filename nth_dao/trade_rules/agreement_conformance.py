@@ -32,6 +32,19 @@ from nth_dao.trade_rules.execution_audit import (
     EVENT_TRADE_EXECUTION_RECORDED,
     execution_audit_payload,
 )
+from nth_dao.trade_rules.receipt_review import (
+    create_trade_receipt_review,
+    receipt_review_digest,
+)
+from nth_dao.trade_rules.receipt_review_audit import (
+    EVENT_TRADE_RECEIPT_REVIEW_CONFLICTED,
+    EVENT_TRADE_RECEIPT_REVIEWED,
+    receipt_review_conflict_audit_payload,
+    receipt_review_audit_payload,
+)
+from nth_dao.trade_rules.receipt_review_store import (
+    TradeReceiptReviewConflictStatus,
+)
 from nth_dao.trade_rules.execution_adapter import (
     TradeExecutionAdapterPolicy,
     build_execution_adapter,
@@ -82,6 +95,22 @@ EXECUTION_AUDIT_SCHEMA_PATH = (
 EXECUTION_ADAPTER_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-execution-adapter.schema.json"
+)
+EXECUTION_ADAPTER_POLICY_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-execution-adapter-policy.schema.json"
+)
+RECEIPT_REVIEW_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-receipt-review.schema.json"
+)
+RECEIPT_REVIEW_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-receipt-review-audit-payload.schema.json"
+)
+RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-receipt-review-conflict-audit-payload.schema.json"
 )
 
 
@@ -354,6 +383,39 @@ def generate_vectors() -> dict[str, Any]:
             completed_at="2026-08-01T02:01:00Z",
             now=_utc("2026-08-01T02:01:00Z"),
         )
+        receipt_review = create_trade_receipt_review(
+            taker,
+            receipt=execution_receipt,
+            order=order,
+            package_resolver=package_store,
+            verifier_policy=verifier_policy,
+            adapter_resolver=_AdapterResolver(adapter, adapter_artifact),
+            adapter_policy=adapter_policy,
+            content_resolver=MappingTradeExecutionContentResolver(
+                execution_content
+            ),
+            schema_validator=JsonSchema202012Validator(),
+            decision="accepted",
+            reviewed_at="2026-08-01T02:02:00Z",
+            now=_utc("2026-08-01T02:02:00Z"),
+        )
+        conflicting_receipt_review = create_trade_receipt_review(
+            taker,
+            receipt=execution_receipt,
+            order=order,
+            package_resolver=package_store,
+            verifier_policy=verifier_policy,
+            adapter_resolver=_AdapterResolver(adapter, adapter_artifact),
+            adapter_policy=adapter_policy,
+            content_resolver=MappingTradeExecutionContentResolver(
+                execution_content
+            ),
+            schema_validator=JsonSchema202012Validator(),
+            decision="disputed",
+            reason_codes=["result.mismatch"],
+            reviewed_at="2026-08-01T02:03:00Z",
+            now=_utc("2026-08-01T02:03:00Z"),
+        )
         omitted_rules_body = proposal.to_dict()
         omitted_rules_body.pop("proof")
         omitted_rules_body["rule_bindings"] = []
@@ -427,6 +489,40 @@ def generate_vectors() -> dict[str, Any]:
         )
         adapter_unknown_field = adapter.to_dict()
         adapter_unknown_field["unexpected"] = True
+        receipt_review_tamper = receipt_review.to_dict()
+        receipt_review_tamper["decision"] = "disputed"
+        receipt_review_tamper["reason_codes"] = ["result.mismatch"]
+        receipt_review_audit = receipt_review_audit_payload(
+            receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        primary_review_digest = receipt_review_digest(receipt_review)
+        conflicting_review_digest = receipt_review_digest(
+            conflicting_receipt_review
+        )
+        receipt_review_conflict_audit = (
+            receipt_review_conflict_audit_payload(
+                conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                status=TradeReceiptReviewConflictStatus(
+                    review_id=receipt_review.review_id,
+                    has_conflict=True,
+                    primary_review_digest=primary_review_digest,
+                    marker_candidate_digest=conflicting_review_digest,
+                    retained_review_digests=(
+                        primary_review_digest,
+                        conflicting_review_digest,
+                    ),
+                    retention_complete=True,
+                ),
+            )
+        )
+        receipt_review_audit_tamper = copy.deepcopy(receipt_review_audit)
+        receipt_review_audit_tamper["receipt_digest"] = (
+            "sha256:" + ("0" * 64)
+        )
     return {
         "format": "nth-trade-agreement-conformance-v1",
         "schema_version": 1,
@@ -456,17 +552,7 @@ def generate_vectors() -> dict[str, Any]:
             ],
         },
         "verifier_policy": json.loads(verifier_policy.canonical_bytes),
-        "adapter_policy": {
-            "accepted_adapter_digests": sorted(
-                adapter_policy.accepted_adapter_digests
-            ),
-            "allowed_execution_modes": sorted(
-                adapter_policy.allowed_execution_modes
-            ),
-            "allowed_permissions": sorted(
-                adapter_policy.allowed_permissions
-            ),
-        },
+        "adapter_policy": adapter_policy.to_dict(),
         "execution_content": [
             {
                 "digest": digest,
@@ -478,6 +564,8 @@ def generate_vectors() -> dict[str, Any]:
         "execution_receipt_digest": execution_receipt_digest(
             execution_receipt
         ),
+        "receipt_review": receipt_review.to_dict(),
+        "receipt_review_digest": receipt_review_digest(receipt_review),
         "expected_execution_readiness": (
             execution_receipt.to_dict()["readiness"]
         ),
@@ -488,6 +576,14 @@ def generate_vectors() -> dict[str, Any]:
         "execution_audit": {
             "event_type": EVENT_TRADE_EXECUTION_RECORDED,
             "payload": execution_audit,
+        },
+        "receipt_review_audit": {
+            "event_type": EVENT_TRADE_RECEIPT_REVIEWED,
+            "payload": receipt_review_audit,
+        },
+        "receipt_review_conflict_audit": {
+            "event_type": EVENT_TRADE_RECEIPT_REVIEW_CONFLICTED,
+            "payload": receipt_review_conflict_audit,
         },
         "negative_cases": [
             {
@@ -562,6 +658,18 @@ def generate_vectors() -> dict[str, Any]:
                 "expected_valid": False,
                 "document": adapter_unknown_field,
             },
+            {
+                "case": "receipt-review-signed-decision-tamper",
+                "target": "receipt_review",
+                "expected_valid": False,
+                "document": receipt_review_tamper,
+            },
+            {
+                "case": "receipt-review-audit-binding-tamper",
+                "target": "receipt_review_audit_binding",
+                "expected_valid": False,
+                "document": receipt_review_audit_tamper,
+            },
         ],
     }
 
@@ -593,9 +701,13 @@ __all__ = [
     "EXECUTION_RECEIPT_SCHEMA_PATH",
     "EXECUTION_AUDIT_SCHEMA_PATH",
     "EXECUTION_ADAPTER_SCHEMA_PATH",
+    "EXECUTION_ADAPTER_POLICY_SCHEMA_PATH",
     "ORDER_SCHEMA_PATH",
     "ORDER_AUDIT_SCHEMA_PATH",
     "PROPOSAL_SCHEMA_PATH",
+    "RECEIPT_REVIEW_AUDIT_SCHEMA_PATH",
+    "RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH",
+    "RECEIPT_REVIEW_SCHEMA_PATH",
     "VECTORS_PATH",
     "generate_vectors",
     "write_vectors",

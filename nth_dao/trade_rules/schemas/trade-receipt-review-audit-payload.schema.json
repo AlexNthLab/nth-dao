@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-receipt-review-audit-payload-v1.json",
+  "title": "NTH DAO Trade Receipt Reviewed Spine Payload v1",
+  "$comment": "Exact payload-to-Review, payload-to-Receipt, and payload-to-Order equality require the protocol validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "review_id",
+    "review_digest",
+    "order_id",
+    "order_digest",
+    "execution_id",
+    "receipt_digest",
+    "reviewer_did",
+    "reviewer_role",
+    "decision",
+    "reviewed_at"
+  ],
+  "properties": {
+    "protocol_version": {"const": "1"},
+    "review_id": {
+      "type": "string",
+      "pattern": "^nth-trade-review-sha256:[0-9a-f]{64}$"
+    },
+    "review_digest": {"$ref": "#/$defs/digest"},
+    "order_id": {
+      "type": "string",
+      "pattern": "^nth-trade-order-sha256:[0-9a-f]{64}$"
+    },
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "execution_id": {
+      "type": "string",
+      "pattern": "^nth-trade-execution-sha256:[0-9a-f]{64}$"
+    },
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "reviewer_did": {"$ref": "#/$defs/did"},
+    "reviewer_role": {"enum": ["maker", "taker"]},
+    "decision": {"enum": ["accepted", "rejected", "disputed"]},
+    "reviewed_at": {"$ref": "#/$defs/timestamp"}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.(?!000000)\\d{6})?Z$"
+    }
+  }
+}

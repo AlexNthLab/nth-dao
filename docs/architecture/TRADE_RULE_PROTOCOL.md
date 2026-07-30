@@ -305,6 +305,40 @@ under the same Spine lock, closing the gap between verification and reading.
 Automatic Web or daemon startup scheduling is not part of this
 protocol-kernel slice.
 
+A Receipt counterparty may issue a Trade Receipt Review v1 after independently
+replaying the Receipt under its own Rule and Adapter policies. The Review binds
+the exact Order, execution ID, Receipt digest, reviewer DID and role, and the
+digests of both local policy snapshots used for verification. Only the Order
+party opposite the executor may sign. Decisions are `accepted`, `rejected`, or
+`disputed`; negative decisions require at least one bounded machine-readable
+reason code. An `accepted` decision is valid only for a Receipt whose claimed
+outcome is `succeeded`.
+
+A Receipt Review remains a signed counterparty claim. It proves neither that
+delivery objectively occurred nor that goods, rights, or funds changed hands.
+It does not close a dispute or grant reputation by itself. Local publication
+first prepares a bounded write-ahead record containing the exact signed Review,
+Receipt, and Order bytes. It then stores the Review in a conflict-retaining CAS
+and projects one exact, idempotent `trade.receipt.reviewed` event into the
+signed Spine. Startup or operator reconciliation can repair an interrupted
+projection from the outbox without requiring the caller to resubmit any of
+those objects.
+
+Contradictory signed Reviews sharing one semantic Review ID are retained as
+equivocation. They never replace the first `trade.receipt.reviewed` event.
+Instead, the coordinator appends an idempotent
+`trade.receipt.review.conflicted` event that binds the primary and candidate
+Review digests and reports whether both signed candidates were retained. A
+marker-only conflict can be completed after configured capacity is increased.
+Retention is complete only when the primary and marker digests are distinct
+and both candidates are actually present. A conflict event proves that
+inconsistent signed claims exist; it does not establish which claim is true.
+
+Trade Execution Adapter Policy v1 is a canonical protocol value with kind,
+protocol version, accepted Adapter digests, execution modes, and permissions.
+Its digest is computed over that exact canonical representation. Receipt
+Reviews bind this public Policy digest rather than a Review-private encoding.
+
 A later contradictory Receipt blocks the audit record even when its first
 candidate was already anchored. Blocked is not trusted as a local status flag:
 reconciliation must prove that Receipt CAS retains a distinct candidate marker,
@@ -407,12 +441,18 @@ The reviewed protocol kernel currently contains:
   persistence, exact idempotent `trade.execution.recorded` Spine anchoring,
   verified-snapshot replay, bounded cursor reconciliation, and externally
   checked fail-closed equivocation state;
+- counterparty-signed Trade Receipt Review v1 claims with mandatory local
+  Receipt replay, exact policy snapshot binding, conflict-retaining CAS
+  storage, write-ahead restart recovery, and idempotent
+  `trade.receipt.reviewed` / `trade.receipt.review.conflicted` Spine
+  projections;
 - bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - schemas and deterministic positive and negative conformance vectors,
-  including Agreement v1, Execution Receipt v1, and the
-  `trade.order.accepted` and `trade.execution.recorded` payloads;
+  including Agreement v1, Execution Receipt v1, Receipt Review v1, and the
+  `trade.order.accepted`, `trade.execution.recorded`, and
+  Receipt Review audit payloads;
 - focused tests.
 
 Agreement and Order objects remain protocol-kernel primitives. The audit

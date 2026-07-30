@@ -17,8 +17,11 @@ from nth_dao.trade_rules.manifest import MANIFEST_EXECUTION_MODES
 
 ADAPTER_KIND = "nth.dao.trade.execution-adapter"
 ADAPTER_PROTOCOL_VERSION = "1"
+ADAPTER_POLICY_KIND = "nth.dao.trade.execution-adapter-policy"
+ADAPTER_POLICY_PROTOCOL_VERSION = "1"
 MAX_ADAPTER_HOOKS = 256
 MAX_ADAPTER_PERMISSIONS = 64
+MAX_ACCEPTED_ADAPTERS = 1024
 MAX_ADAPTER_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -51,6 +54,15 @@ _FIELDS = frozenset(
     }
 )
 _HOOK_FIELDS = frozenset({"rule_id", "hook_name", "hook_version"})
+_POLICY_FIELDS = frozenset(
+    {
+        "kind",
+        "protocol_version",
+        "accepted_adapter_digests",
+        "allowed_execution_modes",
+        "allowed_permissions",
+    }
+)
 
 
 class TradeExecutionAdapterRejected(ValueError):
@@ -194,6 +206,63 @@ class TradeExecutionAdapterPolicy:
     allowed_execution_modes: frozenset[str] = frozenset({"declarative"})
     allowed_permissions: frozenset[str] = frozenset()
 
+    @classmethod
+    def from_dict(
+        cls,
+        document: dict[str, Any],
+    ) -> "TradeExecutionAdapterPolicy":
+        try:
+            value = parse_trade_json(
+                trade_canonical_json(copy.deepcopy(document))
+            )
+            if set(value) != _POLICY_FIELDS:
+                _reject("Adapter Policy has missing or unknown fields")
+            if value["kind"] != ADAPTER_POLICY_KIND:
+                _reject("Adapter Policy has the wrong kind")
+            if (
+                value["protocol_version"]
+                != ADAPTER_POLICY_PROTOCOL_VERSION
+            ):
+                _reject("Adapter Policy has an unsupported version")
+            accepted = value["accepted_adapter_digests"]
+            if (
+                not isinstance(accepted, list)
+                or len(accepted) > MAX_ACCEPTED_ADAPTERS
+            ):
+                _reject(
+                    "accepted_adapter_digests exceeds the entry limit"
+                )
+            if accepted != sorted(set(accepted)):
+                _reject(
+                    "accepted_adapter_digests must be sorted and unique"
+                )
+            for digest in accepted:
+                _digest(digest, label="accepted_adapter_digests item")
+            modes = _sorted_tokens(
+                value["allowed_execution_modes"],
+                label="allowed_execution_modes",
+                maximum=len(MANIFEST_EXECUTION_MODES),
+            )
+            permissions = _sorted_tokens(
+                value["allowed_permissions"],
+                label="allowed_permissions",
+                maximum=MAX_ADAPTER_PERMISSIONS,
+            )
+            return cls(
+                accepted_adapter_digests=frozenset(accepted),
+                allowed_execution_modes=frozenset(modes),
+                allowed_permissions=frozenset(permissions),
+            )
+        except (
+            TradeCanonicalJSONError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+        ) as exc:
+            if isinstance(exc, TradeExecutionAdapterRejected):
+                raise
+            raise TradeExecutionAdapterRejected(str(exc)) from exc
+
     def __post_init__(self) -> None:
         accepted = frozenset(self.accepted_adapter_digests)
         modes = frozenset(self.allowed_execution_modes)
@@ -201,6 +270,8 @@ class TradeExecutionAdapterPolicy:
         object.__setattr__(self, "accepted_adapter_digests", accepted)
         object.__setattr__(self, "allowed_execution_modes", modes)
         object.__setattr__(self, "allowed_permissions", permissions)
+        if len(accepted) > MAX_ACCEPTED_ADAPTERS:
+            _reject("accepted_adapter_digests exceeds the entry limit")
         for digest in accepted:
             _digest(digest, label="accepted_adapter_digests item")
         if (
@@ -211,6 +282,27 @@ class TradeExecutionAdapterPolicy:
         for permission in permissions:
             if not isinstance(permission, str) or _TOKEN.fullmatch(permission) is None:
                 _reject("allowed_permissions contains an invalid token")
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return trade_canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + hashlib.sha256(self.canonical_bytes).hexdigest()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": ADAPTER_POLICY_KIND,
+            "protocol_version": ADAPTER_POLICY_PROTOCOL_VERSION,
+            "accepted_adapter_digests": sorted(
+                self.accepted_adapter_digests
+            ),
+            "allowed_execution_modes": sorted(
+                self.allowed_execution_modes
+            ),
+            "allowed_permissions": sorted(self.allowed_permissions),
+        }
 
 
 def build_execution_adapter(
@@ -324,7 +416,10 @@ def resolve_execution_adapter(
 
 __all__ = [
     "ADAPTER_KIND",
+    "ADAPTER_POLICY_KIND",
+    "ADAPTER_POLICY_PROTOCOL_VERSION",
     "ADAPTER_PROTOCOL_VERSION",
+    "MAX_ACCEPTED_ADAPTERS",
     "MAX_ADAPTER_HOOKS",
     "MAX_ADAPTER_PERMISSIONS",
     "MAX_ADAPTER_ARTIFACT_BYTES",
