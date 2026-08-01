@@ -68,7 +68,7 @@ def test_concurrent_writers_do_not_lose_decisions(tmp_path: Path) -> None:
     def write(index: int) -> None:
         try:
             store = DecisionStore(tmp_path)
-            barrier.wait()
+            barrier.wait(timeout=5)
             store.put(_decision(f"d-{index:02d}"))
         except BaseException as exc:
             errors.append(exc)
@@ -77,7 +77,7 @@ def test_concurrent_writers_do_not_lose_decisions(tmp_path: Path) -> None:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=10)
+        thread.join(timeout=15)
 
     assert not errors
     assert all(not thread.is_alive() for thread in threads)

@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from nth_dao.util.io import InterProcessLock
+
 
 class DecisionNotFound(KeyError):
     """The requested decision is not pending."""
@@ -53,8 +55,16 @@ class DecisionStore:
         root = Path(workspace) / "decisions"
         root.mkdir(parents=True, exist_ok=True)
         self.path = root / "decisions.sqlite3"
-        self.timeout = timeout
-        self._initialize()
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise TypeError("timeout must be a positive number")
+        self.timeout = float(timeout)
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+        # SQLite serializes data transactions, but concurrent first-open DDL
+        # and journal-mode negotiation can still fail immediately on Windows.
+        # One durable lock covers initialization across threads and processes.
+        with InterProcessLock(root / ".initialize", timeout=self.timeout):
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -64,7 +74,9 @@ class DecisionStore:
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute(
+            f"PRAGMA busy_timeout = {max(1, int(self.timeout * 1_000))}"
+        )
         return connection
 
     def _initialize(self) -> None:
