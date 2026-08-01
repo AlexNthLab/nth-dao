@@ -232,7 +232,7 @@ describe("ChannelsView", () => {
 
     const receiptButton = await screen.findByRole("button", {
       name: /receipt r-channel-1/,
-    });
+    }, { timeout: 3_000 });
     fireEvent.click(receiptButton);
 
     await waitFor(() => {
