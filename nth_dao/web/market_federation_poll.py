@@ -430,10 +430,37 @@ def _verify_pulled_listing(
     http_get: HttpGetJson,
     verified_listings: Dict[str, Any],
 ) -> bool:
-    """Resolve and bind commerce summaries; legacy task announcements pass."""
-    from nth_dao.market.announcement import NTH_ANNOUNCEMENT_KIND_V3
+    """Resolve and bind full market documents; legacy tasks pass."""
+    from nth_dao.market.announcement import (
+        NTH_ANNOUNCEMENT_KIND_V3,
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+    )
 
-    if ann.kind != NTH_ANNOUNCEMENT_KIND_V3:
+    if ann.kind not in {
+        NTH_ANNOUNCEMENT_KIND_V3,
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+    }:
+        return True
+    if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+        from nth_dao.market.trade_offer_announcement import (
+            trade_offer_uri,
+            verify_trade_offer_announcement_binding,
+        )
+        from nth_dao.trade_rules.offer import TradeOffer
+
+        if ann.offer_uri != trade_offer_uri(ann.offer_digest):
+            return False
+        offer = verified_listings.get(ann.offer_digest)
+        if offer is None:
+            try:
+                raw = http_get(f"{base}{ann.offer_uri}")
+                offer = TradeOffer.from_dict(raw)
+            except (OSError, TypeError, ValueError, urllib.error.URLError):
+                return False
+        ok, _ = verify_trade_offer_announcement_binding(offer, ann)
+        if not ok:
+            return False
+        verified_listings[ann.offer_digest] = offer
         return True
     from nth_dao.commerce.listing import SignedListing
     from nth_dao.commerce.listing_announcement import (

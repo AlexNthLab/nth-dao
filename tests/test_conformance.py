@@ -8,7 +8,6 @@ implementation MUST pass its own vectors; otherwise the file is wrong.
 import pytest
 
 from nth_dao.conformance import (
-    ConformanceFailure,
     load_vectors,
     run_all_vectors,
 )
@@ -49,6 +48,7 @@ def test_each_category_has_at_least_one_vector():
         "replay_window",
         "handoff_response_v2",
         "handoff_review_packet_v1",
+        "trade_offer_announcement_v1",
     }
     data = load_vectors()
     present = set(data["vectors"].keys())
@@ -72,6 +72,7 @@ def test_main_regenerator_preserves_documented_categories(tmp_path):
         "mandate_negative_expiry",
         "handoff_response_v2",
         "handoff_review_packet_v1",
+        "trade_offer_announcement_v1",
     } <= present
 
 
@@ -157,3 +158,51 @@ def test_handoff_review_packet_v1_vector_matches_generator():
 
     data = load_vectors()
     assert data["vectors"]["handoff_review_packet_v1"] == gen_handoff_review_packet_v1()
+
+
+def test_trade_offer_announcement_v1_vector_matches_generator():
+    from nth_dao.conformance.regenerate import gen_trade_offer_announcement_v1
+
+    data = load_vectors()
+    assert data["vectors"]["trade_offer_announcement_v1"] == (
+        gen_trade_offer_announcement_v1()
+    )
+
+
+def test_trade_offer_announcement_v1_vectors_cover_binding_rejections():
+    data = load_vectors()
+    cases = data["vectors"]["trade_offer_announcement_v1"]
+    assert sum(case["expected_valid"] is True for case in cases) == 1
+    rejected = [case for case in cases if case["expected_valid"] is False]
+    assert len(rejected) >= 5
+    assert all(case["expected_reason"] != "ok" for case in rejected)
+    assert {
+        "title",
+        "offer_digest",
+        "revision",
+        "lifetime",
+        "publisher_did",
+    } <= {
+        token
+        for case in rejected
+        for token in case["expected_reason"].split()
+    }
+
+
+def test_trade_offer_announcement_v1_runner_checks_rejection_reason():
+    data = load_vectors()
+    vectors = data["vectors"]["trade_offer_announcement_v1"]
+    negative = next(case for case in vectors if not case["expected_valid"])
+    changed = {
+        **data,
+        "vectors": {
+            **data["vectors"],
+            "trade_offer_announcement_v1": [
+                {**negative, "expected_reason": "wrong expected reason"}
+            ],
+        },
+    }
+    failures = run_all_vectors(changed)
+    assert len(failures) == 1
+    assert failures[0].category == "trade_offer_announcement_v1"
+    assert failures[0].description == "binding"

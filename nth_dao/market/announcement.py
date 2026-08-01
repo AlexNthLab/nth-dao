@@ -50,6 +50,7 @@ REJECT_ANN_SCHEMA_INVALID = "ann-schema-invalid"
 NTH_ANNOUNCEMENT_KIND_V1 = "nth-task-announcement-v1"
 NTH_ANNOUNCEMENT_KIND_V2 = "nth-task-announcement-v2"
 NTH_ANNOUNCEMENT_KIND_V3 = "nth-task-announcement-v3"
+NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1 = "nth-trade-offer-announcement-v1"
 # Preserve the historical default so existing callers do not silently change
 # their signed wire body. Commerce publishers opt in to v3 explicitly.
 NTH_ANNOUNCEMENT_KIND = NTH_ANNOUNCEMENT_KIND_V2
@@ -229,6 +230,7 @@ def _validate_announcement_schema(
         NTH_ANNOUNCEMENT_KIND_V1,
         NTH_ANNOUNCEMENT_KIND_V2,
         NTH_ANNOUNCEMENT_KIND_V3,
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
     }:
         return False, REJECT_ANN_SCHEMA_INVALID
     if not _valid_announcement_id(ann):
@@ -261,6 +263,36 @@ def _validate_announcement_schema(
         ):
             return False, REJECT_ANN_SCHEMA_INVALID
         if ann.price_minor != ann.reward_minor or ann.price_asset != ann.reward_asset:
+            return False, REJECT_ANN_SCHEMA_INVALID
+    elif ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+        if ann.listing_type != "exchange":
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not isinstance(ann.offer_digest, str) or not _OFFER_DIGEST_PATTERN.fullmatch(
+            ann.offer_digest
+        ):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not _bounded_text(
+            ann.offer_uri, minimum=1, maximum=_MAX_OFFER_URI_CHARS,
+        ):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if ann.offer_uri != f"/api/v2/trade/federation/offers/{ann.offer_digest}":
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if ann.price_minor != 0 or ann.price_asset != "":
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if ann.reward_minor != 0 or ann.reward_asset != "exchange":
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if not _bounded_json_object(
+            ann.availability_summary,
+            maximum=_MAX_AVAILABILITY_BYTES,
+        ):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        offer_id = ann.availability_summary.get("offer_id")
+        revision = ann.availability_summary.get("revision")
+        if not _bounded_text(offer_id, minimum=3, maximum=256):
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if type(revision) is not int or not 1 <= revision <= 2_147_483_647:
+            return False, REJECT_ANN_SCHEMA_INVALID
+        if ann.availability_summary.get("state") != "active":
             return False, REJECT_ANN_SCHEMA_INVALID
     elif (
         ann.listing_type != ""
@@ -467,8 +499,11 @@ def verify_announcement(ann: TaskAnnouncement) -> Tuple[bool, str]:
 
 
 def announcement_listing_type(ann: TaskAnnouncement) -> str:
-    """Return the trusted listing type across v1/v2/v3 wire formats."""
-    if ann.kind == NTH_ANNOUNCEMENT_KIND_V3:
+    """Return the trusted listing type across supported wire formats."""
+    if ann.kind in {
+        NTH_ANNOUNCEMENT_KIND_V3,
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+    }:
         return ann.listing_type
     schema = ann.input_schema if isinstance(ann.input_schema, dict) else {}
     value = schema.get("__nth_listing_type", schema.get("listing_type", "task"))

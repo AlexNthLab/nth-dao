@@ -575,22 +575,27 @@ The reviewed protocol kernel currently contains:
 Agreement and Order objects remain protocol-kernel primitives. The audit
 outbox makes local Order persistence and Spine projection recoverable, but it
 does not make separate files atomically committed and it is not a settlement
-ledger. Offer/Agreement federation, inventory or asset reservation, UI,
-fulfillment, payment, federation of
-Receipt anchors, delegation, and sandboxed executable Adapters remain separate
-independently reviewed slices. The local HTTP endpoints are not yet a
-federation protocol. Trade Offer v2, Rule Package loading, Agreement creation,
-Order storage, and Receipt creation cannot execute settlement.
+ledger. Federation can now discover an exact signed Trade Offer v2 through a
+short-lived signed exchange hint, full-document fetch, and strict binding. The
+projection exposes only a local publisher's active canonical Offer head, but a
+signature still proves authorship rather than truth or global freshness.
+The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
+renewal requires a new publisher signature.
+
+Remote Offer retention, latest-revision proofs, Agreement federation,
+inventory or asset reservation, fulfillment, payment, federation of Receipt
+anchors, delegation, and sandboxed executable Adapters remain separate,
+independently reviewed slices. Trade Offer discovery, Rule Package loading,
+Agreement creation, Order storage, and Receipt creation cannot execute
+settlement.
 
 ## Deferred Repository Quality Sweep
 
 The repository-wide Ruff baseline recorded on 2026-07-29 contains 319
 historical findings, primarily in legacy examples and tests. Files changed by
-the reviewed trade slices pass their focused Ruff gate. The latest full Python
-run passed except for the explicitly deselected historical concurrency test
-described below; this is not represented as an unqualified full-suite pass.
-After the transaction framework reaches its planned protocol boundary, run a
-dedicated cleanup series that:
+the reviewed trade slices pass their focused Ruff gate. After the transaction
+framework reaches its planned protocol boundary, run a dedicated cleanup
+series that:
 
 1. freezes and publishes the Ruff configuration used for the baseline;
 2. fixes findings by module in reviewable commits, without mechanical behavior
@@ -598,11 +603,7 @@ dedicated cleanup series that:
 3. reruns each affected module's tests after every batch; and
 4. makes repository-wide Ruff success a required merge gate.
 
-The same cleanup phase must repair
-`test_concurrent_writers_do_not_lose_decisions`: its workers construct SQLite
-stores before entering a 12-party barrier, so one initialization delay or
-failure can strand every worker at the barrier. On the 2026-07-29 Python 3.14
-run this node was independently reproducible as a hang and was explicitly
-deselected from the otherwise passing full-suite run. The test needs
-failure-aware barrier cancellation and a single bounded join deadline; this is
-test-infrastructure debt, not a waived product failure.
+`DecisionStore` initialization now serializes SQLite journal negotiation and
+schema DDL across processes. Its concurrency regression also uses bounded
+barrier and join waits, so a worker failure is reported instead of hanging the
+suite.

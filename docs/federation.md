@@ -1,9 +1,10 @@
 # NTH DAO Federation Discovery
 
 Federation lets independently operated NTH DAO nodes discover signed tasks,
-services, and product listings without a central market index. It is an
-overlay network, not magic zero-configuration global discovery: every new
-network needs at least one reachable bootstrap seed.
+services, product listings, and exact signed Trade Offer v2 documents without
+a central market index. It is an overlay network, not magic zero-configuration
+global discovery: every new network needs at least one reachable bootstrap
+seed.
 
 ## Mental Model
 
@@ -11,8 +12,11 @@ network needs at least one reachable bootstrap seed.
 - **Learned peer**: a public HTTPS URL learned from a seed or peer and accepted
   only after its signed identity card is fetched and verified.
 - **Feed digest**: a signed, compact hint describing available announcements.
-- **Full announcement**: the signed task, service, or product record fetched on
-  demand. Its publisher signature is the authority for its content.
+- **Full announcement**: a signed task, service, product, or exchange discovery
+  record fetched on demand. Its publisher signature is the authority for its
+  content.
+- **Trade Offer document**: the exact content-addressed, independently signed
+  Trade Offer fetched for an exchange announcement and rebound to that hint.
 - **Peer hello**: a reverse-discovery hint sent by a newcomer to its seeds. The
   receiver fetches the newcomer's identity card itself before learning it.
 
@@ -112,11 +116,24 @@ For every accepted peer, the market poller performs:
 3. Select announcement IDs and fetch them in bounded batches from
    `GET /api/v2/market/federation/pull?ids=...`.
 4. Verify every full announcement's publisher signature.
-5. Merge unexpired records into the local read-only federation cache.
+5. For an exchange hint, fetch the exact Trade Offer from its fixed digest
+   route, verify the Offer signature and digest, then verify every summary and
+   lifetime binding again.
+6. Merge unexpired records into the local read-only federation cache.
 
 Remote records are not copied into the local authoritative feed and therefore
 are not re-announced as local work. Claims return to the announcement's source
 DAO, which remains the single CAS authority for that listing.
+
+Trade Offer announcements are deliberately non-claimable. They advertise an
+exact signed proposal for exchange; they do not create an Agreement, reserve
+inventory or assets, prove current availability, or authorize settlement.
+Local publishers expose only the active canonical head of an unforked Offer
+chain. A remote publisher can still make a stale or dishonest signed claim, so
+consumers must apply trust policy and obtain a new bilateral Agreement before
+execution. An exchange announcement can live for at most 24 hours and never
+past its Offer expiry; an active Offer must publish a new signed hint after that
+discovery lease expires.
 
 Announcement IDs are transport identifiers, not free-form labels. They use
 only ASCII letters, digits, `.`, `_`, `:`, and `-`; path/query delimiters are
@@ -142,6 +159,8 @@ complete view.
 | `POST /api/v2/market/federation/peers` | Add or remove operator seeds | Console write |
 | `POST /api/v2/market/federation/discover` | Import verified LAN/mDNS peers | Member/console write |
 | `POST /api/v2/market/federation/refresh` | Run one synchronous pull | Console write |
+| `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
+| `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 
 ## Security Boundaries
 
@@ -155,6 +174,9 @@ complete view.
   learned-peer storage, and hello rates are bounded.
 - Reverse hello is limited both per source address (12/minute) and per node
   (120/minute), with a locked cross-worker budget when a workspace is present.
+- Exact Trade Offer reads use a process-local source gate (120/minute) before a
+  locked cross-worker global gate (300/minute). This ordering prevents rejected
+  source floods from turning the persistent limiter into a disk-write amplifier.
 - A malformed or unverifiable digest, identity card, or announcement fails
   closed.
 - Before a remote claim, the source identity card is fetched afresh and the
@@ -176,6 +198,16 @@ cloud-metadata destinations.
   decide what a verified peer is allowed to do.
 - The federation cache is a read model. Durable authoritative ownership stays
   with the source DAO.
+- Remote Trade Offer documents are verified during synchronization but are not
+  yet retained as a local actionable Offer chain. Discovery therefore supports
+  verified summary matching, not local full-document inspection or remote
+  Agreement creation in this slice.
+- Open-set absence removes withdrawn or superseded Offer announcements from
+  the current projection, but there is no cross-node proof that a publisher
+  has disclosed its latest revision. Durable signed Offer tombstones and
+  revision-head proofs remain future protocol work.
+- Trade Offer discovery does not federate Agreements, Mandates, Receipts,
+  payment, delivery, dispute outcomes, or settlement state.
 - Withdrawal currently uses signed open-set absence, not durable tombstones.
   Nodes that need historical proof of withdrawal must retain their own audit
   events until a tombstone/revocation wire type is standardized.

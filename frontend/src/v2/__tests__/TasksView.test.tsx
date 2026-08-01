@@ -226,7 +226,7 @@ describe("TasksView", () => {
         </ToastProvider>
       </LangProvider>,
     );
-    expect(screen.getByText(/Claimed tasks move into Missions/)).toBeTruthy();
+    expect(screen.getByText(/signed exchange offers across DAOs/)).toBeTruthy();
     // 公告卡片
     expect(await screen.findByText("review the auth PR")).toBeTruthy();
     expect(screen.getByText("look at the token check")).toBeTruthy();
@@ -328,6 +328,45 @@ describe("TasksView", () => {
       "did:key:zWorker",
       "nth-ann-sha256:abc123",
     ));
+  });
+
+  it("shows exchange discovery without routing it into task claim", async () => {
+    const { listOpenTasks } = await import("../api");
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "exchange-1",
+      federation_key: "nth-ann-sha256:exchange",
+      publisher_did: "did:key:zPublisher",
+      title: "Compute for design",
+      listing_type: "exchange",
+      offer_digest: `sha256:${"a".repeat(64)}`,
+      availability_summary: {
+        offer_id: "org.nthdao.tests/swap",
+        revision: 1,
+        state: "active",
+      },
+      capability_set: ["compute"],
+      context: "trade",
+      reward_minor: 0,
+      reward_asset: "exchange",
+      claimable: false,
+      federated: true,
+      source_peer: "https://publisher.example",
+    }]);
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    expect(await screen.findByText("Compute for design")).toBeTruthy();
+    expect(screen.getByText(/org\.nthdao\.tests\/swap/)).toBeTruthy();
+    expect(screen.getByText("Signed offer")).toBeTruthy();
+    expect(screen.queryByText("claim (cross-DAO)")).toBeNull();
+    expect(claimTask).not.toHaveBeenCalled();
+    expect(claimFederatedTask).not.toHaveBeenCalled();
   });
 
   it("allows adding a federation seed peer from the Tasks sidebar", async () => {

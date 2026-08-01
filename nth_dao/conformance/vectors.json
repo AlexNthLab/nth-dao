@@ -788,6 +788,506 @@
           "version": "1.0.0"
         }
       }
+    ],
+    "trade_offer_announcement_v1": [
+      {
+        "announcement": {
+          "acceptance": {},
+          "announcement_id": "trade-offer-conformance-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "availability_summary": {
+            "offer_id": "org.nthdao.conformance/swap",
+            "revision": 1,
+            "state": "active",
+            "status": "publisher-asserted-available"
+          },
+          "capability_set": [
+            "code-review",
+            "compute"
+          ],
+          "claimant_policy": {},
+          "context": "trade",
+          "description": "Exchange one compute task for one signed code review.",
+          "input_schema": {},
+          "kind": "nth-trade-offer-announcement-v1",
+          "listing_type": "exchange",
+          "mission_id": "",
+          "not_after": 1785628799000,
+          "offer_digest": "sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "offer_uri": "/api/v2/trade/federation/offers/sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "price_asset": "",
+          "price_minor": 0,
+          "published_at_ms": 1785542402000,
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "publisher_sig": "ZySAfC52PKV1Kc_9JdYNRCSR72H648H7i3-U0_AjukEomFwkeCBMqDBCbtxcd87KIFI9UvhgdaFEv5LvDAhIBw",
+          "reward_asset": "exchange",
+          "reward_minor": 0,
+          "title": "Compute for review"
+        },
+        "description": "Signed exchange discovery hint binds one exact signed Trade Offer.",
+        "expected_federation_key": "nth-ann-sha256:b765b2f5bade7009a5d5742559c8e9c9e177a3cd54b76e142728e0b33a74a8d1",
+        "expected_reason": "ok",
+        "expected_signing_body_hex": "7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f73776170222c227265766973696f6e223a312c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383739393030302c226f666665725f646967657374223a227368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323430323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22436f6d7075746520666f7220726576696577227d",
+        "expected_valid": true,
+        "id": "trade-offer-announcement-v1-valid",
+        "offer": {
+          "extensions": {},
+          "kind": "org.nthdao.trade.offer",
+          "not_after": "2026-08-02T00:00:00Z",
+          "offer_id": "org.nthdao.conformance/swap",
+          "previous_offer_digest": null,
+          "proof": {
+            "created": "2026-08-01T00:00:01Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "hWct_mhGCF8DOEquZ09g3M4CmJ_GiT2Xjt2ZcixO1c5q53FYLxk7cyGcxb9tOQ9xhyrCj0ZbcjeKPTApbLjZDw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+          },
+          "protocol_version": "2.0",
+          "provides": [
+            {
+              "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "leg_id": "compute",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:compute",
+              "resource_type": "service:compute",
+              "unit": "task"
+            }
+          ],
+          "published_at": "2026-08-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "requests": [
+            {
+              "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "leg_id": "review",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:review",
+              "resource_type": "service:code-review",
+              "unit": "review"
+            }
+          ],
+          "revision": 1,
+          "rule_refs": [],
+          "state": "active",
+          "summary": "Exchange one compute task for one signed code review.",
+          "title": "Compute for review"
+        }
+      },
+      {
+        "announcement": {
+          "acceptance": {},
+          "announcement_id": "trade-offer-conformance-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "availability_summary": {
+            "offer_id": "org.nthdao.conformance/swap",
+            "revision": 1,
+            "state": "active",
+            "status": "publisher-asserted-available"
+          },
+          "capability_set": [
+            "code-review",
+            "compute"
+          ],
+          "claimant_policy": {},
+          "context": "trade",
+          "description": "Exchange one compute task for one signed code review.",
+          "input_schema": {},
+          "kind": "nth-trade-offer-announcement-v1",
+          "listing_type": "exchange",
+          "mission_id": "",
+          "not_after": 1785628799000,
+          "offer_digest": "sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "offer_uri": "/api/v2/trade/federation/offers/sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "price_asset": "",
+          "price_minor": 0,
+          "published_at_ms": 1785542402000,
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "publisher_sig": "x4gUgFonnsa978BQthfAKiEukiWaw_427WbL6ugQSNJqwNbsnI5aMoc9OadZIQEVcfqXHRC4m7UKjFWwddS-Ag",
+          "reward_asset": "exchange",
+          "reward_minor": 0,
+          "title": "Different signed title"
+        },
+        "description": "A valid signature cannot authorize a title that differs from the Offer.",
+        "expected_federation_key": "nth-ann-sha256:7b73e4ac91aee735d95f816f763a60b6f034458f32e72edba0805c939a93732f",
+        "expected_reason": "Trade Offer announcement binding mismatch: title",
+        "expected_signing_body_hex": "7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f73776170222c227265766973696f6e223a312c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383739393030302c226f666665725f646967657374223a227368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323430323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22446966666572656e74207369676e6564207469746c65227d",
+        "expected_valid": false,
+        "id": "trade-offer-announcement-v1-title-mismatch",
+        "offer": {
+          "extensions": {},
+          "kind": "org.nthdao.trade.offer",
+          "not_after": "2026-08-02T00:00:00Z",
+          "offer_id": "org.nthdao.conformance/swap",
+          "previous_offer_digest": null,
+          "proof": {
+            "created": "2026-08-01T00:00:01Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "hWct_mhGCF8DOEquZ09g3M4CmJ_GiT2Xjt2ZcixO1c5q53FYLxk7cyGcxb9tOQ9xhyrCj0ZbcjeKPTApbLjZDw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+          },
+          "protocol_version": "2.0",
+          "provides": [
+            {
+              "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "leg_id": "compute",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:compute",
+              "resource_type": "service:compute",
+              "unit": "task"
+            }
+          ],
+          "published_at": "2026-08-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "requests": [
+            {
+              "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "leg_id": "review",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:review",
+              "resource_type": "service:code-review",
+              "unit": "review"
+            }
+          ],
+          "revision": 1,
+          "rule_refs": [],
+          "state": "active",
+          "summary": "Exchange one compute task for one signed code review.",
+          "title": "Compute for review"
+        }
+      },
+      {
+        "announcement": {
+          "acceptance": {},
+          "announcement_id": "trade-offer-conformance-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "availability_summary": {
+            "offer_id": "org.nthdao.conformance/swap",
+            "revision": 1,
+            "state": "active",
+            "status": "publisher-asserted-available"
+          },
+          "capability_set": [
+            "code-review",
+            "compute"
+          ],
+          "claimant_policy": {},
+          "context": "trade",
+          "description": "Exchange one compute task for one signed code review.",
+          "input_schema": {},
+          "kind": "nth-trade-offer-announcement-v1",
+          "listing_type": "exchange",
+          "mission_id": "",
+          "not_after": 1785628799000,
+          "offer_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "offer_uri": "/api/v2/trade/federation/offers/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "price_asset": "",
+          "price_minor": 0,
+          "published_at_ms": 1785542402000,
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "publisher_sig": "cIWPWogersnYSzMkvMeTi0Y4pBfQUm2bn7BigDuBhfTz-vrmnyC7eUdYkGnvMVTf2wAKIwpWT0JRw68L9NGFCw",
+          "reward_asset": "exchange",
+          "reward_minor": 0,
+          "title": "Compute for review"
+        },
+        "description": "A self-consistent digest and URI pair must still bind the supplied Offer.",
+        "expected_federation_key": "nth-ann-sha256:3935cc6b92d3d69a8393e327f02cb7cf6a1cb23fda69b4f4cdcebbd40c989bf2",
+        "expected_reason": "Trade Offer announcement binding mismatch: offer_digest",
+        "expected_signing_body_hex": "7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f73776170222c227265766973696f6e223a312c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383739393030302c226f666665725f646967657374223a227368613235363a63636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a63636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323430323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22436f6d7075746520666f7220726576696577227d",
+        "expected_valid": false,
+        "id": "trade-offer-announcement-v1-digest-mismatch",
+        "offer": {
+          "extensions": {},
+          "kind": "org.nthdao.trade.offer",
+          "not_after": "2026-08-02T00:00:00Z",
+          "offer_id": "org.nthdao.conformance/swap",
+          "previous_offer_digest": null,
+          "proof": {
+            "created": "2026-08-01T00:00:01Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "hWct_mhGCF8DOEquZ09g3M4CmJ_GiT2Xjt2ZcixO1c5q53FYLxk7cyGcxb9tOQ9xhyrCj0ZbcjeKPTApbLjZDw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+          },
+          "protocol_version": "2.0",
+          "provides": [
+            {
+              "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "leg_id": "compute",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:compute",
+              "resource_type": "service:compute",
+              "unit": "task"
+            }
+          ],
+          "published_at": "2026-08-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "requests": [
+            {
+              "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "leg_id": "review",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:review",
+              "resource_type": "service:code-review",
+              "unit": "review"
+            }
+          ],
+          "revision": 1,
+          "rule_refs": [],
+          "state": "active",
+          "summary": "Exchange one compute task for one signed code review.",
+          "title": "Compute for review"
+        }
+      },
+      {
+        "announcement": {
+          "acceptance": {},
+          "announcement_id": "trade-offer-conformance-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "availability_summary": {
+            "offer_id": "org.nthdao.conformance/swap",
+            "revision": 2,
+            "state": "active",
+            "status": "publisher-asserted-available"
+          },
+          "capability_set": [
+            "code-review",
+            "compute"
+          ],
+          "claimant_policy": {},
+          "context": "trade",
+          "description": "Exchange one compute task for one signed code review.",
+          "input_schema": {},
+          "kind": "nth-trade-offer-announcement-v1",
+          "listing_type": "exchange",
+          "mission_id": "",
+          "not_after": 1785628799000,
+          "offer_digest": "sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "offer_uri": "/api/v2/trade/federation/offers/sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "price_asset": "",
+          "price_minor": 0,
+          "published_at_ms": 1785542402000,
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "publisher_sig": "vZUc81XdxmGWJE5rsdyBJBo2Ft5t8Tfc--9WXEEi6teSB5NrZljVVhsemawW2GKPO8VEvKgs1Js4BJt_I4fWCA",
+          "reward_asset": "exchange",
+          "reward_minor": 0,
+          "title": "Compute for review"
+        },
+        "description": "The signed availability summary must bind the Offer revision.",
+        "expected_federation_key": "nth-ann-sha256:f176b1ca6df02f05a2bfbed378900295ef2bfcf70294ce9de8db2b8c59f50017",
+        "expected_reason": "availability summary does not bind revision",
+        "expected_signing_body_hex": "7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f73776170222c227265766973696f6e223a322c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383739393030302c226f666665725f646967657374223a227368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323430323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22436f6d7075746520666f7220726576696577227d",
+        "expected_valid": false,
+        "id": "trade-offer-announcement-v1-revision-mismatch",
+        "offer": {
+          "extensions": {},
+          "kind": "org.nthdao.trade.offer",
+          "not_after": "2026-08-02T00:00:00Z",
+          "offer_id": "org.nthdao.conformance/swap",
+          "previous_offer_digest": null,
+          "proof": {
+            "created": "2026-08-01T00:00:01Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "hWct_mhGCF8DOEquZ09g3M4CmJ_GiT2Xjt2ZcixO1c5q53FYLxk7cyGcxb9tOQ9xhyrCj0ZbcjeKPTApbLjZDw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+          },
+          "protocol_version": "2.0",
+          "provides": [
+            {
+              "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "leg_id": "compute",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:compute",
+              "resource_type": "service:compute",
+              "unit": "task"
+            }
+          ],
+          "published_at": "2026-08-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "requests": [
+            {
+              "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "leg_id": "review",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:review",
+              "resource_type": "service:code-review",
+              "unit": "review"
+            }
+          ],
+          "revision": 1,
+          "rule_refs": [],
+          "state": "active",
+          "summary": "Exchange one compute task for one signed code review.",
+          "title": "Compute for review"
+        }
+      },
+      {
+        "announcement": {
+          "acceptance": {},
+          "announcement_id": "trade-offer-conformance-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "availability_summary": {
+            "offer_id": "org.nthdao.conformance/swap",
+            "revision": 1,
+            "state": "active",
+            "status": "publisher-asserted-available"
+          },
+          "capability_set": [
+            "code-review",
+            "compute"
+          ],
+          "claimant_policy": {},
+          "context": "trade",
+          "description": "Exchange one compute task for one signed code review.",
+          "input_schema": {},
+          "kind": "nth-trade-offer-announcement-v1",
+          "listing_type": "exchange",
+          "mission_id": "",
+          "not_after": 1785628801000,
+          "offer_digest": "sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "offer_uri": "/api/v2/trade/federation/offers/sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "price_asset": "",
+          "price_minor": 0,
+          "published_at_ms": 1785542402000,
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "publisher_sig": "qyYeHOnGJVEhnn12S2NJFxWiib0Lkwp8-tdJ0eRPj7CGqDt0x41-QQqXdn-mY9nd-oIvfeVvHQm2H_qH4v6CDQ",
+          "reward_asset": "exchange",
+          "reward_minor": 0,
+          "title": "Compute for review"
+        },
+        "description": "An announcement must not remain live after its Offer expires.",
+        "expected_federation_key": "nth-ann-sha256:7cd24c363648b85c22f17c95314afe6d72d1b0512a510b40679187348edea81c",
+        "expected_reason": "announcement expiry is outside the Trade Offer lifetime",
+        "expected_signing_body_hex": "7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f73776170222c227265766973696f6e223a312c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383830313030302c226f666665725f646967657374223a227368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323430323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22436f6d7075746520666f7220726576696577227d",
+        "expected_valid": false,
+        "id": "trade-offer-announcement-v1-expiry-outlives-offer",
+        "offer": {
+          "extensions": {},
+          "kind": "org.nthdao.trade.offer",
+          "not_after": "2026-08-02T00:00:00Z",
+          "offer_id": "org.nthdao.conformance/swap",
+          "previous_offer_digest": null,
+          "proof": {
+            "created": "2026-08-01T00:00:01Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "hWct_mhGCF8DOEquZ09g3M4CmJ_GiT2Xjt2ZcixO1c5q53FYLxk7cyGcxb9tOQ9xhyrCj0ZbcjeKPTApbLjZDw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+          },
+          "protocol_version": "2.0",
+          "provides": [
+            {
+              "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "leg_id": "compute",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:compute",
+              "resource_type": "service:compute",
+              "unit": "task"
+            }
+          ],
+          "published_at": "2026-08-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "requests": [
+            {
+              "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "leg_id": "review",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:review",
+              "resource_type": "service:code-review",
+              "unit": "review"
+            }
+          ],
+          "revision": 1,
+          "rule_refs": [],
+          "state": "active",
+          "summary": "Exchange one compute task for one signed code review.",
+          "title": "Compute for review"
+        }
+      },
+      {
+        "announcement": {
+          "acceptance": {},
+          "announcement_id": "trade-offer-conformance-001",
+          "authority_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "availability_summary": {
+            "offer_id": "org.nthdao.conformance/swap",
+            "revision": 1,
+            "state": "active",
+            "status": "publisher-asserted-available"
+          },
+          "capability_set": [
+            "code-review",
+            "compute"
+          ],
+          "claimant_policy": {},
+          "context": "trade",
+          "description": "Exchange one compute task for one signed code review.",
+          "input_schema": {},
+          "kind": "nth-trade-offer-announcement-v1",
+          "listing_type": "exchange",
+          "mission_id": "",
+          "not_after": 1785628799000,
+          "offer_digest": "sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "offer_uri": "/api/v2/trade/federation/offers/sha256:268419ef4e9c865929f144492f094fdb5109a8dd16cd3c2875e99026b5bf655f",
+          "price_asset": "",
+          "price_minor": 0,
+          "published_at_ms": 1785542402000,
+          "publisher_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "publisher_sig": "ajEg9jbgCFER47oosfySSb9HcUmGYlp5SNjFurbzEijYMGUVudwb-lCAznls2kkHFce4bRjoBERIkj9OJf7oDA",
+          "reward_asset": "exchange",
+          "reward_minor": 0,
+          "title": "Compute for review"
+        },
+        "description": "A valid signature by another DID cannot publish this Offer.",
+        "expected_federation_key": "nth-ann-sha256:a915effc92f80d8f30a6afca6df55cc7e9635e248bee5be79b1529b8df740fe7",
+        "expected_reason": "Trade Offer announcement binding mismatch: publisher_did",
+        "expected_signing_body_hex": "7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6e4763336f634873337a6450694a626e616171446935384e476234706b315370395778577566755853647866222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f73776170222c227265766973696f6e223a312c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383739393030302c226f666665725f646967657374223a227368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a32363834313965663465396338363539323966313434343932663039346664623531303961386464313663643363323837356539393032366235626636353566222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323430323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6e4763336f634873337a6450694a626e616171446935384e476234706b315370395778577566755853647866222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22436f6d7075746520666f7220726576696577227d",
+        "expected_valid": false,
+        "id": "trade-offer-announcement-v1-publisher-mismatch",
+        "offer": {
+          "extensions": {},
+          "kind": "org.nthdao.trade.offer",
+          "not_after": "2026-08-02T00:00:00Z",
+          "offer_id": "org.nthdao.conformance/swap",
+          "previous_offer_digest": null,
+          "proof": {
+            "created": "2026-08-01T00:00:01Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "hWct_mhGCF8DOEquZ09g3M4CmJ_GiT2Xjt2ZcixO1c5q53FYLxk7cyGcxb9tOQ9xhyrCj0ZbcjeKPTApbLjZDw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+          },
+          "protocol_version": "2.0",
+          "provides": [
+            {
+              "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "leg_id": "compute",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:compute",
+              "resource_type": "service:compute",
+              "unit": "task"
+            }
+          ],
+          "published_at": "2026-08-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "requests": [
+            {
+              "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "leg_id": "review",
+              "quantity": "1",
+              "resource_id": "urn:nth:conformance:review",
+              "resource_type": "service:code-review",
+              "unit": "review"
+            }
+          ],
+          "revision": 1,
+          "rule_refs": [],
+          "state": "active",
+          "summary": "Exchange one compute task for one signed code review.",
+          "title": "Compute for review"
+        }
+      }
     ]
   }
 }

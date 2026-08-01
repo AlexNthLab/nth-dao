@@ -65,7 +65,9 @@ export function TasksView() {
   // 市场化分区 + 排序。market=可承接的活(本节点+联邦);mine=我发布的。
   const [tab, setTab] = useState<"market" | "mine">("market");
   const [sort, setSort] = useState<"recent" | "reward">("recent");
-  const [listingFilter, setListingFilter] = useState<"" | "task" | "service" | "product">("");
+  const [listingFilter, setListingFilter] = useState<
+    "" | "task" | "service" | "product" | "exchange"
+  >("");
 
   // 发布表单
   const [showForm, setShowForm] = useState(false);
@@ -233,6 +235,13 @@ export function TasksView() {
   }, [reloadKey]);
 
   async function handleClaim(task: TaskAnnouncement) {
+    if (task.listing_type === "exchange" || task.claimable === false) {
+      toast.push(
+        "Signed exchange offers continue through the Agreement flow.",
+        "info",
+      );
+      return;
+    }
     const annId = task.announcement_id;
     if (!claimAgent || claimingId) return;
     setClaimingId(annId);
@@ -731,7 +740,7 @@ export function TasksView() {
             <p className="main-subtitle">
               {t(
                 "发布或承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
-                "Publish or claim outside work. Claimed tasks move into Missions and show status on Blackboard.",
+                "Discover tasks, services, products, and signed exchange offers across DAOs.",
               )}
             </p>
           </div>
@@ -764,7 +773,7 @@ export function TasksView() {
             >
               {t("我发布的", "My published")} ({myTasks.length})
             </button>
-            {(["", "task", "service", "product"] as const).map((kind) => (
+            {(["", "task", "service", "product", "exchange"] as const).map((kind) => (
               <button
                 key={kind || "all"}
                 className={`btn ${listingFilter === kind ? "btn-primary" : "btn-ghost"}`}
@@ -778,7 +787,9 @@ export function TasksView() {
                     ? t("Tasks", "Tasks")
                     : kind === "service"
                       ? t("Services", "Services")
-                      : t("Products", "Products")}
+                      : kind === "product"
+                        ? t("Products", "Products")
+                        : t("Exchange", "Exchange")}
               </button>
             ))}
             <span style={{ flex: 1 }} />
@@ -906,11 +917,13 @@ export function TasksView() {
                       </span>
                     )}
                     <span className="pill dim" style={{ fontSize: 10 }}>
-                      {task.listing_type === "product"
-                        ? t("Product", "Product")
-                        : task.listing_type === "service"
-                          ? t("Service", "Service")
-                          : t("Task", "Task")}
+                      {task.listing_type === "exchange"
+                        ? t("Exchange", "Exchange")
+                        : task.listing_type === "product"
+                          ? t("Product", "Product")
+                          : task.listing_type === "service"
+                            ? t("Service", "Service")
+                            : t("Task", "Task")}
                     </span>
                     {task.federated && (
                       <span
@@ -981,6 +994,19 @@ export function TasksView() {
                       ))}
                     </div>
                   )}
+                  {task.listing_type === "exchange" && task.offer_digest && (
+                    <div
+                      className="muted"
+                      style={{
+                        marginTop: 8,
+                        fontSize: 11,
+                        fontFamily: "var(--t-mono)",
+                      }}
+                    >
+                      {String(task.availability_summary?.offer_id || "Trade Offer")}
+                      {` - ${task.offer_digest.slice(0, 22)}...`}
+                    </div>
+                  )}
                   <div
                     style={{
                       marginTop: 8,
@@ -998,31 +1024,41 @@ export function TasksView() {
                         : ""}
                     </span>
                     {/* 认领:用左栏所选 agent,由 agent 自己私钥签收据。 */}
-                    <button
-                      className="btn"
-                      disabled={
-                        !claimAgent || task.federation_stale === true
-                        || claimingId === task.announcement_id
-                      }
-                      title={
-                        !claimAgent
-                          ? t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
+                    {task.listing_type === "exchange" || task.claimable === false ? (
+                      <span
+                        className="pill"
+                        style={{ marginLeft: "auto" }}
+                        title="Publisher-signed discovery claim. Agreement is a separate protocol step."
+                      >
+                        Signed offer
+                      </span>
+                    ) : (
+                      <button
+                        className="btn"
+                        disabled={
+                          !claimAgent || task.federation_stale === true
+                          || claimingId === task.announcement_id
+                        }
+                        title={
+                          !claimAgent
+                            ? t("先在左栏选一个认领 agent", "Pick a claiming agent in the left panel first")
+                            : task.federated
+                              ? t(
+                                  "跨 DAO 认领:本地 agent 自签收据 → 回投到来源 DAO 落地",
+                                  "Cross-DAO claim: your local agent signs, routed to the source DAO",
+                                )
+                              : t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
+                        }
+                        style={{ marginLeft: "auto" }}
+                        onClick={() => void handleClaim(task)}
+                      >
+                        {claimingId === task.announcement_id
+                          ? t("认领中…", "Claiming…")
                           : task.federated
-                            ? t(
-                                "跨 DAO 认领:本地 agent 自签收据 → 回投到来源 DAO 落地",
-                                "Cross-DAO claim: your local agent signs, routed to the source DAO",
-                              )
-                            : t("用所选 agent 认领(agent 自签收据)", "Claim with selected agent (agent self-signs the receipt)")
-                      }
-                      style={{ marginLeft: "auto" }}
-                      onClick={() => void handleClaim(task)}
-                    >
-                      {claimingId === task.announcement_id
-                        ? t("认领中…", "Claiming…")
-                        : task.federated
-                          ? t("跨 DAO 认领", "claim (cross-DAO)")
-                          : t("认领", "Claim")}
-                    </button>
+                            ? t("跨 DAO 认领", "claim (cross-DAO)")
+                            : t("认领", "Claim")}
+                      </button>
+                    )}
                   </div>
                 </article>
               ))}

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Verified Trade Offer v2 federation discovery through a short-lived signed
+  exchange hint, exact content-addressed Offer fetch, signature and field
+  rebinding, canonical active-head publication, conformance vectors, read-only
+  market projection, 24-hour maximum discovery lifetime, bounded public reads,
+  and non-claimable UI presentation. Discovery proves the publisher's signed
+  claim; it does not prove availability, create an Agreement, or authorize
+  settlement.
 - Signed Trade Rule Recognition v1 chains for community, DAO, or individual
   recognition, deprecation, and revocation of exact Rule Package digests,
   including mandatory bounded expiry, issuer Rule-ID scopes, local observed

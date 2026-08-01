@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import Any, TYPE_CHECKING, List, Optional, Union
 
 from nth_dao.market.announcement import (
     NTH_ANNOUNCEMENT_KIND_V3,
+    NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
     TaskAnnouncement,
     verify_announcement,
 )
@@ -65,12 +67,20 @@ class MarketFeed:
     """单 DAO 的任务公告 feed。文件持久、append-only、游标可补齐。"""
 
     def __init__(
-        self, root: PathLike, *, spine: "Optional[SignedEventLog]" = None,
+        self,
+        root: PathLike,
+        *,
+        spine: "Optional[SignedEventLog]" = None,
+        trade_offer_store: Any = None,
     ) -> None:
         self.workspace = Path(root)
         self.root = self.workspace / "market_feed"
         self.root.mkdir(parents=True, exist_ok=True)
         self.log_path = self.root / "announcements.jsonl"
+        self._trade_offer_store = trade_offer_store
+        self._trade_index_lock = threading.Lock()
+        self._trade_index_fingerprint: tuple[Any, ...] | None = None
+        self._trade_index: dict[str, TaskAnnouncement] = {}
         # Phase 2 影子双写:接线后 publish 同时把公告记入 spine(可选,默认关)。
         self._spine = spine
 
@@ -92,7 +102,7 @@ class MarketFeed:
                 f"refusing to publish unverifiable announcement "
                 f"{ann.announcement_id!r}: {reason}"
             )
-        self._require_listing_binding(ann)
+        self.require_listing_binding(ann)
         # safe_append_jsonl 持锁 + fsync：跨进程并发发布安全，且
         # crash 不会丢已确认的 append。
         safe_append_jsonl(self.log_path, ann.to_dict())
@@ -159,6 +169,74 @@ class MarketFeed:
         """当前 feed 的最高序号（空 feed 返回 -1）。运维 / 测试用。"""
         records = self._read_all()
         return records[-1][0] if records else -1
+
+    def _feed_fingerprint(self) -> tuple[Any, ...]:
+        try:
+            stat = self.log_path.stat()
+        except FileNotFoundError:
+            return (False, 0, 0, 0, 0)
+        except OSError as exc:
+            raise RuntimeError("market feed could not be inspected") from exc
+        return (
+            True,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+            stat.st_ino,
+        )
+
+    def find_live_trade_offer_announcement(
+        self,
+        digest: str,
+        *,
+        now_ms_override: int = 0,
+    ) -> Optional[TaskAnnouncement]:
+        """Resolve one exchange hint without rescanning a stable feed.
+
+        The cache is a verified read projection, not an authority. A feed
+        fingerprint change invalidates the complete projection, including
+        appends made by another process. Offer lifecycle binding is checked by
+        the caller against the current OfferStore before any document is
+        served.
+        """
+        if not (
+            isinstance(digest, str)
+            and len(digest) == 71
+            and digest.startswith("sha256:")
+            and all(character in "0123456789abcdef" for character in digest[7:])
+        ):
+            raise ValueError("Trade Offer digest must be lowercase sha256")
+        fingerprint = self._feed_fingerprint()
+        with self._trade_index_lock:
+            if self._trade_index_fingerprint != fingerprint:
+                # A concurrent append between the first fingerprint and read
+                # is detected by the post-read fingerprint and retried once.
+                for _ in range(2):
+                    before = self._feed_fingerprint()
+                    records = self._read_all()
+                    after = self._feed_fingerprint()
+                    if before == after:
+                        break
+                else:
+                    raise RuntimeError(
+                        "market feed changed during index rebuild"
+                    )
+                rebuilt: dict[str, TaskAnnouncement] = {}
+                for seq, raw in records:
+                    announcement = self._safe_parse(seq, raw)
+                    if (
+                        announcement is not None
+                        and announcement.kind
+                        == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+                        and not announcement.is_expired(now_ms_override)
+                    ):
+                        rebuilt[announcement.offer_digest] = announcement
+                self._trade_index = rebuilt
+                self._trade_index_fingerprint = after
+            announcement = self._trade_index.get(digest)
+            if announcement is None or announcement.is_expired(now_ms_override):
+                return None
+            return TaskAnnouncement.from_dict(announcement.to_dict())
 
     def get(
         self,
@@ -289,7 +367,7 @@ class MarketFeed:
             )
             return None
         try:
-            self._require_listing_binding(ann)
+            self.require_listing_binding(ann)
         except ValueError as exc:
             logger.warning(
                 "market feed seq=%d failed listing binding (%s) - dropping",
@@ -299,8 +377,50 @@ class MarketFeed:
             return None
         return ann
 
-    def _require_listing_binding(self, ann: TaskAnnouncement) -> None:
-        if ann.kind != NTH_ANNOUNCEMENT_KIND_V3:
+    def require_listing_binding(self, ann: TaskAnnouncement) -> None:
+        """Fail closed unless a typed listing matches its local authority."""
+        if ann.kind not in {
+            NTH_ANNOUNCEMENT_KIND_V3,
+            NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+        }:
+            return
+        if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+            from nth_dao.market.trade_offer_announcement import (
+                verify_trade_offer_announcement_binding,
+            )
+            from nth_dao.trade_rules.offer import evaluate_offer, offer_digest
+            from nth_dao.trade_rules.store import OfferStore, OfferStoreError
+
+            try:
+                if self._trade_offer_store is None:
+                    self._trade_offer_store = OfferStore(self.workspace)
+                offer = self._trade_offer_store.get(ann.offer_digest)
+                if offer is not None:
+                    view, head = self._trade_offer_store.canonical_snapshot(
+                        offer.publisher_did,
+                        offer.offer_id,
+                    )
+            except OfferStoreError as exc:
+                raise ValueError("Trade Offer store could not be verified") from exc
+            if offer is None:
+                raise ValueError(
+                    "Trade Offer announcement has no verified local Offer"
+                )
+            if (
+                not view.is_canonical
+                or head is None
+                or offer_digest(head) != ann.offer_digest
+            ):
+                raise ValueError(
+                    "Trade Offer announcement is not the canonical chain head"
+                )
+            if not evaluate_offer(head)[0]:
+                raise ValueError(
+                    "Trade Offer announcement is not currently active"
+                )
+            ok, reason = verify_trade_offer_announcement_binding(offer, ann)
+            if not ok:
+                raise ValueError(reason)
             return
         from nth_dao.commerce.listing import ListingStore
         from nth_dao.commerce.listing_announcement import (

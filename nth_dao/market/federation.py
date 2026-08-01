@@ -47,6 +47,10 @@ from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
 from nth_dao.execution_receipt import now_ms
 from nth_dao.identity import _NACL_AVAILABLE
 from nth_dao.market.announcement import (
+    NTH_ANNOUNCEMENT_KIND_V1,
+    NTH_ANNOUNCEMENT_KIND_V2,
+    NTH_ANNOUNCEMENT_KIND_V3,
+    NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
     TaskAnnouncement,
     announcement_federation_key,
     verify_announcement,
@@ -185,18 +189,19 @@ def _validate_digest_ref(ref: Any) -> bool:
         return False
     # Historical nth-feed-digest-v1 refs did not carry announcement kind.
     # Absence therefore means a legacy v2 summary, not an invalid digest.
-    kind = ref.get("kind", "nth-task-announcement-v2")
+    kind = ref.get("kind", NTH_ANNOUNCEMENT_KIND_V2)
     if kind not in {
-        "nth-task-announcement-v1",
-        "nth-task-announcement-v2",
-        "nth-task-announcement-v3",
+        NTH_ANNOUNCEMENT_KIND_V1,
+        NTH_ANNOUNCEMENT_KIND_V2,
+        NTH_ANNOUNCEMENT_KIND_V3,
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
     }:
         return False
     listing_type = ref.get("listing_type", "")
     offer_digest = ref.get("offer_digest", "")
     price_asset = ref.get("price_asset", "")
     availability = ref.get("availability_summary", {})
-    if kind == "nth-task-announcement-v3":
+    if kind == NTH_ANNOUNCEMENT_KIND_V3:
         if not set((*_REF_FIELDS, "federation_key")).issubset(ref):
             return False
         if listing_type not in {"product", "service"}:
@@ -223,6 +228,43 @@ def _validate_digest_ref(ref: Any) -> bool:
             ref.get("price_minor") != ref.get("reward_minor")
             or price_asset != ref.get("reward_asset")
         ):
+            return False
+    elif kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+        if not set((*_REF_FIELDS, "federation_key")).issubset(ref):
+            return False
+        if listing_type != "exchange":
+            return False
+        if not (
+            isinstance(offer_digest, str)
+            and len(offer_digest) == 71
+            and offer_digest.startswith("sha256:")
+            and all(ch in "0123456789abcdef" for ch in offer_digest[7:])
+        ):
+            return False
+        if (
+            ref.get("price_minor") != 0
+            or price_asset != ""
+            or ref.get("reward_minor") != 0
+            or ref.get("reward_asset") != "exchange"
+        ):
+            return False
+        if not isinstance(availability, dict):
+            return False
+        try:
+            if len(canonical_json(availability)) > _MAX_DIGEST_AVAILABILITY_BYTES:
+                return False
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            return False
+        if not _digest_text(
+            availability.get("offer_id"), minimum=3, maximum=256,
+        ):
+            return False
+        revision = availability.get("revision")
+        if type(revision) is not int or not 1 <= revision <= 2_147_483_647:
+            return False
+        if availability.get("state") != "active":
+            return False
+        if ref.get("not_after") <= ref.get("published_at_ms"):
             return False
     elif (
         listing_type != "" or offer_digest != "" or ref.get("price_minor", 0) != 0
@@ -380,7 +422,7 @@ def _ref_to_partial_ann(ref: Dict[str, Any]) -> TaskAnnouncement:
         announcement_id=_safe_str(ref.get("announcement_id")),
         publisher_did=_safe_str(ref.get("publisher_did")),
         title="",
-        kind=_safe_str(ref.get("kind")) or "nth-task-announcement-v2",
+        kind=_safe_str(ref.get("kind")) or NTH_ANNOUNCEMENT_KIND_V2,
         capability_set=_safe_str_list(ref.get("capability_set")),
         context=_safe_str(ref.get("context")) or "general",
         reward_minor=_safe_int(ref.get("reward_minor")),

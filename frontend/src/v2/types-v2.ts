@@ -413,7 +413,7 @@ export interface TaskAnnouncement {
   federation_key?: string;
   publisher_did: string;
   title: string;
-  listing_type?: "task" | "service" | "product";
+  listing_type?: "task" | "service" | "product" | "exchange";
   offer_digest?: string;
   offer_uri?: string;
   price_minor?: number;
@@ -435,6 +435,8 @@ export interface TaskAnnouncement {
   source_peer?: string;
   federation_stale?: boolean;
   federation_verified_at_ms?: number;
+  /** Exchange offers use the Agreement flow, never the task-claim endpoint. */
+  claimable?: boolean;
 }
 
 /** 类别分面(/api/v2/market/categories)。 */

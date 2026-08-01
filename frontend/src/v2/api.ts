@@ -896,7 +896,7 @@ export async function listOpenTasks(
   filters: {
     context?: string;
     capability?: string;
-    listingType?: "task" | "service" | "product" | "";
+    listingType?: "task" | "service" | "product" | "exchange" | "";
     minReward?: number;
     q?: string;
   } = {},

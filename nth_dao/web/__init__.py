@@ -1134,6 +1134,14 @@ def create_app(
             "/api/v2/social/federation/pull",
         }:
             return True
+        trade_offer_prefix = "/api/v2/trade/federation/offers/"
+        if path.startswith(trade_offer_prefix):
+            digest = path[len(trade_offer_prefix):]
+            return (
+                len(digest) == 71
+                and digest.startswith("sha256:")
+                and all(character in "0123456789abcdef" for character in digest[7:])
+            )
         return path.startswith("/api/v2/commerce/federation/listings/")
 
     @app.middleware("http")

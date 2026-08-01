@@ -28,6 +28,7 @@ from nth_dao.market.announcement import (
     NTH_ANNOUNCEMENT_KIND_V1,
     NTH_ANNOUNCEMENT_KIND_V2,
     NTH_ANNOUNCEMENT_KIND_V3,
+    NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
     announcement_listing_type,
     sign_announcement,
     verify_announcement,
@@ -40,6 +41,12 @@ from nth_dao.market.announcement import (
     REJECT_ANN_SCHEMA_INVALID,
 )
 from nth_dao.market.feed import MarketFeed, PollResult
+from nth_dao.market.trade_offer_announcement import (
+    MAX_TRADE_OFFER_ANNOUNCEMENT_TTL_MS,
+    create_trade_offer_announcement,
+    trade_offer_uri,
+    verify_trade_offer_announcement_binding,
+)
 from nth_dao.market.subscription import MarketSubscription
 from nth_dao.market.match import (
     match,
@@ -111,12 +118,17 @@ __all__ = [
     "NTH_ANNOUNCEMENT_KIND_V1",
     "NTH_ANNOUNCEMENT_KIND_V2",
     "NTH_ANNOUNCEMENT_KIND_V3",
+    "NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1",
     "announcement_listing_type",
     "sign_announcement",
     "verify_announcement",
     "announcement_federation_key",
     "MarketFeed",
     "PollResult",
+    "MAX_TRADE_OFFER_ANNOUNCEMENT_TTL_MS",
+    "create_trade_offer_announcement",
+    "trade_offer_uri",
+    "verify_trade_offer_announcement_binding",
     "REJECT_ANN_MISSING_FIELD",
     "REJECT_ANN_BAD_PUBLISHER_DID",
     "REJECT_ANN_SIG_INVALID",

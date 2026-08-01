@@ -490,6 +490,70 @@ def check_handoff_review_packet_v1(vectors: List[dict]) -> List[ConformanceFailu
     return failures
 
 
+def check_trade_offer_announcement_v1(
+    vectors: List[dict],
+) -> List[ConformanceFailure]:
+    """Verify both signatures and the exact Offer discovery binding."""
+    from ..market import (
+        TaskAnnouncement,
+        announcement_federation_key,
+        verify_trade_offer_announcement_binding,
+    )
+    from ..trade_rules import TradeOffer
+
+    failures: List[ConformanceFailure] = []
+    for vector in vectors:
+        try:
+            offer = TradeOffer.from_dict(vector["offer"])
+            announcement = TaskAnnouncement.from_dict(vector["announcement"])
+            binding = verify_trade_offer_announcement_binding(
+                offer,
+                announcement,
+            )
+            signing_body_hex = canonical_json(
+                announcement.signing_body()
+            ).hex()
+            federation_key = announcement_federation_key(announcement)
+        except (KeyError, TypeError, ValueError) as exc:
+            failures.append(ConformanceFailure(
+                vector_id=vector.get(
+                    "id", "trade-offer-announcement:invalid"
+                ),
+                category="trade_offer_announcement_v1",
+                description=vector.get("description", ""),
+                expected="valid signed Offer announcement binding",
+                actual=f"{type(exc).__name__}: {exc}",
+            ))
+            continue
+        expected_binding = (
+            vector["expected_valid"],
+            vector["expected_reason"],
+        )
+        checks = (
+            ("binding", expected_binding, binding),
+            (
+                "canonical signing body",
+                vector["expected_signing_body_hex"],
+                signing_body_hex,
+            ),
+            (
+                "federation key",
+                vector["expected_federation_key"],
+                federation_key,
+            ),
+        )
+        for description, expected, actual in checks:
+            if actual != expected:
+                failures.append(ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="trade_offer_announcement_v1",
+                    description=description,
+                    expected=expected,
+                    actual=actual,
+                ))
+    return failures
+
+
 _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "canonical_json":              check_canonical_json,
     "fingerprint":                 check_fingerprint,
@@ -510,6 +574,7 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "mandate_negative_expiry":     check_mandate_negative_expiry,
     "handoff_response_v2":         check_handoff_response_v2,
     "handoff_review_packet_v1":    check_handoff_review_packet_v1,
+    "trade_offer_announcement_v1": check_trade_offer_announcement_v1,
 }
 
 

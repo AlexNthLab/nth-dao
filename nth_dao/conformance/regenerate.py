@@ -249,7 +249,6 @@ def gen_template_canonical_payload() -> list:
 
 def gen_channel_message_canonical() -> list:
     """ChannelMessage canonical payload bytes for the sign-over-payload step."""
-    alice = _seed_keypair(ALICE_SEED_HEX)
     # We re-create the payload exactly as TeamChannel.send() does:
     # {msg_id, channel, from_agent, content, content_type, reply_to,
     #  mentions, timestamp, metadata}
@@ -590,6 +589,185 @@ def gen_handoff_review_packet_v1() -> list:
     }]
 
 
+def gen_trade_offer_announcement_v1() -> list:
+    """Pin positive and signed-negative Offer discovery bindings."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+
+    from ..identity import AgentID, AgentIdentity
+    from ..market import (
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+        TaskAnnouncement,
+        announcement_federation_key,
+        create_trade_offer_announcement,
+        sign_announcement,
+    )
+    from ..trade_rules import offer_body, sign_offer
+
+    signing_key = SigningKey(bytes.fromhex(ALICE_SEED_HEX))
+    public_key = signing_key.verify_key.encode()
+    publisher = AgentIdentity(
+        agent_id=AgentID.from_pubkey(public_key.hex()),
+        label="conformance-publisher",
+        _signing_key=signing_key.encode(),
+        _verify_key=public_key,
+    )
+    offer = sign_offer(
+        publisher,
+        offer_body(
+            offer_id="org.nthdao.conformance/swap",
+            publisher_did=publisher.as_did(),
+            title="Compute for review",
+            summary="Exchange one compute task for one signed code review.",
+            provides=[{
+                "leg_id": "compute",
+                "resource_type": "service:compute",
+                "resource_id": "urn:nth:conformance:compute",
+                "quantity": "1",
+                "unit": "task",
+                "descriptor_digest": "sha256:" + ("a" * 64),
+            }],
+            requests=[{
+                "leg_id": "review",
+                "resource_type": "service:code-review",
+                "resource_id": "urn:nth:conformance:review",
+                "quantity": "1",
+                "unit": "review",
+                "descriptor_digest": "sha256:" + ("b" * 64),
+            }],
+            published_at="2026-08-01T00:00:00Z",
+            not_after="2026-08-02T00:00:00Z",
+        ),
+        created="2026-08-01T00:00:01Z",
+    )
+    announcement = create_trade_offer_announcement(
+        publisher,
+        offer,
+        announcement_id="trade-offer-conformance-001",
+        capability_set=["code-review", "compute"],
+        availability_summary={"status": "publisher-asserted-available"},
+        published_at_ms=1_785_542_402_000,
+        not_after_ms=1_785_628_799_000,
+    )
+
+    def resign(
+        source: TaskAnnouncement,
+        *,
+        signer: AgentIdentity = publisher,
+        **changes: object,
+    ) -> TaskAnnouncement:
+        body = source.signing_body()
+        body.pop("publisher_did")
+        body.update(changes)
+        return sign_announcement(publisher=signer, **body)
+
+    forged_digest = "sha256:" + ("c" * 64)
+    bob_signing_key = SigningKey(bytes.fromhex(BOB_SEED_HEX))
+    bob_public_key = bob_signing_key.verify_key.encode()
+    bob = AgentIdentity(
+        agent_id=AgentID.from_pubkey(bob_public_key.hex()),
+        label="conformance-non-publisher",
+        _signing_key=bob_signing_key.encode(),
+        _verify_key=bob_public_key,
+    )
+    negative_cases = [
+        (
+            "trade-offer-announcement-v1-title-mismatch",
+            "A valid signature cannot authorize a title that differs from the Offer.",
+            resign(announcement, title="Different signed title"),
+            "Trade Offer announcement binding mismatch: title",
+        ),
+        (
+            "trade-offer-announcement-v1-digest-mismatch",
+            "A self-consistent digest and URI pair must still bind the supplied Offer.",
+            resign(
+                announcement,
+                offer_digest=forged_digest,
+                offer_uri=(
+                    "/api/v2/trade/federation/offers/" + forged_digest
+                ),
+            ),
+            "Trade Offer announcement binding mismatch: offer_digest",
+        ),
+        (
+            "trade-offer-announcement-v1-revision-mismatch",
+            "The signed availability summary must bind the Offer revision.",
+            resign(
+                announcement,
+                availability_summary={
+                    **announcement.availability_summary,
+                    "revision": announcement.availability_summary["revision"] + 1,
+                },
+            ),
+            "availability summary does not bind revision",
+        ),
+        (
+            "trade-offer-announcement-v1-expiry-outlives-offer",
+            "An announcement must not remain live after its Offer expires.",
+            resign(announcement, not_after=1_785_628_801_000),
+            "announcement expiry is outside the Trade Offer lifetime",
+        ),
+        (
+            "trade-offer-announcement-v1-publisher-mismatch",
+            "A valid signature by another DID cannot publish this Offer.",
+            resign(announcement, signer=bob, authority_did=bob.as_did()),
+            "Trade Offer announcement binding mismatch: publisher_did",
+        ),
+    ]
+
+    def vector(
+        *,
+        vector_id: str,
+        description: str,
+        signed_announcement: TaskAnnouncement,
+        expected_valid: bool,
+        expected_reason: str,
+    ) -> dict:
+        assert signed_announcement.kind == (
+            NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+        )
+        return {
+            "id": vector_id,
+            "description": description,
+            "offer": offer.to_dict(),
+            "announcement": signed_announcement.to_dict(),
+            "expected_valid": expected_valid,
+            "expected_reason": expected_reason,
+            "expected_signing_body_hex": canonical_json(
+                signed_announcement.signing_body()
+            ).hex(),
+            "expected_federation_key": announcement_federation_key(
+                signed_announcement
+            ),
+        }
+
+    vectors = [
+        vector(
+            vector_id="trade-offer-announcement-v1-valid",
+            description=(
+                "Signed exchange discovery hint binds one exact signed Trade Offer."
+            ),
+            signed_announcement=announcement,
+            expected_valid=True,
+            expected_reason="ok",
+        )
+    ]
+    vectors.extend(
+        vector(
+            vector_id=vector_id,
+            description=description,
+            signed_announcement=signed_announcement,
+            expected_valid=False,
+            expected_reason=expected_reason,
+        )
+        for vector_id, description, signed_announcement, expected_reason
+        in negative_cases
+    )
+    return vectors
+
+
 def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors = {
         "format": "nth-dao-conformance-v1",
@@ -611,6 +789,7 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             **build_mandate_vectors(),
             "handoff_response_v2":         gen_handoff_response_v2(),
             "handoff_review_packet_v1":    gen_handoff_review_packet_v1(),
+            "trade_offer_announcement_v1": gen_trade_offer_announcement_v1(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

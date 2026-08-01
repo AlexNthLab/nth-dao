@@ -1222,6 +1222,32 @@ def _state_spine(request: Request) -> Optional[Any]:
         return None
 
 
+_MARKET_FEED_STATE_LOCK = threading.Lock()
+
+
+def _state_market_feed(request: Request) -> Any:
+    """Return one mtime-invalidated MarketFeed projection per web process."""
+    state = request.app.state
+    feed = getattr(state, "trade_offer_market_feed", None)
+    if feed is not None:
+        return feed
+    with _MARKET_FEED_STATE_LOCK:
+        feed = getattr(state, "trade_offer_market_feed", None)
+        if feed is None:
+            from nth_dao.market import MarketFeed
+
+            workspace = _state_workspace(request)
+            if workspace is None:
+                raise RuntimeError("market feed workspace unavailable")
+            feed = MarketFeed(
+                workspace,
+                spine=_state_spine(request),
+                trade_offer_store=_state_trade_offer_store(request),
+            )
+            state.trade_offer_market_feed = feed
+    return feed
+
+
 def _verified_spine_events(request: Request) -> Optional[list]:
     """hub spine 的**已验证**事件列表(Phase 4c 读端统一入口)。
 
@@ -1316,7 +1342,7 @@ def _find_trade_offer_spine_anchor(
 
 
 _MARKET_LISTING_TYPE_FIELD = "__nth_listing_type"
-_MARKET_LISTING_TYPES = {"task", "service", "product"}
+_MARKET_LISTING_TYPES = {"task", "service", "product", "exchange"}
 
 
 def _normalize_market_listing_type(value: Any) -> str:
@@ -1324,23 +1350,17 @@ def _normalize_market_listing_type(value: Any) -> str:
     if not listing_type:
         return "task"
     if listing_type not in _MARKET_LISTING_TYPES:
-        raise ValueError("listing_type must be task, service, or product")
+        raise ValueError(
+            "listing_type must be task, service, product, or exchange"
+        )
     return listing_type
 
 
 def _market_announcement_listing_type(ann: Any) -> str:
-    if str(getattr(ann, "kind", "")) == "nth-task-announcement-v3":
-        try:
-            return _normalize_market_listing_type(getattr(ann, "listing_type", ""))
-        except ValueError:
-            return "task"
-    schema = getattr(ann, "input_schema", {}) or {}
-    if isinstance(schema, dict):
-        raw = schema.get(_MARKET_LISTING_TYPE_FIELD, schema.get("listing_type", "task"))
-    else:
-        raw = "task"
+    from nth_dao.market.announcement import announcement_listing_type
+
     try:
-        return _normalize_market_listing_type(raw)
+        return _normalize_market_listing_type(announcement_listing_type(ann))
     except ValueError:
         return "task"
 
@@ -1350,6 +1370,7 @@ def _market_announcement_to_wire(ann: Any) -> Dict[str, Any]:
 
     data = ann.to_dict()
     data["listing_type"] = _market_announcement_listing_type(ann)
+    data["claimable"] = data["listing_type"] != "exchange"
     data["federation_key"] = announcement_federation_key(ann)
     return data
 
@@ -3587,6 +3608,13 @@ class AnnounceTaskBody(_Model):
         default=0, ge=0,
         description="过期时间(epoch ms);0=不过期。",
     )
+
+
+class AnnounceTradeOfferBody(_Model):
+    """Optional discovery metadata for one already-signed Trade Offer."""
+
+    capability_set: List[str] = Field(default_factory=list, max_length=32)
+    availability_summary: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AnnounceStepBody(_Model):
@@ -5865,6 +5893,59 @@ def _federation_hello_limiter(request: Request):
                 )
             )
             state.market_fed_hello_limiter = limiter
+    return limiter
+
+
+def _trade_offer_read_limiter(request: Request):
+    """Apply a cheap process-local gate before any persistent limiter I/O."""
+    state = request.app.state
+    limiter = getattr(state, "trade_offer_fed_read_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "trade_offer_fed_read_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import RateLimiter
+
+            limiter = RateLimiter(
+                max_per_window=120,
+                window_seconds=60.0,
+                max_tracked_keys=4_096,
+            )
+            state.trade_offer_fed_read_limiter = limiter
+    return limiter
+
+
+def _trade_offer_read_global_limiter(request: Request):
+    """Bound aggregate exact Offer reads across all network sources."""
+    state = request.app.state
+    limiter = getattr(state, "trade_offer_fed_read_global_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "trade_offer_fed_read_global_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            workspace = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    workspace
+                    / "trade"
+                    / "rate_limits"
+                    / "offer_read_global.json",
+                    max_per_window=300,
+                    window_seconds=60.0,
+                    max_tracked_keys=4,
+                )
+                if workspace is not None
+                else RateLimiter(
+                    max_per_window=300,
+                    window_seconds=60.0,
+                    max_tracked_keys=4,
+                )
+            )
+            state.trade_offer_fed_read_global_limiter = limiter
     return limiter
 
 
@@ -8894,6 +8975,169 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="trade offer not found")
         return {"digest": digest, "offer": offer.to_dict()}
 
+    @app.post("/api/v2/trade/offers/{digest}/announce")
+    def v2_trade_offer_announce(
+        digest: str,
+        body: AnnounceTradeOfferBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Publish one idempotent discovery hint for a local signed Offer."""
+        from nth_dao.market import (
+            NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+            create_trade_offer_announcement,
+        )
+        from nth_dao.trade_rules import OfferStoreError
+        from nth_dao.util.io import InterProcessLock
+
+        store = _state_trade_offer_store(request)
+        workspace = _state_workspace(request)
+        identity = _state_node_identity(request)
+        if store is None or workspace is None:
+            raise HTTPException(status_code=503, detail="trade storage unavailable")
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(status_code=503, detail="signing identity unavailable")
+        try:
+            offer = store.get(digest)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade offer store integrity check failed",
+            ) from exc
+        if offer is None:
+            raise HTTPException(status_code=404, detail="trade offer not found")
+        if offer.publisher_did != identity.as_did():
+            raise HTTPException(
+                status_code=403,
+                detail="only this node's own Trade Offer can be announced",
+            )
+
+        lock_path = (
+            workspace / "market_feed" / ".locks" / f"trade-{digest[7:]}"
+        )
+        try:
+            with InterProcessLock(lock_path):
+                feed = _state_market_feed(request)
+                existing = next(
+                    (
+                        announcement
+                        for announcement in feed.poll(
+                            since_seq=-1,
+                            include_expired=True,
+                        ).announcements
+                        if (
+                            announcement.kind
+                            == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+                            and announcement.offer_digest == digest
+                            and announcement.publisher_did == identity.as_did()
+                            and not announcement.is_expired()
+                        )
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    return {
+                        "announcement": _market_announcement_to_wire(existing),
+                        "published": False,
+                    }
+                announcement = create_trade_offer_announcement(
+                    identity,
+                    offer,
+                    capability_set=body.capability_set,
+                    availability_summary=body.availability_summary,
+                )
+                feed.publish(announcement)
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Offer announcement is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "announcement": _market_announcement_to_wire(announcement),
+            "published": True,
+        }
+
+    @app.get("/api/v2/trade/federation/offers/{digest}")
+    def v2_trade_offer_federation_get(
+        digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Serve an exact Offer only while this node publicly announces it."""
+        from nth_dao.trade_rules import OfferStoreError
+
+        store = _state_trade_offer_store(request)
+        workspace = _state_workspace(request)
+        if store is None or workspace is None:
+            raise HTTPException(status_code=503, detail="trade storage unavailable")
+        try:
+            source_decision = _trade_offer_read_limiter(request).check(
+                _federation_hello_client_key(request)
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Offer read budget is temporarily unavailable",
+            ) from exc
+        if not source_decision.allowed:
+            retry_after = max(
+                1, int(source_decision.retry_after_seconds) + 1
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Trade Offer federation read rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        try:
+            global_decision = _trade_offer_read_global_limiter(request).check(
+                "global"
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Offer read budget is temporarily unavailable",
+            ) from exc
+        if not global_decision.allowed:
+            retry_after = max(
+                1, int(global_decision.retry_after_seconds) + 1
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Trade Offer federation read rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        try:
+            feed = _state_market_feed(request)
+            announcement = feed.find_live_trade_offer_announcement(digest)
+            if announcement is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="announced offer not found",
+                )
+            offer = store.get(digest)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Offer public index is temporarily unavailable",
+            ) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade offer store integrity check failed",
+            ) from exc
+        if offer is None:
+            raise HTTPException(status_code=404, detail="announced offer not found")
+        try:
+            feed.require_listing_binding(announcement)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="announced offer not found")
+        return offer.to_dict()
+
     @app.get("/api/v2/market/open")
     def v2_market_open(
         request: Request,
@@ -9101,6 +9345,10 @@ def register_v2_routes(app: FastAPI) -> None:
         # 永久膨胀。在落盘前于 HTTP 边界封顶,给清晰 400。
         try:
             listing_type = _normalize_market_listing_type(body.listing_type)
+            if listing_type == "exchange":
+                raise ValueError(
+                    "exchange listings must be derived from a signed Trade Offer"
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         if len(body.title) > 200:
