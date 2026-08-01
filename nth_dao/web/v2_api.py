@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager, nullcontext
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -1445,6 +1446,84 @@ def _require_console_bearer_for_sensitive_read(request: Request) -> None:
     """
     if not _has_console_bearer(request):
         raise HTTPException(status_code=401, detail="missing or invalid console token")
+
+
+def _require_console_bearer_for_governance_mutation(request: Request) -> None:
+    """Restrict local trust-policy mutations to the authenticated console.
+
+    A cryptographically valid CapToken identifies its issuer, but it does not
+    by itself grant authority over this node's Recognition trust policy. Until
+    a dedicated, node-issued governance capability is defined, fail closed and
+    accept only the per-process console Bearer token.
+    """
+    if not _has_console_bearer(request):
+        raise HTTPException(status_code=401, detail="missing or invalid console token")
+
+
+def _enforce_recognition_policy_mutation_limit(
+    request: Request,
+    *,
+    operation: str,
+) -> None:
+    state = getattr(request.app.state, "nth", None)
+    limiter = getattr(
+        state,
+        "trade_rule_recognition_policy_limiter",
+        None,
+    )
+    if limiter is None:
+        logger.error("Recognition policy limiter is unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Recognition policy governance is unavailable",
+        )
+    try:
+        decision = limiter.check(operation)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Recognition policy limiter failed during %s: %s: %s",
+            operation,
+            type(exc).__name__,
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Recognition policy governance is unavailable",
+        ) from exc
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Recognition policy mutation rate limit exceeded",
+            headers={
+                "Retry-After": str(
+                    max(1, int(decision.retry_after_seconds) + 1)
+                )
+            },
+        )
+
+
+def _recognition_policy_service_error(
+    *,
+    operation: str,
+    code: str,
+    message: str,
+    exc: Exception,
+    status_code: int = 503,
+    retry_after: str | None = None,
+) -> HTTPException:
+    logger.warning(
+        "Recognition policy %s failed [%s]: %s: %s",
+        operation,
+        code,
+        type(exc).__name__,
+        exc,
+    )
+    headers = {"Retry-After": retry_after} if retry_after else None
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+        headers=headers,
+    )
 
 
 
@@ -3779,6 +3858,38 @@ def _state_trade_rule_recognition_audit(
         return request.app.state.nth.trade_rule_recognition_audit
     except AttributeError:
         return None
+
+
+def _state_trade_rule_recognition_policy_audit(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_rule_recognition_policy_audit
+    except AttributeError:
+        return None
+
+
+_CANONICAL_UTC_QUERY = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{6}))?Z$"
+)
+
+
+def _parse_canonical_utc_query(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 35:
+        raise ValueError("at must be a canonical UTC RFC3339 timestamp")
+    match = _CANONICAL_UTC_QUERY.fullmatch(value)
+    if match is None or match.group(2) == "000000":
+        raise ValueError("at must be a canonical UTC RFC3339 timestamp")
+    fraction = match.group(2)
+    try:
+        return datetime.strptime(
+            match.group(1) + (f".{fraction}" if fraction else ""),
+            "%Y-%m-%dT%H:%M:%S.%f" if fraction else "%Y-%m-%dT%H:%M:%S",
+        ).replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError("at must be a real UTC RFC3339 timestamp") from exc
 
 
 def _load_trade_rule_package(request: Request, digest: str) -> Any:
@@ -8262,6 +8373,314 @@ def register_v2_routes(app: FastAPI) -> None:
             "blocked_digest": result.blocked_digest,
             "error_code": result.error_code,
             "error_message": result.error_message,
+        }
+
+    @app.post("/api/v2/trade/recognition-policy")
+    async def v2_trade_rule_recognition_policy_record(
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Persist and Spine-anchor one already-signed local trust policy."""
+
+        from nth_dao.trade_rules import (
+            RuleRecognitionPolicyAuditError,
+            RuleRecognitionPolicyAuditIntegrityError,
+            RuleRecognitionPolicyStoreBusy,
+            RuleRecognitionPolicyStoreCapacity,
+            RuleRecognitionPolicyStoreError,
+            TradeRuleRecognitionPolicy,
+            TradeRuleRecognitionPolicyRejected,
+        )
+
+        _require_console_bearer_for_governance_mutation(request)
+        _enforce_recognition_policy_mutation_limit(
+            request,
+            operation="record",
+        )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "trade rule recognition policy requires "
+                    "Content-Type application/json"
+                ),
+            )
+        coordinator = _state_trade_rule_recognition_policy_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "signed Spine unavailable; unaudited Recognition "
+                    "policy persistence is disabled"
+                ),
+            )
+        raw_body = await request.body()
+        try:
+            policy = await run_in_threadpool(
+                TradeRuleRecognitionPolicy.from_json,
+                raw_body,
+            )
+        except TradeRuleRecognitionPolicyRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            result = await run_in_threadpool(coordinator.record, policy)
+        except TradeRuleRecognitionPolicyRejected as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RuleRecognitionPolicyAuditIntegrityError as exc:
+            raise _recognition_policy_service_error(
+                operation="record",
+                code="recognition-policy-integrity-failed",
+                message="Recognition policy integrity check failed",
+                exc=exc,
+            ) from exc
+        except RuleRecognitionPolicyStoreCapacity as exc:
+            raise _recognition_policy_service_error(
+                operation="record",
+                code="recognition-policy-capacity-exceeded",
+                message="Recognition policy storage capacity exceeded",
+                exc=exc,
+                status_code=507,
+            ) from exc
+        except RuleRecognitionPolicyStoreBusy as exc:
+            raise _recognition_policy_service_error(
+                operation="record",
+                code="recognition-policy-store-busy",
+                message="Recognition policy store is busy",
+                exc=exc,
+                retry_after="1",
+            ) from exc
+        except (
+            RuleRecognitionPolicyStoreError,
+            RuleRecognitionPolicyAuditError,
+        ) as exc:
+            raise _recognition_policy_service_error(
+                operation="record",
+                code="recognition-policy-unavailable",
+                message="Recognition policy service is unavailable",
+                exc=exc,
+            ) from exc
+        return {
+            "policy_digest": result.policy.digest,
+            "policy": result.policy.to_dict(),
+            "store_created": result.store_created,
+            "anchor_created": result.anchor_created,
+            "audit_event_id": result.event.event_id,
+        }
+
+    @app.get("/api/v2/trade/recognition-policy")
+    def v2_trade_rule_recognition_policy_list(
+        request: Request,
+        limit: int = 100,
+        before_sequence: int | None = None,
+    ) -> Dict[str, Any]:
+        """Read a bounded, Spine-verified local policy history."""
+
+        from nth_dao.trade_rules import (
+            RuleRecognitionPolicyAuditError,
+            RuleRecognitionPolicyAuditIntegrityError,
+            RuleRecognitionPolicyStoreBusy,
+            RuleRecognitionPolicyStoreError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be in 1..500")
+        if (
+            before_sequence is not None
+            and (
+                isinstance(before_sequence, bool)
+                or before_sequence < 1
+            )
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="before_sequence must be a positive integer",
+            )
+        coordinator = _state_trade_rule_recognition_policy_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed Recognition policy audit unavailable",
+            )
+        try:
+            policies = coordinator.verified_policies()
+        except RuleRecognitionPolicyAuditIntegrityError as exc:
+            raise _recognition_policy_service_error(
+                operation="list",
+                code="recognition-policy-integrity-failed",
+                message="Recognition policy integrity check failed",
+                exc=exc,
+            ) from exc
+        except RuleRecognitionPolicyStoreBusy as exc:
+            raise _recognition_policy_service_error(
+                operation="list",
+                code="recognition-policy-store-busy",
+                message="Recognition policy store is busy",
+                exc=exc,
+                retry_after="1",
+            ) from exc
+        except (
+            RuleRecognitionPolicyStoreError,
+            RuleRecognitionPolicyAuditError,
+        ) as exc:
+            raise _recognition_policy_service_error(
+                operation="list",
+                code="recognition-policy-unavailable",
+                message="Recognition policy service is unavailable",
+                exc=exc,
+            ) from exc
+        head = policies[-1] if policies else None
+        eligible = [
+            policy
+            for policy in policies
+            if (
+                before_sequence is None
+                or policy.to_dict()["sequence"] < before_sequence
+            )
+        ]
+        page = list(reversed(eligible[-limit:]))
+        has_more = len(eligible) > len(page)
+        next_before_sequence = (
+            page[-1].to_dict()["sequence"] if has_more and page else None
+        )
+        return {
+            "node_did": coordinator.policy_store.node_did,
+            "head_digest": head.digest if head is not None else None,
+            "head": head.to_dict() if head is not None else None,
+            "items": [policy.to_dict() for policy in page],
+            "has_more": has_more,
+            "next_before_sequence": next_before_sequence,
+        }
+
+    @app.post("/api/v2/trade/recognition-policy/reconcile")
+    def v2_trade_rule_recognition_policy_reconcile(
+        request: Request,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Recover exact store-first policy revisions into the Spine."""
+
+        from nth_dao.trade_rules import (
+            RuleRecognitionPolicyAuditError,
+            RuleRecognitionPolicyAuditIntegrityError,
+            RuleRecognitionPolicyStoreBusy,
+            RuleRecognitionPolicyStoreError,
+        )
+
+        _require_console_bearer_for_governance_mutation(request)
+        _enforce_recognition_policy_mutation_limit(
+            request,
+            operation="reconcile",
+        )
+        coordinator = _state_trade_rule_recognition_policy_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed Recognition policy audit unavailable",
+            )
+        try:
+            result = coordinator.reconcile(limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuleRecognitionPolicyAuditIntegrityError as exc:
+            raise _recognition_policy_service_error(
+                operation="reconcile",
+                code="recognition-policy-integrity-failed",
+                message="Recognition policy integrity check failed",
+                exc=exc,
+            ) from exc
+        except RuleRecognitionPolicyStoreBusy as exc:
+            raise _recognition_policy_service_error(
+                operation="reconcile",
+                code="recognition-policy-store-busy",
+                message="Recognition policy store is busy",
+                exc=exc,
+                retry_after="1",
+            ) from exc
+        except (
+            RuleRecognitionPolicyStoreError,
+            RuleRecognitionPolicyAuditError,
+        ) as exc:
+            raise _recognition_policy_service_error(
+                operation="reconcile",
+                code="recognition-policy-unavailable",
+                message="Recognition policy service is unavailable",
+                exc=exc,
+            ) from exc
+        return {
+            "scanned": result.scanned,
+            "anchored": result.anchored,
+            "failed": result.failed,
+            "remaining": result.remaining,
+            "has_more": result.remaining > 0,
+            "blocked_digest": result.blocked_digest,
+            "error_message": result.error_message,
+        }
+
+    @app.get(
+        "/api/v2/trade/rule-packages/{package_digest}"
+        "/recognition-evaluation"
+    )
+    def v2_trade_rule_recognition_policy_evaluate(
+        package_digest: str,
+        request: Request,
+        at: str | None = None,
+    ) -> Dict[str, Any]:
+        """Project local trust without granting package execution authority."""
+
+        from nth_dao.trade_rules import (
+            RuleRecognitionPolicyAuditError,
+            RuleRecognitionPolicyAuditIntegrityError,
+            RuleRecognitionPolicyStoreBusy,
+            RuleRecognitionPolicyStoreError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        _load_trade_rule_package(request, package_digest)
+        try:
+            moment = _parse_canonical_utc_query(at)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        coordinator = _state_trade_rule_recognition_policy_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed Recognition policy audit unavailable",
+            )
+        try:
+            result = coordinator.evaluate(package_digest, at=moment)
+        except RuleRecognitionPolicyAuditIntegrityError as exc:
+            raise _recognition_policy_service_error(
+                operation="evaluate",
+                code="recognition-policy-integrity-failed",
+                message="Recognition policy integrity check failed",
+                exc=exc,
+            ) from exc
+        except RuleRecognitionPolicyStoreBusy as exc:
+            raise _recognition_policy_service_error(
+                operation="evaluate",
+                code="recognition-policy-store-busy",
+                message="Recognition policy store is busy",
+                exc=exc,
+                retry_after="1",
+            ) from exc
+        except (
+            RuleRecognitionPolicyStoreError,
+            RuleRecognitionPolicyAuditError,
+        ) as exc:
+            raise _recognition_policy_service_error(
+                operation="evaluate",
+                code="recognition-policy-unavailable",
+                message="Recognition policy service is unavailable",
+                exc=exc,
+            ) from exc
+        policy_document = result.policy.to_dict()
+        return {
+            "package_digest": package_digest,
+            "policy_digest": result.policy.digest,
+            "policy_sequence": policy_document["sequence"],
+            "advisory": True,
+            "execution_authorized": False,
+            "snapshot": asdict(result.snapshot),
         }
 
     @app.post("/api/v2/trade/offers")

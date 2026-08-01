@@ -100,6 +100,7 @@ _COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
 _COMMERCE_WRITE_MAX_BODY_BYTES = 768 * 1024
 _TRADE_OFFER_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_MAX_BODY_BYTES = 256 * 1024
+_TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES = 256 * 1024
 
 
 class _RequestBodyTooLarge(Exception):
@@ -154,12 +155,21 @@ class _FederationBodyLimitMiddleware:
                 or path.endswith("/recognitions/reconcile")
             )
         )
+        is_trade_recognition_policy_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path in {
+                "/api/v2/trade/recognition-policy",
+                "/api/v2/trade/recognition-policy/reconcile",
+            }
+        )
         if not (
             is_foreign_claim
             or is_federation_hello
             or is_commerce_write
             or is_trade_offer_write
             or is_trade_recognition_write
+            or is_trade_recognition_policy_write
         ):
             await self.app(scope, receive, send)
             return
@@ -182,6 +192,9 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_recognition_write:
             max_body_bytes = _TRADE_RECOGNITION_MAX_BODY_BYTES
             body_label = "trade rule recognition"
+        elif is_trade_recognition_policy_write:
+            max_body_bytes = _TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES
+            body_label = "trade rule recognition policy"
         else:
             max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
             body_label = "commerce write"
@@ -685,6 +698,16 @@ class WebState:
         self.trade_rule_packages = RulePackageStore(workspace)
         self.trade_rule_recognitions = RuleRecognitionStore(workspace)
         self.trade_rule_recognition_audit: Optional[Any] = None
+        self.trade_rule_recognition_policy_store: Optional[Any] = None
+        self.trade_rule_recognition_policy_audit: Optional[Any] = None
+        self.trade_rule_recognition_policy_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "recognition_policy.json",
+            max_per_window=30,
+            window_seconds=60.0,
+        )
         # v0.10 V-30: per-actor rate limiters for the two crypto-heavy
         # /api/mandates/* routes. The verify endpoint is more sensitive
         # (free oracle + timing side-channel) so its window is tighter.
@@ -3468,7 +3491,11 @@ def _bootstrap(state: WebState) -> None:
             )
             state.spine = None
     if state.spine is not None:
-        from ..trade_rules import RuleRecognitionAuditCoordinator
+        from ..trade_rules import (
+            RuleRecognitionAuditCoordinator,
+            RuleRecognitionPolicyAuditCoordinator,
+            RuleRecognitionPolicyStore,
+        )
 
         state.trade_rule_recognition_audit = (
             RuleRecognitionAuditCoordinator(
@@ -3476,6 +3503,24 @@ def _bootstrap(state: WebState) -> None:
                 spine=state.spine,
             )
         )
+        node_did = _safe_did(node_identity)
+        if node_did:
+            state.trade_rule_recognition_policy_store = (
+                RuleRecognitionPolicyStore.open_or_create_for_identity(
+                    state.workspace,
+                    identity_did=node_did,
+                )
+            )
+            state.trade_rule_recognition_policy_audit = (
+                RuleRecognitionPolicyAuditCoordinator(
+                    policy_store=(
+                        state.trade_rule_recognition_policy_store
+                    ),
+                    package_store=state.trade_rule_packages,
+                    recognition_audit=state.trade_rule_recognition_audit,
+                    spine=state.spine,
+                )
+            )
 
     config = state.membership.load_config()
     if not config.admin_ids and not config.member_ids:

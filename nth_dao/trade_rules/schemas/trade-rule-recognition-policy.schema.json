@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-rule-recognition-policy-v1.json",
+  "title": "NTH DAO Trade Rule Recognition Policy v1",
+  "$comment": "Structural schema only. Implementations must also verify canonical JSON, real UTC dates, Ed25519 DID signatures, policy_id derivation, controller authorization, and the exact predecessor chain.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "policy_id",
+    "node_did",
+    "signer_did",
+    "controllers",
+    "sequence",
+    "previous_policy_digest",
+    "issued_at",
+    "trusted_issuers",
+    "threshold",
+    "max_statement_ttl_seconds",
+    "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.rule-recognition-policy"},
+    "protocol_version": {"const": "1"},
+    "policy_id": {
+      "type": "string",
+      "pattern": "^nth-trade-recognition-policy-sha256:[0-9a-f]{64}$"
+    },
+    "node_did": {"$ref": "#/$defs/did"},
+    "signer_did": {"$ref": "#/$defs/did"},
+    "controllers": {
+      "type": "array",
+      "$comment": "The protocol validator additionally requires ascending lexical order.",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/did"}
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "previous_policy_digest": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/digest"}
+      ]
+    },
+    "issued_at": {"$ref": "#/$defs/timestamp"},
+    "trusted_issuers": {
+      "type": "array",
+      "$comment": "The protocol validator additionally requires ascending issuer and scope order.",
+      "minItems": 1,
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issuer_did", "rule_scopes"],
+        "properties": {
+          "issuer_did": {"$ref": "#/$defs/did"},
+          "rule_scopes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "oneOf": [
+                {"const": "*"},
+                {"$ref": "#/$defs/rule_id"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "threshold": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "max_statement_ttl_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 31622400
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "NthEd25519SignatureV1"},
+        "created": {"$ref": "#/$defs/timestamp"},
+        "verification_method": {"type": "string", "minLength": 1, "maxLength": 600},
+        "proof_purpose": {"const": "tradeRuleRecognitionPolicy"},
+        "proof_value": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"sequence": {"const": 1}}, "required": ["sequence"]},
+      "then": {"properties": {"previous_policy_digest": {"type": "null"}}},
+      "else": {"properties": {"previous_policy_digest": {"$ref": "#/$defs/digest"}}}
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {"type": "string", "pattern": "^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$"},
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.(?!000000)[0-9]{6})?Z$"
+    },
+    "rule_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:\\/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?)?$"
+    }
+  }
+}

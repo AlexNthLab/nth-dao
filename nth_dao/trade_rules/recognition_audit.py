@@ -538,6 +538,40 @@ class RuleRecognitionAuditCoordinator:
             return False, f"Recognition anchor has no local statement {extra[0]}"
         return True, "ok"
 
+    def verified_statements(
+        self,
+        *,
+        package: RulePackage,
+    ) -> tuple[TradeRuleRecognition, ...]:
+        """Return one CAS snapshot proven against one Spine snapshot."""
+
+        statements = self.store.list_for_package(package)
+        expected = self._expected_payloads(statements, package=package)
+        anchors = self._anchor_index()
+        self._assert_no_orphan_or_mismatched_anchors(
+            package=package,
+            expected=expected,
+            anchors=anchors,
+        )
+        relevant = {
+            digest: event
+            for digest, event in anchors.items()
+            if event.payload.get("package_digest") == package.digest
+        }
+        missing = sorted(set(expected) - set(relevant))
+        if missing:
+            raise RuleRecognitionAuditIntegrityError(
+                f"missing Recognition anchor {missing[0]}"
+            )
+        statements_after_verification = self.store.list_for_package(package)
+        if tuple(item.digest for item in statements) != tuple(
+            item.digest for item in statements_after_verification
+        ):
+            raise RuleRecognitionAuditIntegrityError(
+                "Recognition statements changed during projection"
+            )
+        return statements
+
 
 __all__ = [
     "DEFAULT_RULE_RECOGNITION_RECONCILE_LIMIT",

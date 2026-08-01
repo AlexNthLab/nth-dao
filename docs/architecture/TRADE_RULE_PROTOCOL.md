@@ -224,6 +224,51 @@ An orphan or conflicting Spine anchor is rollback evidence and blocks both new
 writes and reconciliation until the exact signed statement is restored or an
 operator resolves the integrity incident.
 
+The node's interpretation policy is itself a signed, durable v1 chain rather
+than an ephemeral constructor argument. Its stable `policy_id` is derived from
+the genesis node DID. After genesis, that DID is the permanent policy namespace
+rather than an alias for whichever signing key is currently loaded. An
+authorized replacement key can reopen the existing namespace after restart
+only when the previous signed revision names its DID as a controller. The
+genesis revision must be signed by the namespace DID; each
+successor must be contiguous, bind the exact predecessor digest, and be signed
+by a controller authorized in the previous revision. A revision can rotate the
+next controller set without requiring a central registry. This makes offline
+replay deterministic: controller authority is carried by the signed history,
+not by a mutable callback or server-side ACL.
+
+Policy revisions are persisted as canonical, content-addressed statements plus
+a durable rollback-detecting head. The store writes first and the signed Spine
+then records one exact, idempotent
+`trade.rule.recognition.policy.updated` event. Bounded reconciliation repairs
+only exact store-first revisions. Missing, duplicate, conflicting, forked, or
+orphaned facts fail closed. Read projections pin and recheck both policy and
+Recognition snapshots around audit verification so a concurrent append cannot
+silently enter an already-verified response. A time-pinned projection selects
+the highest verified policy revision whose `issued_at` is not later than the
+requested time. Future revisions are scheduled state, not retroactive policy;
+a time before genesis has no active policy and fails explicitly.
+
+The local Web v2 policy boundary provides:
+
+- `POST /api/v2/trade/recognition-policy` for an already signed revision;
+- `GET /api/v2/trade/recognition-policy` for bounded newest-first history;
+- `POST /api/v2/trade/recognition-policy/reconcile` for exact crash recovery;
+  and
+- `GET /api/v2/trade/rule-packages/{digest}/recognition-evaluation` for a
+  time-pinned advisory snapshot.
+
+Policy history and evaluation are sensitive local-console reads. Policy writes
+and reconciliation currently require the per-process local console Bearer
+token even if the request carries a cryptographically valid CapToken: signature
+validity alone grants no governance authority. A dedicated node-issued policy
+capability is not defined in v1. Mutations share a cross-process persistent
+rate limit, are body-bounded before parsing, and never degrade to unaudited
+storage. Operational exceptions are logged locally while HTTP responses expose
+stable error codes without filesystem paths. An observed quorum still returns
+`execution_authorized: false`; a separate signed `RuleResolutionPolicy` and
+Adapter approval remain mandatory for execution.
+
 Signed issuer-head exchange and federation transport remain separate future
 slices, so this release does not claim globally fresh revocation. Deleting both
 the local CAS and Spine can still erase local history until another node
@@ -482,6 +527,10 @@ The reviewed protocol kernel currently contains:
 - content-addressed, non-executing Rule Package storage;
 - explicit local recognition policy and bounded exact-digest dependency
   resolution;
+- signed, sequence-linked local Recognition policy revisions with deterministic
+  controller rotation, content-addressed rollback-detecting persistence,
+  recoverable `trade.rule.recognition.policy.updated` Spine projection, and
+  fail-closed advisory Web v2 evaluation;
 - signed, sequence-linked Rule Recognition v1 statements and deterministic
   scoped local quorum projection, bounded expiry, durable CAS import, and
   metadata-only invalid-input quarantine, plus recoverable exact-digest
@@ -520,14 +569,14 @@ The reviewed protocol kernel currently contains:
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Execution Receipt v1, Receipt Review v1, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
-  Rule Recognition and Receipt Review audit payloads;
+  Rule Recognition, Recognition Policy, and Receipt Review audit payloads;
 - focused tests.
 
 Agreement and Order objects remain protocol-kernel primitives. The audit
 outbox makes local Order persistence and Spine projection recoverable, but it
 does not make separate files atomically committed and it is not a settlement
-ledger. Offer/Agreement federation, persistent/governed recognition policy,
-inventory or asset reservation, UI, fulfillment, payment, federation of
+ledger. Offer/Agreement federation, inventory or asset reservation, UI,
+fulfillment, payment, federation of
 Receipt anchors, delegation, and sandboxed executable Adapters remain separate
 independently reviewed slices. The local HTTP endpoints are not yet a
 federation protocol. Trade Offer v2, Rule Package loading, Agreement creation,

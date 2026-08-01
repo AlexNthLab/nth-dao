@@ -51,6 +51,15 @@ same checked-in vector. Negative audit vectors cover malformed Ed25519
 `did:key` values, impossible calendar dates, and reversed validity intervals;
 schema-only acceptance is not treated as semantic conformance.
 
+Recognition Policy v1 has a separate deterministic vector in the same
+directory. It covers a node-signed genesis, a successor signed by a delegated
+controller, byte-exact canonical JSON and domain-separated signing input, and
+exact `trade.rule.recognition.policy.updated` Spine payloads. Negative vectors
+include a signature-breaking mutation and correctly signed successors with an
+unauthorized signer or wrong predecessor. Ports MUST run both structural JSON
+Schema validation and semantic chain authorization; accepting a valid Ed25519
+signature alone is non-conformant.
+
 ## What's NOT covered yet (planned for v0.9.5+)
 
 - Channel message signature verification end-to-end

@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   remain fail-closed when the signed Spine is unavailable, expose bounded
   reconciliation diagnostics, and reject rollback evidence before new CAS
   writes.
+- Signed local Recognition trust-policy v1 revisions with node-bound genesis,
+  predecessor-authorized controller rotation, canonical content-addressed
+  storage, durable rollback-detecting head, recoverable idempotent
+  `trade.rule.recognition.policy.updated` Spine anchors, bounded sensitive Web
+  v2 history/reconciliation, and time-pinned advisory Rule Package evaluation.
+  Deterministic public vectors and schemas cover the policy wire format,
+  delegated successor, audit payload, and correctly signed unauthorized-chain
+  attacks. Recognition quorum still never grants execution authority.
+- Recognition policy hardening: local-console-only governance mutations reject
+  arbitrary self-signed CapTokens, persistent cross-process throttling bounds
+  writes and reconciliation, HTTP failures no longer expose local paths,
+  historical evaluation selects the policy effective at the requested time,
+  authorized key rotation preserves the signed genesis namespace, and audit
+  payloads cryptographically bind `policy_id` to `node_did`.
 - Recoverable Trade Order audit outbox with `prepared -> cached -> anchored`
   state transitions and exact, idempotent `trade.order.accepted` Spine events.
 - Execution-readiness verification that reloads and resolves every transitive
