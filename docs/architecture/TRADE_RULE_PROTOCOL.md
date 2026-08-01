@@ -566,6 +566,13 @@ The reviewed protocol kernel currently contains:
 - bounded package-store reconciliation with explicit cleanup;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
+- user-directed durable import of a reverified federated Offer into the local
+  append-only Offer Store, with signed remote-publisher identity inside the
+  Offer and exact local-importer provenance in the Store/Spine anchor,
+  including the reverified signed discovery announcement and content-derived
+  federation key; signed write-ahead import proposals, cross-process digest
+  serialization, restart-safe idempotent completion anchoring, and explicit
+  non-trust/non-acceptance semantics;
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Execution Receipt v1, Receipt Review v1, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
@@ -582,11 +589,12 @@ signature still proves authorship rather than truth or global freshness.
 The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
 renewal requires a new publisher signature.
 
-Durable remote Offer retention, latest-revision proofs, Agreement federation,
-inventory or asset reservation, fulfillment, payment, federation of Receipt
-anchors, delegation, and sandboxed executable Adapters remain separate,
-independently reviewed slices. Trade Offer discovery, Rule Package loading,
-Agreement creation, Order storage, and Receipt creation cannot execute
+Latest-revision proofs, Agreement federation, inventory or asset reservation,
+fulfillment, payment, federation of Receipt anchors, delegation, and sandboxed
+executable Adapters remain separate, independently reviewed slices. Durable
+remote retention preserves one exact signed claim; it does not prove that the
+publisher disclosed its latest revision. Trade Offer discovery, Rule Package
+loading, Agreement creation, Order storage, and Receipt creation cannot execute
 settlement.
 
 ## Deferred Repository Quality Sweep

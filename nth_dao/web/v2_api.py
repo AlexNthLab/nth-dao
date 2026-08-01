@@ -1254,42 +1254,180 @@ def _verified_spine_events(request: Request) -> Optional[list]:
     spine 缺失 → None(调用方返回空视图);链完整性校验失败 → 503,**绝不**把可能
     被篡改的数据投影出去(fail-closed)。校验通过才回放投影。
 
-    性能(2026 优化):按 ``head_hash`` 缓存在 spine 实例上 —— 链头未变(没有新
-    append)就直接返回上次的已验证事件,免去每次 verify_chain(读全文 + 全链验签)+
-    read_all(再读一遍)。append 改变 head_hash → 缓存失效、下次重新校验。单写者
-    模型下读多写少,命中率高;并发下最坏用到稍旧快照(下次自愈),无需加锁。
+    性能(2026 优化):按 ``head_hash`` 和日志文件指纹缓存在 spine 实例上。
+    文件指纹不可省略:另一个 hub 进程追加时不会更新本进程内的 head_hash。
+    未变化时返回同一快照;变化时通过 SignedEventLog.verified_snapshot() 在同一
+    跨进程锁内完成校验和读取,避免 verify/read 间的 TOCTOU 窗口。
     """
     spine = _state_spine(request)
     if spine is None:
         return None
     head = spine.head_hash
-    cache = getattr(spine, "_v2_verified_cache", None)   # (head_hash, events) | None
-    if cache is not None and cache[0] == head:
-        return cache[1]
-    ok, why = spine.verify_chain()
-    if not ok:
+    path = getattr(spine, "_path", None)
+
+    def storage_fingerprint() -> tuple[Any, ...]:
+        if path is None:
+            return (False, 0, 0, 0, 0, "")
+        target = Path(path)
+        try:
+            before = target.stat()
+            digest = hashlib.sha256()
+            with target.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+            after = target.stat()
+        except FileNotFoundError:
+            return (False, 0, 0, 0, 0, "")
+        return (
+            True,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_ino,
+            digest.hexdigest(),
+        )
+
+    try:
+        fingerprint = storage_fingerprint()
+    except OSError as exc:
         raise HTTPException(
-            status_code=503, detail=f"spine integrity check failed: {why}")
-    events = list(spine.read_all())
-    # 用读完后的 head 作键(若校验期间有并发 append,键与事件更一致)。
+            status_code=503,
+            detail=f"spine integrity check failed: {exc}",
+        ) from exc
+    cache = getattr(spine, "_v2_verified_cache", None)
+    cache_fingerprint = getattr(
+        spine,
+        "_v2_verified_cache_fingerprint",
+        None,
+    )
+    if (
+        cache is not None
+        and cache[0] == head
+        and cache_fingerprint == fingerprint
+    ):
+        return cache[1]
+    try:
+        events: list[Any] = []
+        verified_fingerprint: tuple[Any, ...] | None = None
+        for _attempt in range(3):
+            before = storage_fingerprint()
+            if hasattr(spine, "verified_snapshot"):
+                events = list(spine.verified_snapshot())
+            else:
+                ok, why = spine.verify_chain()
+                if not ok:
+                    raise ValueError(why)
+                events = list(spine.read_all())
+            after = storage_fingerprint()
+            if before == after:
+                verified_fingerprint = after
+                break
+        if verified_fingerprint is None:
+            raise RuntimeError("Spine changed repeatedly during verification")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"spine integrity check failed: {exc}",
+        ) from exc
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"spine integrity check failed: {exc}",
+        ) from exc
     spine._v2_verified_cache = (spine.head_hash, events)
+    spine._v2_verified_cache_fingerprint = verified_fingerprint
     return events
 
 
-def _verify_trade_offer_spine_anchors(request: Request, store: Any) -> None:
-    """Fail closed if a signed import event no longer matches local storage."""
+def _verify_trade_offer_discovery_evidence(
+    evidence: Any,
+    offer: Any,
+    *,
+    imported_at_ms: int,
+) -> tuple[bool, str]:
+    """Reverify the exact discovery claim signed into an import event."""
 
+    from nth_dao.market import (
+        TaskAnnouncement,
+        announcement_federation_key,
+        verify_trade_offer_announcement_binding,
+    )
+
+    required = {
+        "announcement",
+        "federation_key",
+        "source_peer",
+        "source_did",
+        "stale",
+        "last_verified_ms",
+    }
+    if not isinstance(evidence, dict) or set(evidence) != required:
+        return False, "federated discovery evidence has an invalid shape"
+    source_peer = evidence["source_peer"]
+    source_did = evidence["source_did"]
+    verified_ms = evidence["last_verified_ms"]
     try:
-        events = _verified_spine_events(request)
-    except HTTPException:
-        raise
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"trade offer Spine could not be verified: {exc}",
-        ) from exc
-    if events is None:
-        return
+        source_peer_bytes = (
+            source_peer.encode("utf-8") if isinstance(source_peer, str) else b""
+        )
+    except UnicodeEncodeError:
+        source_peer_bytes = b""
+    if (
+        not 1 <= len(source_peer_bytes) <= 2_048
+        or any(ord(character) < 0x20 for character in source_peer)
+    ):
+        return False, "federated discovery source peer is invalid"
+    try:
+        parsed = urlsplit(source_peer)
+        parsed_port = parsed.port
+    except ValueError:
+        return False, "federated discovery source peer is invalid"
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "federated discovery source peer is invalid"
+    if parsed_port is not None and not 1 <= parsed_port <= 65_535:
+        return False, "federated discovery source peer is invalid"
+    if parsed.username or parsed.password or parsed.fragment:
+        return False, "federated discovery source peer is invalid"
+    if (
+        type(verified_ms) is not int
+        or not 0 < verified_ms <= (1 << 63) - 1
+        or type(imported_at_ms) is not int
+        or verified_ms > imported_at_ms
+        or type(evidence["stale"]) is not bool
+    ):
+        return False, "federated discovery observation metadata is invalid"
+    try:
+        announcement = TaskAnnouncement.from_dict(evidence["announcement"])
+    except (TypeError, ValueError) as exc:
+        return False, f"federated discovery announcement is invalid: {exc}"
+    ok, reason = verify_trade_offer_announcement_binding(offer, announcement)
+    if not ok:
+        return False, reason
+    if evidence["federation_key"] != announcement_federation_key(announcement):
+        return False, "federated discovery key does not match its announcement"
+    if (
+        source_did != announcement.effective_authority_did()
+        or source_did != offer.publisher_did
+    ):
+        return False, "federated discovery source DID is not the Offer publisher"
+    return True, "ok"
+
+
+def _validate_trade_offer_spine_anchor_snapshot(
+    events: list[Any],
+    store: Any,
+) -> None:
+    """Validate one already signature-verified Spine snapshot."""
+
+    proposals = {
+        event.event_id: event
+        for event in events
+        if event.type == "trade.offer.import.proposed"
+    }
     anchors: list[dict[str, Any]] = []
     for event in events:
         if event.type != "trade.offer.imported":
@@ -1300,20 +1438,174 @@ def _verify_trade_offer_spine_anchors(request: Request, store: Any) -> None:
                 status_code=503,
                 detail="trade offer Spine anchor has an invalid payload",
             )
-        if (
-            payload.get("source_kind") != "local-operator"
-            or payload.get("source_id") != event.author_did
-        ):
+        source_kind = payload.get("source_kind")
+        source_id = payload.get("source_id")
+        local_operator = (
+            source_kind == "local-operator"
+            and source_id == event.author_did
+        )
+        federation_import = (
+            source_kind == "federation-cache"
+            and payload.get("completion_did") == event.author_did
+        )
+        if not (local_operator or federation_import):
             raise HTTPException(
                 status_code=503,
                 detail="trade offer Spine anchor has invalid source authority",
             )
+        if local_operator and "discovery" in payload:
+            raise HTTPException(
+                status_code=503,
+                detail="local trade offer Spine anchor contains remote evidence",
+            )
+        if federation_import:
+            from nth_dao.trade_rules import TradeOffer, offer_digest
+
+            proposal = proposals.get(payload.get("proposal_event_id"))
+            if proposal is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="federated Trade Offer anchor has no signed proposal",
+                )
+            proposal_payload = proposal.payload
+            if (
+                not isinstance(proposal_payload, dict)
+                or proposal_payload.get("offer_digest")
+                != payload.get("offer_digest")
+                or proposal_payload.get("source_kind") != source_kind
+                or proposal_payload.get("source_id") != source_id
+                or proposal_payload.get("discovery") != payload.get("discovery")
+                or proposal.author_did != source_id
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail="federated Trade Offer proposal does not match its anchor",
+                )
+            try:
+                record = store.get_record(payload.get("offer_digest"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade offer Spine anchor has an invalid digest",
+                ) from exc
+            if record is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade offer Spine anchor references a missing Offer",
+                )
+            try:
+                proposed_offer = TradeOffer.from_dict(proposal_payload.get("offer"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="federated Trade Offer proposal Offer is invalid",
+                ) from exc
+            if (
+                offer_digest(proposed_offer) != payload.get("offer_digest")
+                or proposed_offer.canonical_bytes != record.offer.canonical_bytes
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "federated Trade Offer proposal Offer does not match "
+                        "the persisted Offer"
+                    ),
+                )
+            ok, reason = _verify_trade_offer_discovery_evidence(
+                proposal_payload.get("discovery"),
+                proposed_offer,
+                imported_at_ms=proposal.ts_ms,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "federated Trade Offer proposal discovery evidence "
+                        f"failure: {reason}"
+                    ),
+                )
+            ok, reason = _verify_trade_offer_discovery_evidence(
+                payload.get("discovery"),
+                record.offer,
+                imported_at_ms=event.ts_ms,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"trade offer discovery evidence failure: {reason}",
+                )
         anchors.append(payload)
     ok, why = store.verify_import_anchors(anchors)
     if not ok:
         raise HTTPException(
             status_code=503,
             detail=f"trade offer cross-log integrity failure: {why}",
+        )
+
+
+def _verify_trade_offer_spine_anchors(request: Request, store: Any) -> None:
+    """Fail closed unless one stable Store/Spine snapshot cross-verifies."""
+
+    with store.integrity_verification_lock:
+        for _attempt in range(3):
+            try:
+                store_before = store.integrity_fingerprint()
+                events = _verified_spine_events(request)
+            except HTTPException:
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"trade offer Spine could not be verified: {exc}",
+                ) from exc
+            if events is None:
+                if store.latest_seq() >= 0:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="signed Spine unavailable for persisted Trade Offers",
+                    )
+                return
+            spine = _state_spine(request)
+            spine_fingerprint = getattr(
+                spine, "_v2_verified_cache_fingerprint", None
+            )
+            spine_head = events[-1].content_hash if events else "genesis"
+            cache_key = (store_before, spine_fingerprint, spine_head)
+            if getattr(store, "_v2_spine_anchor_cache", None) == cache_key:
+                return
+
+            _validate_trade_offer_spine_anchor_snapshot(events, store)
+
+            try:
+                store_after = store.integrity_fingerprint()
+                events_after = _verified_spine_events(request)
+            except HTTPException:
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"trade offer Spine could not be verified: {exc}",
+                ) from exc
+            spine_after = _state_spine(request)
+            if events_after is None or spine_after is None:
+                continue
+            fingerprint_after = getattr(
+                spine_after, "_v2_verified_cache_fingerprint", None
+            )
+            head_after = (
+                events_after[-1].content_hash if events_after else "genesis"
+            )
+            if (
+                store_before == store_after
+                and spine_fingerprint == fingerprint_after
+                and spine_head == head_after
+            ):
+                store._v2_spine_anchor_cache = cache_key
+                return
+        raise HTTPException(
+            status_code=503,
+            detail="trade offer Store or Spine changed during verification",
+            headers={"Retry-After": "1"},
         )
 
 
@@ -1336,9 +1628,93 @@ def _find_trade_offer_spine_anchor(
         "source_id": result.source_id,
     }
     for event in reversed(events):
-        if event.type == "trade.offer.imported" and event.payload == expected:
+        if (
+            event.type == "trade.offer.imported"
+            and isinstance(event.payload, dict)
+            and all(event.payload.get(key) == value for key, value in expected.items())
+        ):
             return event
     return None
+
+
+def _verified_trade_offer_import_proposal(
+    request: Request,
+    digest: str,
+) -> Optional[tuple[Any, Dict[str, Any], int, Any]]:
+    """Recover one signed, incomplete federated Offer import intent."""
+
+    from nth_dao.trade_rules import TradeOffer, offer_digest
+
+    events = _verified_spine_events(request)
+    if events is None:
+        return None
+    matches = [
+        event
+        for event in events
+        if event.type == "trade.offer.import.proposed"
+        and isinstance(event.payload, dict)
+        and event.payload.get("offer_digest") == digest
+    ]
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=503,
+            detail="Spine contains duplicate Trade Offer import proposals",
+        )
+    if not matches:
+        return None
+    event = matches[0]
+    payload = event.payload
+    required = {
+        "offer_digest",
+        "offer",
+        "source_kind",
+        "source_id",
+        "discovery",
+        "discovery_sources",
+    }
+    if set(payload) != required:
+        raise HTTPException(
+            status_code=503,
+            detail="Trade Offer import proposal has an invalid payload",
+        )
+    if (
+        payload["source_kind"] != "federation-cache"
+        or payload["source_id"] != event.author_did
+        or type(payload["discovery_sources"]) is not int
+        or not 1 <= payload["discovery_sources"] <= 100_000
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Trade Offer import proposal has invalid provenance",
+        )
+    try:
+        offer = TradeOffer.from_dict(payload["offer"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Trade Offer import proposal contains an invalid Offer",
+        ) from exc
+    if offer_digest(offer) != digest:
+        raise HTTPException(
+            status_code=503,
+            detail="Trade Offer import proposal digest does not match its Offer",
+        )
+    ok, reason = _verify_trade_offer_discovery_evidence(
+        payload["discovery"],
+        offer,
+        imported_at_ms=event.ts_ms,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Trade Offer import proposal evidence failure: {reason}",
+        )
+    return (
+        offer,
+        payload["discovery"],
+        payload["discovery_sources"],
+        event,
+    )
 
 
 _MARKET_LISTING_TYPE_FIELD = "__nth_listing_type"
@@ -6905,6 +7281,129 @@ def _state_market_fed_cache(request: Request):
     return cache
 
 
+def _require_trade_offer_digest(digest: str) -> None:
+    """Reject malformed Offer digests before cache or filesystem access."""
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="digest must be a lowercase sha256 digest",
+        )
+
+
+def _verified_cached_trade_offer(
+    request: Request,
+    digest: str,
+) -> tuple[Any, List[Dict[str, Any]], Dict[str, Any]]:
+    """Reverify one volatile federated Offer and every retained binding.
+
+    This is the single trust boundary used by both inspection and durable
+    import.  It deliberately returns a signed claim plus discovery evidence;
+    it does not grant trust, acceptance, or execution authority.
+    """
+    from nth_dao.market import (
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+        announcement_federation_key,
+        verify_trade_offer_announcement_binding,
+    )
+    from nth_dao.trade_rules import TradeOffer, offer_digest
+
+    _require_trade_offer_digest(digest)
+    cache = _state_market_fed_cache(request)
+    if cache is None:
+        raise HTTPException(status_code=404, detail="remote offer not found")
+    try:
+        cached_offers = cache.trade_offer_snapshot(digest)
+    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="federation cache integrity check failed",
+        ) from exc
+
+    verified_offer: Any = None
+    discoveries: List[Dict[str, Any]] = []
+    evidence_candidates: List[Dict[str, Any]] = []
+    try:
+        for entry in cached_offers:
+            if not isinstance(entry, dict):
+                raise ValueError("cached Trade Offer entry is invalid")
+            announcement = entry.get("ann")
+            if (
+                getattr(announcement, "kind", "")
+                != NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+                or getattr(announcement, "offer_digest", "") != digest
+                or announcement.is_expired()
+            ):
+                continue
+            raw_offer = entry.get("trade_offer")
+            if not isinstance(raw_offer, TradeOffer):
+                raise ValueError("verified Trade Offer is missing")
+            candidate = TradeOffer.from_json(raw_offer.canonical_bytes)
+            if offer_digest(candidate) != digest:
+                raise ValueError("cached Trade Offer digest mismatch")
+            ok, reason = verify_trade_offer_announcement_binding(
+                candidate,
+                announcement,
+            )
+            if not ok:
+                raise ValueError(reason)
+            source_did = str(entry.get("source_did") or "")
+            if source_did != announcement.effective_authority_did():
+                raise ValueError("cached Trade Offer source DID mismatch")
+            if source_did != candidate.publisher_did:
+                raise ValueError("cached Trade Offer publisher DID mismatch")
+            federation_key = str(entry.get("federation_key") or "")
+            if federation_key != announcement_federation_key(announcement):
+                raise ValueError("cached Trade Offer federation key mismatch")
+            if (
+                verified_offer is not None
+                and verified_offer.canonical_bytes != candidate.canonical_bytes
+            ):
+                raise ValueError("one digest resolved to conflicting Offers")
+            verified_offer = candidate
+            discoveries.append({
+                "announcement_id": announcement.announcement_id,
+                "federation_key": federation_key,
+                "source_peer": str(entry.get("source") or ""),
+                "source_did": source_did,
+                "stale": bool(entry.get("stale", False)),
+                "last_verified_ms": int(entry.get("last_verified_ms") or 0),
+            })
+            evidence_candidates.append({
+                "announcement": announcement.to_dict(),
+                "federation_key": federation_key,
+                "source_peer": str(entry.get("source") or ""),
+                "source_did": source_did,
+                "stale": bool(entry.get("stale", False)),
+                "last_verified_ms": int(entry.get("last_verified_ms") or 0),
+            })
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="cached Trade Offer verification failed",
+        ) from exc
+    if verified_offer is None or not discoveries:
+        raise HTTPException(status_code=404, detail="remote offer not found")
+    discoveries.sort(
+        key=lambda item: (
+            item["source_did"],
+            item["source_peer"],
+            item["announcement_id"],
+        )
+    )
+    evidence = min(
+        evidence_candidates,
+        key=lambda item: (
+            item["stale"],
+            -item["last_verified_ms"],
+            item["source_did"],
+            item["source_peer"],
+            item["federation_key"],
+        ),
+    )
+    return verified_offer, discoveries, evidence
+
+
 def _ensure_market_fed_cache_for_update(request: Request):
     """Create the federation cache and start the poller after peer edits."""
     state = request.app.state
@@ -8766,7 +9265,8 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.post("/api/v2/trade/offers")
     async def v2_trade_offer_publish(request: Request) -> Dict[str, Any]:
-        """Verify and append one already-signed Trade Offer v2 document."""
+        """Publish one Offer signed by this node's current identity."""
+        _require_console_bearer_for_sensitive_read(request)
         from nth_dao.trade_rules import (
             InspectedTradeOffer,
             OfferStoreBusyError,
@@ -8787,12 +9287,12 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail="trade offer requires Content-Type application/json",
             )
         identity = _state_node_identity(request)
-        source_id = (
-            identity.as_did()
-            if identity is not None and hasattr(identity, "as_did")
-            else ""
-        )
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(status_code=503, detail="signing identity unavailable")
+        source_id = identity.as_did()
         spine = _state_spine(request)
+        if spine is None:
+            raise HTTPException(status_code=503, detail="signed Spine unavailable")
         try:
             raw_body = await request.body()
 
@@ -8803,6 +9303,11 @@ def register_v2_routes(app: FastAPI) -> None:
                 # them. Signature verification, lock waits, and fsync are all
                 # blocking work and must not run on the ASGI event loop.
                 inspected = InspectedTradeOffer.from_json(raw_body)
+                if inspected.publisher_did != source_id:
+                    raise PermissionError(
+                        "publisher_did must match this node; use the verified "
+                        "federation import endpoint for remote Offers"
+                    )
                 result = store.publish(
                     inspected.to_dict(),
                     source_kind="local-operator",
@@ -8810,43 +9315,40 @@ def register_v2_routes(app: FastAPI) -> None:
                 )
                 audit_event_id = ""
                 audit_warning = ""
-                if spine is None:
-                    audit_warning = "signed spine unavailable"
-                else:
-                    try:
-                        existing_anchor = (
-                            None
-                            if result.appended
-                            else _find_trade_offer_spine_anchor(request, result)
+                try:
+                    existing_anchor = (
+                        None
+                        if result.appended
+                        else _find_trade_offer_spine_anchor(request, result)
+                    )
+                    if existing_anchor is not None:
+                        audit_event_id = existing_anchor.event_id
+                    elif (
+                        result.source_kind == "local-operator"
+                        and result.source_id == source_id
+                    ):
+                        event = spine.append(
+                            "trade.offer.imported",
+                            {
+                                "seq": result.seq,
+                                "offer_digest": result.digest,
+                                "entry_hash": result.entry_hash,
+                                "publisher_did": inspected.publisher_did,
+                                "offer_id": inspected.offer_id,
+                                "source_kind": result.source_kind,
+                                "source_id": result.source_id,
+                            },
                         )
-                        if existing_anchor is not None:
-                            audit_event_id = existing_anchor.event_id
-                        elif (
-                            result.source_kind == "local-operator"
-                            and result.source_id == source_id
-                        ):
-                            event = spine.append(
-                                "trade.offer.imported",
-                                {
-                                    "seq": result.seq,
-                                    "offer_digest": result.digest,
-                                    "entry_hash": result.entry_hash,
-                                    "publisher_did": inspected.publisher_did,
-                                    "offer_id": inspected.offer_id,
-                                    "source_kind": result.source_kind,
-                                    "source_id": result.source_id,
-                                },
-                            )
-                            audit_event_id = event.event_id
-                        else:
-                            audit_warning = (
-                                "existing offer provenance is not local-operator"
-                            )
-                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                        logger.warning(
-                            "trade offer spine audit failed: %s", exc
+                        audit_event_id = event.event_id
+                    else:
+                        audit_warning = (
+                            "existing offer provenance is not local-operator"
                         )
-                        audit_warning = "signed spine append failed"
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "trade offer spine audit failed: %s", exc
+                    )
+                    audit_warning = "signed spine append failed"
                 return result, audit_event_id, audit_warning
 
             result, audit_event_id, audit_warning = await run_in_threadpool(
@@ -8854,6 +9356,8 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except OfferStoreCryptoUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except OfferStoreBusyError as exc:
@@ -8875,6 +9379,17 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=503, detail=f"trade offer persistence failed: {exc}"
             ) from exc
+        if audit_warning:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-offer-audit-incomplete",
+                    "message": audit_warning,
+                    "offer_digest": result.digest,
+                    "retryable": True,
+                },
+                headers={"Retry-After": "1"},
+            )
         return {
             "digest": result.digest,
             "appended": result.appended,
@@ -8956,7 +9471,7 @@ def register_v2_routes(app: FastAPI) -> None:
         if store is None:
             raise HTTPException(status_code=503, detail="trade offer store unavailable")
         try:
-            offer = store.get(digest)
+            record = store.get_record(digest)
             _verify_trade_offer_spine_anchors(request, store)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -8971,9 +9486,48 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=503,
                 detail=f"trade offer store integrity failure: {exc}",
             ) from exc
-        if offer is None:
+        if record is None:
             raise HTTPException(status_code=404, detail="trade offer not found")
-        return {"digest": digest, "offer": offer.to_dict()}
+        identity = _state_node_identity(request)
+        local_did = (
+            identity.as_did()
+            if identity is not None and hasattr(identity, "as_did")
+            else ""
+        )
+        historically_local = (
+            record.source_kind == "local-operator"
+            and record.source_id == record.offer.publisher_did
+        )
+        currently_local = (
+            bool(local_did) and record.offer.publisher_did == local_did
+        )
+        authority = (
+            "local-publisher"
+            if historically_local or currently_local
+            else "remote-publisher"
+        )
+        return {
+            "digest": digest,
+            "offer": record.offer.to_dict(),
+            "discoveries": [],
+            "verification": {
+                "offer_signature_valid": True,
+                "announcement_binding_valid": None,
+                "source_did_bound": None,
+                "recent_source_verified": None,
+            },
+            "authority": authority,
+            "storage_provenance": {
+                "source_kind": record.source_kind,
+                "source_id": record.source_id,
+            },
+            "actionable": False,
+            "warning": (
+                "A valid signature proves authorship, not availability, fairness, "
+                "ownership, or settlement. Create a new bilateral Agreement "
+                "before execution."
+            ),
+        }
 
     @app.post("/api/v2/trade/offers/{digest}/announce")
     def v2_trade_offer_announce(
@@ -8982,6 +9536,7 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request,
     ) -> Dict[str, Any]:
         """Publish one idempotent discovery hint for a local signed Offer."""
+        _require_console_bearer_for_sensitive_read(request)
         from nth_dao.market import (
             NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
             create_trade_offer_announcement,
@@ -9145,85 +9700,28 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """Inspect a verified remote Offer without importing its authority."""
         _require_console_bearer_for_sensitive_read(request)
-        from nth_dao.market import (
-            NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
-            verify_trade_offer_announcement_binding,
+        verified_offer, discoveries, _evidence = _verified_cached_trade_offer(
+            request,
+            digest,
         )
-        from nth_dao.trade_rules import TradeOffer, offer_digest
-
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
-            raise HTTPException(
-                status_code=400,
-                detail="digest must be a lowercase sha256 digest",
-            )
-        cache = _state_market_fed_cache(request)
-        if cache is None:
-            raise HTTPException(status_code=404, detail="remote offer not found")
-        try:
-            cached_offers = cache.trade_offer_snapshot(digest)
-        except (TypeError, ValueError, RuntimeError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="federation cache integrity check failed",
-            ) from exc
-
-        verified_offer: Any = None
-        discoveries: List[Dict[str, Any]] = []
-        try:
-            for entry in cached_offers:
-                announcement = entry.get("ann")
-                if (
-                    getattr(announcement, "kind", "")
-                    != NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
-                    or getattr(announcement, "offer_digest", "") != digest
-                    or announcement.is_expired()
-                ):
-                    continue
-                raw_offer = entry.get("trade_offer")
-                if not isinstance(raw_offer, TradeOffer):
-                    raise ValueError("verified Trade Offer is missing")
-                candidate = TradeOffer.from_json(raw_offer.canonical_bytes)
-                if offer_digest(candidate) != digest:
-                    raise ValueError("cached Trade Offer digest mismatch")
-                ok, reason = verify_trade_offer_announcement_binding(
-                    candidate,
-                    announcement,
-                )
-                if not ok:
-                    raise ValueError(reason)
-                source_did = str(entry.get("source_did") or "")
-                if source_did != announcement.effective_authority_did():
-                    raise ValueError("cached Trade Offer source DID mismatch")
-                if (
-                    verified_offer is not None
-                    and verified_offer.canonical_bytes != candidate.canonical_bytes
-                ):
-                    raise ValueError("one digest resolved to conflicting Offers")
-                verified_offer = candidate
-                discoveries.append({
-                    "announcement_id": announcement.announcement_id,
-                    "federation_key": str(entry.get("federation_key") or ""),
-                    "source_peer": str(entry.get("source") or ""),
-                    "source_did": source_did,
-                    "stale": bool(entry.get("stale", False)),
-                    "last_verified_ms": int(
-                        entry.get("last_verified_ms") or 0
-                    ),
-                })
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="cached Trade Offer verification failed",
-            ) from exc
-        if verified_offer is None or not discoveries:
-            raise HTTPException(status_code=404, detail="remote offer not found")
-        discoveries.sort(
-            key=lambda item: (
-                item["source_did"],
-                item["source_peer"],
-                item["announcement_id"],
-            )
-        )
+        store = _state_trade_offer_store(request)
+        storage_provenance = None
+        if store is not None:
+            try:
+                record = store.get_record(digest)
+                if record is not None:
+                    _verify_trade_offer_spine_anchors(request, store)
+                    storage_provenance = {
+                        "source_kind": record.source_kind,
+                        "source_id": record.source_id,
+                    }
+            except HTTPException:
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"local Trade Offer provenance unavailable: {exc}",
+                ) from exc
         return {
             "digest": digest,
             "offer": verified_offer.to_dict(),
@@ -9237,11 +9735,202 @@ def register_v2_routes(app: FastAPI) -> None:
                 ),
             },
             "authority": "remote-publisher",
+            "storage_provenance": storage_provenance,
             "actionable": False,
             "warning": (
                 "A valid signature proves authorship, not availability, "
                 "fairness, ownership, or settlement. Create a new bilateral "
                 "Agreement before execution."
+            ),
+        }
+
+    @app.post("/api/v2/trade/federation/cached-offers/{digest}/import")
+    def v2_trade_offer_federation_cached_import(
+        digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Durably retain one reverified remote Offer without trusting it."""
+        _require_console_bearer_for_sensitive_read(request)
+        _require_trade_offer_digest(digest)
+        from nth_dao.trade_rules import (
+            OfferStoreBusyError,
+            OfferStoreCapacityError,
+            OfferStoreCorruptionError,
+            OfferStoreCryptoUnavailableError,
+            OfferStoreError,
+            OfferStoreValidationError,
+        )
+        from nth_dao.util.io import InterProcessLock
+
+        store = _state_trade_offer_store(request)
+        workspace = _state_workspace(request)
+        spine = _state_spine(request)
+        local_identity = _state_node_identity(request)
+        if store is None or workspace is None:
+            raise HTTPException(status_code=503, detail="trade offer store unavailable")
+        if (
+            spine is None
+            or local_identity is None
+            or not getattr(local_identity, "can_sign", False)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="signed Spine or node identity unavailable",
+            )
+        local_did = local_identity.as_did()
+
+        lock_path = (
+            workspace / "trade" / "offers" / ".locks"
+            / f"federation-import-{digest[7:]}.lock"
+        )
+        try:
+            with InterProcessLock(lock_path):
+                proposal = _verified_trade_offer_import_proposal(
+                    request,
+                    digest,
+                )
+                if proposal is None:
+                    (
+                        verified_offer,
+                        discoveries,
+                        discovery_evidence,
+                    ) = _verified_cached_trade_offer(request, digest)
+                    discovery_source_count = len({
+                        item["federation_key"] for item in discoveries
+                    })
+                    proposal_source_id = local_did
+                else:
+                    (
+                        verified_offer,
+                        discovery_evidence,
+                        discovery_source_count,
+                        proposal_event,
+                    ) = proposal
+                    proposal_source_id = proposal_event.author_did
+
+                existing_record = store.get_record(digest)
+                if existing_record is not None:
+                    compatible_local = (
+                        existing_record.source_kind == "local-operator"
+                        and existing_record.source_id == local_did
+                    )
+                    compatible_federated = (
+                        existing_record.source_kind == "federation-cache"
+                        and existing_record.source_id == proposal_source_id
+                    )
+                    if not (compatible_local or compatible_federated):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "offer already exists with incompatible "
+                                "import provenance"
+                            ),
+                        )
+
+                if proposal is None and existing_record is None:
+                    proposal_event = spine.append(
+                        "trade.offer.import.proposed",
+                        {
+                            "offer_digest": digest,
+                            "offer": verified_offer.to_dict(),
+                            "source_kind": "federation-cache",
+                            "source_id": local_did,
+                            "discovery": discovery_evidence,
+                            "discovery_sources": discovery_source_count,
+                        },
+                    )
+                    proposal_source_id = proposal_event.author_did
+
+                result = store.publish(
+                    verified_offer,
+                    source_kind="federation-cache",
+                    source_id=proposal_source_id,
+                )
+                existing_anchor = _find_trade_offer_spine_anchor(
+                    request,
+                    result,
+                )
+                if existing_anchor is None:
+                    if proposal is None and existing_record is not None:
+                        proposal_event = spine.append(
+                            "trade.offer.import.proposed",
+                            {
+                                "offer_digest": digest,
+                                "offer": verified_offer.to_dict(),
+                                "source_kind": "federation-cache",
+                                "source_id": proposal_source_id,
+                                "discovery": discovery_evidence,
+                                "discovery_sources": discovery_source_count,
+                            },
+                        )
+                    payload = {
+                        "seq": result.seq,
+                        "offer_digest": result.digest,
+                        "entry_hash": result.entry_hash,
+                        "publisher_did": verified_offer.publisher_did,
+                        "offer_id": verified_offer.offer_id,
+                        "source_kind": result.source_kind,
+                        "source_id": result.source_id,
+                        "completion_did": local_did,
+                        "discovery": discovery_evidence,
+                        "proposal_event_id": proposal_event.event_id,
+                    }
+                    existing_anchor = spine.append(
+                        "trade.offer.imported",
+                        payload,
+                    )
+                _verify_trade_offer_spine_anchors(request, store)
+        except HTTPException:
+            raise
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Offer import is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreCryptoUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except OfferStoreBusyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OfferStoreCapacityError as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except OfferStoreCorruptionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer store integrity failure: {exc}",
+            ) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer persistence failed: {exc}",
+            ) from exc
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("federated Trade Offer import failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="federated Trade Offer could not be durably imported",
+            ) from exc
+        return {
+            "digest": result.digest,
+            "appended": result.appended,
+            "persisted": True,
+            "classification": result.classification,
+            "entry_hash": result.entry_hash,
+            "source_kind": result.source_kind,
+            "source_id": result.source_id,
+            "audit_event_id": existing_anchor.event_id,
+            "discovery_sources": discovery_source_count,
+            "trusted": False,
+            "actionable": False,
+            "warning": (
+                "Saved locally as a signed claim. This does not accept the "
+                "Offer, trust its publisher, reserve assets, or authorize execution."
             ),
         }
 

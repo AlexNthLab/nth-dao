@@ -8,7 +8,13 @@ from fastapi.testclient import TestClient
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity, crypto_available
-from nth_dao.trade_rules import offer_body, offer_digest, sign_offer
+from nth_dao.spine import SignedEventLog
+from nth_dao.trade_rules import (
+    MAX_TRADE_JSON_BYTES,
+    offer_body,
+    offer_digest,
+    sign_offer,
+)
 from nth_dao.web import create_app
 
 pytestmark = pytest.mark.skipif(
@@ -48,9 +54,50 @@ def _signed_offer(identity, *, day=29):
     )
 
 
+def _console_headers(app) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+    }
+
+
+def _authed_client(app, **kwargs) -> TestClient:
+    return TestClient(app, headers=_console_headers(app), **kwargs)
+
+
+def _local_client(root) -> TestClient:
+    return _authed_client(create_app(root, require_console_auth=False))
+
+
+def test_trade_offer_publish_requires_console_and_node_publisher(tmp_path):
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    local_offer = _signed_offer(app.state.nth.node_identity)
+    remote_offer = _signed_offer(AgentIdentity.generate())
+
+    unauthenticated = client.post(
+        "/api/v2/trade/offers",
+        json=local_offer.to_dict(),
+    )
+    wrong_publisher = client.post(
+        "/api/v2/trade/offers",
+        json=remote_offer.to_dict(),
+        headers=_console_headers(app),
+    )
+    published = client.post(
+        "/api/v2/trade/offers",
+        json=local_offer.to_dict(),
+        headers=_console_headers(app),
+    )
+
+    assert unauthenticated.status_code == 401
+    assert wrong_publisher.status_code == 403
+    assert "publisher_did must match this node" in wrong_publisher.json()["detail"]
+    assert published.status_code == 200
+
+
 def test_trade_offer_publish_list_get_and_duplicate(tmp_path):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
-    identity = AgentIdentity.generate()
+    client = _local_client(tmp_path)
+    identity = client.app.state.nth.node_identity
     offer = _signed_offer(identity)
     digest = offer_digest(offer)
 
@@ -72,7 +119,28 @@ def test_trade_offer_publish_list_get_and_duplicate(tmp_path):
     assert listed.status_code == 200
     assert listed.json()["items"][0]["canonical_head_digest"] == digest
     assert fetched.status_code == 200
-    assert fetched.json() == {"digest": digest, "offer": offer.to_dict()}
+    assert fetched.json() == {
+        "digest": digest,
+        "offer": offer.to_dict(),
+        "discoveries": [],
+        "verification": {
+            "offer_signature_valid": True,
+            "announcement_binding_valid": None,
+            "source_did_bound": None,
+            "recent_source_verified": None,
+        },
+        "authority": "local-publisher",
+        "storage_provenance": {
+            "source_kind": "local-operator",
+            "source_id": identity.as_did(),
+        },
+        "actionable": False,
+        "warning": (
+            "A valid signature proves authorship, not availability, fairness, "
+            "ownership, or settlement. Create a new bilateral Agreement "
+            "before execution."
+        ),
+    }
     record = client.app.state.nth.trade_offers.poll().records[0]
     assert record.source_kind == "local-operator"
     assert record.source_id == client.app.state.nth.node_identity.as_did()
@@ -85,9 +153,35 @@ def test_trade_offer_publish_list_get_and_duplicate(tmp_path):
     )
 
 
+def test_local_offer_authority_survives_node_identity_rotation(tmp_path):
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    original_identity = app.state.nth.node_identity
+    offer = _signed_offer(original_identity)
+    digest = offer_digest(offer)
+    assert client.post(
+        "/api/v2/trade/offers",
+        json=offer.to_dict(),
+    ).status_code == 200
+
+    old_spine = app.state.nth.spine
+    replacement = AgentIdentity.generate(label="rotated-node")
+    app.state.nth.node_identity = replacement
+    app.state.nth.spine = SignedEventLog(old_spine._path, replacement)
+
+    response = client.get(f"/api/v2/trade/offers/{digest}")
+
+    assert response.status_code == 200
+    assert response.json()["authority"] == "local-publisher"
+    assert response.json()["storage_provenance"] == {
+        "source_kind": "local-operator",
+        "source_id": original_identity.as_did(),
+    }
+
+
 def test_trade_offer_api_rejects_tampering_without_persisting(tmp_path):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
-    identity = AgentIdentity.generate()
+    client = _local_client(tmp_path)
+    identity = client.app.state.nth.node_identity
     document = _signed_offer(identity).to_dict()
     document["summary"] = "tampered after signing"
 
@@ -98,11 +192,29 @@ def test_trade_offer_api_rejects_tampering_without_persisting(tmp_path):
     assert client.get("/api/v2/trade/offers").json()["items"] == []
 
 
+def test_trade_offer_publish_rejects_oversized_body_before_parsing(tmp_path):
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+
+    response = client.post(
+        "/api/v2/trade/offers",
+        content=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(MAX_TRADE_JSON_BYTES + 1),
+        },
+    )
+
+    assert response.status_code == 413
+    assert "exceeds" in response.json()["detail"]
+    assert app.state.nth.trade_offers.latest_seq() == -1
+
+
 def test_trade_offer_api_rejects_duplicate_json_keys_before_normalization(
     tmp_path,
 ):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
-    identity = AgentIdentity.generate()
+    client = _local_client(tmp_path)
+    identity = client.app.state.nth.node_identity
     offer = _signed_offer(identity)
     raw = offer.canonical_bytes.decode("utf-8")
     duplicated = '{"kind":"org.nthdao.trade.offer",' + raw[1:]
@@ -119,7 +231,7 @@ def test_trade_offer_api_rejects_duplicate_json_keys_before_normalization(
 
 
 def test_trade_offer_api_rejects_oversized_body_before_parsing(tmp_path):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    client = _local_client(tmp_path)
     response = client.post(
         "/api/v2/trade/offers",
         content=b"{" + (b" " * (256 * 1024)) + b"}",
@@ -132,7 +244,7 @@ def test_trade_offer_api_rejects_oversized_body_before_parsing(tmp_path):
 
 @pytest.mark.parametrize("content_type", ["text/plain", "", "application/xml"])
 def test_trade_offer_api_requires_json_content_type(tmp_path, content_type):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    client = _local_client(tmp_path)
     headers = {"Content-Type": content_type} if content_type else {}
     response = client.post(
         "/api/v2/trade/offers",
@@ -144,8 +256,8 @@ def test_trade_offer_api_requires_json_content_type(tmp_path, content_type):
 
 
 def test_trade_offer_api_exposes_fork_without_selecting_a_winner(tmp_path):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
-    identity = AgentIdentity.generate()
+    client = _local_client(tmp_path)
+    identity = client.app.state.nth.node_identity
     first = _signed_offer(identity, day=29)
     competing = _signed_offer(identity, day=30)
 
@@ -168,7 +280,7 @@ def test_trade_offer_api_exposes_fork_without_selecting_a_winner(tmp_path):
 
 def test_trade_offer_api_fails_closed_on_corrupt_local_log(tmp_path):
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _authed_client(app)
     log_path = app.state.nth.trade_offers.log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_bytes(b"{broken}\n")
@@ -182,7 +294,7 @@ def test_trade_offer_api_fails_closed_on_corrupt_local_log(tmp_path):
 def test_trade_offer_write_requires_console_auth_when_enabled(tmp_path):
     app = create_app(tmp_path, require_console_auth=True)
     client = TestClient(app)
-    identity = AgentIdentity.generate()
+    identity = app.state.nth.node_identity
     document = _signed_offer(identity).to_dict()
 
     denied = client.post("/api/v2/trade/offers", json=document)
@@ -199,8 +311,8 @@ def test_trade_offer_write_requires_console_auth_when_enabled(tmp_path):
 
 
 def test_trade_offer_list_is_bounded_and_paginated(tmp_path):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
-    identity = AgentIdentity.generate()
+    client = _local_client(tmp_path)
+    identity = client.app.state.nth.node_identity
     for index in range(3):
         offer = _signed_offer(identity)
         document = offer.to_dict()
@@ -241,8 +353,8 @@ def test_trade_offer_list_is_bounded_and_paginated(tmp_path):
 
 
 def test_trade_offer_cursor_is_stable_when_earlier_key_is_inserted(tmp_path):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
-    identity = AgentIdentity.generate()
+    client = _local_client(tmp_path)
+    identity = client.app.state.nth.node_identity
 
     def publish(offer_id):
         body = offer_body(
@@ -300,7 +412,7 @@ def test_trade_offer_cursor_is_stable_when_earlier_key_is_inserted(tmp_path):
 def test_trade_offer_get_distinguishes_bad_and_missing_digest(
     tmp_path, digest, status
 ):
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    client = _local_client(tmp_path)
     response = client.get(f"/api/v2/trade/offers/{digest}")
     assert response.status_code == status
 
@@ -311,8 +423,8 @@ def test_trade_offer_api_reports_crypto_unavailable_as_503(
     import nth_dao.trade_rules.signing as signing
 
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
-    identity = AgentIdentity.generate()
+    client = _authed_client(app)
+    identity = app.state.nth.node_identity
     document = _signed_offer(identity).to_dict()
     monkeypatch.setattr(signing, "_VerifyKey", None)
 
@@ -327,7 +439,7 @@ def test_trade_offer_api_maps_lock_contention_to_retryable_503(tmp_path):
 
     app = create_app(tmp_path, require_console_auth=False)
     app.state.nth.trade_offers.lock_timeout = 0.05
-    client = TestClient(app, raise_server_exceptions=False)
+    client = _authed_client(app, raise_server_exceptions=False)
     store = app.state.nth.trade_offers
     store.publish(_signed_offer(AgentIdentity.generate()))
 
@@ -345,7 +457,7 @@ def test_trade_offer_publish_does_not_block_the_asgi_event_loop(
     import httpx
 
     app = create_app(tmp_path, require_console_auth=False)
-    identity = AgentIdentity.generate()
+    identity = app.state.nth.node_identity
     offer = _signed_offer(identity)
     store = app.state.nth.trade_offers
     real_publish = store.publish
@@ -368,7 +480,10 @@ def test_trade_offer_publish_does_not_block_the_asgi_event_loop(
                 client.post(
                     "/api/v2/trade/offers",
                     content=offer.canonical_bytes,
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        **_console_headers(app),
+                    },
                 )
             )
             for _ in range(100):
@@ -390,27 +505,35 @@ def test_trade_offer_publish_does_not_block_the_asgi_event_loop(
 
 def test_trade_offer_api_reports_spine_audit_failure(tmp_path, monkeypatch):
     app = create_app(tmp_path, require_console_auth=False)
-    identity = AgentIdentity.generate()
+    identity = app.state.nth.node_identity
     offer = _signed_offer(identity)
     monkeypatch.setattr(
         app.state.nth.spine,
         "append",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
-    client = TestClient(app)
+    client = _authed_client(app)
 
     response = client.post("/api/v2/trade/offers", json=offer.to_dict())
 
-    assert response.status_code == 200
-    assert response.json()["appended"] is True
-    assert response.json()["audit_event_id"] == ""
-    assert response.json()["audit_warning"] == "signed spine append failed"
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    detail = response.json()["detail"]
+    assert detail == {
+        "code": "trade-offer-audit-incomplete",
+        "message": "signed spine append failed",
+        "offer_digest": offer_digest(offer),
+        "retryable": True,
+    }
+    unavailable = client.get("/api/v2/trade/offers")
+    assert unavailable.status_code == 503
+    assert "missing offer import anchor" in unavailable.json()["detail"]
 
 
 def test_duplicate_retry_repairs_missing_spine_anchor(tmp_path, monkeypatch):
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
-    offer = _signed_offer(AgentIdentity.generate())
+    client = _authed_client(app)
+    offer = _signed_offer(app.state.nth.node_identity)
     spine = app.state.nth.spine
     real_append = spine.append
     attempts = 0
@@ -427,8 +550,10 @@ def test_duplicate_retry_repairs_missing_spine_anchor(tmp_path, monkeypatch):
     retried = client.post("/api/v2/trade/offers", json=offer.to_dict())
     listed = client.get("/api/v2/trade/offers")
 
-    assert first.status_code == 200
-    assert first.json()["audit_warning"] == "signed spine append failed"
+    assert first.status_code == 503
+    assert first.headers["Retry-After"] == "1"
+    assert first.json()["detail"]["code"] == "trade-offer-audit-incomplete"
+    assert first.json()["detail"]["offer_digest"] == offer_digest(offer)
     assert retried.status_code == 200
     assert retried.json()["appended"] is False
     assert retried.json()["audit_event_id"]
@@ -436,10 +561,78 @@ def test_duplicate_retry_repairs_missing_spine_anchor(tmp_path, monkeypatch):
     assert listed.status_code == 200
 
 
+def test_trade_offer_api_does_not_write_without_signed_spine(tmp_path):
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    offer = _signed_offer(app.state.nth.node_identity)
+    store = app.state.nth.trade_offers
+    app.state.nth.spine = None
+
+    response = client.post("/api/v2/trade/offers", json=offer.to_dict())
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "signed Spine unavailable"
+    assert store.latest_seq() == -1
+
+
+def test_trade_offer_read_fails_closed_when_spine_disappears(tmp_path):
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    offer = _signed_offer(app.state.nth.node_identity)
+    digest = offer_digest(offer)
+    assert client.post("/api/v2/trade/offers", json=offer.to_dict()).status_code == 200
+    app.state.nth.spine = None
+
+    response = client.get(f"/api/v2/trade/offers/{digest}")
+
+    assert response.status_code == 503
+    assert "signed Spine unavailable" in response.json()["detail"]
+
+
+def test_cross_log_cache_invalidates_on_store_and_external_spine_writes(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    identity = app.state.nth.node_identity
+    offer = _signed_offer(identity)
+    digest = offer_digest(offer)
+    assert client.post("/api/v2/trade/offers", json=offer.to_dict()).status_code == 200
+    store = app.state.nth.trade_offers
+    store._v2_spine_anchor_cache = None
+    real_verify = store.verify_import_anchors
+    calls = 0
+
+    def counted_verify(anchors):
+        nonlocal calls
+        calls += 1
+        return real_verify(anchors)
+
+    monkeypatch.setattr(store, "verify_import_anchors", counted_verify)
+
+    assert client.get(f"/api/v2/trade/offers/{digest}").status_code == 200
+    assert client.get(f"/api/v2/trade/offers/{digest}").status_code == 200
+    assert calls == 1
+
+    store.publish(
+        _signed_offer(identity, day=30),
+        source_kind="local-library",
+        source_id="cache-invalidation-test",
+    )
+    assert client.get(f"/api/v2/trade/offers/{digest}").status_code == 200
+    assert calls == 2
+
+    second_process = SignedEventLog(app.state.nth.spine._path, identity)
+    second_process.append("test.cache.invalidated", {"reason": "external-write"})
+    assert client.get(f"/api/v2/trade/offers/{digest}").status_code == 200
+    assert calls == 3
+
+
 def test_trade_offer_api_detects_log_and_checkpoint_rollback(tmp_path):
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
-    identity = AgentIdentity.generate()
+    client = _authed_client(app)
+    identity = app.state.nth.node_identity
     first = _signed_offer(identity, day=29)
     second = _signed_offer(identity, day=30)
 
@@ -471,8 +664,8 @@ def test_trade_offer_api_detects_log_and_checkpoint_rollback(tmp_path):
 
 def test_trade_offer_api_rejects_signed_anchor_with_forged_metadata(tmp_path):
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
-    identity = AgentIdentity.generate()
+    client = _authed_client(app)
+    identity = app.state.nth.node_identity
     offer = _signed_offer(identity)
     published = client.post("/api/v2/trade/offers", json=offer.to_dict())
     assert published.status_code == 200

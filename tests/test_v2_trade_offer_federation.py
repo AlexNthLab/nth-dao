@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -14,10 +16,13 @@ from fastapi.testclient import TestClient
 from nth_dao.identity import AgentIdentity, crypto_available
 from nth_dao.market import (
     MarketFeed,
+    TaskAnnouncement,
+    announcement_federation_key,
     create_trade_offer_announcement,
     sign_announcement,
 )
 from nth_dao.market.federation import FeedDigest, verify_digest
+from nth_dao.spine import SignedEventLog
 from nth_dao.trade_rules import offer_body, offer_digest, sign_offer
 from nth_dao.web import create_app
 from nth_dao.web.market_federation_poll import (
@@ -107,11 +112,49 @@ def _http_get_via(client: TestClient):
     return get
 
 
+def _cached_remote_offer(
+    root: Path,
+) -> tuple[object, object, TestClient, object, str]:
+    source_app = create_app(root / "source", require_console_auth=False)
+    source = _authed_client(source_app)
+    offer = _offer(source_app.state.nth.node_identity)
+    digest = offer_digest(offer)
+    assert source.post(
+        "/api/v2/trade/offers", json=offer.to_dict()
+    ).status_code == 200
+    assert source.post(
+        f"/api/v2/trade/offers/{digest}/announce", json={}
+    ).status_code == 200
+    entries = federate_once(
+        ["https://source.example"],
+        _http_get_via(source),
+        verify_seed_peer=lambda _url: (
+            source_app.state.nth.node_identity.as_did()
+        ),
+    )
+    target_app = create_app(root / "target", require_console_auth=False)
+    cache = FederationCache()
+    cache.replace_all(entries)
+    target_app.state.market_fed_cache = cache
+    target = TestClient(target_app)
+    return source_app, target_app, target, offer, digest
+
+
+def _console_headers(app: object) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+    }
+
+
+def _authed_client(app: object) -> TestClient:
+    return TestClient(app, headers=_console_headers(app))
+
+
 def test_trade_offer_announce_is_idempotent_and_public_by_digest(
     tmp_path: Path,
 ) -> None:
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _authed_client(app)
     offer = _offer(app.state.nth.node_identity)
     digest = offer_digest(offer)
 
@@ -162,7 +205,7 @@ def test_public_offer_reads_reuse_verified_feed_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _authed_client(app)
     offer = _offer(app.state.nth.node_identity)
     digest = offer_digest(offer)
     assert client.post(
@@ -203,7 +246,7 @@ def test_public_offer_reads_are_rate_limited(tmp_path: Path) -> None:
         max_per_window=10,
         window_seconds=60.0,
     )
-    client = TestClient(app)
+    client = _authed_client(app)
     offer = _offer(app.state.nth.node_identity)
     digest = offer_digest(offer)
     assert client.post(
@@ -242,7 +285,7 @@ def test_source_rate_limit_rejects_before_persistent_global_gate(
     )
     global_gate = CountingGlobal()
     app.state.trade_offer_fed_read_global_limiter = global_gate
-    client = TestClient(app)
+    client = _authed_client(app)
     digest = "sha256:" + ("a" * 64)
 
     # Spend the process-local source budget without reaching a valid Offer.
@@ -257,7 +300,7 @@ def test_expired_discovery_hint_is_replaced_while_offer_remains_active(
     tmp_path: Path,
 ) -> None:
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _authed_client(app)
     offer = _offer(app.state.nth.node_identity)
     digest = offer_digest(offer)
     assert client.post(
@@ -294,18 +337,20 @@ def test_node_cannot_announce_another_publishers_trade_offer(
     tmp_path: Path,
 ) -> None:
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _authed_client(app)
     foreign_offer = _offer(AgentIdentity.generate(label="foreign"))
     digest = offer_digest(foreign_offer)
-    assert client.post(
+    rejected = client.post(
         "/api/v2/trade/offers", json=foreign_offer.to_dict()
-    ).status_code == 200
+    )
+    assert rejected.status_code == 403
 
     response = client.post(
         f"/api/v2/trade/offers/{digest}/announce", json={}
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 404
+    assert app.state.nth.trade_offers.poll(-1).records == ()
     assert client.get(
         f"/api/v2/trade/federation/offers/{digest}"
     ).status_code == 404
@@ -315,7 +360,7 @@ def test_withdrawal_removes_public_offer_and_old_revision_cannot_reannounce(
     tmp_path: Path,
 ) -> None:
     app = create_app(tmp_path, require_console_auth=False)
-    client = TestClient(app)
+    client = _authed_client(app)
     offer = _offer(app.state.nth.node_identity)
     digest = offer_digest(offer)
     assert client.post(
@@ -388,11 +433,35 @@ def test_trade_offer_announce_requires_console_auth(tmp_path: Path) -> None:
     assert public.json() == offer.to_dict()
 
 
+def test_trade_offer_announce_requires_route_auth_when_global_auth_is_off(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    authorized = _authed_client(app)
+    unauthenticated = TestClient(app)
+    offer = _offer(app.state.nth.node_identity)
+    digest = offer_digest(offer)
+    assert authorized.post(
+        "/api/v2/trade/offers",
+        json=offer.to_dict(),
+    ).status_code == 200
+
+    denied = unauthenticated.post(
+        f"/api/v2/trade/offers/{digest}/announce",
+        json={},
+    )
+
+    assert denied.status_code == 401
+    assert unauthenticated.get(
+        f"/api/v2/trade/federation/offers/{digest}"
+    ).status_code == 404
+
+
 def test_trade_offer_is_discovered_and_reverified_across_nodes(
     tmp_path: Path,
 ) -> None:
     source_app = create_app(tmp_path / "source", require_console_auth=False)
-    source = TestClient(source_app)
+    source = _authed_client(source_app)
     offer = _offer(source_app.state.nth.node_identity)
     digest = offer_digest(offer)
     assert source.post(
@@ -484,6 +553,7 @@ def test_trade_offer_is_discovered_and_reverified_across_nodes(
     assert detail["offer"] == offer.to_dict()
     assert detail["digest"] == digest
     assert detail["authority"] == "remote-publisher"
+    assert detail["storage_provenance"] is None
     assert detail["actionable"] is False
     assert detail["verification"] == {
         "offer_signature_valid": True,
@@ -500,7 +570,7 @@ def test_federation_cache_rejects_missing_mismatched_or_wrong_source_offer(
     tmp_path: Path,
 ) -> None:
     source_app = create_app(tmp_path / "source", require_console_auth=False)
-    source = TestClient(source_app)
+    source = _authed_client(source_app)
     identity = source_app.state.nth.node_identity
     offer = _offer(identity)
     digest = offer_digest(offer)
@@ -544,7 +614,7 @@ def test_cached_remote_offer_inspection_always_requires_console_bearer(
     require_console_auth: bool,
 ) -> None:
     source_app = create_app(tmp_path / "source", require_console_auth=False)
-    source = TestClient(source_app)
+    source = _authed_client(source_app)
     offer = _offer(source_app.state.nth.node_identity)
     digest = offer_digest(offer)
     assert source.post(
@@ -596,4 +666,358 @@ def test_cached_remote_offer_inspection_fails_closed_on_cache_corruption(
     assert response.status_code == 503
     assert response.json()["detail"] == (
         "federation cache integrity check failed"
+    )
+
+
+def test_cached_remote_offer_import_requires_console_and_anchors_provenance(
+    tmp_path: Path,
+) -> None:
+    _, target_app, target, offer, digest = _cached_remote_offer(tmp_path)
+    path = f"/api/v2/trade/federation/cached-offers/{digest}/import"
+
+    assert target.post(path).status_code == 401
+    imported = target.post(path, headers=_console_headers(target_app))
+
+    assert imported.status_code == 200
+    result = imported.json()
+    assert result == {
+        "digest": digest,
+        "appended": True,
+        "persisted": True,
+        "classification": "canonical",
+        "entry_hash": result["entry_hash"],
+        "source_kind": "federation-cache",
+        "source_id": target_app.state.nth.node_identity.as_did(),
+        "audit_event_id": result["audit_event_id"],
+        "discovery_sources": 1,
+        "trusted": False,
+        "actionable": False,
+        "warning": (
+            "Saved locally as a signed claim. This does not accept the "
+            "Offer, trust its publisher, reserve assets, or authorize execution."
+        ),
+    }
+    records = target_app.state.nth.trade_offers.poll(-1).records
+    assert len(records) == 1
+    assert records[0].offer.to_dict() == offer.to_dict()
+    assert records[0].source_kind == "federation-cache"
+    assert records[0].source_id == target_app.state.nth.node_identity.as_did()
+    anchors = [
+        event for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    ]
+    assert len(anchors) == 1
+    assert anchors[0].event_id == result["audit_event_id"]
+    assert anchors[0].payload["source_kind"] == "federation-cache"
+    assert anchors[0].payload["source_id"] == anchors[0].author_did
+    assert anchors[0].author_did == target_app.state.nth.node_identity.as_did()
+    discovery = anchors[0].payload["discovery"]
+    assert discovery["announcement"]["offer_digest"] == digest
+    assert discovery["federation_key"] == announcement_federation_key(
+        TaskAnnouncement.from_dict(discovery["announcement"])
+    )
+
+    cached_again = target.get(
+        f"/api/v2/trade/federation/cached-offers/{digest}",
+        headers=_console_headers(target_app),
+    )
+    assert cached_again.status_code == 200
+    assert cached_again.json()["storage_provenance"] == {
+        "source_kind": "federation-cache",
+        "source_id": target_app.state.nth.node_identity.as_did(),
+    }
+
+    target_app.state.market_fed_cache = FederationCache()
+    local = target.get(f"/api/v2/trade/offers/{digest}")
+    assert local.status_code == 200
+    assert local.json()["offer"] == offer.to_dict()
+    assert local.json()["authority"] == "remote-publisher"
+    assert local.json()["storage_provenance"] == {
+        "source_kind": "federation-cache",
+        "source_id": target_app.state.nth.node_identity.as_did(),
+    }
+
+
+def test_cached_remote_offer_import_validates_digest_before_lock_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(tmp_path / "target", require_console_auth=False)
+    client = TestClient(app)
+    malformed = r"sha256:x\..\..\..\escaped"
+
+    class UnexpectedLock:
+        def __init__(self, _path: Path) -> None:
+            raise AssertionError("invalid digest reached the filesystem lock")
+
+    monkeypatch.setattr("nth_dao.util.io.InterProcessLock", UnexpectedLock)
+
+    response = client.post(
+        f"/api/v2/trade/federation/cached-offers/{malformed}/import",
+        headers=_console_headers(app),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "digest must be a lowercase sha256 digest"
+    )
+    assert not (tmp_path / "target" / "trade" / "escaped.lock").exists()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["federation_key", "source_did", "announcement", "verified_at"],
+)
+def test_local_offer_read_rejects_signed_but_false_discovery_evidence(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    _, target_app, target, _, digest = _cached_remote_offer(tmp_path)
+    imported = target.post(
+        f"/api/v2/trade/federation/cached-offers/{digest}/import",
+        headers=_console_headers(target_app),
+    )
+    assert imported.status_code == 200
+    anchor = next(
+        event for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    )
+    proposal = next(
+        event for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.import.proposed"
+    )
+    payload = deepcopy(anchor.payload)
+    proposal_payload = deepcopy(proposal.payload)
+    if tamper == "federation_key":
+        proposal_payload["discovery"]["federation_key"] = (
+            "nth-ann-sha256:" + ("0" * 64)
+        )
+    elif tamper == "source_did":
+        proposal_payload["discovery"]["source_did"] = (
+            AgentIdentity.generate().as_did()
+        )
+    elif tamper == "verified_at":
+        proposal_payload["discovery"]["last_verified_ms"] = (1 << 63) - 1
+    else:
+        proposal_payload["discovery"]["announcement"]["title"] = (
+            "tampered title"
+        )
+
+    replacement = SignedEventLog(
+        tmp_path / f"false-evidence-{tamper}.jsonl",
+        target_app.state.nth.node_identity,
+    )
+    replacement_proposal = replacement.append(
+        "trade.offer.import.proposed",
+        proposal_payload,
+    )
+    payload["discovery"] = deepcopy(proposal_payload["discovery"])
+    payload["proposal_event_id"] = replacement_proposal.event_id
+    replacement.append("trade.offer.imported", payload)
+    target_app.state.nth.spine = replacement
+
+    response = target.get(f"/api/v2/trade/offers/{digest}")
+
+    assert response.status_code == 503
+    assert "discovery evidence failure" in response.json()["detail"]
+
+
+def test_cached_offer_recomputes_federation_key_before_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, target_app, target, _, digest = _cached_remote_offer(tmp_path)
+    cache = target_app.state.market_fed_cache
+    snapshot = cache.trade_offer_snapshot(digest)
+    snapshot[0]["federation_key"] = "nth-ann-sha256:" + ("0" * 64)
+    monkeypatch.setattr(cache, "trade_offer_snapshot", lambda _digest: snapshot)
+
+    inspected = target.get(
+        f"/api/v2/trade/federation/cached-offers/{digest}",
+        headers=_console_headers(target_app),
+    )
+    imported = target.post(
+        f"/api/v2/trade/federation/cached-offers/{digest}/import",
+        headers=_console_headers(target_app),
+    )
+
+    assert inspected.status_code == 503
+    assert imported.status_code == 503
+    assert target_app.state.nth.trade_offers.latest_seq() == -1
+
+
+def test_local_read_rejects_signed_proposal_with_different_offer(
+    tmp_path: Path,
+) -> None:
+    _, target_app, target, _, digest = _cached_remote_offer(tmp_path)
+    imported = target.post(
+        f"/api/v2/trade/federation/cached-offers/{digest}/import",
+        headers=_console_headers(target_app),
+    )
+    assert imported.status_code == 200
+    events = list(target_app.state.nth.spine.read_all())
+    proposal = next(
+        event for event in events
+        if event.type == "trade.offer.import.proposed"
+    )
+    anchor = next(
+        event for event in events
+        if event.type == "trade.offer.imported"
+    )
+    proposal_payload = deepcopy(proposal.payload)
+    proposal_payload["offer"]["summary"] = "different signed claim"
+
+    replacement = SignedEventLog(
+        tmp_path / "proposal-offer-mismatch.jsonl",
+        target_app.state.nth.node_identity,
+    )
+    replacement_proposal = replacement.append(
+        "trade.offer.import.proposed",
+        proposal_payload,
+    )
+    anchor_payload = deepcopy(anchor.payload)
+    anchor_payload["proposal_event_id"] = replacement_proposal.event_id
+    replacement.append("trade.offer.imported", anchor_payload)
+    target_app.state.nth.spine = replacement
+
+    response = target.get(f"/api/v2/trade/offers/{digest}")
+
+    assert response.status_code == 503
+    assert "proposal Offer" in response.json()["detail"]
+
+
+def test_cached_remote_offer_import_is_idempotent_and_concurrent(
+    tmp_path: Path,
+) -> None:
+    _, target_app, _, _, digest = _cached_remote_offer(tmp_path)
+    path = f"/api/v2/trade/federation/cached-offers/{digest}/import"
+    headers = _console_headers(target_app)
+    clients = [TestClient(target_app) for _ in range(4)]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = list(pool.map(
+            lambda client: client.post(path, headers=headers),
+            clients,
+        ))
+
+    assert [response.status_code for response in responses] == [200] * 4
+    bodies = [response.json() for response in responses]
+    assert sum(body["appended"] is True for body in bodies) == 1
+    assert len({body["entry_hash"] for body in bodies}) == 1
+    assert len({body["audit_event_id"] for body in bodies}) == 1
+    assert len(target_app.state.nth.trade_offers.poll(-1).records) == 1
+    anchors = [
+        event for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    ]
+    assert len(anchors) == 1
+
+
+def test_cached_remote_offer_import_recovers_after_restart_without_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, target_app, target, _, digest = _cached_remote_offer(tmp_path)
+    path = f"/api/v2/trade/federation/cached-offers/{digest}/import"
+    headers = _console_headers(target_app)
+    spine = target_app.state.nth.spine
+    original_append = spine.append
+
+    def fail_completion(event_type, payload, **kwargs):
+        if event_type == "trade.offer.imported":
+            raise OSError("simulated completion outage")
+        return original_append(event_type, payload, **kwargs)
+
+    monkeypatch.setattr(spine, "append", fail_completion)
+    failed = target.post(path, headers=headers)
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == (
+        "federated Trade Offer could not be durably imported"
+    )
+    assert len(target_app.state.nth.trade_offers.poll(-1).records) == 1
+    proposed = [
+        event for event in spine.read_all()
+        if event.type == "trade.offer.import.proposed"
+    ]
+    assert len(proposed) == 1
+    unavailable = target.get(f"/api/v2/trade/offers/{digest}")
+    assert unavailable.status_code == 503
+    assert "missing offer import anchor" in unavailable.json()["detail"]
+
+    restarted_app = create_app(
+        tmp_path / "target",
+        require_console_auth=False,
+    )
+    original_importer = restarted_app.state.nth.node_identity.as_did()
+    old_spine = restarted_app.state.nth.spine
+    replacement = AgentIdentity.generate(label="recovery-node")
+    restarted_app.state.nth.node_identity = replacement
+    restarted_app.state.nth.spine = SignedEventLog(
+        old_spine._path,
+        replacement,
+    )
+    restarted = TestClient(restarted_app)
+    recovered = restarted.post(
+        path,
+        headers=_console_headers(restarted_app),
+    )
+    assert recovered.status_code == 200
+    assert recovered.json()["appended"] is False
+    assert recovered.json()["source_id"] == original_importer
+    anchors = [
+        event for event in restarted_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    ]
+    assert len(anchors) == 1
+    assert anchors[0].event_id == recovered.json()["audit_event_id"]
+    assert anchors[0].author_did == replacement.as_did()
+    assert restarted.get(f"/api/v2/trade/offers/{digest}").status_code == 200
+
+
+def test_cached_remote_offer_import_rejects_incompatible_existing_provenance(
+    tmp_path: Path,
+) -> None:
+    _, target_app, target, offer, digest = _cached_remote_offer(tmp_path)
+    target_app.state.nth.trade_offers.publish(
+        offer,
+        source_kind="local-library",
+        source_id="test-fixture",
+    )
+
+    response = target.post(
+        f"/api/v2/trade/federation/cached-offers/{digest}/import",
+        headers=_console_headers(target_app),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "offer already exists with incompatible import provenance"
+    )
+    assert list(target_app.state.nth.spine.read_all()) == []
+
+
+def test_cached_remote_offer_import_anchor_survives_local_key_rotation(
+    tmp_path: Path,
+) -> None:
+    _, target_app, target, offer, digest = _cached_remote_offer(tmp_path)
+    path = f"/api/v2/trade/federation/cached-offers/{digest}/import"
+    imported = target.post(path, headers=_console_headers(target_app))
+    assert imported.status_code == 200
+    original_importer = imported.json()["source_id"]
+
+    replacement = AgentIdentity.generate(label="replacement-node")
+    old_spine = target_app.state.nth.spine
+    target_app.state.nth.node_identity = replacement
+    target_app.state.nth.spine = SignedEventLog(old_spine._path, replacement)
+
+    listed = target.get("/api/v2/trade/offers")
+    retried = target.post(path, headers=_console_headers(target_app))
+
+    assert listed.status_code == 200
+    assert retried.status_code == 200
+    assert retried.json()["appended"] is False
+    assert retried.json()["source_id"] == original_importer
+    assert retried.json()["source_id"] != replacement.as_did()
+    assert target.get(f"/api/v2/trade/offers/{digest}").json()["offer"] == (
+        offer.to_dict()
     )

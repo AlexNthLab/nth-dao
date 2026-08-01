@@ -8,6 +8,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,6 +54,7 @@ _CHECKPOINT_FIELDS = frozenset(
 _DIGEST_PREFIX = "sha256:"
 _GENESIS_HASH = "sha256:" + ("0" * 64)
 _SOURCE_KIND = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
+_AUDITED_SOURCE_KINDS = frozenset({"local-operator", "federation-cache"})
 _MAX_RECEIVED_AT_MS = (1 << 63) - 1
 
 
@@ -174,6 +176,7 @@ class OfferStore:
         self._cache_views: tuple[OfferChainView, ...] = ()
         self._cache_by_digest_head: str | None = None
         self._cache_by_digest: dict[str, OfferRecord] = {}
+        self.integrity_verification_lock = threading.Lock()
 
     @staticmethod
     def _verified_offer(value: TradeOffer | dict[str, Any]) -> TradeOffer:
@@ -208,23 +211,38 @@ class OfferStore:
         values: list[Any] = []
         for path in (self.log_path, self.checkpoint_path):
             try:
-                stat = path.stat()
+                before = path.stat()
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        digest.update(chunk)
+                after = path.stat()
                 values.extend(
                     (
                         True,
-                        stat.st_size,
-                        stat.st_mtime_ns,
-                        stat.st_ctime_ns,
-                        stat.st_ino,
+                        before.st_size,
+                        before.st_mtime_ns,
+                        before.st_ctime_ns,
+                        before.st_ino,
+                        after.st_size,
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                        after.st_ino,
+                        digest.hexdigest(),
                     )
                 )
             except FileNotFoundError:
-                values.extend((False, 0, 0, 0, 0))
+                values.extend((False, 0, 0, 0, 0, 0, 0, 0, 0, ""))
             except OSError as exc:
                 raise OfferStoreError(
                     f"unable to stat trade storage: {exc}"
                 ) from exc
         return tuple(values)
+
+    def integrity_fingerprint(self) -> tuple[Any, ...]:
+        """Return a process-independent cache key for the durable log state."""
+
+        return self._storage_fingerprint()
 
     def _remember_records(self, records: list[OfferRecord]) -> None:
         self._cache_records = tuple(records)
@@ -868,6 +886,7 @@ class OfferStore:
             "source_kind",
             "source_id",
         }
+        anchored_sequences: set[int] = set()
         for anchor in anchors:
             if not isinstance(anchor, dict) or not required.issubset(anchor):
                 return False, "signed Spine contains a malformed offer anchor"
@@ -896,9 +915,27 @@ class OfferStore:
                 return False, (
                     f"signed Spine metadata mismatch at offer log seq {seq}"
                 )
+            if seq in anchored_sequences:
+                return False, f"signed Spine duplicates offer log seq {seq}"
+            anchored_sequences.add(seq)
+        missing_sequences = sorted(
+            record.seq
+            for record in records
+            if (
+                record.source_kind in _AUDITED_SOURCE_KINDS
+                and record.seq not in anchored_sequences
+            )
+        )
+        if missing_sequences:
+            return False, (
+                "signed Spine is missing offer import anchor for log seq "
+                f"{missing_sequences[0]}"
+            )
         return True, "ok"
 
-    def get(self, digest: str) -> TradeOffer | None:
+    def get_record(self, digest: str) -> OfferRecord | None:
+        """Return the verified append-only record for an exact Offer digest."""
+
         if not (
             isinstance(digest, str)
             and len(digest) == 71
@@ -911,7 +948,10 @@ class OfferStore:
         if self._cache_by_digest_head != head:
             self._cache_by_digest = self._deduplicate(records)
             self._cache_by_digest_head = head
-        record = self._cache_by_digest.get(digest)
+        return self._cache_by_digest.get(digest)
+
+    def get(self, digest: str) -> TradeOffer | None:
+        record = self.get_record(digest)
         return record.offer if record is not None else None
 
     def chain(self, publisher_did: str, offer_id: str) -> OfferChainView:

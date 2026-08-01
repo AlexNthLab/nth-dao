@@ -1,6 +1,7 @@
 """读端 head_hash 缓存:链头不变返回同一已验证快照,append 后失效。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ pytest.importorskip("nacl")
 
 from nth_dao.web import create_app
 from nth_dao.web.v2_api import _verified_spine_events
+from fastapi import HTTPException
 
 
 def test_verified_events_cached_by_head(tmp_path: Path) -> None:
@@ -31,3 +33,45 @@ def test_verified_events_cached_by_head(tmp_path: Path) -> None:
 
     e4 = _verified_spine_events(req)
     assert e4 is e3                        # 再次命中缓存
+
+
+def test_verified_events_cache_detects_another_process_append(
+    tmp_path: Path,
+) -> None:
+    first_app = create_app(tmp_path, require_console_auth=False)
+    second_app = create_app(tmp_path, require_console_auth=False)
+    first_spine = first_app.state.nth.spine
+    second_spine = second_app.state.nth.spine
+    second_request = SimpleNamespace(app=second_app)
+
+    cached_empty = _verified_spine_events(second_request)
+    assert cached_empty == []
+    stale_in_memory_head = second_spine.head_hash
+
+    appended = first_spine.append("cross-process", {"value": 1})
+    refreshed = _verified_spine_events(second_request)
+
+    assert second_spine.head_hash == stale_in_memory_head
+    assert [event.event_id for event in refreshed] == [appended.event_id]
+    assert refreshed is not cached_empty
+
+
+def test_verified_events_cache_detects_same_size_retimestamped_tamper(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    request = SimpleNamespace(app=app)
+    spine = app.state.nth.spine
+    spine.append("cache-integrity", {"status": "original"})
+    assert len(_verified_spine_events(request)) == 1
+
+    path = spine._path
+    before = path.stat()
+    raw = path.read_bytes()
+    assert b"original" in raw
+    path.write_bytes(raw.replace(b"original", b"tampered", 1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+
+    with pytest.raises(HTTPException, match="spine integrity check failed"):
+        _verified_spine_events(request)

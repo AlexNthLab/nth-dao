@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getTradeOfferInspection } from "../api";
+import { getTradeOfferInspection, importCachedTradeOffer } from "../api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -32,11 +32,31 @@ const offer = {
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  delete (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })
+    .__NTH_CONSOLE_TOKEN__;
 });
 
 describe("Trade Offer inspection API wiring", () => {
-  it("wraps a verified local Offer as a non-actionable inspection", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ digest, offer }));
+  it("uses the server-derived authority for a stored Offer", async () => {
+    const localInspection = {
+      digest,
+      offer,
+      discoveries: [],
+      verification: {
+        offer_signature_valid: true,
+        announcement_binding_valid: null,
+        source_did_bound: null,
+        recent_source_verified: null,
+      },
+      authority: "remote-publisher",
+      storage_provenance: {
+        source_kind: "federation-cache",
+        source_id: "did:key:zImporter",
+      },
+      actionable: false,
+      warning: "A valid signature proves authorship, not availability.",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(localInspection));
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await getTradeOfferInspection(digest, false);
@@ -45,19 +65,7 @@ describe("Trade Offer inspection API wiring", () => {
       `/api/v2/trade/offers/${encodeURIComponent(digest)}`,
       expect.objectContaining({ credentials: "same-origin" }),
     );
-    expect(result).toMatchObject({
-      digest,
-      offer,
-      authority: "local-publisher",
-      actionable: false,
-      discoveries: [],
-      verification: {
-        offer_signature_valid: true,
-        announcement_binding_valid: null,
-        source_did_bound: null,
-        recent_source_verified: null,
-      },
-    });
+    expect(result).toEqual(localInspection);
   });
 
   it("returns the server-reverified remote inspection unchanged", async () => {
@@ -79,6 +87,7 @@ describe("Trade Offer inspection API wiring", () => {
         recent_source_verified: true,
       },
       authority: "remote-publisher",
+      storage_provenance: null,
       actionable: false,
       warning: "A valid signature proves authorship, not availability.",
     };
@@ -92,5 +101,40 @@ describe("Trade Offer inspection API wiring", () => {
       expect.objectContaining({ credentials: "same-origin" }),
     );
     expect(result).toEqual(remote);
+  });
+
+  it("posts an authenticated exact-digest durable import request", async () => {
+    const persisted = {
+      digest,
+      appended: true,
+      persisted: true,
+      classification: "canonical",
+      entry_hash: `sha256:${"b".repeat(64)}`,
+      source_kind: "federation-cache",
+      source_id: "did:key:zPublisher",
+      audit_event_id: "event-imported",
+      discovery_sources: 1,
+      trusted: false,
+      actionable: false,
+      warning: "Saved locally as a signed claim.",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(persisted));
+    vi.stubGlobal("fetch", fetchMock);
+    (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })
+      .__NTH_CONSOLE_TOKEN__ = "console-secret";
+
+    const result = await importCachedTradeOffer(digest);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/trade/federation/cached-offers/${encodeURIComponent(digest)}/import`,
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          Authorization: "Bearer console-secret",
+        }),
+      }),
+    );
+    expect(result).toEqual(persisted);
   });
 });

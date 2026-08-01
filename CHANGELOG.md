@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   TTL pruning, per-peer/global/byte capacity limits, and a digest index prevent
   false freshness and unbounded full-cache inspection. Cached documents remain
   read-only, non-actionable, and non-durable across restart or stale eviction.
+- Explicit durable retention of a reverified remote Trade Offer as a signed
+  claim in the local append-only Offer Store. The Console-authenticated import
+  is exact-digest, cross-process serialized, idempotent, provenance-bound, and
+  anchored to the signed Spine. A signed `trade.offer.import.proposed` event
+  retains the complete Offer and discovery evidence before Store mutation, so
+  restart recovery does not depend on the volatile federation cache; a later
+  `trade.offer.imported` event completes the Store anchor idempotently, including
+  across node-key rotation. The Spine anchor retains and independently
+  reparses and reverifies the proposal's complete signed Offer against both its
+  digest and the persisted Store bytes, plus the exact signed discovery
+  announcement, federation key, source DID, and observation provenance after
+  volatile cache eviction. Malformed digests are rejected before lock-path or
+  cache access. Reads fail
+  closed if Store and Spine diverge, while a content-digest-backed cross-log
+  fingerprint detects same-size/re-timestamped disk changes without replaying
+  every Ed25519 signature on an unchanged log. The Tasks UI exposes this
+  as **Save locally** and states that persistence grants no trust, acceptance,
+  reservation, or execution authority.
 - Signed Trade Rule Recognition v1 chains for community, DAO, or individual
   recognition, deprecation, and revocation of exact Rule Package digests,
   including mandatory bounded expiry, issuer Rule-ID scopes, local observed

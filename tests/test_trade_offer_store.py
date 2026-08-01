@@ -654,10 +654,32 @@ def test_signed_import_anchors_bind_sequence_hash_and_offer_digest(tmp_path):
     }
 
     assert store.verify_import_anchors([anchor]) == (True, "ok")
+    ok, why = store.verify_import_anchors([])
+    assert ok is False
+    assert "missing offer import anchor" in why
+    ok, why = store.verify_import_anchors([anchor, anchor])
+    assert ok is False
+    assert "duplicates offer log seq" in why
     forged = {**anchor, "entry_hash": "sha256:" + ("f" * 64)}
     ok, why = store.verify_import_anchors([forged])
     assert ok is False
     assert "mismatch" in why
+
+
+def test_integrity_verification_lock_is_scoped_per_store(tmp_path):
+    first = OfferStore(tmp_path / "first")
+    second = OfferStore(tmp_path / "second")
+
+    assert (
+        first.integrity_verification_lock
+        is not second.integrity_verification_lock
+    )
+    assert first.integrity_verification_lock.acquire(blocking=False) is True
+    try:
+        assert second.integrity_verification_lock.acquire(blocking=False) is True
+        second.integrity_verification_lock.release()
+    finally:
+        first.integrity_verification_lock.release()
 
 
 def test_canonical_snapshot_returns_view_and_head_from_one_projection(tmp_path):

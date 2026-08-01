@@ -170,6 +170,7 @@ complete view.
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 | `GET /api/v2/trade/federation/cached-offers/{digest}` | Reverify and inspect a volatile remote Offer cached with a discovery announcement | Console read |
+| `POST /api/v2/trade/federation/cached-offers/{digest}/import` | Reverify and durably retain one exact remote Offer as a non-authoritative signed claim | Console write; Bearer always required |
 
 ## Security Boundaries
 
@@ -192,6 +193,19 @@ complete view.
   source floods from turning the persistent limiter into a disk-write amplifier.
 - A malformed or unverifiable digest, identity card, or announcement fails
   closed.
+- Durable remote-Offer import reuses the inspection verifier, serializes by
+  exact Offer digest across processes, records `federation-cache` provenance,
+  and writes a signed `trade.offer.import.proposed` intent containing the full
+  Offer and evidence before mutating the Offer Store. An exact
+  `trade.offer.imported` completion anchor is required before reporting success.
+  These signed events contain the original signed discovery
+  announcement, its recomputed federation key, source DID, source peer, and
+  observation metadata, so later audit does not depend on the volatile cache.
+  Read-time verification reparses the proposal Offer, verifies its signature
+  and digest, and requires byte-for-byte equality with the Offer Store record.
+  Digest syntax is rejected before any import lock path is constructed.
+  A retry or restarted node repairs an interrupted import without the volatile
+  federation cache, including when the completing node identity has rotated.
 - Before a remote claim, the source identity card is fetched afresh and the
   claim POST is pinned to the same validated IP.
 
@@ -211,11 +225,11 @@ cloud-metadata destinations.
   decide what a verified peer is allowed to do.
 - The federation cache is a read model. Durable authoritative ownership stays
   with the source DAO.
-- Remote Trade Offer documents are retained only in the volatile, read-only
-  federation cache and are reverified for console inspection. They disappear
-  on process restart or stale-entry eviction and are not imported as a local
-  actionable Offer chain. Inspection therefore does not authorize remote
-  Agreement creation in this slice.
+- Remote Trade Offer documents remain volatile until an operator explicitly
+  selects **Save locally**. That action retains the exact signed claim and its
+  import provenance in local append-only storage; it does not make the remote
+  publisher local, prove latest revision, grant trust, or make the Offer
+  actionable. Agreement creation remains a separate protocol step.
 - A recent source verification means the signed snapshot was verified within
   the local two-minute cache TTL. It does not prove that the source is currently
   online or that the advertised resource is still available.

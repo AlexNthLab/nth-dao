@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   announceTask, claimFederatedTask, claimTask, discoverFederationPeers, fetchAgents, getFederationStatus,
   getTradeOfferInspection,
+  importCachedTradeOffer,
   listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
 } from "../api";
 import { IconBriefcase } from "./Icons";
@@ -104,6 +105,8 @@ export function TasksView() {
   const [offerInspection, setOfferInspection] = useState<TradeOfferInspection | null>(null);
   const [offerInspectionKey, setOfferInspectionKey] = useState("");
   const [offerInspectionError, setOfferInspectionError] = useState("");
+  const [offerImportBusyDigest, setOfferImportBusyDigest] = useState("");
+  const [offerImportErrors, setOfferImportErrors] = useState<Record<string, string>>({});
   const fedRequestSequence = useRef(0);
   const offerInspectionRequestSequence = useRef(0);
   const offerInspectionAbort = useRef<AbortController | null>(null);
@@ -389,6 +392,43 @@ export function TasksView() {
       setOfferInspectionError(
         error instanceof Error ? error.message : String(error),
       );
+    }
+  }
+
+  async function handleSaveRemoteOffer(task: TaskAnnouncement) {
+    const digest = task.offer_digest || "";
+    if (!digest || offerImportBusyDigest) return;
+    setOfferImportBusyDigest(digest);
+    setOfferImportErrors((current) => ({ ...current, [digest]: "" }));
+    try {
+      const result = await importCachedTradeOffer(digest);
+      if (!result.persisted || result.digest !== digest) {
+        throw new Error("server returned an invalid persistence result");
+      }
+      setOfferInspection((current) => (
+        current?.digest === digest
+          ? {
+            ...current,
+            storage_provenance: {
+              source_kind: result.source_kind,
+              source_id: result.source_id,
+            },
+          }
+          : current
+      ));
+      toast.push(
+        result.appended
+          ? "Signed offer saved locally"
+          : "Signed offer was already saved locally",
+        "success",
+      );
+    } catch (error) {
+      setOfferImportErrors((current) => ({
+        ...current,
+        [digest]: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setOfferImportBusyDigest("");
     }
   }
 
@@ -1182,6 +1222,33 @@ export function TasksView() {
                             </div>
                           ) : (
                             <p className="muted">No rule references declared.</p>
+                          )}
+                          {offerInspection.authority === "remote-publisher" && (
+                            <div style={{ marginTop: 12 }}>
+                              <button
+                                className="btn btn-secondary"
+                                disabled={
+                                  offerImportBusyDigest === offerInspection.digest
+                                  || offerInspection.storage_provenance !== null
+                                }
+                                onClick={() => void handleSaveRemoteOffer(task)}
+                              >
+                                {offerInspection.storage_provenance !== null
+                                  ? "Saved locally"
+                                  : offerImportBusyDigest === offerInspection.digest
+                                    ? "Saving..."
+                                    : "Save locally"}
+                              </button>
+                              <p className="muted" style={{ margin: "6px 0 0" }}>
+                                Saving retains the exact signed claim for later review. It does not
+                                accept the offer, trust the publisher, or authorize execution.
+                              </p>
+                              {offerImportErrors[offerInspection.digest] && (
+                                <p role="alert" style={{ color: "var(--danger)", marginTop: 6 }}>
+                                  Could not save this signed offer. {offerImportErrors[offerInspection.digest]}
+                                </p>
+                              )}
+                            </div>
                           )}
                         </section>
                       )}

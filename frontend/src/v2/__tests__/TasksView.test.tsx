@@ -63,6 +63,7 @@ vi.mock("../api", () => ({
   claimTask: vi.fn(),
   claimFederatedTask: vi.fn(),
   getTradeOfferInspection: vi.fn(),
+  importCachedTradeOffer: vi.fn(),
 }));
 
 import {
@@ -71,6 +72,7 @@ import {
   discoverFederationPeers,
   fetchAgents,
   getTradeOfferInspection,
+  importCachedTradeOffer,
   refreshFederation,
   updateFederationPeer,
 } from "../api";
@@ -415,8 +417,23 @@ describe("TasksView", () => {
         recent_source_verified: true,
       },
       authority: "remote-publisher",
+      storage_provenance: null,
       actionable: false,
       warning: "A valid signature proves authorship, not availability.",
+    });
+    vi.mocked(importCachedTradeOffer).mockResolvedValueOnce({
+      digest: `sha256:${"a".repeat(64)}`,
+      appended: true,
+      persisted: true,
+      classification: "canonical",
+      entry_hash: `sha256:${"f".repeat(64)}`,
+      source_kind: "federation-cache",
+      source_id: "did:key:zPublisher",
+      audit_event_id: "event-imported",
+      discovery_sources: 1,
+      trusted: false,
+      actionable: false,
+      warning: "Saved locally as a signed claim.",
     });
 
     render(
@@ -438,6 +455,13 @@ describe("TasksView", () => {
     expect(screen.getByText(/org\.nthdao\.rules\/review-swap/)).toBeTruthy();
     expect(screen.getByText("Remote source recently verified · 1 discovery source(s)")).toBeTruthy();
     expect(screen.getByText(/Last verified: 2026-08-01T00:01:00\.000Z/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save locally" }));
+    expect((
+      await screen.findByRole("button", { name: "Saved locally" })
+    ) as HTMLButtonElement).toHaveProperty("disabled", true);
+    expect(importCachedTradeOffer).toHaveBeenCalledWith(
+      `sha256:${"a".repeat(64)}`,
+    );
     expect(getTradeOfferInspection).toHaveBeenCalledWith(
       `sha256:${"a".repeat(64)}`,
       true,
@@ -446,6 +470,87 @@ describe("TasksView", () => {
     expect(screen.queryByText("claim (cross-DAO)")).toBeNull();
     expect(claimTask).not.toHaveBeenCalled();
     expect(claimFederatedTask).not.toHaveBeenCalled();
+  });
+
+  it("keeps a remote signed offer retryable when local persistence fails", async () => {
+    const { listOpenTasks } = await import("../api");
+    const digest = `sha256:${"9".repeat(64)}`;
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "exchange-save-error",
+      federation_key: "nth-ann-sha256:exchange-save-error",
+      publisher_did: "did:key:zPublisher",
+      title: "Save failure exchange",
+      listing_type: "exchange",
+      offer_digest: digest,
+      availability_summary: { offer_id: "org.nthdao.tests/save-failure" },
+      capability_set: [],
+      context: "trade",
+      reward_minor: 0,
+      reward_asset: "exchange",
+      claimable: false,
+      federated: true,
+    }]);
+    vi.mocked(getTradeOfferInspection).mockResolvedValueOnce({
+      digest,
+      offer: {
+        kind: "org.nthdao.trade.offer",
+        protocol_version: "2.0",
+        offer_id: "org.nthdao.tests/save-failure",
+        revision: 1,
+        previous_offer_digest: null,
+        state: "active",
+        publisher_did: "did:key:zPublisher",
+        title: "Save failure exchange",
+        summary: "",
+        provides: [],
+        requests: [],
+        rule_refs: [],
+        published_at: "2026-08-01T00:00:00Z",
+        not_after: null,
+        extensions: {},
+        proof: {},
+      },
+      discoveries: [{
+        announcement_id: "exchange-save-error",
+        federation_key: "nth-ann-sha256:exchange-save-error",
+        source_peer: "https://publisher.example",
+        source_did: "did:key:zPublisher",
+        stale: false,
+        last_verified_ms: 1,
+      }],
+      verification: {
+        offer_signature_valid: true,
+        announcement_binding_valid: true,
+        source_did_bound: true,
+        recent_source_verified: true,
+      },
+      authority: "remote-publisher",
+      storage_provenance: null,
+      actionable: false,
+      warning: "A signature is not proof of truth.",
+    });
+    vi.mocked(importCachedTradeOffer).mockRejectedValueOnce(
+      new Error("Spine unavailable"),
+    );
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+    await screen.findByText("Save failure exchange");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect terms" }));
+    await screen.findByText("Signed exchange terms");
+    fireEvent.click(screen.getByRole("button", { name: "Save locally" }));
+
+    const error = await screen.findByRole("alert");
+    expect(error.textContent).toContain("Could not save this signed offer");
+    expect(error.textContent).toContain("Spine unavailable");
+    expect(
+      screen.getByRole("button", { name: "Save locally" }),
+    ).toHaveProperty("disabled", false);
   });
 
   it("shows a visible error when signed offer inspection fails", async () => {

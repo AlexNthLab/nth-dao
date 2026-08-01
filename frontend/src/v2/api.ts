@@ -43,6 +43,7 @@ import type {
   Rule,
   TaskAnnouncement,
   TaskCategory,
+  TradeOfferImportResult,
   TradeOfferInspection,
 } from "./types-v2";
 
@@ -935,26 +936,18 @@ export async function getTradeOfferInspection(
       signal,
     );
   }
-  const local = await getJson<{
-    digest: string;
-    offer: TradeOfferInspection["offer"];
-  }>(`/trade/offers/${encoded}`, signal);
-  return {
-    ...local,
-    discoveries: [],
-    verification: {
-      offer_signature_valid: true,
-      announcement_binding_valid: null,
-      source_did_bound: null,
-      recent_source_verified: null,
-    },
-    authority: "local-publisher",
-    actionable: false,
-    warning: (
-      "A valid signature proves authorship, not availability, fairness, "
-      + "ownership, or settlement. Create a new bilateral Agreement before execution."
-    ),
-  };
+  return getJson<TradeOfferInspection>(`/trade/offers/${encoded}`, signal);
+}
+
+export function importCachedTradeOffer(
+  digest: string,
+  signal?: AbortSignal,
+): Promise<TradeOfferImportResult> {
+  return postJson<TradeOfferImportResult>(
+    `/trade/federation/cached-offers/${encodeURIComponent(digest)}/import`,
+    undefined,
+    signal,
+  );
 }
 
 export async function getFederationStatus(

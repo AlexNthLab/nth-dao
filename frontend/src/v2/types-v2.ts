@@ -485,6 +485,25 @@ export interface TradeOfferInspection {
     recent_source_verified: boolean | null;
   };
   authority: "remote-publisher" | "local-publisher";
+  storage_provenance: {
+    source_kind: string;
+    source_id: string;
+  } | null;
+  actionable: false;
+  warning: string;
+}
+
+export interface TradeOfferImportResult {
+  digest: string;
+  appended: boolean;
+  persisted: true;
+  classification: string;
+  entry_hash: string;
+  source_kind: "federation-cache" | "local-operator";
+  source_id: string;
+  audit_event_id: string;
+  discovery_sources: number;
+  trusted: false;
   actionable: false;
   warning: string;
 }
