@@ -16,6 +16,9 @@ from nth_dao.trade_rules.recognition import (
     RULE_RECOGNITION_SIGNING_DOMAIN,
     create_rule_recognition,
 )
+from nth_dao.trade_rules.recognition_audit import (
+    rule_recognition_audit_payload,
+)
 from nth_dao.trade_rules.signing import (
     encode_ed25519_signature,
     signed_document_input,
@@ -27,6 +30,10 @@ VECTORS_PATH = (
 SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-rule-recognition.schema.json"
+)
+AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-rule-recognition-audit-payload.schema.json"
 )
 _PUBLISHER_SEED = hashlib.sha256(
     b"NTH Trade Rule Recognition publisher public seed"
@@ -145,6 +152,16 @@ def generate_vectors() -> dict[str, Any]:
     missing_expiry = first.to_dict()
     missing_expiry["not_after"] = None
     missing_expiry = _sign_semantically_invalid(issuer, missing_expiry)
+    valid_audit_payload = rule_recognition_audit_payload(
+        first,
+        package=package,
+    )
+    invalid_audit_did = copy.deepcopy(valid_audit_payload)
+    invalid_audit_did["issuer_did"] = "did:key:z123"
+    invalid_audit_date = copy.deepcopy(valid_audit_payload)
+    invalid_audit_date["issued_at"] = "2026-02-30T00:00:00Z"
+    reversed_audit_interval = copy.deepcopy(valid_audit_payload)
+    reversed_audit_interval["not_after"] = valid_audit_payload["issued_at"]
     return {
         "format": "nth-trade-rule-recognition-conformance-v1",
         "schema_version": 1,
@@ -161,6 +178,14 @@ def generate_vectors() -> dict[str, Any]:
         "issuer_did": issuer.as_did(),
         "recognized": first.to_dict(),
         "revoked": revoked.to_dict(),
+        "recognized_audit_payload": rule_recognition_audit_payload(
+            first,
+            package=package,
+        ),
+        "revoked_audit_payload": rule_recognition_audit_payload(
+            revoked,
+            package=package,
+        ),
         "expected_recognized_canonical_hex": first.canonical_bytes.hex(),
         "expected_recognized_signing_input_hex": signed_document_input(
             RULE_RECOGNITION_SIGNING_DOMAIN,
@@ -171,6 +196,11 @@ def generate_vectors() -> dict[str, Any]:
             "bad_predecessor": bad_predecessor,
             "missing_expiry": missing_expiry,
             "missing_reason": missing_reason,
+        },
+        "invalid_audit_payloads": {
+            "invalid_issuer_did": invalid_audit_did,
+            "invalid_issued_at": invalid_audit_date,
+            "reversed_interval": reversed_audit_interval,
         },
     }
 

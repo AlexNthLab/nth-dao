@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   quarantine, and TypeScript verification vectors. Recognition never grants
   executable or funds authority automatically and does not claim globally
   fresh revocation.
+- Recoverable Rule Recognition audit projection that persists the exact signed
+  statement in local CAS before appending an idempotent
+  `trade.rule.recognition.recorded` Spine event. Package-scoped reconciliation
+  repairs interrupted anchors, and cross-log verification rejects missing,
+  duplicate, conflicting, or orphaned local facts. Formal Web v2 endpoints
+  remain fail-closed when the signed Spine is unavailable, expose bounded
+  reconciliation diagnostics, and reject rollback evidence before new CAS
+  writes.
 - Recoverable Trade Order audit outbox with `prepared -> cached -> anchored`
   state transitions and exact, idempotent `trade.order.accepted` Spine events.
 - Execution-readiness verification that reloads and resolves every transitive

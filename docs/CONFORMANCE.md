@@ -43,8 +43,13 @@ Without them, "I implemented the spec" is a guess. With them, "I pass all
 The Trade Rule Protocol also ships independently versioned vectors under
 `nth_dao/trade_rules/vectors/`. Rule Recognition v1 includes canonical bytes,
 domain-separated signing bytes, valid recognition/revocation chains, and
-negative semantic cases. Both the Python reference tests and the TypeScript
-frontend verifier consume the same checked-in vector.
+negative semantic cases. It also includes exact
+`trade.rule.recognition.recorded` audit payloads whose statement digests and
+field bindings are independently recomputed by the TypeScript verifier. Both
+the Python reference tests and the TypeScript frontend verifier consume the
+same checked-in vector. Negative audit vectors cover malformed Ed25519
+`did:key` values, impossible calendar dates, and reversed validity intervals;
+schema-only acceptance is not treated as semantic conformance.
 
 ## What's NOT covered yet (planned for v0.9.5+)
 

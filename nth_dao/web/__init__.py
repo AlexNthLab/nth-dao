@@ -99,6 +99,7 @@ _COMMERCE_CART_MAX_BODY_BYTES = 256 * 1024
 _COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
 _COMMERCE_WRITE_MAX_BODY_BYTES = 768 * 1024
 _TRADE_OFFER_MAX_BODY_BYTES = 256 * 1024
+_TRADE_RECOGNITION_MAX_BODY_BYTES = 256 * 1024
 
 
 class _RequestBodyTooLarge(Exception):
@@ -144,11 +145,21 @@ class _FederationBodyLimitMiddleware:
             and scope.get("method") == "POST"
             and path == "/api/v2/trade/offers"
         )
+        is_trade_recognition_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/v2/trade/rule-packages/")
+            and (
+                path.endswith("/recognitions")
+                or path.endswith("/recognitions/reconcile")
+            )
+        )
         if not (
             is_foreign_claim
             or is_federation_hello
             or is_commerce_write
             or is_trade_offer_write
+            or is_trade_recognition_write
         ):
             await self.app(scope, receive, send)
             return
@@ -168,6 +179,9 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_offer_write:
             max_body_bytes = _TRADE_OFFER_MAX_BODY_BYTES
             body_label = "trade offer"
+        elif is_trade_recognition_write:
+            max_body_bytes = _TRADE_RECOGNITION_MAX_BODY_BYTES
+            body_label = "trade rule recognition"
         else:
             max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
             body_label = "commerce write"
@@ -662,8 +676,15 @@ class WebState:
         # Trade Offer v2 is intentionally separate from the legacy, rigid
         # Commerce v1 listing model. The append-only store retains signed
         # revisions and conflicts for local projection and later federation.
-        from ..trade_rules import OfferStore
+        from ..trade_rules import (
+            OfferStore,
+            RulePackageStore,
+            RuleRecognitionStore,
+        )
         self.trade_offers = OfferStore(workspace)
+        self.trade_rule_packages = RulePackageStore(workspace)
+        self.trade_rule_recognitions = RuleRecognitionStore(workspace)
+        self.trade_rule_recognition_audit: Optional[Any] = None
         # v0.10 V-30: per-actor rate limiters for the two crypto-heavy
         # /api/mandates/* routes. The verify endpoint is more sensitive
         # (free oracle + timing side-channel) so its window is tighter.
@@ -3446,6 +3467,15 @@ def _bootstrap(state: WebState) -> None:
                 "(feed-only). Run verify_chain to inspect the log.", exc,
             )
             state.spine = None
+    if state.spine is not None:
+        from ..trade_rules import RuleRecognitionAuditCoordinator
+
+        state.trade_rule_recognition_audit = (
+            RuleRecognitionAuditCoordinator(
+                store=state.trade_rule_recognitions,
+                spine=state.spine,
+            )
+        )
 
     config = state.membership.load_config()
     if not config.admin_ids and not config.member_ids:

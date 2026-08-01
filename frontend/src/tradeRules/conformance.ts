@@ -183,6 +183,21 @@ const EXTENSION_ID =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?$/;
 const TIMESTAMP =
   /^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$/;
+const RECOGNITION_AUDIT_TIMESTAMP =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{6})?Z$/;
+const RECOGNITION_ID = /^nth-trade-recognition-sha256:[0-9a-f]{64}$/;
+const RECOGNITION_AUDIT_FIELDS = [
+  "protocol_version",
+  "recognition_id",
+  "recognition_digest",
+  "rule_id",
+  "package_digest",
+  "issuer_did",
+  "sequence",
+  "decision",
+  "issued_at",
+  "not_after",
+] as const;
 const UNSAFE_RESOURCE_SCHEMES = new Set(["data", "file", "javascript", "vbscript"]);
 
 const OFFER_FIELDS = [
@@ -465,6 +480,66 @@ export function recognitionSigningInput(
   domain = TRADE_RULE_RECOGNITION_DOMAIN
 ): Uint8Array {
   return manifestSigningInput(recognition, domain);
+}
+
+export function validateRuleRecognitionAuditPayload(
+  value: unknown
+): Record<string, unknown> {
+  const payload = exactObject(
+    value,
+    RECOGNITION_AUDIT_FIELDS,
+    "Recognition Spine payload"
+  );
+  if (payload.protocol_version !== "1") {
+    throw new Error("Recognition Spine payload protocol version is unsupported");
+  }
+  if (
+    typeof payload.recognition_id !== "string" ||
+    !RECOGNITION_ID.test(payload.recognition_id)
+  ) {
+    throw new Error("Recognition Spine payload recognition_id is invalid");
+  }
+  digest(payload.recognition_digest, "recognition_digest");
+  digest(payload.package_digest, "package_digest");
+  if (typeof payload.rule_id !== "string" || !RULE_ID.test(payload.rule_id)) {
+    throw new Error("Recognition Spine payload rule_id is invalid");
+  }
+  if (typeof payload.issuer_did !== "string") {
+    throw new Error("Recognition Spine payload issuer_did is invalid");
+  }
+  decodeDidKey(payload.issuer_did);
+  if (
+    typeof payload.sequence !== "number" ||
+    !Number.isSafeInteger(payload.sequence) ||
+    payload.sequence < 1 ||
+    payload.sequence > 2_147_483_647
+  ) {
+    throw new Error("Recognition Spine payload sequence is invalid");
+  }
+  if (
+    payload.decision !== "recognized" &&
+    payload.decision !== "deprecated" &&
+    payload.decision !== "revoked"
+  ) {
+    throw new Error("Recognition Spine payload decision is invalid");
+  }
+  for (const field of ["issued_at", "not_after"] as const) {
+    if (
+      typeof payload[field] !== "string" ||
+      !RECOGNITION_AUDIT_TIMESTAMP.test(payload[field]) ||
+      payload[field].endsWith(".000000Z")
+    ) {
+      throw new Error(`Recognition Spine payload ${field} is invalid`);
+    }
+  }
+  const issuedAt = timestampNanos(payload.issued_at, "issued_at");
+  const notAfter = timestampNanos(payload.not_after, "not_after");
+  if (notAfter <= issuedAt) {
+    throw new Error(
+      "Recognition Spine payload not_after must follow issued_at"
+    );
+  }
+  return payload;
 }
 
 function decodeBase58(value: string): Uint8Array {

@@ -92,6 +92,44 @@
       "sequence": 1
     }
   },
+  "invalid_audit_payloads": {
+    "invalid_issued_at": {
+      "decision": "recognized",
+      "issued_at": "2026-02-30T00:00:00Z",
+      "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      "not_after": "2026-08-20T00:00:00Z",
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "protocol_version": "1",
+      "recognition_digest": "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 1
+    },
+    "invalid_issuer_did": {
+      "decision": "recognized",
+      "issued_at": "2026-08-01T00:00:00Z",
+      "issuer_did": "did:key:z123",
+      "not_after": "2026-08-20T00:00:00Z",
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "protocol_version": "1",
+      "recognition_digest": "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 1
+    },
+    "reversed_interval": {
+      "decision": "recognized",
+      "issued_at": "2026-08-01T00:00:00Z",
+      "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      "not_after": "2026-08-01T00:00:00Z",
+      "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+      "protocol_version": "1",
+      "recognition_digest": "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+      "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+      "rule_id": "org.nthdao.reference/digital-delivery",
+      "sequence": 1
+    }
+  },
   "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
   "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
   "package_manifest": {
@@ -159,6 +197,18 @@
     "rule_id": "org.nthdao.reference/digital-delivery",
     "sequence": 1
   },
+  "recognized_audit_payload": {
+    "decision": "recognized",
+    "issued_at": "2026-08-01T00:00:00Z",
+    "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+    "not_after": "2026-08-20T00:00:00Z",
+    "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+    "protocol_version": "1",
+    "recognition_digest": "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+    "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+    "rule_id": "org.nthdao.reference/digital-delivery",
+    "sequence": 1
+  },
   "revoked": {
     "decision": "revoked",
     "issued_at": "2026-08-02T00:00:00Z",
@@ -178,6 +228,18 @@
     "reason_codes": [
       "security.withdrawn"
     ],
+    "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
+    "rule_id": "org.nthdao.reference/digital-delivery",
+    "sequence": 2
+  },
+  "revoked_audit_payload": {
+    "decision": "revoked",
+    "issued_at": "2026-08-02T00:00:00Z",
+    "issuer_did": "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+    "not_after": "2026-08-20T00:00:00Z",
+    "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+    "protocol_version": "1",
+    "recognition_digest": "sha256:e51f7ce29c0f83831fa6a858f159aa0cf745257b4c0c1e90287335862fbac5b8",
     "recognition_id": "nth-trade-recognition-sha256:1adf3c481cd97327a07db8c5b81a62b2bf51281471051581bc78a7b50134365d",
     "rule_id": "org.nthdao.reference/digital-delivery",
     "sequence": 2

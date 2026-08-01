@@ -225,6 +225,20 @@ from nth_dao.trade_rules.recognition_store import (
     RuleRecognitionStoreCorruption,
     RuleRecognitionStoreError,
 )
+from nth_dao.trade_rules.recognition_audit import (
+    DEFAULT_RULE_RECOGNITION_RECONCILE_LIMIT,
+    EVENT_TRADE_RULE_RECOGNITION_RECORDED,
+    MAX_RULE_RECOGNITION_RECONCILE_LIMIT,
+    RULE_RECOGNITION_AUDIT_PROTOCOL_VERSION,
+    RuleRecognitionAuditCoordinator,
+    RuleRecognitionAuditError,
+    RuleRecognitionAuditIntegrityError,
+    RuleRecognitionAuditReconciliation,
+    RuleRecognitionAuditResult,
+    rule_recognition_audit_payload,
+    validate_rule_recognition_audit_binding,
+    validate_rule_recognition_audit_payload,
+)
 from nth_dao.trade_rules.canonical import (
     MAX_SAFE_INTEGER,
     MAX_TRADE_JSON_BYTES,
@@ -590,4 +604,16 @@ __all__ = [
     "RuleRecognitionStoreCapacity",
     "RuleRecognitionStoreCorruption",
     "RuleRecognitionStoreError",
+    "DEFAULT_RULE_RECOGNITION_RECONCILE_LIMIT",
+    "EVENT_TRADE_RULE_RECOGNITION_RECORDED",
+    "MAX_RULE_RECOGNITION_RECONCILE_LIMIT",
+    "RULE_RECOGNITION_AUDIT_PROTOCOL_VERSION",
+    "RuleRecognitionAuditCoordinator",
+    "RuleRecognitionAuditError",
+    "RuleRecognitionAuditIntegrityError",
+    "RuleRecognitionAuditReconciliation",
+    "RuleRecognitionAuditResult",
+    "rule_recognition_audit_payload",
+    "validate_rule_recognition_audit_binding",
+    "validate_rule_recognition_audit_payload",
 ]

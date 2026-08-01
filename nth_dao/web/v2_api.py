@@ -3765,6 +3765,48 @@ def _state_trade_offer_store(request: Request) -> Optional[Any]:
         return None
 
 
+def _state_trade_rule_package_store(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_rule_packages
+    except AttributeError:
+        return None
+
+
+def _state_trade_rule_recognition_audit(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_rule_recognition_audit
+    except AttributeError:
+        return None
+
+
+def _load_trade_rule_package(request: Request, digest: str) -> Any:
+    from nth_dao.trade_rules import RulePackageError
+
+    store = _state_trade_rule_package_store(request)
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="trade rule package store unavailable",
+        )
+    try:
+        package = store.load(digest)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RulePackageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"trade rule package integrity failure: {exc}",
+        ) from exc
+    if package is None:
+        raise HTTPException(
+            status_code=404,
+            detail="trade rule package not found",
+        )
+    return package
+
+
 def _trade_offer_chain_to_wire(view: Any) -> Dict[str, Any]:
     return {
         "publisher_did": view.publisher_did,
@@ -8046,10 +8088,181 @@ def register_v2_routes(app: FastAPI) -> None:
         return _receipt_detail_to_wire(receipt)
 
     @app.get("/api/v2/rules")
-    def v2_rules() -> List[Dict[str, Any]]:
-        # No persistent rule store exists yet. An honest empty state is safer
-        # than presenting executable-looking sample policy as live authority.
-        return []
+    def v2_rules(request: Request) -> List[Dict[str, Any]]:
+        store = _state_trade_rule_package_store(request)
+        if store is None:
+            return []
+        try:
+            return [
+                {"package_digest": digest}
+                for digest in store.list_digests()
+            ]
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade rule package store unavailable: {exc}",
+            ) from exc
+
+    @app.post(
+        "/api/v2/trade/rule-packages/{package_digest}/recognitions"
+    )
+    async def v2_trade_rule_recognition_record(
+        package_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Persist and audit one already-signed Recognition statement."""
+
+        from nth_dao.trade_rules import (
+            RuleRecognitionAuditError,
+            RuleRecognitionAuditIntegrityError,
+            RuleRecognitionStoreBusy,
+            RuleRecognitionStoreCapacity,
+            RuleRecognitionStoreError,
+            TradeRuleRecognition,
+            TradeRuleRecognitionRejected,
+        )
+
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "trade rule recognition requires "
+                    "Content-Type application/json"
+                ),
+            )
+        coordinator = _state_trade_rule_recognition_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "signed Spine unavailable; unaudited Recognition "
+                    "persistence is disabled"
+                ),
+            )
+        package = _load_trade_rule_package(request, package_digest)
+        raw_body = await request.body()
+
+        def _record() -> Any:
+            return coordinator.record(
+                TradeRuleRecognition.from_json(raw_body),
+                package=package,
+            )
+
+        try:
+            result = await run_in_threadpool(_record)
+        except TradeRuleRecognitionRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuleRecognitionAuditIntegrityError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Recognition cross-log integrity failure: {exc}",
+            ) from exc
+        except RuleRecognitionStoreCapacity as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except RuleRecognitionStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (RuleRecognitionStoreError, RuleRecognitionAuditError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "recognition_digest": result.statement.digest,
+            "recognition": result.statement.to_dict(),
+            "store_created": result.store_created,
+            "anchor_created": result.anchor_created,
+            "audit_event_id": result.event.event_id,
+        }
+
+    @app.get(
+        "/api/v2/trade/rule-packages/{package_digest}/recognitions"
+    )
+    def v2_trade_rule_recognition_list(
+        package_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        from nth_dao.trade_rules import (
+            RuleRecognitionStoreBusy,
+            RuleRecognitionStoreError,
+        )
+
+        coordinator = _state_trade_rule_recognition_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed Recognition audit unavailable",
+            )
+        package = _load_trade_rule_package(request, package_digest)
+        try:
+            statements = coordinator.store.list_for_package(package)
+            ok, reason = coordinator.verify_anchors(package=package)
+        except RuleRecognitionStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except RuleRecognitionStoreError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Recognition cross-log integrity failure: {reason}",
+            )
+        return {
+            "package_digest": package.digest,
+            "items": [statement.to_dict() for statement in statements],
+        }
+
+    @app.post(
+        "/api/v2/trade/rule-packages/{package_digest}"
+        "/recognitions/reconcile"
+    )
+    def v2_trade_rule_recognition_reconcile(
+        package_digest: str,
+        request: Request,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        from nth_dao.trade_rules import (
+            RuleRecognitionAuditError,
+            RuleRecognitionAuditIntegrityError,
+            RuleRecognitionStoreError,
+        )
+
+        coordinator = _state_trade_rule_recognition_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed Recognition audit unavailable",
+            )
+        package = _load_trade_rule_package(request, package_digest)
+        try:
+            result = coordinator.reconcile(
+                package=package,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuleRecognitionAuditIntegrityError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Recognition cross-log integrity failure: {exc}",
+            ) from exc
+        except (RuleRecognitionStoreError, RuleRecognitionAuditError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "scanned": result.scanned,
+            "anchored": result.anchored,
+            "verified_anchored": result.verified_anchored,
+            "failed": result.failed,
+            "remaining": result.remaining,
+            "has_more": result.has_more,
+            "blocked_digest": result.blocked_digest,
+            "error_code": result.error_code,
+            "error_message": result.error_message,
+        }
 
     @app.post("/api/v2/trade/offers")
     async def v2_trade_offer_publish(request: Request) -> Dict[str, Any]:

@@ -196,12 +196,38 @@ approve.
 Verified Recognition statements may be imported into a bounded,
 content-addressed local CAS. Invalid input bytes are not retained; the
 quarantine stores only a digest, reason code, and observation time. Store reads
-reverify signatures, package bindings, filenames, and path safety. Spine
-projection, signed issuer-head exchange, and federation transport remain
-separate future slices, so this release does not claim globally fresh
-revocation. The CAS is not an audit ledger: deleting both local facts and any
-future checkpoint can still erase local history until another node presents a
-signed conflicting head.
+reverify signatures, package bindings, filenames, and path safety.
+
+Local audit projection persists the exact signed statement in the CAS before
+appending one idempotent `trade.rule.recognition.recorded` event to the signed
+Spine. The Spine payload binds the statement digest, Recognition ID, Rule ID,
+package digest, issuer, sequence, decision, and validity interval. If a process
+stops after the CAS write, package-scoped reconciliation can recover the
+missing anchor without resubmitting the statement. Cross-log verification
+fails closed on missing, duplicate, conflicting, or orphaned local anchors.
+The CAS therefore acts as the recovery source, not as a second audit ledger.
+
+The Web v2 boundary exposes this flow through:
+
+- `POST /api/v2/trade/rule-packages/{digest}/recognitions` to verify, store,
+  and anchor an already issuer-signed statement;
+- `GET /api/v2/trade/rule-packages/{digest}/recognitions` to return statements
+  only after CAS/Spine cross-log verification succeeds; and
+- `POST /api/v2/trade/rule-packages/{digest}/recognitions/reconcile` to repair
+  store-first crash residue from the current pending set.
+
+Writes require the normal console authorization boundary and a signed local
+Spine. They never fall back to unaudited CAS persistence. Request bodies are
+bounded before parsing. Reconciliation is stateless across calls, stops at the
+first anchor failure, and returns the blocked digest plus a stable error code.
+An orphan or conflicting Spine anchor is rollback evidence and blocks both new
+writes and reconciliation until the exact signed statement is restored or an
+operator resolves the integrity incident.
+
+Signed issuer-head exchange and federation transport remain separate future
+slices, so this release does not claim globally fresh revocation. Deleting both
+the local CAS and Spine can still erase local history until another node
+presents a signed conflicting head.
 
 ## Bilateral Agreement and Order
 
@@ -458,8 +484,10 @@ The reviewed protocol kernel currently contains:
   resolution;
 - signed, sequence-linked Rule Recognition v1 statements and deterministic
   scoped local quorum projection, bounded expiry, durable CAS import, and
-  metadata-only invalid-input quarantine, without automatic execution
-  authority or claims of globally fresh revocation;
+  metadata-only invalid-input quarantine, plus recoverable exact-digest
+  `trade.rule.recognition.recorded` Spine anchoring and cross-log validation,
+  without automatic execution authority or claims of globally fresh
+  revocation;
 - canonical Offer-head and policy-snapshot binding before Order-facing rule
   resolution;
 - signed bilateral Proposal and Acceptance statements with independent local
@@ -492,7 +520,7 @@ The reviewed protocol kernel currently contains:
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Execution Receipt v1, Receipt Review v1, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
-  Receipt Review audit payloads;
+  Rule Recognition and Receipt Review audit payloads;
 - focused tests.
 
 Agreement and Order objects remain protocol-kernel primitives. The audit
