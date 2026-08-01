@@ -50,6 +50,14 @@ _HTTP_TIMEOUT_S = 8.0
 _MAX_GOSSIP_PEER_LIST = 64
 _MAX_HTTP_JSON_BYTES = 512 * 1024
 _DEFAULT_STALE_TTL_MS = 2 * 60 * 1000
+_DEFAULT_MAX_RECORDS_PER_PEER = 2_000
+_DEFAULT_MAX_CACHE_RECORDS = 10_000
+_DEFAULT_MAX_CACHE_RECORDS_PER_SOURCE = 2_000
+_DEFAULT_MAX_CACHE_BYTES = 64 * 1024 * 1024
+
+
+class FederationCacheCapacityError(RuntimeError):
+    """A complete federation snapshot exceeds configured local capacity."""
 
 
 @dataclass
@@ -281,12 +289,19 @@ def _collect_refs_via_digest(
     http_get: HttpGetJson,
     *,
     expected_source_did: str,
+    max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
 ) -> Optional[List[Dict[str, str]]]:
     """增量翻页拉对端 digest,收集所有 ref 的 announcement_id(去重保序)。
 
     带 ``since=high_seq`` 一页页翻,直到游标不再推进(到底)或撞安全上限。
     任一页 provenance 验不过 → 返回 None(整个 peer 不可信,fail-closed)。
     """
+    if (
+        isinstance(max_records, bool)
+        or not isinstance(max_records, int)
+        or max_records <= 0
+    ):
+        raise ValueError("max_records must be a positive integer")
     collected: List[Dict[str, str]] = []
     seen: set = set()
     cursor = -1
@@ -329,6 +344,11 @@ def _collect_refs_via_digest(
             )
             if dedupe_key in seen:
                 continue
+            if len(collected) >= max_records:
+                logger.warning(
+                    "fed: peer %s exceeded the per-peer record limit", base,
+                )
+                return None
             seen.add(dedupe_key)
             item = {"announcement_id": aid}
             if isinstance(federation_key, str) and federation_key:
@@ -347,6 +367,8 @@ def _pull_from_peer_snapshot(
     http_get: HttpGetJson = _urllib_get_json,
     *,
     expected_source_did: str,
+    verified_documents: Optional[Dict[str, Any]] = None,
+    max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
 ) -> Optional[List[TaskAnnouncement]]:
     """从一个 peer 拉取**已双层验签**的开放公告(digest 翻页 + 全文分批拉)。
 
@@ -362,10 +384,13 @@ def _pull_from_peer_snapshot(
         base,
         http_get,
         expected_source_did=expected_source_did,
+        max_records=max_records,
     )
     if refs is None:
         return None
     if not refs:
+        if verified_documents is not None:
+            verified_documents.clear()
         return []
     out: List[TaskAnnouncement] = []
     verified_listings: Dict[str, Any] = {}
@@ -384,6 +409,7 @@ def _pull_from_peer_snapshot(
             if not isinstance(praw, list):
                 return None
             requested = set(batch)
+            returned: Set[str] = set()
             for item in praw:
                 if not isinstance(item, dict):
                     return None
@@ -401,6 +427,12 @@ def _pull_from_peer_snapshot(
                         "fed: peer %s returned an unrequested announcement", base,
                     )
                     return None
+                if selector in returned:
+                    logger.warning(
+                        "fed: peer %s returned a duplicate announcement", base,
+                    )
+                    return None
+                returned.add(selector)
                 vok, _ = verify_announcement(ann)
                 if (
                     vok
@@ -421,6 +453,15 @@ def _pull_from_peer_snapshot(
                     return None
                 else:
                     return None
+            if returned != requested:
+                logger.warning(
+                    "fed: peer %s returned an incomplete announcement batch",
+                    base,
+                )
+                return None
+    if verified_documents is not None:
+        verified_documents.clear()
+        verified_documents.update(verified_listings)
     return out
 
 
@@ -493,12 +534,16 @@ def pull_from_peer(
     *,
     expected_source_did: str,
     _completion: Optional[Dict[str, bool]] = None,
+    _verified_documents: Optional[Dict[str, Any]] = None,
+    _max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
 ) -> List[TaskAnnouncement]:
     """Return a verified snapshot, preserving the historical list API."""
     snapshot = _pull_from_peer_snapshot(
         peer_base,
         http_get,
         expected_source_did=expected_source_did,
+        verified_documents=_verified_documents,
+        max_records=_max_records,
     )
     if _completion is not None:
         _completion["complete"] = snapshot is not None
@@ -650,6 +695,7 @@ def federate_once(
     cancelled: Optional[Callable[[], bool]] = None,
     start_offset: int = 0,
     cycle_report: Optional[FederationCycleReport] = None,
+    max_records: int = _DEFAULT_MAX_CACHE_RECORDS,
 ) -> Dict[str, Dict[str, Any]]:
     """对 peer 图做 **BFS 传递发现**:从 seed 出发,拉每个 peer 的任务 + 它的
     peer 列表(gossip 成员),把新 peer 入队继续展开,直到无新 peer 或撞
@@ -660,6 +706,12 @@ def federate_once(
     seen 去重 + max_peers 上限 → 防环、防恶意 peer 把图撑爆。
     """
     now = now_ms_override or now_ms()
+    if (
+        isinstance(max_records, bool)
+        or not isinstance(max_records, int)
+        or max_records <= 0
+    ):
+        raise ValueError("max_records must be a positive integer")
     deadline = (
         time.monotonic() + max_duration_s
         if max_duration_s and max_duration_s > 0
@@ -753,11 +805,13 @@ def federate_once(
             continue
         # 任务:直连该 peer 拉全文 + 验签。
         completion: Dict[str, bool] = {}
+        verified_documents: Dict[str, Any] = {}
         snapshot = pull_from_peer(
             peer,
             federation_http_get,
             expected_source_did=peer_did,
             _completion=completion,
+            _verified_documents=verified_documents,
         )
         # Injected legacy pullers return a list without filling the optional
         # report; their historical contract treats that list as complete.
@@ -769,14 +823,34 @@ def federate_once(
             federation_key = announcement_federation_key(ann)
             if federation_key in merged:
                 continue
+            if len(merged) >= max_records:
+                raise FederationCacheCapacityError(
+                    "federation cycle exceeds the global record limit"
+                )
             if ann.is_expired(now_ms_override=now):
                 continue
-            merged[federation_key] = {
+            entry: Dict[str, Any] = {
                 "ann": ann,
                 "source": peer,
                 "source_did": peer_did,
                 "federation_key": federation_key,
             }
+            from nth_dao.market.announcement import (
+                NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+            )
+            if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+                from nth_dao.trade_rules.offer import TradeOffer
+
+                trade_offer = verified_documents.get(ann.offer_digest)
+                if not isinstance(trade_offer, TradeOffer):
+                    logger.warning(
+                        "fed: verified Trade Offer missing for %s from %s",
+                        ann.offer_digest,
+                        peer,
+                    )
+                    continue
+                entry["trade_offer"] = trade_offer
+            merged[federation_key] = entry
         # gossip:学这个 peer 的 peer 列表 → 传递发现下一跳。
         # 发现到的是不可信网络数据 → 必须过 SSRF 公网校验才入队。
         candidates_considered = 0
@@ -829,7 +903,7 @@ def _isolated_cache_entry(
     ann = entry.get("ann")
     if not isinstance(ann, TaskAnnouncement):
         raise TypeError("federation cache entry requires a TaskAnnouncement")
-    return {
+    isolated: Dict[str, Any] = {
         "ann": TaskAnnouncement.from_dict(ann.to_dict()),
         "source": str(entry.get("source") or "").rstrip("/"),
         "source_did": str(entry.get("source_did") or ""),
@@ -837,6 +911,28 @@ def _isolated_cache_entry(
         "stale": bool(stale),
         "last_verified_ms": int(last_verified_ms),
     }
+    from nth_dao.market.announcement import (
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+    )
+    if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+        from nth_dao.market.trade_offer_announcement import (
+            verify_trade_offer_announcement_binding,
+        )
+        from nth_dao.trade_rules.offer import TradeOffer
+
+        raw_offer = entry.get("trade_offer")
+        if not isinstance(raw_offer, TradeOffer):
+            raise TypeError(
+                "exchange federation cache entry requires a verified TradeOffer"
+            )
+        offer = TradeOffer.from_json(raw_offer.canonical_bytes)
+        ok, reason = verify_trade_offer_announcement_binding(offer, ann)
+        if not ok:
+            raise ValueError(f"federated Trade Offer binding failed: {reason}")
+        if isolated["source_did"] != ann.effective_authority_did():
+            raise ValueError("federated Trade Offer source DID mismatch")
+        isolated["trade_offer"] = offer
+    return isolated
 
 
 class FederationCache:
@@ -846,15 +942,85 @@ class FederationCache:
     +快照拷贝避免读写竞争。
     """
 
-    def __init__(self, *, stale_ttl_ms: int = _DEFAULT_STALE_TTL_MS) -> None:
+    def __init__(
+        self,
+        *,
+        stale_ttl_ms: int = _DEFAULT_STALE_TTL_MS,
+        max_records: int = _DEFAULT_MAX_CACHE_RECORDS,
+        max_records_per_source: int = _DEFAULT_MAX_CACHE_RECORDS_PER_SOURCE,
+        max_bytes: int = _DEFAULT_MAX_CACHE_BYTES,
+    ) -> None:
         if stale_ttl_ms <= 0:
             raise ValueError("stale_ttl_ms must be positive")
+        for label, value in (
+            ("max_records", max_records),
+            ("max_records_per_source", max_records_per_source),
+            ("max_bytes", max_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{label} must be a positive integer")
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._offer_index: Dict[str, Set[str]] = {}
         self._stale_ttl_ms = int(stale_ttl_ms)
+        self._max_records = max_records
+        self._max_records_per_source = max_records_per_source
+        self._max_bytes = max_bytes
         self._last_refresh_ms = 0
         self._last_error = ""
         self._last_peer_count = 0
+
+    @staticmethod
+    def _entry_size_bytes(entry: Dict[str, Any]) -> int:
+        ann = entry.get("ann")
+        body: Dict[str, Any] = {
+            "ann": ann.to_dict() if isinstance(ann, TaskAnnouncement) else None,
+            "source": entry.get("source"),
+            "source_did": entry.get("source_did"),
+            "federation_key": entry.get("federation_key"),
+            "stale": bool(entry.get("stale")),
+            "last_verified_ms": int(entry.get("last_verified_ms") or 0),
+        }
+        trade_offer = entry.get("trade_offer")
+        if trade_offer is not None and hasattr(trade_offer, "to_dict"):
+            body["trade_offer"] = trade_offer.to_dict()
+        return len(json.dumps(
+            body,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+
+    def _validate_capacity(self, entries: Dict[str, Dict[str, Any]]) -> None:
+        if len(entries) > self._max_records:
+            raise FederationCacheCapacityError(
+                "federation cache exceeds the global record limit"
+            )
+        per_source: Dict[str, int] = {}
+        total_bytes = 0
+        for entry in entries.values():
+            source = str(entry.get("source") or "")
+            per_source[source] = per_source.get(source, 0) + 1
+            if per_source[source] > self._max_records_per_source:
+                raise FederationCacheCapacityError(
+                    "federation cache exceeds the per-source record limit"
+                )
+            total_bytes += self._entry_size_bytes(entry)
+            if total_bytes > self._max_bytes:
+                raise FederationCacheCapacityError(
+                    "federation cache exceeds the byte limit"
+                )
+
+    def _rebuild_offer_index_locked(self) -> None:
+        index: Dict[str, Set[str]] = {}
+        for key, entry in self._data.items():
+            ann = entry.get("ann")
+            if not isinstance(ann, TaskAnnouncement):
+                continue
+            digest = str(getattr(ann, "offer_digest", "") or "")
+            if digest and "trade_offer" in entry:
+                index.setdefault(digest, set()).add(key)
+        self._offer_index = index
 
     def replace_all(
         self,
@@ -876,8 +1042,10 @@ class FederationCache:
                 stale=False,
                 last_verified_ms=now_ms(),
             )
+        self._validate_capacity(normalized)
         with self._lock:
             self._data = normalized
+            self._rebuild_offer_index_locked()
             self._last_refresh_ms = now_ms()
             self._last_error = ""
             self._last_peer_count = max(0, int(peer_count or 0))
@@ -926,7 +1094,9 @@ class FederationCache:
                     continue
                 retained[key] = {**entry, "stale": True}
             retained.update(incoming)
+            self._validate_capacity(retained)
             self._data = retained
+            self._rebuild_offer_index_locked()
             self._last_refresh_ms = observed_at
             self._last_error = str(error or "")[:500]
             self._last_peer_count = max(0, int(peer_count or 0))
@@ -939,6 +1109,7 @@ class FederationCache:
                 key: entry for key, entry in self._data.items()
                 if str(entry.get("source") or "").rstrip("/") != normalized
             }
+            self._rebuild_offer_index_locked()
 
     def mark_error(self, error: str, *, peer_count: int = 0) -> None:
         self.apply_cycle(
@@ -948,8 +1119,36 @@ class FederationCache:
             error=error,
         )
 
-    def snapshot(self) -> Dict[str, Dict[str, Any]]:
+    def _entry_is_current(
+        self,
+        entry: Dict[str, Any],
+        observed_at: int,
+    ) -> bool:
+        ann = entry.get("ann")
+        verified_at = int(entry.get("last_verified_ms") or 0)
+        if not isinstance(ann, TaskAnnouncement):
+            return False
+        if ann.is_expired(now_ms_override=observed_at):
+            return False
+        age = observed_at - verified_at
+        return verified_at > 0 and 0 <= age <= self._stale_ttl_ms
+
+    def _prune_expired_locked(self, observed_at: int) -> None:
+        retained: Dict[str, Dict[str, Any]] = {}
+        for key, entry in self._data.items():
+            if self._entry_is_current(entry, observed_at):
+                retained[key] = entry
+        self._data = retained
+        self._rebuild_offer_index_locked()
+
+    def snapshot(
+        self,
+        *,
+        now_ms_override: int = 0,
+    ) -> Dict[str, Dict[str, Any]]:
+        observed_at = int(now_ms_override or now_ms())
         with self._lock:
+            self._prune_expired_locked(observed_at)
             captured = list(self._data.items())
         return {
             key: _isolated_cache_entry(
@@ -961,8 +1160,38 @@ class FederationCache:
             for key, entry in captured
         }
 
+    def trade_offer_snapshot(
+        self,
+        digest: str,
+        *,
+        now_ms_override: int = 0,
+    ) -> List[Dict[str, Any]]:
+        observed_at = int(now_ms_override or now_ms())
+        with self._lock:
+            indexed_keys = set(self._offer_index.get(digest, set()))
+            captured = []
+            for key in sorted(indexed_keys):
+                entry = self._data.get(key)
+                if entry is None or not self._entry_is_current(entry, observed_at):
+                    self._data.pop(key, None)
+                    self._offer_index.get(digest, set()).discard(key)
+                    continue
+                captured.append((key, entry))
+            if not self._offer_index.get(digest):
+                self._offer_index.pop(digest, None)
+        return [
+            _isolated_cache_entry(
+                entry,
+                federation_key=key,
+                stale=bool(entry.get("stale")),
+                last_verified_ms=int(entry.get("last_verified_ms") or 0),
+            )
+            for key, entry in captured
+        ]
+
     def status(self) -> Dict[str, Any]:
         with self._lock:
+            self._prune_expired_locked(now_ms())
             return {
                 "cached_announcements": len(self._data),
                 "last_refresh_ms": self._last_refresh_ms,

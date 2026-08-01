@@ -62,6 +62,7 @@ vi.mock("../api", () => ({
   fetchAgents: vi.fn().mockResolvedValue([]),
   claimTask: vi.fn(),
   claimFederatedTask: vi.fn(),
+  getTradeOfferInspection: vi.fn(),
 }));
 
 import {
@@ -69,6 +70,7 @@ import {
   claimTask,
   discoverFederationPeers,
   fetchAgents,
+  getTradeOfferInspection,
   refreshFederation,
   updateFederationPeer,
 } from "../api";
@@ -332,7 +334,7 @@ describe("TasksView", () => {
 
   it("shows exchange discovery without routing it into task claim", async () => {
     const { listOpenTasks } = await import("../api");
-    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+    const exchangeTask: Awaited<ReturnType<typeof listOpenTasks>>[number] = {
       announcement_id: "exchange-1",
       federation_key: "nth-ann-sha256:exchange",
       publisher_did: "did:key:zPublisher",
@@ -351,7 +353,71 @@ describe("TasksView", () => {
       claimable: false,
       federated: true,
       source_peer: "https://publisher.example",
-    }]);
+    };
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([
+      exchangeTask,
+      {
+        ...exchangeTask,
+        announcement_id: "exchange-2",
+        federation_key: "nth-ann-sha256:exchange-2",
+        source_peer: "https://mirror.example",
+      },
+    ]);
+    vi.mocked(getTradeOfferInspection).mockResolvedValueOnce({
+      digest: `sha256:${"a".repeat(64)}`,
+      offer: {
+        kind: "org.nthdao.trade.offer",
+        protocol_version: "2.0",
+        offer_id: "org.nthdao.tests/swap",
+        revision: 1,
+        previous_offer_digest: null,
+        state: "active",
+        publisher_did: "did:key:zPublisher",
+        title: "Compute for design",
+        summary: "Exchange compute for review.",
+        provides: [{
+          leg_id: "compute",
+          resource_type: "service:compute",
+          resource_id: "urn:nth:test:compute",
+          quantity: "1",
+          unit: "task",
+          descriptor_digest: `sha256:${"b".repeat(64)}`,
+        }],
+        requests: [{
+          leg_id: "review",
+          resource_type: "service:code-review",
+          resource_id: "urn:nth:test:review",
+          quantity: "1",
+          unit: "review",
+          descriptor_digest: `sha256:${"c".repeat(64)}`,
+        }],
+        rule_refs: [{
+          rule_id: "org.nthdao.rules/review-swap",
+          digest: `sha256:${"e".repeat(64)}`,
+        }],
+        published_at: "2026-08-01T00:00:00Z",
+        not_after: "2026-08-02T00:00:00Z",
+        extensions: {},
+        proof: {},
+      },
+      discoveries: [{
+        announcement_id: "exchange-1",
+        federation_key: "nth-ann-sha256:exchange",
+        source_peer: "https://publisher.example",
+        source_did: "did:key:zPublisher",
+        stale: false,
+        last_verified_ms: Date.parse("2026-08-01T00:01:00Z"),
+      }],
+      verification: {
+        offer_signature_valid: true,
+        announcement_binding_valid: true,
+        source_did_bound: true,
+        recent_source_verified: true,
+      },
+      authority: "remote-publisher",
+      actionable: false,
+      warning: "A valid signature proves authorship, not availability.",
+    });
 
     render(
       <LangProvider>
@@ -361,12 +427,65 @@ describe("TasksView", () => {
       </LangProvider>,
     );
 
-    expect(await screen.findByText("Compute for design")).toBeTruthy();
-    expect(screen.getByText(/org\.nthdao\.tests\/swap/)).toBeTruthy();
-    expect(screen.getByText("Signed offer")).toBeTruthy();
+    expect(await screen.findAllByText("Compute for design")).toHaveLength(2);
+    expect(screen.getAllByText(/org\.nthdao\.tests\/swap/)).toHaveLength(2);
+    expect(screen.getAllByText("Signed offer")).toHaveLength(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Inspect terms" })[0]);
+    expect(await screen.findByText("Signed exchange terms")).toBeTruthy();
+    expect(screen.getAllByLabelText("Signed exchange terms")).toHaveLength(1);
+    expect(screen.getByText("1 task · service:compute")).toBeTruthy();
+    expect(screen.getByText("1 review · service:code-review")).toBeTruthy();
+    expect(screen.getByText(/org\.nthdao\.rules\/review-swap/)).toBeTruthy();
+    expect(screen.getByText("Remote source recently verified · 1 discovery source(s)")).toBeTruthy();
+    expect(screen.getByText(/Last verified: 2026-08-01T00:01:00\.000Z/)).toBeTruthy();
+    expect(getTradeOfferInspection).toHaveBeenCalledWith(
+      `sha256:${"a".repeat(64)}`,
+      true,
+      expect.any(AbortSignal),
+    );
     expect(screen.queryByText("claim (cross-DAO)")).toBeNull();
     expect(claimTask).not.toHaveBeenCalled();
     expect(claimFederatedTask).not.toHaveBeenCalled();
+  });
+
+  it("shows a visible error when signed offer inspection fails", async () => {
+    const { listOpenTasks } = await import("../api");
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "exchange-error",
+      federation_key: "nth-ann-sha256:exchange-error",
+      publisher_did: "did:key:zPublisher",
+      title: "Unavailable exchange detail",
+      listing_type: "exchange",
+      offer_digest: `sha256:${"d".repeat(64)}`,
+      availability_summary: {
+        offer_id: "org.nthdao.tests/unavailable-swap",
+        revision: 1,
+        state: "active",
+      },
+      capability_set: [],
+      context: "trade",
+      reward_minor: 0,
+      reward_asset: "exchange",
+      claimable: false,
+      federated: true,
+    }]);
+    vi.mocked(getTradeOfferInspection).mockRejectedValueOnce(
+      new Error("GET cached offer returned HTTP 503"),
+    );
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <TasksView />
+        </ToastProvider>
+      </LangProvider>,
+    );
+    await screen.findByText("Unavailable exchange detail");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect terms" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Could not inspect this signed offer",
+    );
   });
 
   it("allows adding a federation seed peer from the Tasks sidebar", async () => {

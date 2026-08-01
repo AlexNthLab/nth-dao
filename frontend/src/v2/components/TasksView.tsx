@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   announceTask, claimFederatedTask, claimTask, discoverFederationPeers, fetchAgents, getFederationStatus,
+  getTradeOfferInspection,
   listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
 } from "../api";
 import { IconBriefcase } from "./Icons";
@@ -21,6 +22,7 @@ import type {
   FederationStatus,
   TaskAnnouncement,
   TaskCategory,
+  TradeOfferInspection,
 } from "../types-v2";
 
 function visibilityWarningLabel(
@@ -38,6 +40,16 @@ function visibilityWarningLabel(
       }
       return t("执行视图写入异常", "Execution view persistence warning");
   }
+}
+
+function tradeOfferSelectionKey(task: TaskAnnouncement): string {
+  return `${task.federation_key || task.announcement_id}:${task.offer_digest || ""}`;
+}
+
+function tradeOfferSourceCount(inspection: TradeOfferInspection): number {
+  return new Set(inspection.discoveries.map(
+    (item) => `${item.source_did}\u0000${item.source_peer}`,
+  )).size;
 }
 
 function formatFederationRefresh(ms: number): string {
@@ -89,7 +101,14 @@ export function TasksView() {
   const [fedStatus, setFedStatus] = useState<FederationStatus | null>(null);
   const [fedPeerUrl, setFedPeerUrl] = useState("");
   const [fedBusy, setFedBusy] = useState(false);
+  const [offerInspection, setOfferInspection] = useState<TradeOfferInspection | null>(null);
+  const [offerInspectionKey, setOfferInspectionKey] = useState("");
+  const [offerInspectionError, setOfferInspectionError] = useState("");
   const fedRequestSequence = useRef(0);
+  const offerInspectionRequestSequence = useRef(0);
+  const offerInspectionAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => () => offerInspectionAbort.current?.abort(), []);
 
   function beginFederationRequest(): number {
     fedRequestSequence.current += 1;
@@ -334,6 +353,42 @@ export function TasksView() {
       );
     } finally {
       setPublishing(false);
+    }
+  }
+
+  async function handleInspectOffer(task: TaskAnnouncement) {
+    const digest = task.offer_digest || "";
+    if (!digest) return;
+    const selectionKey = tradeOfferSelectionKey(task);
+    if (offerInspectionKey === selectionKey && offerInspection) {
+      offerInspectionAbort.current?.abort();
+      offerInspectionRequestSequence.current += 1;
+      setOfferInspection(null);
+      setOfferInspectionKey("");
+      setOfferInspectionError("");
+      return;
+    }
+    offerInspectionAbort.current?.abort();
+    const controller = new AbortController();
+    offerInspectionAbort.current = controller;
+    setOfferInspectionKey(selectionKey);
+    setOfferInspection(null);
+    setOfferInspectionError("");
+    const requestSequence = ++offerInspectionRequestSequence.current;
+    try {
+      const detail = await getTradeOfferInspection(
+        digest,
+        task.federated === true,
+        controller.signal,
+      );
+      if (requestSequence !== offerInspectionRequestSequence.current) return;
+      setOfferInspection(detail);
+    } catch (error) {
+      if (requestSequence !== offerInspectionRequestSequence.current) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setOfferInspectionError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -899,7 +954,11 @@ export function TasksView() {
             </div>
           ) : (
             <div className="stack" style={{ gap: 10 }}>
-              {shown.map((task) => (
+              {shown.map((task) => {
+                const offerSelected = (
+                  offerInspectionKey === tradeOfferSelectionKey(task)
+                );
+                return (
                 <article
                   key={task.announcement_id}
                   style={{
@@ -995,17 +1054,138 @@ export function TasksView() {
                     </div>
                   )}
                   {task.listing_type === "exchange" && task.offer_digest && (
-                    <div
-                      className="muted"
-                      style={{
-                        marginTop: 8,
-                        fontSize: 11,
-                        fontFamily: "var(--t-mono)",
-                      }}
-                    >
-                      {String(task.availability_summary?.offer_id || "Trade Offer")}
-                      {` - ${task.offer_digest.slice(0, 22)}...`}
-                    </div>
+                    <>
+                      <div
+                        className="muted"
+                        style={{
+                          marginTop: 8,
+                          fontSize: 11,
+                          fontFamily: "var(--t-mono)",
+                          overflowWrap: "anywhere",
+                        }}
+                      >
+                        {String(task.availability_summary?.offer_id || "Trade Offer")}
+                        {` - ${task.offer_digest.slice(0, 22)}...`}
+                        <button
+                          className="btn btn-ghost"
+                          style={{ marginLeft: 8 }}
+                          aria-expanded={
+                            offerSelected && offerInspection !== null
+                          }
+                          onClick={() => void handleInspectOffer(task)}
+                        >
+                          {offerSelected && !offerInspection && !offerInspectionError
+                            ? "Inspecting..."
+                            : offerSelected && offerInspection
+                              ? "Close terms"
+                              : "Inspect terms"}
+                        </button>
+                      </div>
+                      {offerSelected && offerInspectionError && (
+                        <p role="alert" style={{ color: "var(--danger)", marginTop: 8 }}>
+                          Could not inspect this signed offer. {offerInspectionError}
+                        </p>
+                      )}
+                      {offerSelected && offerInspection && (
+                        <section
+                          aria-label="Signed exchange terms"
+                          style={{
+                            borderTop: "1px solid var(--border)",
+                            marginTop: 10,
+                            paddingTop: 10,
+                          }}
+                        >
+                          <p style={{ margin: 0, fontWeight: 600 }}>
+                            Signed exchange terms
+                          </p>
+                          <p className="muted" style={{ margin: "4px 0" }}>
+                            Revision {offerInspection.offer.revision}
+                            {` · ${offerInspection.offer.state}`}
+                            {offerInspection.offer.not_after
+                              ? ` · expires ${offerInspection.offer.not_after}`
+                              : " · no declared expiry"}
+                          </p>
+                          <p className="muted" style={{ margin: "4px 0 10px" }}>
+                            {offerInspection.warning}
+                          </p>
+                          <div style={{ margin: "8px 0 10px" }}>
+                            <strong>Verification</strong>
+                            <div className="muted">
+                              Publisher signature verified
+                              {offerInspection.verification.announcement_binding_valid === true
+                                ? " · announcement bound"
+                                : ""}
+                              {offerInspection.verification.source_did_bound === true
+                                ? " · source DID bound"
+                                : ""}
+                            </div>
+                            {offerInspection.authority === "remote-publisher" && (
+                              <div
+                                style={{
+                                  color: offerInspection.verification.recent_source_verified
+                                    ? "var(--success)"
+                                    : "var(--warning)",
+                                }}
+                              >
+                                {offerInspection.verification.recent_source_verified
+                                  ? "Remote source recently verified"
+                                  : "No recently verified remote source"}
+                                {` · ${tradeOfferSourceCount(offerInspection)} discovery source(s)`}
+                              </div>
+                            )}
+                            {offerInspection.discoveries.length > 0 && (
+                              <div className="muted">
+                                Last verified: {new Date(Math.max(
+                                  ...offerInspection.discoveries.map(
+                                    (item) => item.last_verified_ms,
+                                  ),
+                                )).toISOString()}
+                              </div>
+                            )}
+                          </div>
+                          {([
+                            ["Provides", offerInspection.offer.provides],
+                            ["Requests", offerInspection.offer.requests],
+                          ] as const).map(([label, legs]) => (
+                            <div key={label} style={{ marginTop: 8 }}>
+                              <strong>{label}</strong>
+                              {legs.length === 0 ? (
+                                <p className="muted">None declared</p>
+                              ) : legs.map((leg) => (
+                                <div
+                                  key={`${label}-${leg.leg_id}`}
+                                  style={{ marginTop: 4, overflowWrap: "anywhere" }}
+                                >
+                                  {leg.quantity} {leg.unit} · {leg.resource_type}
+                                  <div className="muted" style={{ fontFamily: "var(--t-mono)" }}>
+                                    {leg.resource_id}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                          <div className="muted" style={{ marginTop: 10, overflowWrap: "anywhere" }}>
+                            Signer: {offerInspection.offer.publisher_did}
+                          </div>
+                          {offerInspection.offer.rule_refs.length > 0 ? (
+                            <div style={{ marginTop: 8 }}>
+                              <strong>Applicable rule references</strong>
+                              {offerInspection.offer.rule_refs.map((rule) => (
+                                <div
+                                  key={`${rule.rule_id}-${rule.digest}`}
+                                  className="muted"
+                                  style={{ fontFamily: "var(--t-mono)", overflowWrap: "anywhere" }}
+                                >
+                                  {rule.rule_id} · {rule.digest}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="muted">No rule references declared.</p>
+                          )}
+                        </section>
+                      )}
+                    </>
                   )}
                   <div
                     style={{
@@ -1061,7 +1241,8 @@ export function TasksView() {
                     )}
                   </div>
                 </article>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

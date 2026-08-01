@@ -114,12 +114,20 @@ For every accepted peer, the market poller performs:
 1. `GET /api/v2/market/federation/digest?since=<cursor>`
 2. Verify the digest source DID and signature.
 3. Select announcement IDs and fetch them in bounded batches from
-   `GET /api/v2/market/federation/pull?ids=...`.
+   `GET /api/v2/market/federation/pull?ids=...`. Every response batch must
+   contain exactly the requested selectors; omissions, duplicates, and extras
+   invalidate the complete source snapshot.
 4. Verify every full announcement's publisher signature.
 5. For an exchange hint, fetch the exact Trade Offer from its fixed digest
    route, verify the Offer signature and digest, then verify every summary and
    lifetime binding again.
 6. Merge unexpired records into the local read-only federation cache.
+
+The console may inspect the exact remote Trade Offer retained with an exchange
+announcement. That document is isolated from the network response and verified
+again when read. It remains a volatile read model: it is not imported into the
+local Offer Store, does not survive process restart or stale-entry eviction, and
+does not become local authority for the Offer.
 
 Remote records are not copied into the local authoritative feed and therefore
 are not re-announced as local work. Claims return to the announcement's source
@@ -161,6 +169,7 @@ complete view.
 | `POST /api/v2/market/federation/refresh` | Run one synchronous pull | Console write |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
+| `GET /api/v2/trade/federation/cached-offers/{digest}` | Reverify and inspect a volatile remote Offer cached with a discovery announcement | Console read |
 
 ## Security Boundaries
 
@@ -172,6 +181,10 @@ complete view.
 - Redirects are rejected while fetching identity cards.
 - Identity cards, HTTP bodies, peer lists, graph breadth, cycle duration,
   learned-peer storage, and hello rates are bounded.
+- Feed collection accepts at most 2,000 records per peer. The read cache
+  accepts at most 10,000 records globally, 2,000 per source, and 64 MiB of
+  canonical projected data. Exceeding a bound rejects the complete cycle;
+  records are never silently truncated into a false open-set snapshot.
 - Reverse hello is limited both per source address (12/minute) and per node
   (120/minute), with a locked cross-worker budget when a workspace is present.
 - Exact Trade Offer reads use a process-local source gate (120/minute) before a
@@ -198,10 +211,14 @@ cloud-metadata destinations.
   decide what a verified peer is allowed to do.
 - The federation cache is a read model. Durable authoritative ownership stays
   with the source DAO.
-- Remote Trade Offer documents are verified during synchronization but are not
-  yet retained as a local actionable Offer chain. Discovery therefore supports
-  verified summary matching, not local full-document inspection or remote
+- Remote Trade Offer documents are retained only in the volatile, read-only
+  federation cache and are reverified for console inspection. They disappear
+  on process restart or stale-entry eviction and are not imported as a local
+  actionable Offer chain. Inspection therefore does not authorize remote
   Agreement creation in this slice.
+- A recent source verification means the signed snapshot was verified within
+  the local two-minute cache TTL. It does not prove that the source is currently
+  online or that the advertised resource is still available.
 - Open-set absence removes withdrawn or superseded Offer announcements from
   the current projection, but there is no cross-node proof that a publisher
   has disclosed its latest revision. Durable signed Offer tombstones and

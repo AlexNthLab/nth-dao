@@ -439,6 +439,56 @@ export interface TaskAnnouncement {
   claimable?: boolean;
 }
 
+export interface TradeOfferLeg {
+  leg_id: string;
+  resource_type: string;
+  resource_id: string;
+  quantity: string;
+  unit: string;
+  descriptor_digest: string;
+}
+
+export interface TradeOfferDocument {
+  kind: string;
+  protocol_version: string;
+  offer_id: string;
+  revision: number;
+  previous_offer_digest: string | null;
+  state: string;
+  publisher_did: string;
+  title: string;
+  summary: string;
+  provides: TradeOfferLeg[];
+  requests: TradeOfferLeg[];
+  rule_refs: Array<{ rule_id: string; digest: string }>;
+  published_at: string;
+  not_after: string | null;
+  extensions: Record<string, unknown>;
+  proof: Record<string, unknown>;
+}
+
+export interface TradeOfferInspection {
+  digest: string;
+  offer: TradeOfferDocument;
+  discoveries: Array<{
+    announcement_id: string;
+    federation_key: string;
+    source_peer: string;
+    source_did: string;
+    stale: boolean;
+    last_verified_ms: number;
+  }>;
+  verification: {
+    offer_signature_valid: boolean;
+    announcement_binding_valid: boolean | null;
+    source_did_bound: boolean | null;
+    recent_source_verified: boolean | null;
+  };
+  authority: "remote-publisher" | "local-publisher";
+  actionable: false;
+  warning: string;
+}
+
 /** 类别分面(/api/v2/market/categories)。 */
 export interface TaskCategory {
   context: string;

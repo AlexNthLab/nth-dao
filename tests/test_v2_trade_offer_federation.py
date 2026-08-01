@@ -12,7 +12,11 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from nth_dao.identity import AgentIdentity, crypto_available
-from nth_dao.market import MarketFeed, create_trade_offer_announcement
+from nth_dao.market import (
+    MarketFeed,
+    create_trade_offer_announcement,
+    sign_announcement,
+)
 from nth_dao.market.federation import FeedDigest, verify_digest
 from nth_dao.trade_rules import offer_body, offer_digest, sign_offer
 from nth_dao.web import create_app
@@ -408,10 +412,54 @@ def test_trade_offer_is_discovered_and_reverified_across_nodes(
         entry["ann"].announcement_id == announcement_id
         for entry in entries.values()
     )
+    remote_entry = next(
+        entry
+        for entry in entries.values()
+        if entry["ann"].announcement_id == announcement_id
+    )
+    assert remote_entry["trade_offer"].to_dict() == offer.to_dict()
+    source_identity = source_app.state.nth.node_identity
+    unrelated = sign_announcement(
+        publisher=source_identity,
+        authority_did=source_identity.as_did(),
+        title="unrelated task",
+    )
+    entries["unrelated"] = {
+        "ann": unrelated,
+        "source": "https://source.example",
+        "source_did": source_identity.as_did(),
+    }
 
     target_app = create_app(tmp_path / "target", require_console_auth=False)
     cache = FederationCache()
     cache.replace_all(entries)
+    cached_entry = next(
+        entry for entry in cache.snapshot().values()
+        if "trade_offer" in entry
+    )
+    assert cached_entry["trade_offer"].to_dict() == offer.to_dict()
+    assert cached_entry["trade_offer"] is not remote_entry["trade_offer"]
+    verified_at = cached_entry["last_verified_ms"]
+    targeted = cache.trade_offer_snapshot(
+        digest,
+        now_ms_override=verified_at,
+    )
+    assert len(targeted) == 1
+    assert targeted[0]["trade_offer"].to_dict() == offer.to_dict()
+    checks = 0
+    original_check = cache._entry_is_current
+
+    def counted_check(entry, observed_at):
+        nonlocal checks
+        checks += 1
+        return original_check(entry, observed_at)
+
+    cache._entry_is_current = counted_check  # type: ignore[method-assign]
+    assert cache.trade_offer_snapshot(
+        digest,
+        now_ms_override=verified_at,
+    )
+    assert checks == 1
     target_app.state.market_fed_cache = cache
     target = TestClient(target_app)
     rows = target.get(
@@ -422,3 +470,130 @@ def test_trade_offer_is_discovered_and_reverified_across_nodes(
     assert rows[0]["federated"] is True
     assert rows[0]["offer_digest"] == digest
     assert rows[0]["claimable"] is False
+    cache.snapshot = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("offer inspection must not snapshot the entire cache")
+    )
+    inspected = target.get(
+        f"/api/v2/trade/federation/cached-offers/{digest}",
+        headers={
+            "Authorization": f"Bearer {target_app.state.nth_console_token}",
+        },
+    )
+    assert inspected.status_code == 200
+    detail = inspected.json()
+    assert detail["offer"] == offer.to_dict()
+    assert detail["digest"] == digest
+    assert detail["authority"] == "remote-publisher"
+    assert detail["actionable"] is False
+    assert detail["verification"] == {
+        "offer_signature_valid": True,
+        "announcement_binding_valid": True,
+        "source_did_bound": True,
+        "recent_source_verified": True,
+    }
+    assert detail["discoveries"][0]["source_peer"] == (
+        "https://source.example"
+    )
+
+
+def test_federation_cache_rejects_missing_mismatched_or_wrong_source_offer(
+    tmp_path: Path,
+) -> None:
+    source_app = create_app(tmp_path / "source", require_console_auth=False)
+    source = TestClient(source_app)
+    identity = source_app.state.nth.node_identity
+    offer = _offer(identity)
+    digest = offer_digest(offer)
+    assert source.post(
+        "/api/v2/trade/offers", json=offer.to_dict()
+    ).status_code == 200
+    assert source.post(
+        f"/api/v2/trade/offers/{digest}/announce", json={}
+    ).status_code == 200
+    entries = federate_once(
+        ["https://source.example"],
+        _http_get_via(source),
+        verify_seed_peer=lambda _url: identity.as_did(),
+    )
+    entry = next(iter(entries.values()))
+    key = entry["federation_key"]
+
+    missing = dict(entry)
+    missing.pop("trade_offer")
+    with pytest.raises(TypeError, match="verified TradeOffer"):
+        FederationCache().replace_all({key: missing})
+
+    mismatched = {
+        **entry,
+        "trade_offer": _offer(
+            AgentIdentity.generate(label="different-publisher"),
+            offer_id="org.nthdao.tests/different-swap",
+        ),
+    }
+    with pytest.raises(ValueError, match="binding failed"):
+        FederationCache().replace_all({key: mismatched})
+
+    wrong_source = {**entry, "source_did": AgentIdentity.generate().as_did()}
+    with pytest.raises(ValueError, match="source DID mismatch"):
+        FederationCache().replace_all({key: wrong_source})
+
+
+@pytest.mark.parametrize("require_console_auth", [False, True])
+def test_cached_remote_offer_inspection_always_requires_console_bearer(
+    tmp_path: Path,
+    require_console_auth: bool,
+) -> None:
+    source_app = create_app(tmp_path / "source", require_console_auth=False)
+    source = TestClient(source_app)
+    offer = _offer(source_app.state.nth.node_identity)
+    digest = offer_digest(offer)
+    assert source.post(
+        "/api/v2/trade/offers", json=offer.to_dict()
+    ).status_code == 200
+    assert source.post(
+        f"/api/v2/trade/offers/{digest}/announce", json={}
+    ).status_code == 200
+    entries = federate_once(
+        ["https://source.example"],
+        _http_get_via(source),
+        verify_seed_peer=lambda _url: source_app.state.nth.node_identity.as_did(),
+    )
+
+    target_app = create_app(
+        tmp_path / "target",
+        require_console_auth=require_console_auth,
+    )
+    cache = FederationCache()
+    cache.replace_all(entries)
+    target_app.state.market_fed_cache = cache
+    target = TestClient(target_app)
+    path = f"/api/v2/trade/federation/cached-offers/{digest}"
+
+    assert target.get(path).status_code == 401
+    allowed = target.get(path, headers={
+        "Authorization": f"Bearer {target_app.state.nth_console_token}",
+    })
+    assert allowed.status_code == 200
+    assert allowed.json()["offer"] == offer.to_dict()
+
+
+def test_cached_remote_offer_inspection_fails_closed_on_cache_corruption(
+    tmp_path: Path,
+) -> None:
+    class CorruptCache:
+        def trade_offer_snapshot(self, _digest):
+            raise ValueError("simulated cache corruption")
+
+    app = create_app(tmp_path, require_console_auth=False)
+    app.state.market_fed_cache = CorruptCache()
+    client = TestClient(app)
+    response = client.get(
+        "/api/v2/trade/federation/cached-offers/sha256:" + ("a" * 64),
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "federation cache integrity check failed"
+    )

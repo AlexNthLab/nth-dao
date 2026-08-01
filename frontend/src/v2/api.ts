@@ -43,6 +43,7 @@ import type {
   Rule,
   TaskAnnouncement,
   TaskCategory,
+  TradeOfferInspection,
 } from "./types-v2";
 
 const BASE = "/api/v2";
@@ -920,6 +921,40 @@ export async function listTaskCategories(
   signal?: AbortSignal,
 ): Promise<TaskCategory[]> {
   return getJson<TaskCategory[]>("/market/categories", signal);
+}
+
+export async function getTradeOfferInspection(
+  digest: string,
+  federated: boolean,
+  signal?: AbortSignal,
+): Promise<TradeOfferInspection> {
+  const encoded = encodeURIComponent(digest);
+  if (federated) {
+    return getJson<TradeOfferInspection>(
+      `/trade/federation/cached-offers/${encoded}`,
+      signal,
+    );
+  }
+  const local = await getJson<{
+    digest: string;
+    offer: TradeOfferInspection["offer"];
+  }>(`/trade/offers/${encoded}`, signal);
+  return {
+    ...local,
+    discoveries: [],
+    verification: {
+      offer_signature_valid: true,
+      announcement_binding_valid: null,
+      source_did_bound: null,
+      recent_source_verified: null,
+    },
+    authority: "local-publisher",
+    actionable: false,
+    warning: (
+      "A valid signature proves authorship, not availability, fairness, "
+      + "ownership, or settlement. Create a new bilateral Agreement before execution."
+    ),
+  };
 }
 
 export async function getFederationStatus(

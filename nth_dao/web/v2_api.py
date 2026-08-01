@@ -9138,6 +9138,113 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="announced offer not found")
         return offer.to_dict()
 
+    @app.get("/api/v2/trade/federation/cached-offers/{digest}")
+    def v2_trade_offer_federation_cached_get(
+        digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Inspect a verified remote Offer without importing its authority."""
+        _require_console_bearer_for_sensitive_read(request)
+        from nth_dao.market import (
+            NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+            verify_trade_offer_announcement_binding,
+        )
+        from nth_dao.trade_rules import TradeOffer, offer_digest
+
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="digest must be a lowercase sha256 digest",
+            )
+        cache = _state_market_fed_cache(request)
+        if cache is None:
+            raise HTTPException(status_code=404, detail="remote offer not found")
+        try:
+            cached_offers = cache.trade_offer_snapshot(digest)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="federation cache integrity check failed",
+            ) from exc
+
+        verified_offer: Any = None
+        discoveries: List[Dict[str, Any]] = []
+        try:
+            for entry in cached_offers:
+                announcement = entry.get("ann")
+                if (
+                    getattr(announcement, "kind", "")
+                    != NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+                    or getattr(announcement, "offer_digest", "") != digest
+                    or announcement.is_expired()
+                ):
+                    continue
+                raw_offer = entry.get("trade_offer")
+                if not isinstance(raw_offer, TradeOffer):
+                    raise ValueError("verified Trade Offer is missing")
+                candidate = TradeOffer.from_json(raw_offer.canonical_bytes)
+                if offer_digest(candidate) != digest:
+                    raise ValueError("cached Trade Offer digest mismatch")
+                ok, reason = verify_trade_offer_announcement_binding(
+                    candidate,
+                    announcement,
+                )
+                if not ok:
+                    raise ValueError(reason)
+                source_did = str(entry.get("source_did") or "")
+                if source_did != announcement.effective_authority_did():
+                    raise ValueError("cached Trade Offer source DID mismatch")
+                if (
+                    verified_offer is not None
+                    and verified_offer.canonical_bytes != candidate.canonical_bytes
+                ):
+                    raise ValueError("one digest resolved to conflicting Offers")
+                verified_offer = candidate
+                discoveries.append({
+                    "announcement_id": announcement.announcement_id,
+                    "federation_key": str(entry.get("federation_key") or ""),
+                    "source_peer": str(entry.get("source") or ""),
+                    "source_did": source_did,
+                    "stale": bool(entry.get("stale", False)),
+                    "last_verified_ms": int(
+                        entry.get("last_verified_ms") or 0
+                    ),
+                })
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="cached Trade Offer verification failed",
+            ) from exc
+        if verified_offer is None or not discoveries:
+            raise HTTPException(status_code=404, detail="remote offer not found")
+        discoveries.sort(
+            key=lambda item: (
+                item["source_did"],
+                item["source_peer"],
+                item["announcement_id"],
+            )
+        )
+        return {
+            "digest": digest,
+            "offer": verified_offer.to_dict(),
+            "discoveries": discoveries,
+            "verification": {
+                "offer_signature_valid": True,
+                "announcement_binding_valid": True,
+                "source_did_bound": True,
+                "recent_source_verified": any(
+                    not item["stale"] for item in discoveries
+                ),
+            },
+            "authority": "remote-publisher",
+            "actionable": False,
+            "warning": (
+                "A valid signature proves authorship, not availability, "
+                "fairness, ownership, or settlement. Create a new bilateral "
+                "Agreement before execution."
+            ),
+        }
+
     @app.get("/api/v2/market/open")
     def v2_market_open(
         request: Request,

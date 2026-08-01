@@ -29,8 +29,8 @@ from nth_dao.market.feed import MarketFeed
 from nth_dao.market.federation import FeedDigest
 from nth_dao.web import create_app
 from nth_dao.web.market_federation_poll import (
-    FederationCache, FederationCycleReport, _verify_pulled_listing,
-    federate_once, pull_from_peer,
+    FederationCache, FederationCacheCapacityError, FederationCycleReport,
+    _verify_pulled_listing, federate_once, pull_from_peer,
 )
 from nth_dao.util.io import atomic_write_json
 
@@ -465,6 +465,112 @@ def test_stale_source_is_evicted_after_ttl() -> None:
     assert cache.snapshot() == {}
 
 
+def test_snapshot_enforces_ttl_without_waiting_for_another_poll_cycle() -> None:
+    identity = AgentIdentity.generate(label="remote")
+    announcement = sign_announcement(
+        publisher=identity,
+        authority_did=identity.as_did(),
+        title="read-time stale task",
+    )
+    cache = FederationCache(stale_ttl_ms=100)
+    cache.replace_all({
+        "one": {
+            "ann": announcement,
+            "source": "https://remote.example",
+        },
+    })
+    verified_at = next(iter(cache.snapshot().values()))["last_verified_ms"]
+
+    assert cache.snapshot(now_ms_override=verified_at + 100)
+    assert cache.snapshot(now_ms_override=verified_at + 101) == {}
+
+
+def test_snapshot_fails_closed_when_wall_clock_moves_before_verification() -> None:
+    identity = AgentIdentity.generate(label="remote")
+    announcement = sign_announcement(
+        publisher=identity,
+        authority_did=identity.as_did(),
+        title="clock rollback task",
+    )
+    cache = FederationCache(stale_ttl_ms=100)
+    cache.replace_all({
+        "one": {
+            "ann": announcement,
+            "source": "https://remote.example",
+        },
+    })
+    verified_at = next(iter(cache.snapshot().values()))["last_verified_ms"]
+
+    assert cache.snapshot(now_ms_override=verified_at - 1) == {}
+
+
+def test_cache_capacity_rejection_is_atomic() -> None:
+    first = AgentIdentity.generate(label="first")
+    second = AgentIdentity.generate(label="second")
+    first_ann = sign_announcement(
+        publisher=first, authority_did=first.as_did(), title="first",
+    )
+    second_ann = sign_announcement(
+        publisher=second, authority_did=second.as_did(), title="second",
+    )
+    cache = FederationCache(max_records=1)
+    cache.replace_all({
+        "first": {"ann": first_ann, "source": "https://first.example"},
+    })
+
+    with pytest.raises(FederationCacheCapacityError, match="global"):
+        cache.replace_all({
+            "first": {"ann": first_ann, "source": "https://first.example"},
+            "second": {"ann": second_ann, "source": "https://second.example"},
+        })
+
+    snapshot = cache.snapshot()
+    assert len(snapshot) == 1
+    assert next(iter(snapshot.values()))["ann"].title == "first"
+
+
+def test_cache_enforces_per_source_and_byte_limits() -> None:
+    identity = AgentIdentity.generate(label="source")
+    announcements = [
+        sign_announcement(
+            publisher=identity,
+            authority_did=identity.as_did(),
+            title=f"record {index}",
+        )
+        for index in range(2)
+    ]
+    entries = {
+        str(index): {
+            "ann": announcement,
+            "source": "https://source.example",
+        }
+        for index, announcement in enumerate(announcements)
+    }
+
+    with pytest.raises(FederationCacheCapacityError, match="per-source"):
+        FederationCache(max_records_per_source=1).replace_all(entries)
+    with pytest.raises(FederationCacheCapacityError, match="byte"):
+        FederationCache(max_bytes=1).replace_all({"one": entries["0"]})
+
+
+def test_federation_cycle_rejects_global_record_overflow(tmp_path: Path) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    for title in ("first", "second"):
+        assert client.post(
+            "/api/v2/market/announce",
+            json={"title": title, "capability_set": ["review"]},
+        ).status_code == 200
+
+    with pytest.raises(FederationCacheCapacityError, match="global"):
+        federate_once(
+            ["https://source.example"],
+            _http_get_via(client),
+            verify_seed_peer=lambda _url: _node_did(client),
+            max_records=1,
+        )
+
+
 def test_seed_rotation_lets_healthy_peer_run_after_slow_peer_budget() -> None:
     slow = AgentIdentity.generate(label="slow")
     healthy = AgentIdentity.generate(label="healthy")
@@ -613,6 +719,112 @@ def test_signed_malformed_digest_and_announcement_fail_closed() -> None:
         bad_announcement_get,
         expected_source_did=source.as_did(),
     ) == []
+
+
+@pytest.mark.parametrize("response_kind", ["empty", "subset", "duplicate"])
+def test_pull_rejects_incomplete_or_duplicate_signed_digest_batch(
+    response_kind: str,
+) -> None:
+    source = AgentIdentity.generate(label="source")
+    announcements = [
+        sign_announcement(
+            publisher=source,
+            authority_did=source.as_did(),
+            title=f"declared record {index}",
+        )
+        for index in range(2)
+    ]
+    ref_fields = (
+        "announcement_id", "publisher_did", "authority_did",
+        "capability_set", "context", "reward_minor", "reward_asset",
+        "published_at_ms", "not_after",
+    )
+    digest = FeedDigest(
+        source_did=source.as_did(),
+        generated_at_ms=1,
+        high_seq=1,
+        refs=[
+            {key: announcement.to_dict().get(key) for key in ref_fields}
+            for announcement in announcements
+        ],
+    )
+    digest.digest_sig = b64u_encode(
+        source.sign(canonical_json(digest.signing_body()))
+    )
+    responses = {
+        "empty": [],
+        "subset": [announcements[0].to_dict()],
+        "duplicate": [
+            announcements[0].to_dict(),
+            announcements[0].to_dict(),
+        ],
+    }
+
+    def inconsistent_get(url: str):
+        if "/digest?" in url:
+            return digest.to_dict()
+        if "/pull?" in url:
+            return responses[response_kind]
+        raise AssertionError(url)
+
+    completion: dict[str, bool] = {}
+    assert pull_from_peer(
+        "https://source.example",
+        inconsistent_get,
+        expected_source_did=source.as_did(),
+        _completion=completion,
+    ) == []
+    assert completion == {"complete": False}
+
+
+def test_pull_rejects_peer_snapshot_above_local_record_limit() -> None:
+    source = AgentIdentity.generate(label="source")
+    announcements = [
+        sign_announcement(
+            publisher=source,
+            authority_did=source.as_did(),
+            title=f"record {index}",
+        )
+        for index in range(2)
+    ]
+    ref_fields = (
+        "announcement_id", "publisher_did", "authority_did",
+        "capability_set", "context", "reward_minor", "reward_asset",
+        "published_at_ms", "not_after",
+    )
+    digest = FeedDigest(
+        source_did=source.as_did(),
+        generated_at_ms=1,
+        high_seq=1,
+        refs=[
+            {key: announcement.to_dict().get(key) for key in ref_fields}
+            for announcement in announcements
+        ],
+    )
+    digest.digest_sig = b64u_encode(
+        source.sign(canonical_json(digest.signing_body()))
+    )
+
+    def oversized_get(url: str):
+        if "/digest?" in url:
+            return digest.to_dict()
+        raise AssertionError("oversized digest must fail before pull")
+
+    completion: dict[str, bool] = {}
+    assert pull_from_peer(
+        "https://source.example",
+        oversized_get,
+        expected_source_did=source.as_did(),
+        _completion=completion,
+        _max_records=1,
+    ) == []
+    assert completion == {"complete": False}
+
+
+@pytest.mark.parametrize("bad_limit", [True, 1.5, 0, -1])
+def test_federation_record_limits_require_positive_integers(bad_limit) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        federate_once([], max_records=bad_limit)
 
 
 def test_later_digest_page_failure_discards_partial_snapshot() -> None:

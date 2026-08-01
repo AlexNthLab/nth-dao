@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and non-claimable UI presentation. Discovery proves the publisher's signed
   claim; it does not prove availability, create an Agreement, or authorize
   settlement.
+- Authenticated, read-time-reverified inspection of exact remote Trade Offer
+  terms retained in the volatile federation cache, including concrete exchange
+  legs, Rule references, verification state, and recent-source evidence in the
+  Tasks UI. Exact pull-set checks reject omitted or duplicate records; read-time
+  TTL pruning, per-peer/global/byte capacity limits, and a digest index prevent
+  false freshness and unbounded full-cache inspection. Cached documents remain
+  read-only, non-actionable, and non-durable across restart or stale eviction.
 - Signed Trade Rule Recognition v1 chains for community, DAO, or individual
   recognition, deprecation, and revocation of exact Rule Package digests,
   including mandatory bounded expiry, issuer Rule-ID scopes, local observed

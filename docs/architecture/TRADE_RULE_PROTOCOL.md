@@ -582,7 +582,7 @@ signature still proves authorship rather than truth or global freshness.
 The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
 renewal requires a new publisher signature.
 
-Remote Offer retention, latest-revision proofs, Agreement federation,
+Durable remote Offer retention, latest-revision proofs, Agreement federation,
 inventory or asset reservation, fulfillment, payment, federation of Receipt
 anchors, delegation, and sandboxed executable Adapters remain separate,
 independently reviewed slices. Trade Offer discovery, Rule Package loading,
