@@ -37,8 +37,10 @@ Without them, "I implemented the spec" is a guess. With them, "I pass all
 | `replay_window` | 5 | gossip replay window boundaries (10-min past / 60-sec future drift). |
 | `handoff_response_v2` | 1 | Signed handoff supersession response plus the canonical receipt timeline entry that binds target and replacement capsule hashes. |
 | `handoff_review_packet_v1` | 1 | Derived handoff review packet canonical bytes, evidence summary, and explicit "not a truth verdict" flags. |
+| `trade_offer_announcement_v1` | 6 | Exact signed Offer discovery binding plus title, digest, revision, lifetime, and publisher rejection cases. |
+| `trade_offer_head_proof_v1` | 5 | Canonical disclosed revision chain plus missing-genesis, reordering, wrong-head, and expired-claim rejection cases. |
 
-**Total: 39 vectors.** This grows with the protocol.
+**Total: 51 vectors.** This grows with the protocol.
 
 The Trade Rule Protocol also ships independently versioned vectors under
 `nth_dao/trade_rules/vectors/`. Rule Recognition v1 includes canonical bytes,

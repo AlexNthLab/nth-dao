@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Verified Trade Offer v2 federation discovery through a short-lived signed
-  exchange hint, exact content-addressed Offer fetch, signature and field
-  rebinding, canonical active-head publication, conformance vectors, read-only
+  exchange hint, a bounded content-addressed head-proof bundle, complete
+  disclosed revision-chain verification, canonical active-head publication,
+  positive and negative conformance vectors, read-only
   market projection, 24-hour maximum discovery lifetime, bounded public reads,
   and non-claimable UI presentation. Discovery proves the publisher's signed
   claim; it does not prove availability, create an Agreement, or authorize
@@ -23,11 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   TTL pruning, per-peer/global/byte capacity limits, and a digest index prevent
   false freshness and unbounded full-cache inspection. Cached documents remain
   read-only, non-actionable, and non-durable across restart or stale eviction.
-- Explicit durable retention of a reverified remote Trade Offer as a signed
-  claim in the local append-only Offer Store. The Console-authenticated import
+- Explicit durable retention of every revision in a reverified remote Trade
+  Offer head proof as a signed claim in the local append-only Offer Store. The Console-authenticated import
   is exact-digest, cross-process serialized, idempotent, provenance-bound, and
   anchored to the signed Spine. A signed `trade.offer.import.proposed` event
-  retains the complete Offer and discovery evidence before Store mutation, so
+  retains the complete disclosed revision chain and discovery evidence before
+  Store mutation, so
   restart recovery does not depend on the volatile federation cache; a later
   `trade.offer.imported` event completes the Store anchor idempotently, including
   across node-key rotation. The Spine anchor retains and independently

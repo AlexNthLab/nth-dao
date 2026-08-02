@@ -1114,4 +1114,38 @@ and the supervisor's recovery sweep covers rare missed signings.
 
 ---
 
-*Last updated for nth-dao v0.10.0 (Phase D, 2026-06-12).*
+## 13. Trade Offer Head Proof v1
+
+The wire object has exactly three fields:
+
+```json
+{
+  "kind": "nth-trade-offer-head-proof-v1",
+  "announcement": { "...": "signed Trade Offer announcement v1" },
+  "offers": [
+    { "...": "signed Trade Offer revision 1" },
+    { "...": "signed Trade Offer revision 2" }
+  ]
+}
+```
+
+The wrapper is not separately signed. A verifier MUST:
+
+1. reject unknown or extra top-level fields;
+2. accept 1 through 64 Offer revisions and no more than 512 KiB canonical JSON;
+3. verify every Offer signature and require revisions to be exactly `1..N`;
+4. verify every `previous_offer_digest` edge and immutable chain field;
+5. verify the signed announcement against revision `N` exactly;
+6. reject an expired announcement or one more than five minutes in the future.
+
+The proof establishes only that one publisher disclosed a complete signed chain
+from revision 1 to the short-lived announced head. It does not prove that no
+later revision exists or that the advertised resource is available. The public
+route is `GET /api/v2/trade/federation/offers/{digest}/head-proof`.
+
+Deterministic positive and negative cases are in the
+`trade_offer_head_proof_v1` conformance category.
+
+---
+
+*Last updated for nth-dao v0.10.0 (Trade Offer Head Proof v1, 2026-08-02).*

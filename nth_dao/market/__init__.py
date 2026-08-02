@@ -42,8 +42,15 @@ from nth_dao.market.announcement import (
 )
 from nth_dao.market.feed import MarketFeed, PollResult
 from nth_dao.market.trade_offer_announcement import (
+    MAX_TRADE_OFFER_HEAD_PROOF_BYTES,
+    MAX_TRADE_OFFER_HEAD_PROOF_CLOCK_SKEW_MS,
+    MAX_TRADE_OFFER_HEAD_PROOF_REVISIONS,
     MAX_TRADE_OFFER_ANNOUNCEMENT_TTL_MS,
+    TRADE_OFFER_HEAD_PROOF_KIND_V1,
+    VerifiedTradeOfferHeadProof,
+    build_trade_offer_head_proof,
     create_trade_offer_announcement,
+    trade_offer_head_proof_uri,
     trade_offer_uri,
     verify_trade_offer_announcement_binding,
 )
@@ -126,7 +133,14 @@ __all__ = [
     "MarketFeed",
     "PollResult",
     "MAX_TRADE_OFFER_ANNOUNCEMENT_TTL_MS",
+    "MAX_TRADE_OFFER_HEAD_PROOF_BYTES",
+    "MAX_TRADE_OFFER_HEAD_PROOF_CLOCK_SKEW_MS",
+    "MAX_TRADE_OFFER_HEAD_PROOF_REVISIONS",
+    "TRADE_OFFER_HEAD_PROOF_KIND_V1",
+    "VerifiedTradeOfferHeadProof",
+    "build_trade_offer_head_proof",
     "create_trade_offer_announcement",
+    "trade_offer_head_proof_uri",
     "trade_offer_uri",
     "verify_trade_offer_announcement_binding",
     "REJECT_ANN_MISSING_FIELD",

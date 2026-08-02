@@ -369,6 +369,7 @@ def _pull_from_peer_snapshot(
     expected_source_did: str,
     verified_documents: Optional[Dict[str, Any]] = None,
     max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
+    now_ms_override: int = 0,
 ) -> Optional[List[TaskAnnouncement]]:
     """从一个 peer 拉取**已双层验签**的开放公告(digest 翻页 + 全文分批拉)。
 
@@ -438,7 +439,11 @@ def _pull_from_peer_snapshot(
                     vok
                     and ann.effective_authority_did() == expected_source_did
                     and _verify_pulled_listing(
-                        base, ann, http_get, verified_listings,
+                        base,
+                        ann,
+                        http_get,
+                        verified_listings,
+                        now_ms_override=now_ms_override,
                     )
                 ):
                     out.append(ann)
@@ -470,6 +475,8 @@ def _verify_pulled_listing(
     ann: TaskAnnouncement,
     http_get: HttpGetJson,
     verified_listings: Dict[str, Any],
+    *,
+    now_ms_override: int = 0,
 ) -> bool:
     """Resolve and bind full market documents; legacy tasks pass."""
     from nth_dao.market.announcement import (
@@ -484,24 +491,34 @@ def _verify_pulled_listing(
         return True
     if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
         from nth_dao.market.trade_offer_announcement import (
+            VerifiedTradeOfferHeadProof,
+            trade_offer_head_proof_uri,
             trade_offer_uri,
             verify_trade_offer_announcement_binding,
         )
-        from nth_dao.trade_rules.offer import TradeOffer
 
         if ann.offer_uri != trade_offer_uri(ann.offer_digest):
             return False
-        offer = verified_listings.get(ann.offer_digest)
-        if offer is None:
+        proof = verified_listings.get(ann.offer_digest)
+        if proof is None:
             try:
-                raw = http_get(f"{base}{ann.offer_uri}")
-                offer = TradeOffer.from_dict(raw)
+                raw = http_get(
+                    f"{base}{trade_offer_head_proof_uri(ann.offer_digest)}"
+                )
+                proof = VerifiedTradeOfferHeadProof.from_dict(
+                    raw,
+                    now_ms_override=now_ms_override,
+                )
             except (OSError, TypeError, ValueError, urllib.error.URLError):
                 return False
-        ok, _ = verify_trade_offer_announcement_binding(offer, ann)
+        if not isinstance(proof, VerifiedTradeOfferHeadProof):
+            return False
+        if proof.announcement.to_dict() != ann.to_dict():
+            return False
+        ok, _ = verify_trade_offer_announcement_binding(proof.head, ann)
         if not ok:
             return False
-        verified_listings[ann.offer_digest] = offer
+        verified_listings[ann.offer_digest] = proof
         return True
     from nth_dao.commerce.listing import SignedListing
     from nth_dao.commerce.listing_announcement import (
@@ -536,6 +553,7 @@ def pull_from_peer(
     _completion: Optional[Dict[str, bool]] = None,
     _verified_documents: Optional[Dict[str, Any]] = None,
     _max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
+    _now_ms_override: int = 0,
 ) -> List[TaskAnnouncement]:
     """Return a verified snapshot, preserving the historical list API."""
     snapshot = _pull_from_peer_snapshot(
@@ -544,6 +562,7 @@ def pull_from_peer(
         expected_source_did=expected_source_did,
         verified_documents=_verified_documents,
         max_records=_max_records,
+        now_ms_override=_now_ms_override,
     )
     if _completion is not None:
         _completion["complete"] = snapshot is not None
@@ -812,6 +831,7 @@ def federate_once(
             expected_source_did=peer_did,
             _completion=completion,
             _verified_documents=verified_documents,
+            _now_ms_override=now,
         )
         # Injected legacy pullers return a list without filling the optional
         # report; their historical contract treats that list as complete.
@@ -839,17 +859,20 @@ def federate_once(
                 NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
             )
             if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
-                from nth_dao.trade_rules.offer import TradeOffer
+                from nth_dao.market.trade_offer_announcement import (
+                    VerifiedTradeOfferHeadProof,
+                )
 
-                trade_offer = verified_documents.get(ann.offer_digest)
-                if not isinstance(trade_offer, TradeOffer):
+                head_proof = verified_documents.get(ann.offer_digest)
+                if not isinstance(head_proof, VerifiedTradeOfferHeadProof):
                     logger.warning(
-                        "fed: verified Trade Offer missing for %s from %s",
+                        "fed: verified Trade Offer head proof missing for %s from %s",
                         ann.offer_digest,
                         peer,
                     )
                     continue
-                entry["trade_offer"] = trade_offer
+                entry["trade_offer"] = head_proof.head
+                entry["trade_offer_head_proof"] = head_proof
             merged[federation_key] = entry
         # gossip:学这个 peer 的 peer 列表 → 传递发现下一跳。
         # 发现到的是不可信网络数据 → 必须过 SSRF 公网校验才入队。
@@ -898,6 +921,7 @@ def _isolated_cache_entry(
     federation_key: str,
     stale: bool,
     last_verified_ms: int,
+    now_ms_override: int = 0,
 ) -> Dict[str, Any]:
     """Copy one verified record across the cache ownership boundary."""
     ann = entry.get("ann")
@@ -916,23 +940,76 @@ def _isolated_cache_entry(
     )
     if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
         from nth_dao.market.trade_offer_announcement import (
+            VerifiedTradeOfferHeadProof,
             verify_trade_offer_announcement_binding,
         )
-        from nth_dao.trade_rules.offer import TradeOffer
 
-        raw_offer = entry.get("trade_offer")
-        if not isinstance(raw_offer, TradeOffer):
+        raw_proof = entry.get("trade_offer_head_proof")
+        if not isinstance(raw_proof, VerifiedTradeOfferHeadProof):
             raise TypeError(
-                "exchange federation cache entry requires a verified TradeOffer"
+                "exchange federation cache entry requires a verified head proof"
             )
-        offer = TradeOffer.from_json(raw_offer.canonical_bytes)
+        proof = VerifiedTradeOfferHeadProof.from_dict(
+            raw_proof.to_dict(),
+            now_ms_override=now_ms_override,
+        )
+        if proof.announcement.to_dict() != ann.to_dict():
+            raise ValueError("federated Trade Offer head claim mismatch")
+        offer = proof.head
         ok, reason = verify_trade_offer_announcement_binding(offer, ann)
         if not ok:
             raise ValueError(f"federated Trade Offer binding failed: {reason}")
         if isolated["source_did"] != ann.effective_authority_did():
             raise ValueError("federated Trade Offer source DID mismatch")
         isolated["trade_offer"] = offer
+        isolated["trade_offer_head_proof"] = proof
     return isolated
+
+
+def _snapshot_cache_entry(
+    entry: Dict[str, Any],
+    *,
+    federation_key: str,
+) -> Dict[str, Any]:
+    """Detach mutable cache metadata without repeating signature checks.
+
+    Entries reach ``_data`` only through ``_isolated_cache_entry``, which
+    verifies every signed record and replaces caller-owned mutable values.
+    TradeOffer and VerifiedTradeOfferHeadProof are frozen wrappers over
+    immutable ``bytes``; sharing those wrappers across a read snapshot is
+    safe. Revalidating them here would turn every public market read into an
+    attacker-controlled number of Ed25519 verifications.
+    """
+
+    from nth_dao.market.announcement import (
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+    )
+    from nth_dao.market.trade_offer_announcement import (
+        VerifiedTradeOfferHeadProof,
+    )
+    from nth_dao.trade_rules.offer import TradeOffer
+
+    ann = entry.get("ann")
+    if not isinstance(ann, TaskAnnouncement):
+        raise TypeError("federation cache contains an invalid announcement")
+    detached: Dict[str, Any] = {
+        "ann": TaskAnnouncement.from_dict(ann.to_dict()),
+        "source": str(entry.get("source") or ""),
+        "source_did": str(entry.get("source_did") or ""),
+        "federation_key": federation_key,
+        "stale": bool(entry.get("stale")),
+        "last_verified_ms": int(entry.get("last_verified_ms") or 0),
+    }
+    if ann.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1:
+        offer = entry.get("trade_offer")
+        proof = entry.get("trade_offer_head_proof")
+        if not isinstance(offer, TradeOffer) or not isinstance(
+            proof, VerifiedTradeOfferHeadProof
+        ):
+            raise TypeError("federation cache contains an invalid head proof")
+        detached["trade_offer"] = offer
+        detached["trade_offer_head_proof"] = proof
+    return detached
 
 
 class FederationCache:
@@ -984,6 +1061,9 @@ class FederationCache:
         trade_offer = entry.get("trade_offer")
         if trade_offer is not None and hasattr(trade_offer, "to_dict"):
             body["trade_offer"] = trade_offer.to_dict()
+        head_proof = entry.get("trade_offer_head_proof")
+        if head_proof is not None and hasattr(head_proof, "to_dict"):
+            body["trade_offer_head_proof"] = head_proof.to_dict()
         return len(json.dumps(
             body,
             ensure_ascii=True,
@@ -1018,7 +1098,7 @@ class FederationCache:
             if not isinstance(ann, TaskAnnouncement):
                 continue
             digest = str(getattr(ann, "offer_digest", "") or "")
-            if digest and "trade_offer" in entry:
+            if digest and "trade_offer_head_proof" in entry:
                 index.setdefault(digest, set()).add(key)
         self._offer_index = index
 
@@ -1028,6 +1108,7 @@ class FederationCache:
         *,
         peer_count: int = 0,
     ) -> None:
+        observed_at = now_ms()
         normalized: Dict[str, Dict[str, Any]] = {}
         for entry in entries.values():
             if not isinstance(entry, dict):
@@ -1040,7 +1121,8 @@ class FederationCache:
                 entry,
                 federation_key=key,
                 stale=False,
-                last_verified_ms=now_ms(),
+                last_verified_ms=observed_at,
+                now_ms_override=observed_at,
             )
         self._validate_capacity(normalized)
         with self._lock:
@@ -1076,6 +1158,7 @@ class FederationCache:
                 federation_key=key,
                 stale=False,
                 last_verified_ms=observed_at,
+                now_ms_override=observed_at,
             )
 
         with self._lock:
@@ -1151,11 +1234,9 @@ class FederationCache:
             self._prune_expired_locked(observed_at)
             captured = list(self._data.items())
         return {
-            key: _isolated_cache_entry(
+            key: _snapshot_cache_entry(
                 entry,
                 federation_key=key,
-                stale=bool(entry.get("stale")),
-                last_verified_ms=int(entry.get("last_verified_ms") or 0),
             )
             for key, entry in captured
         }
@@ -1180,11 +1261,9 @@ class FederationCache:
             if not self._offer_index.get(digest):
                 self._offer_index.pop(digest, None)
         return [
-            _isolated_cache_entry(
+            _snapshot_cache_entry(
                 entry,
                 federation_key=key,
-                stale=bool(entry.get("stale")),
-                last_verified_ms=int(entry.get("last_verified_ms") or 0),
             )
             for key, entry in captured
         ]

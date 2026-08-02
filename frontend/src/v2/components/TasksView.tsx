@@ -13,6 +13,7 @@ import {
   getTradeOfferInspection,
   importCachedTradeOffer,
   listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
+  validateTradeOfferImportResult,
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
@@ -401,10 +402,10 @@ export function TasksView() {
     setOfferImportBusyDigest(digest);
     setOfferImportErrors((current) => ({ ...current, [digest]: "" }));
     try {
-      const result = await importCachedTradeOffer(digest);
-      if (!result.persisted || result.digest !== digest) {
-        throw new Error("server returned an invalid persistence result");
-      }
+      const result = validateTradeOfferImportResult(
+        await importCachedTradeOffer(digest),
+        digest,
+      );
       setOfferInspection((current) => (
         current?.digest === digest
           ? {
@@ -417,9 +418,9 @@ export function TasksView() {
           : current
       ));
       toast.push(
-        result.appended
-          ? "Signed offer saved locally"
-          : "Signed offer was already saved locally",
+        result.appended_revisions > 0
+          ? `Saved ${result.imported_revisions} signed offer revision(s) locally`
+          : `${result.imported_revisions} signed offer revision(s) were already saved locally`,
         "success",
       );
     } catch (error) {
@@ -1172,6 +1173,18 @@ export function TasksView() {
                                   : "No recently verified remote source"}
                                 {` · ${tradeOfferSourceCount(offerInspection)} discovery source(s)`}
                               </div>
+                            )}
+                            {offerInspection.head_claim && (
+                              <>
+                                <div style={{ color: "var(--success)" }}>
+                                  Publisher head claim verified
+                                  {` · disclosed ${offerInspection.head_claim.chain_length}-revision chain is continuous`}
+                                </div>
+                                <div className="muted">
+                                  This verifies the disclosed signed chain, not that no newer
+                                  revision exists elsewhere.
+                                </div>
+                              </>
                             )}
                             {offerInspection.discoveries.length > 0 && (
                               <div className="muted">

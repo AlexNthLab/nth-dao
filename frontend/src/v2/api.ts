@@ -939,15 +939,75 @@ export async function getTradeOfferInspection(
   return getJson<TradeOfferInspection>(`/trade/offers/${encoded}`, signal);
 }
 
-export function importCachedTradeOffer(
+const TRADE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const SPINE_EVENT_ID = /^[0-9a-f]{64}$/;
+
+export function validateTradeOfferImportResult(
+  value: unknown,
+  expectedDigest: string,
+): TradeOfferImportResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("server returned an invalid persistence result");
+  }
+  const result = value as Record<string, unknown>;
+  const auditEventIds = result.audit_event_ids;
+  const importedRevisions = result.imported_revisions;
+  const appendedRevisions = result.appended_revisions;
+  if (
+    !TRADE_DIGEST.test(expectedDigest)
+    || result.digest !== expectedDigest
+    || result.persisted !== true
+    || typeof result.appended !== "boolean"
+    || typeof result.classification !== "string"
+    || result.classification.length < 1
+    || result.classification.length > 64
+    || typeof result.entry_hash !== "string"
+    || !TRADE_DIGEST.test(result.entry_hash)
+    || !["federation-cache", "local-operator"].includes(
+      String(result.source_kind),
+    )
+    || typeof result.source_id !== "string"
+    || !result.source_id.startsWith("did:key:z")
+    || result.source_id.length > 512
+    || typeof result.audit_event_id !== "string"
+    || !SPINE_EVENT_ID.test(result.audit_event_id)
+    || !Array.isArray(auditEventIds)
+    || !auditEventIds.every(
+      (eventId) => typeof eventId === "string" && SPINE_EVENT_ID.test(eventId),
+    )
+    || new Set(auditEventIds).size !== auditEventIds.length
+    || result.audit_event_id !== auditEventIds[auditEventIds.length - 1]
+    || !Number.isInteger(importedRevisions)
+    || (importedRevisions as number) < 1
+    || (importedRevisions as number) > 64
+    || !Number.isInteger(appendedRevisions)
+    || (appendedRevisions as number) < 0
+    || (appendedRevisions as number) > (importedRevisions as number)
+    || auditEventIds.length !== importedRevisions
+    || !Number.isInteger(result.discovery_sources)
+    || (result.discovery_sources as number) < 1
+    || (result.discovery_sources as number) > 100_000
+    || result.trusted !== false
+    || result.actionable !== false
+    || typeof result.warning !== "string"
+    || result.warning.length < 1
+    || result.warning.length > 2_000
+  ) {
+    throw new Error("server returned an invalid persistence result");
+  }
+  return result as unknown as TradeOfferImportResult;
+}
+
+export async function importCachedTradeOffer(
   digest: string,
   signal?: AbortSignal,
 ): Promise<TradeOfferImportResult> {
-  return postJson<TradeOfferImportResult>(
+  const result = await postJson<unknown>(
     `/trade/federation/cached-offers/${encodeURIComponent(digest)}/import`,
     undefined,
     signal,
   );
+  return validateTradeOfferImportResult(result, digest);
 }
 
 export async function getFederationStatus(

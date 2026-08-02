@@ -23,7 +23,7 @@ from ._gen_mandate_vectors import build_mandate_vectors
 from .runner import VECTORS_PATH
 
 
-VECTOR_GENERATED_AT = "2026-07-04T00:00:00"
+VECTOR_GENERATED_AT = "2026-08-02T00:00:00"
 
 
 # ─────────────────── fixed test keys ───────────────────
@@ -768,6 +768,163 @@ def gen_trade_offer_announcement_v1() -> list:
     return vectors
 
 
+def gen_trade_offer_head_proof_v1() -> list:
+    """Pin complete signed revision-chain validation and rejection behavior."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+
+    from ..identity import AgentID, AgentIdentity
+    from ..market import (
+        TRADE_OFFER_HEAD_PROOF_KIND_V1,
+        create_trade_offer_announcement,
+    )
+    from ..trade_rules import offer_body, sign_offer
+
+    signing_key = SigningKey(bytes.fromhex(ALICE_SEED_HEX))
+    public_key = signing_key.verify_key.encode()
+    publisher = AgentIdentity(
+        agent_id=AgentID.from_pubkey(public_key.hex()),
+        label="conformance-publisher",
+        _signing_key=signing_key.encode(),
+        _verify_key=public_key,
+    )
+    first = sign_offer(
+        publisher,
+        offer_body(
+            offer_id="org.nthdao.conformance/head-proof",
+            publisher_did=publisher.as_did(),
+            title="Compute for review",
+            summary="Exchange one compute task for one signed code review.",
+            provides=[{
+                "leg_id": "compute",
+                "resource_type": "service:compute",
+                "resource_id": "urn:nth:conformance:compute",
+                "quantity": "1",
+                "unit": "task",
+                "descriptor_digest": "sha256:" + ("a" * 64),
+            }],
+            requests=[{
+                "leg_id": "review",
+                "resource_type": "service:code-review",
+                "resource_id": "urn:nth:conformance:review",
+                "quantity": "1",
+                "unit": "review",
+                "descriptor_digest": "sha256:" + ("b" * 64),
+            }],
+            published_at="2026-08-01T00:00:00Z",
+            not_after="2026-08-02T00:00:00Z",
+        ),
+        created="2026-08-01T00:00:01Z",
+    )
+    successor_body = first.to_dict()
+    successor_body.pop("proof")
+    successor_body.update({
+        "revision": 2,
+        "previous_offer_digest": (
+            "sha256:" + hashlib.sha256(first.canonical_bytes).hexdigest()
+        ),
+        "published_at": "2026-08-01T00:00:30Z",
+    })
+    second = sign_offer(
+        publisher,
+        successor_body,
+        created="2026-08-01T00:00:31Z",
+    )
+    announcement = create_trade_offer_announcement(
+        publisher,
+        second,
+        announcement_id="trade-offer-head-proof-conformance-001",
+        capability_set=["code-review", "compute"],
+        availability_summary={"status": "publisher-asserted-available"},
+        published_at_ms=1_785_542_432_000,
+        not_after_ms=1_785_628_799_000,
+    )
+    valid_proof = {
+        "kind": TRADE_OFFER_HEAD_PROOF_KIND_V1,
+        "announcement": announcement.to_dict(),
+        "offers": [first.to_dict(), second.to_dict()],
+    }
+    verification_time_ms = 1_785_542_433_000
+
+    def clone(value: dict) -> dict:
+        return json.loads(json.dumps(value))
+
+    missing_genesis = clone(valid_proof)
+    missing_genesis["offers"] = [missing_genesis["offers"][1]]
+    reordered = clone(valid_proof)
+    reordered["offers"] = list(reversed(reordered["offers"]))
+    wrong_head = clone(valid_proof)
+    wrong_head["offers"] = [wrong_head["offers"][0]]
+    cases = [
+        (
+            "trade-offer-head-proof-v1-valid",
+            "A signed announcement binds an unbroken two-revision Offer chain.",
+            valid_proof,
+            verification_time_ms,
+            True,
+            "ok",
+        ),
+        (
+            "trade-offer-head-proof-v1-missing-genesis",
+            "A disclosed chain cannot begin at revision two.",
+            missing_genesis,
+            verification_time_ms,
+            False,
+            "Trade Offer head proof must start at revision 1 and be contiguous",
+        ),
+        (
+            "trade-offer-head-proof-v1-reordered",
+            "Signed revisions remain invalid when presented out of order.",
+            reordered,
+            verification_time_ms,
+            False,
+            "Trade Offer head proof must start at revision 1 and be contiguous",
+        ),
+        (
+            "trade-offer-head-proof-v1-wrong-head",
+            "The announcement must bind the final disclosed revision.",
+            wrong_head,
+            verification_time_ms,
+            False,
+            (
+                "Trade Offer head proof announcement mismatch: "
+                "Trade Offer announcement binding mismatch: offer_digest"
+            ),
+        ),
+        (
+            "trade-offer-head-proof-v1-expired",
+            "A cryptographically valid but expired publisher head claim is rejected.",
+            valid_proof,
+            announcement.not_after + 1,
+            False,
+            "Trade Offer head proof announcement is expired",
+        ),
+    ]
+    return [
+        {
+            "id": vector_id,
+            "description": description,
+            "proof": proof,
+            "verification_time_ms": moment,
+            "expected_valid": expected_valid,
+            "expected_reason": expected_reason,
+            "expected_canonical_hex": (
+                canonical_json(proof).hex() if expected_valid else None
+            ),
+        }
+        for (
+            vector_id,
+            description,
+            proof,
+            moment,
+            expected_valid,
+            expected_reason,
+        ) in cases
+    ]
+
+
 def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors = {
         "format": "nth-dao-conformance-v1",
@@ -790,6 +947,7 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             "handoff_response_v2":         gen_handoff_response_v2(),
             "handoff_review_packet_v1":    gen_handoff_review_packet_v1(),
             "trade_offer_announcement_v1": gen_trade_offer_announcement_v1(),
+            "trade_offer_head_proof_v1":   gen_trade_offer_head_proof_v1(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

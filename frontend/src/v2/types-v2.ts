@@ -483,11 +483,23 @@ export interface TradeOfferInspection {
     announcement_binding_valid: boolean | null;
     source_did_bound: boolean | null;
     recent_source_verified: boolean | null;
+    head_chain_valid: boolean | null;
+    publisher_head_claim_valid: boolean | null;
   };
   authority: "remote-publisher" | "local-publisher";
   storage_provenance: {
     source_kind: string;
     source_id: string;
+  } | null;
+  head_claim: {
+    publisher_claim_verified: true;
+    disclosed_chain_complete: true;
+    globally_latest_proven: false;
+    head_revision: number;
+    chain_length: number;
+    chain_digests: string[];
+    claimed_at_ms: number;
+    expires_at_ms: number;
   } | null;
   actionable: false;
   warning: string;
@@ -502,6 +514,9 @@ export interface TradeOfferImportResult {
   source_kind: "federation-cache" | "local-operator";
   source_id: string;
   audit_event_id: string;
+  audit_event_ids: string[];
+  imported_revisions: number;
+  appended_revisions: number;
   discovery_sources: number;
   trusted: false;
   actionable: false;

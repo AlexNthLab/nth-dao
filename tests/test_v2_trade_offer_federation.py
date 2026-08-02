@@ -4,6 +4,8 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import multiprocessing
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -17,7 +19,9 @@ from nth_dao.identity import AgentIdentity, crypto_available
 from nth_dao.market import (
     MarketFeed,
     TaskAnnouncement,
+    VerifiedTradeOfferHeadProof,
     announcement_federation_key,
+    build_trade_offer_head_proof,
     create_trade_offer_announcement,
     sign_announcement,
 )
@@ -35,6 +39,32 @@ pytestmark = pytest.mark.skipif(
     not crypto_available(),
     reason="Trade Offer federation requires PyNaCl",
 )
+
+
+def _exercise_store_spine_transaction_lock(
+    workspace: str,
+    counter_path: str,
+    start_event,
+    result_queue,
+) -> None:
+    """Spawn-safe worker proving the production transaction lock is global."""
+
+    from nth_dao.util.io import InterProcessLock
+    from nth_dao.web.v2_api import (
+        _trade_offer_store_spine_transaction_lock_path,
+    )
+
+    if not start_event.wait(timeout=10):
+        raise RuntimeError("transaction lock test did not start")
+    lock_path = _trade_offer_store_spine_transaction_lock_path(Path(workspace))
+    with InterProcessLock(lock_path, timeout=10):
+        entered_ns = time.monotonic_ns()
+        counter = Path(counter_path)
+        current = int(counter.read_text(encoding="ascii"))
+        time.sleep(0.2)
+        counter.write_text(str(current + 1), encoding="ascii")
+        exited_ns = time.monotonic_ns()
+    result_queue.put((entered_ns, exited_ns))
 
 
 def _offer(identity: AgentIdentity, *, offer_id: str = "org.nthdao.tests/swap"):
@@ -91,6 +121,25 @@ def _withdrawn_successor(identity: AgentIdentity, previous):
         "revision": document["revision"] + 1,
         "previous_offer_digest": offer_digest(previous),
         "state": "withdrawn",
+        "published_at": successor_published.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    return sign_offer(
+        identity,
+        document,
+        created=proof_created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def _active_successor(identity: AgentIdentity, previous):
+    document = previous.to_dict()
+    document.pop("proof")
+    successor_published = datetime.fromisoformat(
+        document["published_at"].replace("Z", "+00:00")
+    ) + timedelta(seconds=30)
+    proof_created = successor_published + timedelta(seconds=1)
+    document.update({
+        "revision": document["revision"] + 1,
+        "previous_offer_digest": offer_digest(previous),
         "published_at": successor_published.strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
     return sign_offer(
@@ -198,6 +247,56 @@ def test_trade_offer_announce_is_idempotent_and_public_by_digest(
     )
     assert verify_digest(digest_page) == (True, "")
     assert digest_page.refs[0]["listing_type"] == "exchange"
+
+
+def test_trade_offer_announce_rejects_store_record_without_spine_anchor(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    identity = app.state.nth.node_identity
+    offer = _offer(identity)
+    digest = offer_digest(offer)
+    app.state.nth.trade_offers.publish(
+        offer,
+        source_kind="local-operator",
+        source_id=identity.as_did(),
+    )
+
+    response = client.post(
+        f"/api/v2/trade/offers/{digest}/announce",
+        json={},
+    )
+
+    assert response.status_code == 503
+    assert "missing offer import anchor" in response.json()["detail"]
+
+
+def test_public_exact_offer_rejects_store_record_without_spine_anchor(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    identity = app.state.nth.node_identity
+    offer = _offer(identity)
+    digest = offer_digest(offer)
+    app.state.nth.trade_offers.publish(
+        offer,
+        source_kind="local-operator",
+        source_id=identity.as_did(),
+    )
+    feed = MarketFeed(
+        tmp_path,
+        spine=app.state.nth.spine,
+        trade_offer_store=app.state.nth.trade_offers,
+    )
+    feed.publish(create_trade_offer_announcement(identity, offer))
+    app.state.trade_offer_market_feed = feed
+
+    response = client.get(f"/api/v2/trade/federation/offers/{digest}")
+
+    assert response.status_code == 503
+    assert "missing offer import anchor" in response.json()["detail"]
 
 
 def test_public_offer_reads_reuse_verified_feed_index(
@@ -433,6 +532,40 @@ def test_trade_offer_announce_requires_console_auth(tmp_path: Path) -> None:
     assert public.json() == offer.to_dict()
 
 
+def test_trade_offer_head_proof_serves_only_live_canonical_head(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=False)
+    client = _authed_client(app)
+    first = _offer(app.state.nth.node_identity)
+    second = _active_successor(app.state.nth.node_identity, first)
+    first_digest = offer_digest(first)
+    second_digest = offer_digest(second)
+    assert client.post(
+        "/api/v2/trade/offers", json=first.to_dict()
+    ).status_code == 200
+    assert client.post(
+        "/api/v2/trade/offers", json=second.to_dict()
+    ).status_code == 200
+    assert client.post(
+        f"/api/v2/trade/offers/{second_digest}/announce", json={}
+    ).status_code == 200
+
+    response = client.get(
+        f"/api/v2/trade/federation/offers/{second_digest}/head-proof"
+    )
+
+    assert response.status_code == 200
+    proof = VerifiedTradeOfferHeadProof.from_dict(response.json())
+    assert tuple(offer_digest(item) for item in proof.offers) == (
+        first_digest,
+        second_digest,
+    )
+    assert client.get(
+        f"/api/v2/trade/federation/offers/{first_digest}/head-proof"
+    ).status_code == 404
+
+
 def test_trade_offer_announce_requires_route_auth_when_global_auth_is_off(
     tmp_path: Path,
 ) -> None:
@@ -560,10 +693,179 @@ def test_trade_offer_is_discovered_and_reverified_across_nodes(
         "announcement_binding_valid": True,
         "source_did_bound": True,
         "recent_source_verified": True,
+        "head_chain_valid": True,
+        "publisher_head_claim_valid": True,
+    }
+    assert detail["head_claim"] == {
+        "publisher_claim_verified": True,
+        "disclosed_chain_complete": True,
+        "globally_latest_proven": False,
+        "head_revision": 1,
+        "chain_length": 1,
+        "chain_digests": [digest],
+        "claimed_at_ms": remote_entry["ann"].published_at_ms,
+        "expires_at_ms": remote_entry["ann"].not_after,
     }
     assert detail["discoveries"][0]["source_peer"] == (
         "https://source.example"
     )
+
+
+def test_federation_retains_verified_offer_head_revision_chain(
+    tmp_path: Path,
+) -> None:
+    source_app = create_app(tmp_path / "source", require_console_auth=False)
+    source = _authed_client(source_app)
+    first = _offer(source_app.state.nth.node_identity)
+    second = _active_successor(source_app.state.nth.node_identity, first)
+    second_digest = offer_digest(second)
+    for offer in (first, second):
+        assert source.post(
+            "/api/v2/trade/offers", json=offer.to_dict()
+        ).status_code == 200
+    assert source.post(
+        f"/api/v2/trade/offers/{second_digest}/announce", json={}
+    ).status_code == 200
+
+    entries = federate_once(
+        ["https://source.example"],
+        _http_get_via(source),
+        verify_seed_peer=lambda _url: (
+            source_app.state.nth.node_identity.as_did()
+        ),
+    )
+
+    assert len(entries) == 1
+    entry = next(iter(entries.values()))
+    proof = entry["trade_offer_head_proof"]
+    assert isinstance(proof, VerifiedTradeOfferHeadProof)
+    assert tuple(offer_digest(item) for item in proof.offers) == (
+        offer_digest(first),
+        second_digest,
+    )
+    cache = FederationCache()
+    cache.replace_all(entries)
+    cached = cache.trade_offer_snapshot(second_digest)
+    assert len(cached) == 1
+    assert tuple(
+        offer_digest(item)
+        for item in cached[0]["trade_offer_head_proof"].offers
+    ) == (offer_digest(first), second_digest)
+    target_app = create_app(tmp_path / "target", require_console_auth=False)
+    target_app.state.market_fed_cache = cache
+    inspected = TestClient(target_app).get(
+        f"/api/v2/trade/federation/cached-offers/{second_digest}",
+        headers=_console_headers(target_app),
+    )
+    assert inspected.status_code == 200
+    assert inspected.json()["head_claim"]["chain_length"] == 2
+    assert inspected.json()["head_claim"]["chain_digests"] == [
+        offer_digest(first),
+        second_digest,
+    ]
+    imported = TestClient(target_app).post(
+        f"/api/v2/trade/federation/cached-offers/{second_digest}/import",
+        headers=_console_headers(target_app),
+    )
+    assert imported.status_code == 200
+    assert imported.json()["imported_revisions"] == 2
+    assert {
+        offer_digest(record.offer)
+        for record in target_app.state.nth.trade_offers.poll(-1).records
+    } == {offer_digest(first), second_digest}
+    assert {
+        event.payload["offer_digest"]
+        for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    } == {offer_digest(first), second_digest}
+
+
+def test_federated_revision_chain_import_recovers_after_restart_without_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_app = create_app(tmp_path / "source", require_console_auth=False)
+    source = _authed_client(source_app)
+    first = _offer(source_app.state.nth.node_identity)
+    second = _active_successor(source_app.state.nth.node_identity, first)
+    first_digest = offer_digest(first)
+    head_digest = offer_digest(second)
+    for offer in (first, second):
+        assert source.post(
+            "/api/v2/trade/offers", json=offer.to_dict()
+        ).status_code == 200
+    assert source.post(
+        f"/api/v2/trade/offers/{head_digest}/announce", json={}
+    ).status_code == 200
+
+    cache = FederationCache()
+    cache.replace_all(
+        federate_once(
+            ["https://source.example"],
+            _http_get_via(source),
+            verify_seed_peer=lambda _url: (
+                source_app.state.nth.node_identity.as_did()
+            ),
+        )
+    )
+    target_root = tmp_path / "target"
+    target_app = create_app(target_root, require_console_auth=False)
+    target_app.state.market_fed_cache = cache
+    target = TestClient(target_app)
+    path = f"/api/v2/trade/federation/cached-offers/{head_digest}/import"
+    spine = target_app.state.nth.spine
+    original_append = spine.append
+
+    def fail_head_completion(event_type, payload, **kwargs):
+        if (
+            event_type == "trade.offer.imported"
+            and payload.get("offer_digest") == head_digest
+        ):
+            raise OSError("simulated head completion outage")
+        return original_append(event_type, payload, **kwargs)
+
+    monkeypatch.setattr(spine, "append", fail_head_completion)
+    failed = target.post(path, headers=_console_headers(target_app))
+    assert failed.status_code == 503
+    assert {
+        offer_digest(record.offer)
+        for record in target_app.state.nth.trade_offers.poll(-1).records
+    } == {first_digest, head_digest}
+    before_restart_anchors = [
+        event
+        for event in spine.read_all()
+        if event.type == "trade.offer.imported"
+    ]
+    assert [event.payload["offer_digest"] for event in before_restart_anchors] == [
+        first_digest
+    ]
+
+    restarted_app = create_app(target_root, require_console_auth=False)
+    assert not hasattr(restarted_app.state, "market_fed_cache")
+    restarted = TestClient(restarted_app)
+    recovered = restarted.post(
+        path,
+        headers=_console_headers(restarted_app),
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.json()["imported_revisions"] == 2
+    assert recovered.json()["appended_revisions"] == 0
+    assert recovered.json()["audit_event_ids"][0] == (
+        before_restart_anchors[0].event_id
+    )
+    recovered_anchors = [
+        event
+        for event in restarted_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    ]
+    assert [event.payload["offer_digest"] for event in recovered_anchors] == [
+        first_digest,
+        head_digest,
+    ]
+    assert restarted.get(
+        f"/api/v2/trade/offers/{head_digest}"
+    ).status_code == 200
 
 
 def test_federation_cache_rejects_missing_mismatched_or_wrong_source_offer(
@@ -589,19 +891,38 @@ def test_federation_cache_rejects_missing_mismatched_or_wrong_source_offer(
     key = entry["federation_key"]
 
     missing = dict(entry)
-    missing.pop("trade_offer")
-    with pytest.raises(TypeError, match="verified TradeOffer"):
+    missing.pop("trade_offer_head_proof")
+    with pytest.raises(TypeError, match="verified head proof"):
         FederationCache().replace_all({key: missing})
 
+    other_identity = AgentIdentity.generate(label="different-publisher")
+    other_offer = _offer(
+        other_identity,
+        offer_id="org.nthdao.tests/different-swap",
+    )
+    other_announcement = create_trade_offer_announcement(
+        other_identity,
+        other_offer,
+    )
     mismatched = {
         **entry,
-        "trade_offer": _offer(
-            AgentIdentity.generate(label="different-publisher"),
-            offer_id="org.nthdao.tests/different-swap",
+        "trade_offer_head_proof": VerifiedTradeOfferHeadProof.from_dict(
+            {
+                "kind": "nth-trade-offer-head-proof-v1",
+                "announcement": other_announcement.to_dict(),
+                "offers": [other_offer.to_dict()],
+            }
         ),
     }
-    with pytest.raises(ValueError, match="binding failed"):
+    with pytest.raises(ValueError, match="head claim mismatch"):
         FederationCache().replace_all({key: mismatched})
+
+    redundant_head_tamper = {**entry, "trade_offer": other_offer}
+    rebuilt = FederationCache()
+    rebuilt.replace_all({key: redundant_head_tamper})
+    assert rebuilt.trade_offer_snapshot(digest)[0][
+        "trade_offer"
+    ].canonical_bytes == offer.canonical_bytes
 
     wrong_source = {**entry, "source_did": AgentIdentity.generate().as_did()}
     with pytest.raises(ValueError, match="source DID mismatch"):
@@ -689,6 +1010,9 @@ def test_cached_remote_offer_import_requires_console_and_anchors_provenance(
         "source_kind": "federation-cache",
         "source_id": target_app.state.nth.node_identity.as_did(),
         "audit_event_id": result["audit_event_id"],
+        "audit_event_ids": [result["audit_event_id"]],
+        "imported_revisions": 1,
+        "appended_revisions": 1,
         "discovery_sources": 1,
         "trusted": False,
         "actionable": False,
@@ -736,6 +1060,138 @@ def test_cached_remote_offer_import_requires_console_and_anchors_provenance(
         "source_kind": "federation-cache",
         "source_id": target_app.state.nth.node_identity.as_did(),
     }
+
+
+def test_cached_remote_offer_import_counts_distinct_verified_source_peers(
+    tmp_path: Path,
+) -> None:
+    publisher = AgentIdentity.generate(label="publisher")
+    offer = _offer(publisher)
+    digest = offer_digest(offer)
+    announcements = (
+        create_trade_offer_announcement(
+            publisher,
+            offer,
+            announcement_id="offer-observation-primary",
+        ),
+        create_trade_offer_announcement(
+            publisher,
+            offer,
+            announcement_id="offer-observation-backup",
+        ),
+    )
+    entries = {}
+    for index, announcement in enumerate(announcements, start=1):
+        proof = VerifiedTradeOfferHeadProof.from_dict(
+            build_trade_offer_head_proof(announcement, [offer])
+        )
+        federation_key = announcement_federation_key(announcement)
+        entries[federation_key] = {
+            "ann": announcement,
+            "source": f"https://source-{index}.example",
+            "source_did": publisher.as_did(),
+            "federation_key": federation_key,
+            "trade_offer": offer,
+            "trade_offer_head_proof": proof,
+        }
+    cache = FederationCache()
+    cache.replace_all(entries)
+    target_app = create_app(tmp_path / "target", require_console_auth=False)
+    target_app.state.market_fed_cache = cache
+    target = TestClient(target_app)
+    inspected = target.get(
+        f"/api/v2/trade/federation/cached-offers/{digest}",
+        headers=_console_headers(target_app),
+    )
+    assert inspected.status_code == 200
+    assert len(inspected.json()["discoveries"]) == 2
+    response = target.post(
+        f"/api/v2/trade/federation/cached-offers/{digest}/import",
+        headers=_console_headers(target_app),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["discovery_sources"] == 2
+    proposals = [
+        event for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.import.proposed"
+    ]
+    assert len(proposals) == 1
+    assert proposals[0].payload["discovery_sources"] == 2
+    evidence_set = proposals[0].payload["discoveries"]
+    assert len(evidence_set) == 2
+    assert proposals[0].payload["discovery"] in evidence_set
+    assert {
+        (item["source_did"], item["source_peer"])
+        for item in evidence_set
+    } == {
+        (publisher.as_did(), "https://source-1.example"),
+        (publisher.as_did(), "https://source-2.example"),
+    }
+
+
+def test_local_offer_read_rejects_signed_discovery_source_count_without_evidence(
+    tmp_path: Path,
+) -> None:
+    _, target_app, target, _, digest = _cached_remote_offer(tmp_path)
+    imported = target.post(
+        f"/api/v2/trade/federation/cached-offers/{digest}/import",
+        headers=_console_headers(target_app),
+    )
+    assert imported.status_code == 200
+    events = target_app.state.nth.spine.read_all()
+    proposal = next(
+        event for event in events
+        if event.type == "trade.offer.import.proposed"
+    )
+    anchor = next(
+        event for event in events if event.type == "trade.offer.imported"
+    )
+    proposal_payload = deepcopy(proposal.payload)
+    proposal_payload["discovery_sources"] += 1
+
+    replacement = SignedEventLog(
+        tmp_path / "false-discovery-count.jsonl",
+        target_app.state.nth.node_identity,
+    )
+    replacement_proposal = replacement.append(
+        "trade.offer.import.proposed",
+        proposal_payload,
+    )
+    anchor_payload = deepcopy(anchor.payload)
+    anchor_payload["proposal_event_id"] = replacement_proposal.event_id
+    replacement.append("trade.offer.imported", anchor_payload)
+    target_app.state.nth.spine = replacement
+
+    response = target.get(f"/api/v2/trade/offers/{digest}")
+
+    assert response.status_code == 503
+    assert "source count does not match its evidence" in response.json()["detail"]
+
+
+def test_discovery_evidence_budget_rejects_excessive_nesting_without_crashing(
+) -> None:
+    from nth_dao.web.v2_api import (
+        _verify_trade_offer_discovery_evidence_set,
+    )
+
+    nested: dict = {}
+    cursor = nested
+    for _ in range(1_100):
+        child: dict = {}
+        cursor["nested"] = child
+        cursor = child
+
+    ok, reason = _verify_trade_offer_discovery_evidence_set(
+        [nested],
+        nested,
+        object(),
+        imported_at_ms=1,
+        expected_count=1,
+    )
+
+    assert ok is False
+    assert reason == "federated discovery evidence set is not canonical JSON"
 
 
 def test_cached_remote_offer_import_validates_digest_before_lock_path(
@@ -911,6 +1367,116 @@ def test_cached_remote_offer_import_is_idempotent_and_concurrent(
         if event.type == "trade.offer.imported"
     ]
     assert len(anchors) == 1
+
+
+def test_different_offer_imports_share_one_store_spine_transaction_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_app = create_app(tmp_path / "source", require_console_auth=False)
+    source = _authed_client(source_app)
+    identity = source_app.state.nth.node_identity
+    offers = (
+        _offer(identity, offer_id="org.nthdao.tests/swap-a"),
+        _offer(identity, offer_id="org.nthdao.tests/swap-b"),
+    )
+    digests = tuple(offer_digest(offer) for offer in offers)
+    for offer, digest in zip(offers, digests):
+        assert source.post(
+            "/api/v2/trade/offers", json=offer.to_dict()
+        ).status_code == 200
+        assert source.post(
+            f"/api/v2/trade/offers/{digest}/announce", json={}
+        ).status_code == 200
+    cache = FederationCache()
+    cache.replace_all(
+        federate_once(
+            ["https://source.example"],
+            _http_get_via(source),
+            verify_seed_peer=lambda _url: identity.as_did(),
+        )
+    )
+    target_app = create_app(tmp_path / "target", require_console_auth=False)
+    target_app.state.market_fed_cache = cache
+    store = target_app.state.nth.trade_offers
+    original_publish = store.publish
+    state_lock = threading.Lock()
+    active = 0
+    overlapped = False
+
+    def slow_publish(*args, **kwargs):
+        nonlocal active, overlapped
+        with state_lock:
+            active += 1
+            overlapped = overlapped or active > 1
+        try:
+            result = original_publish(*args, **kwargs)
+            time.sleep(0.15)
+            return result
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(store, "publish", slow_publish)
+    headers = _console_headers(target_app)
+    clients = [TestClient(target_app), TestClient(target_app)]
+    paths = [
+        f"/api/v2/trade/federation/cached-offers/{digest}/import"
+        for digest in digests
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(
+            lambda item: item[0].post(item[1], headers=headers),
+            zip(clients, paths),
+        ))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert overlapped is False
+    assert len(store.poll(-1).records) == 2
+    anchors = [
+        event
+        for event in target_app.state.nth.spine.read_all()
+        if event.type == "trade.offer.imported"
+    ]
+    assert len(anchors) == 2
+
+
+def test_store_spine_transaction_lock_serializes_spawned_processes(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    counter_path = tmp_path / "transaction-counter.txt"
+    counter_path.write_text("0", encoding="ascii")
+    processes = [
+        context.Process(
+            target=_exercise_store_spine_transaction_lock,
+            args=(
+                str(tmp_path),
+                str(counter_path),
+                start_event,
+                result_queue,
+            ),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=20)
+    try:
+        assert [process.exitcode for process in processes] == [0, 0]
+        intervals = sorted(result_queue.get(timeout=2) for _ in processes)
+        assert intervals[0][1] <= intervals[1][0]
+        assert counter_path.read_text(encoding="ascii") == "2"
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
 
 
 def test_cached_remote_offer_import_recovers_after_restart_without_cache(

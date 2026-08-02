@@ -128,12 +128,15 @@ def test_trade_offer_publish_list_get_and_duplicate(tmp_path):
             "announcement_binding_valid": None,
             "source_did_bound": None,
             "recent_source_verified": None,
+            "head_chain_valid": None,
+            "publisher_head_claim_valid": None,
         },
         "authority": "local-publisher",
         "storage_provenance": {
             "source_kind": "local-operator",
             "source_id": identity.as_did(),
         },
+        "head_claim": None,
         "actionable": False,
         "warning": (
             "A valid signature proves authorship, not availability, fairness, "

@@ -554,6 +554,50 @@ def check_trade_offer_announcement_v1(
     return failures
 
 
+def check_trade_offer_head_proof_v1(
+    vectors: List[dict],
+) -> List[ConformanceFailure]:
+    """Verify bounded, ordered, signed Offer head-proof bundles."""
+    from ..market import VerifiedTradeOfferHeadProof
+
+    failures: List[ConformanceFailure] = []
+    for vector in vectors:
+        proof = None
+        try:
+            proof = VerifiedTradeOfferHeadProof.from_dict(
+                vector["proof"],
+                now_ms_override=vector["verification_time_ms"],
+            )
+            actual = (True, "ok")
+        except (KeyError, TypeError, ValueError) as exc:
+            actual = (False, str(exc))
+        expected = (
+            vector["expected_valid"],
+            vector["expected_reason"],
+        )
+        if actual != expected:
+            failures.append(ConformanceFailure(
+                vector_id=vector.get("id", "trade-offer-head-proof:invalid"),
+                category="trade_offer_head_proof_v1",
+                description="validation result",
+                expected=expected,
+                actual=actual,
+            ))
+            continue
+        if proof is not None:
+            expected_hex = vector.get("expected_canonical_hex")
+            actual_hex = proof.canonical_bytes.hex()
+            if actual_hex != expected_hex:
+                failures.append(ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="trade_offer_head_proof_v1",
+                    description="canonical proof bytes",
+                    expected=expected_hex,
+                    actual=actual_hex,
+                ))
+    return failures
+
+
 _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "canonical_json":              check_canonical_json,
     "fingerprint":                 check_fingerprint,
@@ -575,6 +619,7 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "handoff_response_v2":         check_handoff_response_v2,
     "handoff_review_packet_v1":    check_handoff_review_packet_v1,
     "trade_offer_announcement_v1": check_trade_offer_announcement_v1,
+    "trade_offer_head_proof_v1":   check_trade_offer_head_proof_v1,
 }
 
 

@@ -567,8 +567,9 @@ The reviewed protocol kernel currently contains:
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - user-directed durable import of a reverified federated Offer into the local
-  append-only Offer Store, with signed remote-publisher identity inside the
-  Offer and exact local-importer provenance in the Store/Spine anchor,
+  append-only Offer Store, including every revision in the bounded, complete
+  disclosed chain, with signed remote-publisher identity inside each Offer and
+  exact local-importer provenance in each Store/Spine anchor,
   including the reverified signed discovery announcement and content-derived
   federation key; signed write-ahead import proposals, cross-process digest
   serialization, restart-safe idempotent completion anchoring, and explicit
@@ -583,17 +584,19 @@ Agreement and Order objects remain protocol-kernel primitives. The audit
 outbox makes local Order persistence and Spine projection recoverable, but it
 does not make separate files atomically committed and it is not a settlement
 ledger. Federation can now discover an exact signed Trade Offer v2 through a
-short-lived signed exchange hint, full-document fetch, and strict binding. The
+short-lived signed exchange hint, a bounded head-proof bundle, and strict
+verification of the complete disclosed chain from revision 1. The
 projection exposes only a local publisher's active canonical Offer head, but a
 signature still proves authorship rather than truth or global freshness.
 The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
 renewal requires a new publisher signature.
 
-Latest-revision proofs, Agreement federation, inventory or asset reservation,
+Globally convergent latest-revision proofs, Agreement federation, inventory or asset reservation,
 fulfillment, payment, federation of Receipt anchors, delegation, and sandboxed
 executable Adapters remain separate, independently reviewed slices. Durable
-remote retention preserves one exact signed claim; it does not prove that the
-publisher disclosed its latest revision. Trade Offer discovery, Rule Package
+remote retention preserves the complete chain disclosed by one signed,
+short-lived publisher head claim; it does not prove that the publisher did not
+withhold a later revision. Trade Offer discovery, Rule Package
 loading, Agreement creation, Order storage, and Receipt creation cannot execute
 settlement.
 

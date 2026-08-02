@@ -1,6 +1,6 @@
 {
   "format": "nth-dao-conformance-v1",
-  "generated_at": "2026-07-04T00:00:00",
+  "generated_at": "2026-08-02T00:00:00",
   "reference_impl": "nth-dao Python (pyproject version)",
   "schema_version": 1,
   "vectors": {
@@ -1287,6 +1287,574 @@
           "summary": "Exchange one compute task for one signed code review.",
           "title": "Compute for review"
         }
+      }
+    ],
+    "trade_offer_head_proof_v1": [
+      {
+        "description": "A signed announcement binds an unbroken two-revision Offer chain.",
+        "expected_canonical_hex": "7b22616e6e6f756e63656d656e74223a7b22616363657074616e6365223a7b7d2c22616e6e6f756e63656d656e745f6964223a2274726164652d6f666665722d686561642d70726f6f662d636f6e666f726d616e63652d303031222c22617574686f726974795f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c22617661696c6162696c6974795f73756d6d617279223a7b226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f686561642d70726f6f66222c227265766973696f6e223a322c227374617465223a22616374697665222c22737461747573223a227075626c69736865722d61737365727465642d617661696c61626c65227d2c226361706162696c6974795f736574223a5b22636f64652d726576696577222c22636f6d70757465225d2c22636c61696d616e745f706f6c696379223a7b7d2c22636f6e74657874223a227472616465222c226465736372697074696f6e223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c22696e7075745f736368656d61223a7b7d2c226b696e64223a226e74682d74726164652d6f666665722d616e6e6f756e63656d656e742d7631222c226c697374696e675f74797065223a2265786368616e6765222c226d697373696f6e5f6964223a22222c226e6f745f6166746572223a313738353632383739393030302c226f666665725f646967657374223a227368613235363a33613862653236363339636430393038393565333565363362643935386664303830373865663938366231376630383065363739376238386230616339353636222c226f666665725f757269223a222f6170692f76322f74726164652f66656465726174696f6e2f6f66666572732f7368613235363a33613862653236363339636430393038393565333565363362643935386664303830373865663938366231376630383065363739376238386230616339353636222c2270726963655f6173736574223a22222c2270726963655f6d696e6f72223a302c227075626c69736865645f61745f6d73223a313738353534323433323030302c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227075626c69736865725f736967223a225342555a6355475534613455725a79464545564e7a5066496e4146686962596750465441646433734271614e306a554579734f704f37755437784e416c737041303334376d515230634e3668557a7067363853784341222c227265776172645f6173736574223a2265786368616e6765222c227265776172645f6d696e6f72223a302c227469746c65223a22436f6d7075746520666f7220726576696577227d2c226b696e64223a226e74682d74726164652d6f666665722d686561642d70726f6f662d7631222c226f6666657273223a5b7b22657874656e73696f6e73223a7b7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032362d30382d30325430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f686561642d70726f6f66222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30382d30315430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2270726f6f665f76616c7565223a225475586e34325949305f44705758704b50664341675476474b66585974355145447a6e4156463267494e6a47746249366963724e496d795153554e32376539756442567a72376c714c4837593843523877366d4c4167222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47237a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226c65675f6964223a22636f6d70757465222c227175616e74697479223a2231222c227265736f757263655f6964223a2275726e3a6e74683a636f6e666f726d616e63653a636f6d70757465222c227265736f757263655f74797065223a22736572766963653a636f6d70757465222c22756e6974223a227461736b227d5d2c227075626c69736865645f6174223a22323032362d30382d30315430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a62626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226c65675f6964223a22726576696577222c227175616e74697479223a2231222c227265736f757263655f6964223a2275726e3a6e74683a636f6e666f726d616e63653a726576696577222c227265736f757263655f74797065223a22736572766963653a636f64652d726576696577222c22756e6974223a22726576696577227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b5d2c227374617465223a22616374697665222c2273756d6d617279223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c227469746c65223a22436f6d7075746520666f7220726576696577227d2c7b22657874656e73696f6e73223a7b7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032362d30382d30325430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e636f6e666f726d616e63652f686561642d70726f6f66222c2270726576696f75735f6f666665725f646967657374223a227368613235363a37323631326234356331373130303530613338663532373361363462666534663865313132623838643665666234366430306661646363346366653763613565222c2270726f6f66223a7b2263726561746564223a22323032362d30382d30315430303a30303a33315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2270726f6f665f76616c7565223a225a6c6c536258375249363878394d7a564976386a32623974326f387073454b686d6f4e38545f725a6367595a446a764a5673455a742d30585f4d466a793951572d2d7a5165416c6c35726b776256456a545862614241222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47237a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226c65675f6964223a22636f6d70757465222c227175616e74697479223a2231222c227265736f757263655f6964223a2275726e3a6e74683a636f6e666f726d616e63653a636f6d70757465222c227265736f757263655f74797065223a22736572766963653a636f6d70757465222c22756e6974223a227461736b227d5d2c227075626c69736865645f6174223a22323032362d30382d30315430303a30303a33305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a62626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226c65675f6964223a22726576696577222c227175616e74697479223a2231222c227265736f757263655f6964223a2275726e3a6e74683a636f6e666f726d616e63653a726576696577222c227265736f757263655f74797065223a22736572766963653a636f64652d726576696577222c22756e6974223a22726576696577227d5d2c227265766973696f6e223a322c2272756c655f72656673223a5b5d2c227374617465223a22616374697665222c2273756d6d617279223a2245786368616e6765206f6e6520636f6d70757465207461736b20666f72206f6e65207369676e656420636f6465207265766965772e222c227469746c65223a22436f6d7075746520666f7220726576696577227d5d7d",
+        "expected_reason": "ok",
+        "expected_valid": true,
+        "id": "trade-offer-head-proof-v1-valid",
+        "proof": {
+          "announcement": {
+            "acceptance": {},
+            "announcement_id": "trade-offer-head-proof-conformance-001",
+            "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "availability_summary": {
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "revision": 2,
+              "state": "active",
+              "status": "publisher-asserted-available"
+            },
+            "capability_set": [
+              "code-review",
+              "compute"
+            ],
+            "claimant_policy": {},
+            "context": "trade",
+            "description": "Exchange one compute task for one signed code review.",
+            "input_schema": {},
+            "kind": "nth-trade-offer-announcement-v1",
+            "listing_type": "exchange",
+            "mission_id": "",
+            "not_after": 1785628799000,
+            "offer_digest": "sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "offer_uri": "/api/v2/trade/federation/offers/sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "price_asset": "",
+            "price_minor": 0,
+            "published_at_ms": 1785542432000,
+            "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "publisher_sig": "SBUZcUGU4a4UrZyFEEVNzPfInAFhibYgPFTAdd3sBqaN0jUEysOpO7uT7xNAlspA0347mQR0cN6hUzpg68SxCA",
+            "reward_asset": "exchange",
+            "reward_minor": 0,
+            "title": "Compute for review"
+          },
+          "kind": "nth-trade-offer-head-proof-v1",
+          "offers": [
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": null,
+              "proof": {
+                "created": "2026-08-01T00:00:01Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "TuXn42YI0_DpWXpKPfCAgTvGKfXYt5QEDznAVF2gINjGtbI6icrNImyQSUN27e9udBVzr7lqLH7Y8CR8w6mLAg",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:00Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 1,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            },
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": "sha256:72612b45c1710050a38f5273a64bfe4f8e112b88d6efb46d00fadcc4cfe7ca5e",
+              "proof": {
+                "created": "2026-08-01T00:00:31Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "ZllSbX7RI68x9MzVIv8j2b9t2o8psEKhmoN8T_rZcgYZDjvJVsEZt-0X_MFjy9QW--zQeAll5rkwbVEjTXbaBA",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:30Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 2,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            }
+          ]
+        },
+        "verification_time_ms": 1785542433000
+      },
+      {
+        "description": "A disclosed chain cannot begin at revision two.",
+        "expected_canonical_hex": null,
+        "expected_reason": "Trade Offer head proof must start at revision 1 and be contiguous",
+        "expected_valid": false,
+        "id": "trade-offer-head-proof-v1-missing-genesis",
+        "proof": {
+          "announcement": {
+            "acceptance": {},
+            "announcement_id": "trade-offer-head-proof-conformance-001",
+            "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "availability_summary": {
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "revision": 2,
+              "state": "active",
+              "status": "publisher-asserted-available"
+            },
+            "capability_set": [
+              "code-review",
+              "compute"
+            ],
+            "claimant_policy": {},
+            "context": "trade",
+            "description": "Exchange one compute task for one signed code review.",
+            "input_schema": {},
+            "kind": "nth-trade-offer-announcement-v1",
+            "listing_type": "exchange",
+            "mission_id": "",
+            "not_after": 1785628799000,
+            "offer_digest": "sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "offer_uri": "/api/v2/trade/federation/offers/sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "price_asset": "",
+            "price_minor": 0,
+            "published_at_ms": 1785542432000,
+            "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "publisher_sig": "SBUZcUGU4a4UrZyFEEVNzPfInAFhibYgPFTAdd3sBqaN0jUEysOpO7uT7xNAlspA0347mQR0cN6hUzpg68SxCA",
+            "reward_asset": "exchange",
+            "reward_minor": 0,
+            "title": "Compute for review"
+          },
+          "kind": "nth-trade-offer-head-proof-v1",
+          "offers": [
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": "sha256:72612b45c1710050a38f5273a64bfe4f8e112b88d6efb46d00fadcc4cfe7ca5e",
+              "proof": {
+                "created": "2026-08-01T00:00:31Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "ZllSbX7RI68x9MzVIv8j2b9t2o8psEKhmoN8T_rZcgYZDjvJVsEZt-0X_MFjy9QW--zQeAll5rkwbVEjTXbaBA",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:30Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 2,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            }
+          ]
+        },
+        "verification_time_ms": 1785542433000
+      },
+      {
+        "description": "Signed revisions remain invalid when presented out of order.",
+        "expected_canonical_hex": null,
+        "expected_reason": "Trade Offer head proof must start at revision 1 and be contiguous",
+        "expected_valid": false,
+        "id": "trade-offer-head-proof-v1-reordered",
+        "proof": {
+          "announcement": {
+            "acceptance": {},
+            "announcement_id": "trade-offer-head-proof-conformance-001",
+            "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "availability_summary": {
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "revision": 2,
+              "state": "active",
+              "status": "publisher-asserted-available"
+            },
+            "capability_set": [
+              "code-review",
+              "compute"
+            ],
+            "claimant_policy": {},
+            "context": "trade",
+            "description": "Exchange one compute task for one signed code review.",
+            "input_schema": {},
+            "kind": "nth-trade-offer-announcement-v1",
+            "listing_type": "exchange",
+            "mission_id": "",
+            "not_after": 1785628799000,
+            "offer_digest": "sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "offer_uri": "/api/v2/trade/federation/offers/sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "price_asset": "",
+            "price_minor": 0,
+            "published_at_ms": 1785542432000,
+            "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "publisher_sig": "SBUZcUGU4a4UrZyFEEVNzPfInAFhibYgPFTAdd3sBqaN0jUEysOpO7uT7xNAlspA0347mQR0cN6hUzpg68SxCA",
+            "reward_asset": "exchange",
+            "reward_minor": 0,
+            "title": "Compute for review"
+          },
+          "kind": "nth-trade-offer-head-proof-v1",
+          "offers": [
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": "sha256:72612b45c1710050a38f5273a64bfe4f8e112b88d6efb46d00fadcc4cfe7ca5e",
+              "proof": {
+                "created": "2026-08-01T00:00:31Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "ZllSbX7RI68x9MzVIv8j2b9t2o8psEKhmoN8T_rZcgYZDjvJVsEZt-0X_MFjy9QW--zQeAll5rkwbVEjTXbaBA",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:30Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 2,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            },
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": null,
+              "proof": {
+                "created": "2026-08-01T00:00:01Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "TuXn42YI0_DpWXpKPfCAgTvGKfXYt5QEDznAVF2gINjGtbI6icrNImyQSUN27e9udBVzr7lqLH7Y8CR8w6mLAg",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:00Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 1,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            }
+          ]
+        },
+        "verification_time_ms": 1785542433000
+      },
+      {
+        "description": "The announcement must bind the final disclosed revision.",
+        "expected_canonical_hex": null,
+        "expected_reason": "Trade Offer head proof announcement mismatch: Trade Offer announcement binding mismatch: offer_digest",
+        "expected_valid": false,
+        "id": "trade-offer-head-proof-v1-wrong-head",
+        "proof": {
+          "announcement": {
+            "acceptance": {},
+            "announcement_id": "trade-offer-head-proof-conformance-001",
+            "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "availability_summary": {
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "revision": 2,
+              "state": "active",
+              "status": "publisher-asserted-available"
+            },
+            "capability_set": [
+              "code-review",
+              "compute"
+            ],
+            "claimant_policy": {},
+            "context": "trade",
+            "description": "Exchange one compute task for one signed code review.",
+            "input_schema": {},
+            "kind": "nth-trade-offer-announcement-v1",
+            "listing_type": "exchange",
+            "mission_id": "",
+            "not_after": 1785628799000,
+            "offer_digest": "sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "offer_uri": "/api/v2/trade/federation/offers/sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "price_asset": "",
+            "price_minor": 0,
+            "published_at_ms": 1785542432000,
+            "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "publisher_sig": "SBUZcUGU4a4UrZyFEEVNzPfInAFhibYgPFTAdd3sBqaN0jUEysOpO7uT7xNAlspA0347mQR0cN6hUzpg68SxCA",
+            "reward_asset": "exchange",
+            "reward_minor": 0,
+            "title": "Compute for review"
+          },
+          "kind": "nth-trade-offer-head-proof-v1",
+          "offers": [
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": null,
+              "proof": {
+                "created": "2026-08-01T00:00:01Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "TuXn42YI0_DpWXpKPfCAgTvGKfXYt5QEDznAVF2gINjGtbI6icrNImyQSUN27e9udBVzr7lqLH7Y8CR8w6mLAg",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:00Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 1,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            }
+          ]
+        },
+        "verification_time_ms": 1785542433000
+      },
+      {
+        "description": "A cryptographically valid but expired publisher head claim is rejected.",
+        "expected_canonical_hex": null,
+        "expected_reason": "Trade Offer head proof announcement is expired",
+        "expected_valid": false,
+        "id": "trade-offer-head-proof-v1-expired",
+        "proof": {
+          "announcement": {
+            "acceptance": {},
+            "announcement_id": "trade-offer-head-proof-conformance-001",
+            "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "availability_summary": {
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "revision": 2,
+              "state": "active",
+              "status": "publisher-asserted-available"
+            },
+            "capability_set": [
+              "code-review",
+              "compute"
+            ],
+            "claimant_policy": {},
+            "context": "trade",
+            "description": "Exchange one compute task for one signed code review.",
+            "input_schema": {},
+            "kind": "nth-trade-offer-announcement-v1",
+            "listing_type": "exchange",
+            "mission_id": "",
+            "not_after": 1785628799000,
+            "offer_digest": "sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "offer_uri": "/api/v2/trade/federation/offers/sha256:3a8be26639cd090895e35e63bd958fd08078ef986b17f080e6797b88b0ac9566",
+            "price_asset": "",
+            "price_minor": 0,
+            "published_at_ms": 1785542432000,
+            "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+            "publisher_sig": "SBUZcUGU4a4UrZyFEEVNzPfInAFhibYgPFTAdd3sBqaN0jUEysOpO7uT7xNAlspA0347mQR0cN6hUzpg68SxCA",
+            "reward_asset": "exchange",
+            "reward_minor": 0,
+            "title": "Compute for review"
+          },
+          "kind": "nth-trade-offer-head-proof-v1",
+          "offers": [
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": null,
+              "proof": {
+                "created": "2026-08-01T00:00:01Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "TuXn42YI0_DpWXpKPfCAgTvGKfXYt5QEDznAVF2gINjGtbI6icrNImyQSUN27e9udBVzr7lqLH7Y8CR8w6mLAg",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:00Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 1,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            },
+            {
+              "extensions": {},
+              "kind": "org.nthdao.trade.offer",
+              "not_after": "2026-08-02T00:00:00Z",
+              "offer_id": "org.nthdao.conformance/head-proof",
+              "previous_offer_digest": "sha256:72612b45c1710050a38f5273a64bfe4f8e112b88d6efb46d00fadcc4cfe7ca5e",
+              "proof": {
+                "created": "2026-08-01T00:00:31Z",
+                "proof_purpose": "assertionMethod",
+                "proof_value": "ZllSbX7RI68x9MzVIv8j2b9t2o8psEKhmoN8T_rZcgYZDjvJVsEZt-0X_MFjy9QW--zQeAll5rkwbVEjTXbaBA",
+                "type": "NthEd25519SignatureV1",
+                "verification_method": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG#z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG"
+              },
+              "protocol_version": "2.0",
+              "provides": [
+                {
+                  "descriptor_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "leg_id": "compute",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:compute",
+                  "resource_type": "service:compute",
+                  "unit": "task"
+                }
+              ],
+              "published_at": "2026-08-01T00:00:30Z",
+              "publisher_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+              "requests": [
+                {
+                  "descriptor_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "leg_id": "review",
+                  "quantity": "1",
+                  "resource_id": "urn:nth:conformance:review",
+                  "resource_type": "service:code-review",
+                  "unit": "review"
+                }
+              ],
+              "revision": 2,
+              "rule_refs": [],
+              "state": "active",
+              "summary": "Exchange one compute task for one signed code review.",
+              "title": "Compute for review"
+            }
+          ]
+        },
+        "verification_time_ms": 1785628799001
       }
     ]
   }

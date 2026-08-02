@@ -118,16 +118,16 @@ For every accepted peer, the market poller performs:
    contain exactly the requested selectors; omissions, duplicates, and extras
    invalidate the complete source snapshot.
 4. Verify every full announcement's publisher signature.
-5. For an exchange hint, fetch the exact Trade Offer from its fixed digest
-   route, verify the Offer signature and digest, then verify every summary and
-   lifetime binding again.
+5. For an exchange hint, fetch its bounded head-proof bundle from the fixed
+   digest route. Verify every signed Offer revision from genesis, every
+   predecessor edge, the exact announced head, and the announcement lifetime.
 6. Merge unexpired records into the local read-only federation cache.
 
-The console may inspect the exact remote Trade Offer retained with an exchange
-announcement. That document is isolated from the network response and verified
-again when read. It remains a volatile read model: it is not imported into the
-local Offer Store, does not survive process restart or stale-entry eviction, and
-does not become local authority for the Offer.
+The console may inspect the exact remote Trade Offer head retained with an
+exchange announcement. The complete disclosed revision chain is isolated from
+the network response and verified again when read. It remains a volatile read
+model until the operator selects **Save locally**, and it never becomes local
+authority for the Offer.
 
 Remote records are not copied into the local authoritative feed and therefore
 are not re-announced as local work. Claims return to the announcement's source
@@ -169,8 +169,9 @@ complete view.
 | `POST /api/v2/market/federation/refresh` | Run one synchronous pull | Console write |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
+| `GET /api/v2/trade/federation/offers/{digest}/head-proof` | Bounded complete disclosed revision chain for a live publisher head claim | Public read |
 | `GET /api/v2/trade/federation/cached-offers/{digest}` | Reverify and inspect a volatile remote Offer cached with a discovery announcement | Console read |
-| `POST /api/v2/trade/federation/cached-offers/{digest}/import` | Reverify and durably retain one exact remote Offer as a non-authoritative signed claim | Console write; Bearer always required |
+| `POST /api/v2/trade/federation/cached-offers/{digest}/import` | Reverify and durably retain the complete disclosed signed revision chain as a non-authoritative claim | Console write; Bearer always required |
 
 ## Security Boundaries
 
@@ -188,7 +189,8 @@ complete view.
   records are never silently truncated into a false open-set snapshot.
 - Reverse hello is limited both per source address (12/minute) and per node
   (120/minute), with a locked cross-worker budget when a workspace is present.
-- Exact Trade Offer reads use a process-local source gate (120/minute) before a
+- Exact Trade Offer and head-proof reads use a process-local source gate
+  (120/minute) before a
   locked cross-worker global gate (300/minute). This ordering prevents rejected
   source floods from turning the persistent limiter into a disk-write amplifier.
 - A malformed or unverifiable digest, identity card, or announcement fails
@@ -196,8 +198,9 @@ complete view.
 - Durable remote-Offer import reuses the inspection verifier, serializes by
   exact Offer digest across processes, records `federation-cache` provenance,
   and writes a signed `trade.offer.import.proposed` intent containing the full
-  Offer and evidence before mutating the Offer Store. An exact
-  `trade.offer.imported` completion anchor is required before reporting success.
+  verified head proof and evidence before mutating the Offer Store. An exact
+  `trade.offer.imported` completion anchor is required for every disclosed
+  revision before reporting success.
   These signed events contain the original signed discovery
   announcement, its recomputed federation key, source DID, source peer, and
   observation metadata, so later audit does not depend on the volatile cache.
@@ -226,17 +229,18 @@ cloud-metadata destinations.
 - The federation cache is a read model. Durable authoritative ownership stays
   with the source DAO.
 - Remote Trade Offer documents remain volatile until an operator explicitly
-  selects **Save locally**. That action retains the exact signed claim and its
-  import provenance in local append-only storage; it does not make the remote
-  publisher local, prove latest revision, grant trust, or make the Offer
-  actionable. Agreement creation remains a separate protocol step.
+  selects **Save locally**. That action retains the complete disclosed signed
+  chain and its import provenance in local append-only storage; it does not make
+  the remote publisher local, prove global latest revision, grant trust, or make
+  the Offer actionable. Agreement creation remains a separate protocol step.
 - A recent source verification means the signed snapshot was verified within
   the local two-minute cache TTL. It does not prove that the source is currently
   online or that the advertised resource is still available.
-- Open-set absence removes withdrawn or superseded Offer announcements from
-  the current projection, but there is no cross-node proof that a publisher
-  has disclosed its latest revision. Durable signed Offer tombstones and
-  revision-head proofs remain future protocol work.
+- A head proof establishes a complete signed chain from revision 1 to the head
+  named by one short-lived publisher announcement. It cannot prove that the
+  publisher has not withheld a later revision or that another peer has already
+  observed one. Durable signed Offer tombstones and globally convergent
+  latest-revision proofs remain future protocol work.
 - Trade Offer discovery does not federate Agreements, Mandates, Receipts,
   payment, delivery, dispute outcomes, or settlement state.
 - Withdrawal currently uses signed open-set absence, not durable tombstones.

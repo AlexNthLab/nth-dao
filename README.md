@@ -163,7 +163,7 @@ from outliving its single maintainer:
   Prometheus exposition-format `/metrics` HTTP endpoint. Pure stdlib.
 - **`requirements/*.lock.txt`** - pinned transitive deps per extra
   (`crypto`, `ux`, `web`, `dev`). Reproducible builds.
-- **`nth_dao/conformance/`** - 22 wire-protocol test vectors in 6 categories.
+- **`nth_dao/conformance/`** - 51 wire-protocol test vectors in 20 categories.
   A non-Python port is "wire-compatible" when it produces zero failures.
   See `docs/CONFORMANCE.md`.
 - **`docs/research/A2A_ALIGNMENT.md`** - side-by-side vs Google's

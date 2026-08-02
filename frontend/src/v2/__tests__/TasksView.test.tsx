@@ -64,6 +64,7 @@ vi.mock("../api", () => ({
   claimFederatedTask: vi.fn(),
   getTradeOfferInspection: vi.fn(),
   importCachedTradeOffer: vi.fn(),
+  validateTradeOfferImportResult: vi.fn((value) => value),
 }));
 
 import {
@@ -75,6 +76,7 @@ import {
   importCachedTradeOffer,
   refreshFederation,
   updateFederationPeer,
+  validateTradeOfferImportResult,
 } from "../api";
 import { TasksView } from "../components/TasksView";
 
@@ -415,9 +417,21 @@ describe("TasksView", () => {
         announcement_binding_valid: true,
         source_did_bound: true,
         recent_source_verified: true,
+        head_chain_valid: true,
+        publisher_head_claim_valid: true,
       },
       authority: "remote-publisher",
       storage_provenance: null,
+      head_claim: {
+        publisher_claim_verified: true,
+        disclosed_chain_complete: true,
+        globally_latest_proven: false,
+        head_revision: 1,
+        chain_length: 1,
+        chain_digests: [`sha256:${"a".repeat(64)}`],
+        claimed_at_ms: Date.parse("2026-08-01T00:00:30Z"),
+        expires_at_ms: Date.parse("2026-08-02T00:00:00Z"),
+      },
       actionable: false,
       warning: "A valid signature proves authorship, not availability.",
     });
@@ -429,7 +443,10 @@ describe("TasksView", () => {
       entry_hash: `sha256:${"f".repeat(64)}`,
       source_kind: "federation-cache",
       source_id: "did:key:zPublisher",
-      audit_event_id: "event-imported",
+      audit_event_id: "c".repeat(64),
+      audit_event_ids: ["c".repeat(64)],
+      imported_revisions: 1,
+      appended_revisions: 1,
       discovery_sources: 1,
       trusted: false,
       actionable: false,
@@ -454,12 +471,20 @@ describe("TasksView", () => {
     expect(screen.getByText("1 review · service:code-review")).toBeTruthy();
     expect(screen.getByText(/org\.nthdao\.rules\/review-swap/)).toBeTruthy();
     expect(screen.getByText("Remote source recently verified · 1 discovery source(s)")).toBeTruthy();
+    expect(screen.getByText(
+      "Publisher head claim verified · disclosed 1-revision chain is continuous",
+    )).toBeTruthy();
+    expect(screen.getByText(/not that no newer revision exists elsewhere/)).toBeTruthy();
     expect(screen.getByText(/Last verified: 2026-08-01T00:01:00\.000Z/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save locally" }));
     expect((
       await screen.findByRole("button", { name: "Saved locally" })
     ) as HTMLButtonElement).toHaveProperty("disabled", true);
     expect(importCachedTradeOffer).toHaveBeenCalledWith(
+      `sha256:${"a".repeat(64)}`,
+    );
+    expect(validateTradeOfferImportResult).toHaveBeenCalledWith(
+      expect.objectContaining({ digest: `sha256:${"a".repeat(64)}` }),
       `sha256:${"a".repeat(64)}`,
     );
     expect(getTradeOfferInspection).toHaveBeenCalledWith(
@@ -523,9 +548,21 @@ describe("TasksView", () => {
         announcement_binding_valid: true,
         source_did_bound: true,
         recent_source_verified: true,
+        head_chain_valid: true,
+        publisher_head_claim_valid: true,
       },
       authority: "remote-publisher",
       storage_provenance: null,
+      head_claim: {
+        publisher_claim_verified: true,
+        disclosed_chain_complete: true,
+        globally_latest_proven: false,
+        head_revision: 1,
+        chain_length: 1,
+        chain_digests: [digest],
+        claimed_at_ms: 1,
+        expires_at_ms: 2,
+      },
       actionable: false,
       warning: "A signature is not proof of truth.",
     });
