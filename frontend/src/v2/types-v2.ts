@@ -585,6 +585,8 @@ export interface TradeOrderSummary {
   dispatch_attempts?: number;
   dispatch_last_error?: string;
   dispatch_updated_at_ms?: number;
+  dispatch_generation?: number;
+  dispatch_superseded_deliveries?: number;
   remote_acknowledged?: boolean;
   remote_receipt_digest?: string;
   remote_audit_event_id?: string;

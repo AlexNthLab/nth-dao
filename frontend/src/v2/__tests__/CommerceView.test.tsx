@@ -380,6 +380,8 @@ describe("CommerceView", () => {
       dispatch_pending: true,
       dispatch_target_url: "http://peer.example:8080",
       dispatch_attempts: 2,
+      dispatch_generation: 2,
+      dispatch_superseded_deliveries: 1,
       dispatch_last_error: "peer unavailable",
       remote_acknowledged: false,
     };
@@ -397,6 +399,7 @@ describe("CommerceView", () => {
 
     expect(await screen.findByText("Delivery pending")).toBeTruthy();
     expect(screen.getByText("Last attempt: peer unavailable")).toBeTruthy();
+    expect(screen.getByText(/Delivery generation: 2/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry delivery" }));
     await waitFor(() => expect(acceptTradeProposal).toHaveBeenCalledWith(
       summary.proposal_digest,

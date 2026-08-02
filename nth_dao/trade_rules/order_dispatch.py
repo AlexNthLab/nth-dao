@@ -10,7 +10,7 @@ import stat
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -25,6 +25,7 @@ from nth_dao.trade_rules.order_transport import (
     TradeOrderIntakeReceipt,
     trade_order_delivery_digest,
     trade_order_intake_receipt_digest,
+    verify_trade_order_delivery,
     verify_trade_order_intake_receipt,
 )
 from nth_dao.trade_rules.agreement_order import trade_order_digest
@@ -34,6 +35,7 @@ from nth_dao.util.jsonl_safe import LOCK_TIMEOUT_PATIENT
 DISPATCH_KIND = "nth.dao.trade.order-dispatch-work"
 ACKNOWLEDGEMENT_KIND = "nth.dao.trade.order-intake-acknowledgement"
 DISPATCH_PROTOCOL_VERSION = "1"
+PENDING_RECORD_VERSION = "2"
 EVENT_TRADE_ORDER_INTAKE_ACKNOWLEDGED = (
     "trade.order.intake-acknowledged"
 )
@@ -41,6 +43,7 @@ DEFAULT_MAX_PENDING_DISPATCHES = 4_096
 DEFAULT_MAX_ACKNOWLEDGEMENTS = 65_536
 DEFAULT_MAX_DISPATCH_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DISPATCH_RECORD_BYTES = 768 * 1024
+MAX_SUPERSEDED_DELIVERIES = 256
 _OBSERVATION_CLOCK_SKEW_MS = int(
     DEFAULT_ORDER_DELIVERY_CLOCK_SKEW_SECONDS * 1_000
 )
@@ -126,6 +129,8 @@ class TradeOrderDispatchRecord:
     last_error: str
     created_at_ms: int
     updated_at_ms: int
+    generation: int = 1
+    superseded_delivery_digests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,6 +159,14 @@ class TradeOrderDispatchReconciliation:
     failed: int
     next_cursor: str
     has_more: bool
+
+
+@dataclass(frozen=True)
+class TradeOrderDispatchResidue:
+    area: str
+    filename: str
+    size_bytes: int
+    modified_at_ns: int
 
 
 class TradeOrderDispatchStore:
@@ -314,6 +327,84 @@ class TradeOrderDispatchStore:
             total += path.stat().st_size
         return sorted(files), records, total
 
+    def _residue_locked(self) -> tuple[TradeOrderDispatchResidue, ...]:
+        output: list[TradeOrderDispatchResidue] = []
+        for area, directory in (
+            ("pending", self.pending_root),
+            ("acknowledgements", self.ack_root),
+        ):
+            self._files_and_usage(directory)
+            if not directory.exists():
+                continue
+            for path in directory.iterdir():
+                if _TEMP_FILE.fullmatch(path.name) is None:
+                    continue
+                metadata = path.stat()
+                output.append(TradeOrderDispatchResidue(
+                    area=area,
+                    filename=path.name,
+                    size_bytes=metadata.st_size,
+                    modified_at_ns=metadata.st_mtime_ns,
+                ))
+        return tuple(sorted(output, key=lambda item: (item.area, item.filename)))
+
+    def inspect_crash_residue(self) -> tuple[TradeOrderDispatchResidue, ...]:
+        """Return recognized temp files without mutating dispatch state."""
+
+        try:
+            with self._acquire():
+                return self._residue_locked()
+        except TimeoutError as exc:
+            raise TradeOrderDispatchBusy("dispatch store is busy") from exc
+
+    def prune_crash_residue(
+        self,
+        *,
+        expected: tuple[TradeOrderDispatchResidue, ...],
+    ) -> int:
+        """Delete only an unchanged operator-inspected residue snapshot."""
+
+        if not isinstance(expected, tuple) or any(
+            not isinstance(item, TradeOrderDispatchResidue)
+            for item in expected
+        ):
+            raise TypeError("expected must be a residue tuple from inspect")
+        try:
+            with self._acquire():
+                current = self._residue_locked()
+                if current != expected:
+                    raise TradeOrderDispatchError(
+                        "dispatch crash residue changed since inspection"
+                    )
+                touched: set[Path] = set()
+                for item in current:
+                    directory = (
+                        self.pending_root
+                        if item.area == "pending"
+                        else self.ack_root
+                    )
+                    path = directory / item.filename
+                    self._assert_path(path)
+                    path.unlink()
+                    touched.add(directory)
+                if os.name != "nt":
+                    for directory_path in touched:
+                        descriptor = os.open(
+                            directory_path,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                        )
+                        try:
+                            os.fsync(descriptor)
+                        finally:
+                            os.close(descriptor)
+                return len(current)
+        except TimeoutError as exc:
+            raise TradeOrderDispatchBusy("dispatch store is busy") from exc
+        except OSError as exc:
+            raise TradeOrderDispatchError(
+                "unable to prune dispatch crash residue"
+            ) from exc
+
     @staticmethod
     def _read_bounded(path: Path, *, label: str) -> bytes:
         try:
@@ -328,14 +419,24 @@ class TradeOrderDispatchStore:
     def _read_pending(self, path: Path) -> TradeOrderDispatchRecord:
         raw = self._read_bounded(path, label="pending dispatch")
         value = _decode_canonical_json(raw, label="pending dispatch")
-        expected = {
+        legacy_fields = {
             "kind", "protocol_version", "order_digest", "target_url",
             "delivery_b64u", "attempts", "last_error", "created_at_ms",
             "updated_at_ms",
         }
+        current_fields = legacy_fields | {
+            "generation",
+            "superseded_delivery_digests",
+        }
+        version = value.get("protocol_version")
+        expected = (
+            legacy_fields
+            if version == DISPATCH_PROTOCOL_VERSION
+            else current_fields
+        )
         if set(value) != expected or value["kind"] != DISPATCH_KIND:
             raise TradeOrderDispatchError("pending dispatch fields are invalid")
-        if value["protocol_version"] != DISPATCH_PROTOCOL_VERSION:
+        if version not in {DISPATCH_PROTOCOL_VERSION, PENDING_RECORD_VERSION}:
             raise TradeOrderDispatchError("pending dispatch version is invalid")
         digest = value["order_digest"]
         if path != self._path(self.pending_root, digest):
@@ -369,6 +470,25 @@ class TradeOrderDispatchStore:
             for item in (created, updated)
         ) or updated < created:
             raise TradeOrderDispatchError("pending timestamps are invalid")
+        generation = value.get("generation", 1)
+        superseded_raw = value.get("superseded_delivery_digests", [])
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or not 1 <= generation <= MAX_SAFE_INTEGER
+            or not isinstance(superseded_raw, list)
+            or len(superseded_raw) > MAX_SUPERSEDED_DELIVERIES
+            or any(
+                not isinstance(item, str) or _DIGEST.fullmatch(item) is None
+                for item in superseded_raw
+            )
+            or len(set(superseded_raw)) != len(superseded_raw)
+            or generation != len(superseded_raw) + 1
+            or trade_order_delivery_digest(delivery) in superseded_raw
+        ):
+            raise TradeOrderDispatchError(
+                "pending delivery generation history is invalid"
+            )
         return TradeOrderDispatchRecord(
             order_digest=digest,
             target_url=_normalize_target_url(value["target_url"]),
@@ -377,12 +497,14 @@ class TradeOrderDispatchStore:
             last_error=last_error,
             created_at_ms=created,
             updated_at_ms=updated,
+            generation=generation,
+            superseded_delivery_digests=tuple(superseded_raw),
         )
 
     def _pending_dict(self, record: TradeOrderDispatchRecord) -> dict[str, Any]:
         return {
             "kind": DISPATCH_KIND,
-            "protocol_version": DISPATCH_PROTOCOL_VERSION,
+            "protocol_version": PENDING_RECORD_VERSION,
             "order_digest": record.order_digest,
             "target_url": record.target_url,
             "delivery_b64u": b64u_encode(record.delivery.canonical_bytes),
@@ -390,6 +512,10 @@ class TradeOrderDispatchStore:
             "last_error": record.last_error,
             "created_at_ms": record.created_at_ms,
             "updated_at_ms": record.updated_at_ms,
+            "generation": record.generation,
+            "superseded_delivery_digests": list(
+                record.superseded_delivery_digests
+            ),
         }
 
     def _read_ack(self, path: Path) -> TradeOrderAcknowledgement:
@@ -489,7 +615,60 @@ class TradeOrderDispatchStore:
                         raise TradeOrderDispatchError(
                             "pending dispatch target cannot change"
                         )
-                    return existing
+                    if existing.delivery.canonical_bytes == verified.canonical_bytes:
+                        return existing
+                    at = datetime.fromtimestamp(
+                        moment / 1_000,
+                        tz=timezone.utc,
+                    )
+                    still_valid, reason = verify_trade_order_delivery(
+                        existing.delivery,
+                        recipient_did=existing.delivery.to_dict()[
+                            "recipient_did"
+                        ],
+                        at=at,
+                    )
+                    if still_valid:
+                        return existing
+                    if reason != "Order delivery has expired":
+                        raise TradeOrderDispatchError(
+                            f"pending dispatch cannot be renewed: {reason}"
+                        )
+                    replacement_valid, replacement_reason = (
+                        verify_trade_order_delivery(
+                            verified,
+                            recipient_did=verified.to_dict()["recipient_did"],
+                            at=at,
+                        )
+                    )
+                    if not replacement_valid:
+                        raise TradeOrderDispatchError(
+                            "replacement Delivery is invalid: "
+                            f"{replacement_reason}"
+                        )
+                    if (
+                        len(existing.superseded_delivery_digests)
+                        >= MAX_SUPERSEDED_DELIVERIES
+                    ):
+                        raise TradeOrderDispatchCapacity(
+                            "max superseded Delivery generations exceeded"
+                        )
+                    renewed = TradeOrderDispatchRecord(
+                        order_digest=digest,
+                        target_url=target,
+                        delivery=verified,
+                        attempts=existing.attempts,
+                        last_error="",
+                        created_at_ms=existing.created_at_ms,
+                        updated_at_ms=max(moment, existing.updated_at_ms),
+                        generation=existing.generation + 1,
+                        superseded_delivery_digests=(
+                            *existing.superseded_delivery_digests,
+                            trade_order_delivery_digest(existing.delivery),
+                        ),
+                    )
+                    self._atomic_write(path, self._pending_dict(renewed))
+                    return self._read_pending(path)
                 record = TradeOrderDispatchRecord(
                     order_digest=digest,
                     target_url=target,
@@ -926,6 +1105,7 @@ __all__ = [
     "TradeOrderDispatchError",
     "TradeOrderDispatchRecord",
     "TradeOrderDispatchReconciliation",
+    "TradeOrderDispatchResidue",
     "TradeOrderDispatchStore",
     "acknowledgement_audit_payload",
 ]

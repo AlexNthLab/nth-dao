@@ -10657,6 +10657,13 @@ def register_v2_routes(app: FastAPI) -> None:
             "dispatch_updated_at_ms": (
                 pending_dispatch.updated_at_ms if pending_dispatch else 0
             ),
+            "dispatch_generation": (
+                pending_dispatch.generation if pending_dispatch else 0
+            ),
+            "dispatch_superseded_deliveries": (
+                len(pending_dispatch.superseded_delivery_digests)
+                if pending_dispatch else 0
+            ),
             "remote_acknowledged": acknowledgement is not None,
             "remote_receipt_digest": (
                 acknowledgement.receipt_digest if acknowledgement else ""

@@ -3822,13 +3822,13 @@ def test_order_dispatch_retry_reuses_exact_delivery_and_pinned_target(tmp_path):
     prepared = store.prepare(
         first,
         target_url="http://peer.example:8080",
-        now_ms=1_775_178_180_000,
+        now_ms=1_785_546_180_000,
     )
 
     retried = store.prepare(
         second,
         target_url="http://peer.example:8080",
-        now_ms=1_775_178_181_000,
+        now_ms=1_785_546_181_000,
     )
 
     assert retried.delivery.canonical_bytes == prepared.delivery.canonical_bytes
@@ -3836,8 +3836,72 @@ def test_order_dispatch_retry_reuses_exact_delivery_and_pinned_target(tmp_path):
         store.prepare(
             second,
             target_url="http://other.example:8080",
-            now_ms=1_775_178_182_000,
+            now_ms=1_785_546_182_000,
         )
+
+
+def test_order_dispatch_renews_only_an_expired_delivery_generation(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    first = _order_delivery(context)
+    replacement = create_trade_order_delivery(
+        context["maker"],
+        order=first.order,
+        created_at="2026-08-01T01:12:00Z",
+        not_after="2026-08-01T01:17:00Z",
+        nonce="cd" * 16,
+        now=_utc("2026-08-01T01:12:00Z"),
+    )
+    root = tmp_path / "runtime"
+    store = TradeOrderDispatchStore(root)
+    original = store.prepare(
+        first,
+        target_url="http://peer.example:8080",
+        now_ms=1_785_546_120_000,
+    )
+
+    renewed = store.prepare(
+        replacement,
+        target_url="http://peer.example:8080",
+        now_ms=1_785_546_960_000,
+    )
+
+    assert renewed.generation == 2
+    assert renewed.delivery == replacement
+    assert renewed.superseded_delivery_digests == (
+        trade_order_delivery_digest(original.delivery),
+    )
+    assert TradeOrderDispatchStore(root).get_pending(
+        renewed.order_digest
+    ) == renewed
+
+
+def test_order_dispatch_migrates_legacy_pending_record_on_write(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    delivery = _order_delivery(context)
+    store = TradeOrderDispatchStore(tmp_path / "runtime")
+    record = store.prepare(
+        delivery,
+        target_url="http://peer.example:8080",
+        now_ms=1_785_546_120_000,
+    )
+    path = store._path(store.pending_root, record.order_digest)
+    legacy = json.loads(path.read_bytes())
+    legacy["protocol_version"] = "1"
+    legacy.pop("generation")
+    legacy.pop("superseded_delivery_digests")
+    path.write_bytes(canonical_json(legacy))
+
+    loaded = store.get_pending(record.order_digest)
+    assert loaded is not None and loaded.generation == 1
+    store.note_failure(
+        record.order_digest,
+        error="retry",
+        now_ms=1_785_546_121_000,
+    )
+    migrated = json.loads(path.read_bytes())
+    assert migrated["protocol_version"] == "2"
+    assert migrated["generation"] == 1
+    assert migrated["superseded_delivery_digests"] == []
 
 
 def test_order_dispatch_rejects_conflicting_acknowledgement(tmp_path):
@@ -3847,7 +3911,7 @@ def test_order_dispatch_rejects_conflicting_acknowledgement(tmp_path):
     store.prepare(
         delivery,
         target_url="http://peer.example:8080",
-        now_ms=1_775_178_180_000,
+        now_ms=1_785_546_180_000,
     )
     first = create_trade_order_intake_receipt(
         context["taker"],
@@ -4012,6 +4076,24 @@ def test_order_dispatch_crash_residue_counts_toward_capacity(tmp_path):
             target_url="http://peer.example:8080",
             now_ms=1_800_000_000_000,
         )
+
+
+def test_order_dispatch_crash_residue_requires_unchanged_inspection(tmp_path):
+    store = TradeOrderDispatchStore(tmp_path / "runtime")
+    store.pending_root.mkdir(parents=True)
+    suffix = "1" * 64
+    residue = store.pending_root / f"{suffix}.json.crash.tmp"
+    residue.write_bytes(b"partial")
+    inspected = store.inspect_crash_residue()
+    assert len(inspected) == 1
+    assert inspected[0].filename == residue.name
+
+    residue.write_bytes(b"changed")
+    with pytest.raises(TradeOrderDispatchError, match="changed"):
+        store.prune_crash_residue(expected=inspected)
+    refreshed = store.inspect_crash_residue()
+    assert store.prune_crash_residue(expected=refreshed) == 1
+    assert not residue.exists()
 
 
 def test_order_dispatch_reads_are_bounded_before_json_decode(tmp_path):
@@ -4550,6 +4632,8 @@ def test_operator_rejects_unsigned_order_delivery_acknowledgement(
         assert projected["dispatch_pending"] is True
         assert projected["dispatch_target_url"] == "http://127.0.0.1:18081"
         assert projected["dispatch_attempts"] == 2
+        assert projected["dispatch_generation"] == 1
+        assert projected["dispatch_superseded_deliveries"] == 0
         assert projected["dispatch_last_error"]
         assert projected["remote_acknowledged"] is False
 

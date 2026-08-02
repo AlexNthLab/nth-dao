@@ -738,6 +738,7 @@ function AgreementWorkbench({
       <h3>Delivery pending</h3>
       <p className="muted">The signed Order and peer target are retained by this node. Retrying reuses the same accepted agreement.</p>
       <div className="muted">Attempts: {agreement.dispatch_attempts ?? 0}</div>
+      <div className="muted">Delivery generation: {agreement.dispatch_generation ?? 1}{(agreement.dispatch_superseded_deliveries ?? 0) > 0 ? ` (${agreement.dispatch_superseded_deliveries} expired envelope(s) superseded)` : ""}</div>
       {agreement.dispatch_last_error && <div className="trade-proposal-warning" role="status">Last attempt: {agreement.dispatch_last_error}</div>}
       <code title={agreement.dispatch_target_url ?? ""}>{agreement.dispatch_target_url}</code>
       <button className="btn btn-primary" type="button" disabled={busy || !agreement.dispatch_target_url} onClick={onRetryDispatch}>Retry delivery</button>

@@ -142,6 +142,7 @@ from nth_dao.trade_rules.order_dispatch import (
     TradeOrderDispatchError,
     TradeOrderDispatchRecord,
     TradeOrderDispatchReconciliation,
+    TradeOrderDispatchResidue,
     TradeOrderDispatchStore,
     acknowledgement_audit_payload,
 )
@@ -575,6 +576,7 @@ __all__ = [
     "TradeOrderDispatchError",
     "TradeOrderDispatchRecord",
     "TradeOrderDispatchReconciliation",
+    "TradeOrderDispatchResidue",
     "TradeOrderDispatchStore",
     "acknowledgement_audit_payload",
     "create_trade_order_delivery",
