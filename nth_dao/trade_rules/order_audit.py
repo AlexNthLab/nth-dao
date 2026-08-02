@@ -58,6 +58,7 @@ _DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
 _EVENT_ID = re.compile(r"^[0-9a-f]{64}$")
 _ORDER_ID = re.compile(r"^nth-trade-order-sha256:([0-9a-f]{64})$")
 _RECORD_FILE = re.compile(r"^([0-9a-f]{64})\.json$")
+_TEMP_FILE = re.compile(r"^[0-9a-f]{64}\.json\..+\.tmp$")
 _TIMESTAMP = re.compile(
     r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?:\.(\d{1,9}))?Z$"
@@ -236,12 +237,26 @@ class TradeOrderAuditResult:
 
 
 @dataclass(frozen=True)
+class TradeOrderAuditView:
+    """One Store-backed Order proven by its signed Spine anchor."""
+
+    order: TradeOrder
+    event: SpineEvent
+
+
+@dataclass(frozen=True)
 class TradeOrderAuditReconciliation:
     scanned: int
     anchored: int
     verified_anchored: int
     blocked: int
     failed: int
+
+
+@dataclass(frozen=True)
+class TradeOrderAuditResidue:
+    temporary_files: tuple[str, ...]
+    total_bytes: int
 
 
 def _now_ms(value: int | None = None) -> int:
@@ -464,7 +479,9 @@ class TradeOrderAuditOutbox:
                 except OSError:
                     pass
 
-    def _usage_locked(self) -> tuple[int, int]:
+    def _usage_locked(
+        self, *, enforce_limits: bool = True
+    ) -> tuple[int, int]:
         if not self.root.exists():
             return 0, 0
         count = 0
@@ -481,25 +498,105 @@ class TradeOrderAuditOutbox:
                 raise TradeOrderAuditError(
                     "audit outbox contains an unexpected directory"
                 )
-            if path.name.endswith(".tmp"):
-                raise TradeOrderAuditError(
-                    "audit outbox contains temporary crash residue"
-                )
-            if _RECORD_FILE.fullmatch(path.name) is None:
+            is_record = _RECORD_FILE.fullmatch(path.name) is not None
+            is_temporary = _TEMP_FILE.fullmatch(path.name) is not None
+            if not is_record and not is_temporary:
                 raise TradeOrderAuditError(
                     "audit outbox contains an unknown file"
                 )
             count += 1
             total += path.stat().st_size
-            if count > self.max_records:
+            if enforce_limits and count > self.max_records:
                 raise TradeOrderAuditCapacity(
                     "existing audit outbox exceeds max_records"
                 )
-            if total > self.max_bytes:
+            if enforce_limits and total > self.max_bytes:
                 raise TradeOrderAuditCapacity(
                     "existing audit outbox exceeds max_bytes"
                 )
         return count, total
+
+    def inspect_crash_residue(self) -> TradeOrderAuditResidue:
+        """List recognized atomic-write residue without deleting anything."""
+
+        if not self.root.exists():
+            return TradeOrderAuditResidue(temporary_files=(), total_bytes=0)
+        try:
+            with self._acquire():
+                self._usage_locked(enforce_limits=False)
+                temporary = tuple(
+                    sorted(
+                        path.name
+                        for path in self.root.glob("*.tmp")
+                        if _TEMP_FILE.fullmatch(path.name) is not None
+                    )
+                )
+                return TradeOrderAuditResidue(
+                    temporary_files=temporary,
+                    total_bytes=sum(
+                        (self.root / name).stat().st_size
+                        for name in temporary
+                    ),
+                )
+        except TimeoutError as exc:
+            raise TradeOrderAuditBusy("Order audit outbox is busy") from exc
+
+    def prune_crash_residue(
+        self,
+        *,
+        expected_files: tuple[str, ...],
+    ) -> TradeOrderAuditResidue:
+        """Delete only an operator-confirmed snapshot of recognized residue."""
+
+        if (
+            not isinstance(expected_files, tuple)
+            or any(
+                not isinstance(name, str)
+                or _TEMP_FILE.fullmatch(name) is None
+                for name in expected_files
+            )
+            or len(set(expected_files)) != len(expected_files)
+        ):
+            raise ValueError(
+                "expected_files must be unique recognized temporary names"
+            )
+        try:
+            with self._acquire():
+                self._usage_locked(enforce_limits=False)
+                current = tuple(
+                    sorted(
+                        path.name
+                        for path in self.root.glob("*.tmp")
+                        if _TEMP_FILE.fullmatch(path.name) is not None
+                    )
+                )
+                if tuple(sorted(expected_files)) != current:
+                    raise TradeOrderAuditError(
+                        "crash residue changed since operator inspection"
+                    )
+                for name in current:
+                    path = self.root / name
+                    self._assert_path(path)
+                    path.unlink()
+                if current and os.name != "nt":
+                    directory = os.open(
+                        self.root,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                return TradeOrderAuditResidue(
+                    temporary_files=current,
+                    total_bytes=0,
+                )
+        except TimeoutError as exc:
+            raise TradeOrderAuditBusy("Order audit outbox is busy") from exc
+        except OSError as exc:
+            raise TradeOrderAuditError(
+                "unable to prune Order audit crash residue"
+            ) from exc
 
     def prepare(
         self,
@@ -568,6 +665,7 @@ class TradeOrderAuditOutbox:
         *,
         statuses: frozenset[str],
         limit: int,
+        after: str | None = None,
     ) -> tuple[TradeOrderAuditRecord, ...]:
         if (
             not isinstance(statuses, frozenset)
@@ -577,6 +675,14 @@ class TradeOrderAuditOutbox:
             raise ValueError("statuses must be a non-empty status frozenset")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
+        after_match = (
+            _DIGEST.fullmatch(after)
+            if isinstance(after, str) and after
+            else None
+        )
+        if after is not None and after_match is None:
+            raise ValueError("after must be a lowercase sha256 digest")
+        after_hex = after_match.group(1) if after_match is not None else ""
         if not self.root.exists():
             return ()
         try:
@@ -584,6 +690,8 @@ class TradeOrderAuditOutbox:
                 self._usage_locked()
                 output: list[TradeOrderAuditRecord] = []
                 for path in sorted(self.root.glob("*.json")):
+                    if after_hex and path.stem <= after_hex:
+                        continue
                     record = self._read(path)
                     if record.status in statuses:
                         output.append(record)
@@ -652,6 +760,37 @@ class TradeOrderAuditOutbox:
             raise TradeOrderAuditError("Order audit record is missing") from exc
         except TimeoutError as exc:
             raise TradeOrderAuditBusy("Order audit outbox is busy") from exc
+
+    def complete(self, digest: str, *, event_id: str) -> bool:
+        """Remove one fully anchored work record after exact event binding."""
+
+        path = self._path(digest)
+        try:
+            with self._acquire():
+                if not path.exists():
+                    return False
+                record = self._read(path)
+                if record.status != "anchored" or record.event_id != event_id:
+                    raise TradeOrderAuditError(
+                        "only the exactly anchored audit record can complete"
+                    )
+                path.unlink()
+                if os.name != "nt":
+                    directory = os.open(
+                        path.parent,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                return True
+        except TimeoutError as exc:
+            raise TradeOrderAuditBusy("Order audit outbox is busy") from exc
+        except OSError as exc:
+            raise TradeOrderAuditError(
+                "unable to complete Order audit work record"
+            ) from exc
 
 
 def order_audit_payload(order: TradeOrder) -> dict[str, Any]:
@@ -727,18 +866,27 @@ class TradeOrderAuditCoordinator:
         self.outbox = outbox
         self.order_store = order_store
         self.spine = spine
+        self._anchor_cache_token: tuple[int, int, int, int, int] | None = None
+        self._anchor_cache: tuple[
+            dict[str, SpineEvent],
+            dict[str, SpineEvent],
+        ] | None = None
 
     def _anchor_index(
         self,
     ) -> tuple[dict[str, SpineEvent], dict[str, SpineEvent]]:
-        ok, reason = self.spine.verify_chain()
-        if not ok:
+        token = self.spine.storage_token()
+        if token == self._anchor_cache_token and self._anchor_cache is not None:
+            return dict(self._anchor_cache[0]), dict(self._anchor_cache[1])
+        try:
+            verified_token, events = self.spine.verified_snapshot_with_token()
+        except ValueError as exc:
             raise TradeOrderAuditError(
-                f"Spine integrity check failed: {reason}"
-            )
+                f"Spine integrity check failed: {exc}"
+            ) from exc
         by_order_id: dict[str, SpineEvent] = {}
         by_digest: dict[str, SpineEvent] = {}
-        for event in self.spine.read_all():
+        for event in events:
             if event.type != EVENT_TRADE_ORDER_ACCEPTED:
                 continue
             payload = validate_order_audit_payload(event.payload)
@@ -750,6 +898,8 @@ class TradeOrderAuditCoordinator:
                 )
             by_order_id[order_id] = event
             by_digest[digest] = event
+        self._anchor_cache_token = verified_token
+        self._anchor_cache = (dict(by_order_id), dict(by_digest))
         return by_order_id, by_digest
 
     @staticmethod
@@ -896,16 +1046,153 @@ class TradeOrderAuditCoordinator:
         now_ms: int | None = None,
     ) -> TradeOrderAuditResult:
         moment = _now_ms(now_ms)
-        prepared, created = self.outbox.prepare(order, now_ms=moment)
+        verified = (
+            TradeOrder.from_json(order.canonical_bytes)
+            if isinstance(order, TradeOrder)
+            else TradeOrder.from_dict(order)
+        )
         try:
             with self.outbox.acquire_reconcile():
                 anchor_index = self._anchor_index()
+                digest = trade_order_digest(verified)
+                existing_work = self.outbox.get(digest)
+                if existing_work is not None:
+                    return self._reconcile_locked(
+                        digest,
+                        now_ms=moment,
+                        prepared_created=False,
+                        anchor_index=anchor_index,
+                    )
+                existing_event = self._find_anchor(verified, anchor_index)
+                if existing_event is not None:
+                    stored = self.order_store.put(verified)
+                    if stored.canonical_bytes != verified.canonical_bytes:
+                        raise TradeOrderAuditError(
+                            "Spine-anchored Order differs from the durable Store"
+                        )
+                    completed = TradeOrderAuditRecord.from_dict({
+                        "kind": ORDER_AUDIT_KIND,
+                        "protocol_version": ORDER_AUDIT_PROTOCOL_VERSION,
+                        "order_digest": digest,
+                        "order_b64u": b64u_encode(verified.canonical_bytes),
+                        "status": "anchored",
+                        "event_id": existing_event.event_id,
+                        "created_at_ms": moment,
+                        "updated_at_ms": moment,
+                        "attempts": 0,
+                        "last_error": "",
+                    })
+                    return TradeOrderAuditResult(
+                        record=completed,
+                        created=False,
+                        cache_created=False,
+                        anchor_created=False,
+                    )
+                prepared, created = self.outbox.prepare(
+                    verified,
+                    now_ms=moment,
+                )
                 return self._reconcile_locked(
                     prepared.order_digest,
                     now_ms=moment,
                     prepared_created=created,
                     anchor_index=anchor_index,
                 )
+        except TimeoutError as exc:
+            raise TradeOrderAuditBusy(
+                "Order audit reconciliation is busy"
+            ) from exc
+
+    def _finalize_locked(
+        self,
+        result: TradeOrderAuditResult,
+        anchor_index: tuple[dict[str, SpineEvent], dict[str, SpineEvent]],
+    ) -> bool:
+        record = result.record
+        if record.status != "anchored":
+            raise TradeOrderAuditError(
+                "only anchored Order audit work can be finalized"
+            )
+        order = record.order
+        event = self._find_anchor(order, anchor_index)
+        if event is None or event.event_id != record.event_id:
+            raise TradeOrderAuditError(
+                "Order audit work does not match its Spine anchor"
+            )
+        stored = self.order_store.get(order.order_id)
+        if stored is None or stored.canonical_bytes != order.canonical_bytes:
+            raise TradeOrderAuditError(
+                "Order audit work does not match the durable Order Store"
+            )
+        self.outbox.complete(
+            record.order_digest,
+            event_id=record.event_id,
+        )
+        # A concurrent idempotent receiver may already have retired the same
+        # work record. Store and Spine were reverified above, so absence is a
+        # completed state rather than an error.
+        return True
+
+    def finalize(self, result: TradeOrderAuditResult) -> bool:
+        """Verify Store/Spine durability, then retire the recovery record."""
+
+        try:
+            with self.outbox.acquire_reconcile():
+                return self._finalize_locked(result, self._anchor_index())
+        except TimeoutError as exc:
+            raise TradeOrderAuditBusy(
+                "Order audit reconciliation is busy"
+            ) from exc
+
+    def _view(self, event: SpineEvent) -> TradeOrderAuditView:
+        payload = validate_order_audit_payload(event.payload)
+        order = self.order_store.get(payload["order_id"])
+        if order is None:
+            raise TradeOrderAuditError(
+                "Spine-anchored Order is missing from the durable Store"
+            )
+        if order_audit_payload(order) != payload:
+            raise TradeOrderAuditError(
+                "durable Order does not match its Spine anchor"
+            )
+        return TradeOrderAuditView(order=order, event=event)
+
+    def list_accepted(
+        self,
+        *,
+        limit: int,
+        after: str | None = None,
+    ) -> tuple[TradeOrderAuditView, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        if after is not None and (
+            not isinstance(after, str) or _DIGEST.fullmatch(after) is None
+        ):
+            raise ValueError("after must be a lowercase sha256 digest")
+        try:
+            with self.outbox.acquire_reconcile():
+                _by_order_id, by_digest = self._anchor_index()
+                output: list[TradeOrderAuditView] = []
+                for digest, event in sorted(by_digest.items()):
+                    if after is not None and digest <= after:
+                        continue
+                    output.append(self._view(event))
+                    if len(output) >= limit:
+                        break
+                return tuple(output)
+        except TimeoutError as exc:
+            raise TradeOrderAuditBusy(
+                "Order audit reconciliation is busy"
+            ) from exc
+
+    def get_accepted(self, digest: str) -> TradeOrderAuditView | None:
+        if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+            raise ValueError("digest must be a lowercase sha256 digest")
+        try:
+            with self.outbox.acquire_reconcile():
+                _by_order_id, by_digest = self._anchor_index()
+                event = by_digest.get(digest)
+                return self._view(event) if event is not None else None
         except TimeoutError as exc:
             raise TradeOrderAuditBusy(
                 "Order audit reconciliation is busy"
@@ -934,12 +1221,13 @@ class TradeOrderAuditCoordinator:
                 for record in records:
                     scanned += 1
                     try:
-                        self._reconcile_locked(
+                        result = self._reconcile_locked(
                             record.order_digest,
                             now_ms=moment,
                             prepared_created=False,
                             anchor_index=anchor_index,
                         )
+                        self._finalize_locked(result, anchor_index)
                         anchored += 1
                     except TradeOrderConflict:
                         blocked += 1
@@ -948,12 +1236,13 @@ class TradeOrderAuditCoordinator:
                 for record in anchored_records:
                     scanned += 1
                     try:
-                        self._reconcile_locked(
+                        result = self._reconcile_locked(
                             record.order_digest,
                             now_ms=moment,
                             prepared_created=False,
                             anchor_index=anchor_index,
                         )
+                        self._finalize_locked(result, anchor_index)
                         verified_anchored += 1
                     except (OSError, RuntimeError, TypeError, ValueError):
                         failed += 1
@@ -986,8 +1275,10 @@ __all__ = [
     "TradeOrderAuditError",
     "TradeOrderAuditOutbox",
     "TradeOrderAuditReconciliation",
+    "TradeOrderAuditResidue",
     "TradeOrderAuditRecord",
     "TradeOrderAuditResult",
+    "TradeOrderAuditView",
     "order_audit_payload",
     "validate_order_audit_payload",
 ]

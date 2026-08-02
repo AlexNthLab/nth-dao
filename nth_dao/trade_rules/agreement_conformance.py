@@ -72,6 +72,17 @@ from nth_dao.trade_rules.order_audit import (
     EVENT_TRADE_ORDER_ACCEPTED,
     order_audit_payload,
 )
+from nth_dao.trade_rules.order_transport import (
+    create_trade_order_delivery,
+    create_trade_order_intake_receipt,
+    trade_order_delivery_digest,
+    trade_order_intake_receipt_digest,
+)
+from nth_dao.trade_rules.order_dispatch import (
+    EVENT_TRADE_ORDER_INTAKE_ACKNOWLEDGED,
+    TradeOrderAcknowledgement,
+    acknowledgement_audit_payload,
+)
 from nth_dao.trade_rules.offer import offer_body, sign_offer
 from nth_dao.trade_rules.package_store import RulePackageStore
 from nth_dao.trade_rules.store import OfferStore
@@ -94,9 +105,20 @@ ACCEPTANCE_SCHEMA_PATH = (
 ORDER_SCHEMA_PATH = (
     Path(__file__).with_name("schemas") / "trade-order.schema.json"
 )
+ORDER_DELIVERY_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas") / "trade-order-delivery.schema.json"
+)
+ORDER_INTAKE_RECEIPT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-order-intake-receipt.schema.json"
+)
 ORDER_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-order-audit-payload.schema.json"
+)
+ORDER_INTAKE_ACKNOWLEDGEMENT_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-order-intake-acknowledgement-audit-payload.schema.json"
 )
 EXECUTION_RECEIPT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -339,6 +361,28 @@ def generate_vectors() -> dict[str, Any]:
             proposal=proposal,
             acceptance=acceptance,
         )
+        order_delivery = create_trade_order_delivery(
+            maker,
+            order=order,
+            created_at="2026-08-01T01:00:01Z",
+            not_after="2026-08-01T01:10:01Z",
+            nonce="abcdef0123456789abcdef0123456789",
+            now=_utc("2026-08-01T01:00:01Z"),
+        )
+        order_intake_receipt = create_trade_order_intake_receipt(
+            taker,
+            delivery=order_delivery,
+            received_at="2026-08-01T01:05:00Z",
+            audit_event_id="1" * 64,
+        )
+        order_intake_acknowledgement = TradeOrderAcknowledgement(
+            order_digest=trade_order_digest(order),
+            target_url="https://taker.example",
+            delivery=order_delivery,
+            receipt=order_intake_receipt,
+            remote_event_id="1" * 64,
+            observed_at_ms=1_775_179_500_000,
+        )
         adapter_artifact = b"public declarative adapter artifact v1"
         adapter = build_execution_adapter(
             adapter_id="org.nthdao.reference/declarative",
@@ -489,6 +533,14 @@ def generate_vectors() -> dict[str, Any]:
             "nth:trade:proposal-delivery:"
             + proposal_delivery_tamper["nonce"]
         )
+        order_delivery_tamper = order_delivery.to_dict()
+        order_delivery_tamper["not_after"] = "2026-08-01T01:09:01Z"
+        order_delivery_nested_tamper = order_delivery.to_dict()
+        order_delivery_nested_tamper["order"]["snapshot"]["proposal"][
+            "terms"
+        ]["requested_quantity"] = "999"
+        order_intake_receipt_tamper = order_intake_receipt.to_dict()
+        order_intake_receipt_tamper["audit_event_id"] = "2" * 64
         proposal_intake_tamper = proposal_intake_receipt.to_dict()
         proposal_intake_tamper["delivery_digest"] = "sha256:" + ("0" * 64)
         acceptance_policy_mismatch = acceptance.to_dict()
@@ -612,6 +664,38 @@ def generate_vectors() -> dict[str, Any]:
         "acceptance_digest": acceptance_digest(acceptance),
         "order": order.to_dict(),
         "order_digest": trade_order_digest(order),
+        "order_delivery": order_delivery.to_dict(),
+        "order_delivery_digest": trade_order_delivery_digest(order_delivery),
+        "order_intake_receipt": order_intake_receipt.to_dict(),
+        "order_intake_receipt_digest": trade_order_intake_receipt_digest(
+            order_intake_receipt
+        ),
+        "order_delivery_verification_cases": [
+            {
+                "case": "valid-recipient-and-window",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T01:05:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-recipient",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T01:05:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "expired-after-clock-skew",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T01:15:02Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
         "execution_adapter": adapter.to_dict(),
         "execution_adapter_digest": adapter.digest,
         "execution_adapter_artifact_hex": adapter_artifact.hex(),
@@ -651,6 +735,12 @@ def generate_vectors() -> dict[str, Any]:
         "order_audit": {
             "event_type": EVENT_TRADE_ORDER_ACCEPTED,
             "payload": audit_payload,
+        },
+        "order_intake_acknowledgement_audit": {
+            "event_type": EVENT_TRADE_ORDER_INTAKE_ACKNOWLEDGED,
+            "payload": acknowledgement_audit_payload(
+                order_intake_acknowledgement
+            ),
         },
         "execution_audit": {
             "event_type": EVENT_TRADE_EXECUTION_RECORDED,
@@ -700,6 +790,24 @@ def generate_vectors() -> dict[str, Any]:
                 "target": "order",
                 "expected_valid": False,
                 "document": order_nested_tamper,
+            },
+            {
+                "case": "order-delivery-signed-window-tamper",
+                "target": "order_delivery",
+                "expected_valid": False,
+                "document": order_delivery_tamper,
+            },
+            {
+                "case": "order-delivery-nested-order-tamper",
+                "target": "order_delivery",
+                "expected_valid": False,
+                "document": order_delivery_nested_tamper,
+            },
+            {
+                "case": "order-intake-receipt-audit-event-tamper",
+                "target": "order_intake_receipt",
+                "expected_valid": False,
+                "document": order_intake_receipt_tamper,
             },
             {
                 "case": "order-audit-id-proposal-binding-mismatch",
@@ -794,6 +902,9 @@ __all__ = [
     "EXECUTION_ADAPTER_SCHEMA_PATH",
     "EXECUTION_ADAPTER_POLICY_SCHEMA_PATH",
     "ORDER_SCHEMA_PATH",
+    "ORDER_DELIVERY_SCHEMA_PATH",
+    "ORDER_INTAKE_RECEIPT_SCHEMA_PATH",
+    "ORDER_INTAKE_ACKNOWLEDGEMENT_AUDIT_SCHEMA_PATH",
     "ORDER_AUDIT_SCHEMA_PATH",
     "PROPOSAL_SCHEMA_PATH",
     "PROPOSAL_DELIVERY_SCHEMA_PATH",

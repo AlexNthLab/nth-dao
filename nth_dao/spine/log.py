@@ -152,6 +152,38 @@ class SignedEventLog:
     def head_seq(self) -> int:
         return self._head_seq
 
+    def storage_token(self) -> tuple[int, int, int, int, int]:
+        """Return a cheap invalidation token for the on-disk log snapshot."""
+
+        try:
+            metadata = self._path.stat()
+        except FileNotFoundError:
+            return (0, 0, 0, 0, 0)
+        return (
+            int(getattr(metadata, "st_dev", 0)),
+            int(getattr(metadata, "st_ino", 0)),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+        )
+
+    def verified_snapshot_with_token(
+        self,
+    ) -> tuple[tuple[int, int, int, int, int], tuple[SpineEvent, ...]]:
+        """Return a storage token and events from one verified lock snapshot."""
+
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                ok, reason, events = self._verified_events_unlocked()
+                if not ok:
+                    raise ValueError(
+                        f"spine log at {self._path} is corrupt: {reason}"
+                    )
+                return self.storage_token(), events
+
     def append(
         self, event_type: str, payload: dict, *, ts_ms: Optional[int] = None,
     ) -> SpineEvent:

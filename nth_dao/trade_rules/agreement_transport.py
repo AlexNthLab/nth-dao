@@ -43,7 +43,7 @@ DEFAULT_DELIVERY_CLOCK_SKEW_SECONDS = 5 * 60
 _DELIVERY_DOMAIN = b"nth-dao/trade-proposal-delivery/v1"
 _INTAKE_RECEIPT_DOMAIN = b"nth-dao/trade-proposal-intake-receipt/v1"
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-_NONCE = re.compile(r"^[0-9a-f]{32,128}$")
+_NONCE = re.compile(r"^(?:[0-9a-f]{2}){16,64}$")
 _TIMESTAMP = re.compile(
     r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?:\.(\d{1,9}))?Z$"
@@ -490,7 +490,7 @@ def verify_trade_proposal_delivery(
 
     try:
         verified = (
-            delivery
+            TradeProposalDelivery.from_json(delivery.canonical_bytes)
             if isinstance(delivery, TradeProposalDelivery)
             else TradeProposalDelivery.from_dict(delivery)
         )
@@ -530,7 +530,7 @@ def trade_proposal_delivery_digest(
     delivery: TradeProposalDelivery | dict[str, Any],
 ) -> str:
     verified = (
-        delivery
+        TradeProposalDelivery.from_json(delivery.canonical_bytes)
         if isinstance(delivery, TradeProposalDelivery)
         else TradeProposalDelivery.from_dict(delivery)
     )
@@ -588,11 +588,13 @@ def verify_trade_proposal_intake_receipt(
 
     try:
         verified_receipt = (
-            receipt
+            TradeProposalIntakeReceipt.from_json(receipt.canonical_bytes)
             if isinstance(receipt, TradeProposalIntakeReceipt)
             else TradeProposalIntakeReceipt.from_dict(receipt)
         )
-        verified_delivery = delivery
+        verified_delivery = TradeProposalDelivery.from_json(
+            delivery.canonical_bytes
+        )
         if not isinstance(receiver_did, str) or not is_did_key(receiver_did):
             raise TradeProposalIntakeReceiptRejected(
                 "expected receiver_did must be an Ed25519 did:key"
@@ -633,7 +635,7 @@ def trade_proposal_intake_receipt_digest(
     receipt: TradeProposalIntakeReceipt | dict[str, Any],
 ) -> str:
     verified = (
-        receipt
+        TradeProposalIntakeReceipt.from_json(receipt.canonical_bytes)
         if isinstance(receipt, TradeProposalIntakeReceipt)
         else TradeProposalIntakeReceipt.from_dict(receipt)
     )

@@ -1,39 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://nthdao.org/schemas/trade-proposal-delivery-v1.json",
-  "title": "NTH DAO Trade Proposal Delivery v1",
-  "$comment": "Signature, TTL, target/party binding, nonce/id binding, and the embedded Proposal digest require the protocol validator.",
+  "$id": "https://nthdao.org/schemas/trade-order-intake-receipt-v1.json",
+  "title": "NTH DAO Trade Order Intake Receipt v1",
+  "$comment": "This is a receiver-signed retention claim, not independent proof of the receiver's filesystem or Spine. Signature, chronology, and exact Delivery/event bindings require the protocol validator.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "kind",
     "protocol_version",
-    "delivery_id",
-    "nonce",
-    "proposal_digest",
+    "order_digest",
+    "delivery_digest",
     "sender_did",
-    "recipient_did",
-    "created_at",
-    "not_after",
-    "proposal",
+    "receiver_did",
+    "received_at",
+    "audit_event_id",
+    "status",
     "proof"
   ],
   "properties": {
-    "kind": {"const": "nth.dao.trade.proposal-delivery"},
+    "kind": {"const": "nth.dao.trade.order-intake-receipt"},
     "protocol_version": {"const": "1"},
-    "delivery_id": {
-      "type": "string",
-      "pattern": "^nth:trade:proposal-delivery:(?:[0-9a-f]{2}){16,64}$"
-    },
-    "nonce": {"type": "string", "pattern": "^(?:[0-9a-f]{2}){16,64}$"},
-    "proposal_digest": {"$ref": "#/$defs/digest"},
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "delivery_digest": {"$ref": "#/$defs/digest"},
     "sender_did": {"$ref": "#/$defs/did"},
-    "recipient_did": {"$ref": "#/$defs/did"},
-    "created_at": {"$ref": "#/$defs/timestamp"},
-    "not_after": {"$ref": "#/$defs/timestamp"},
-    "proposal": {
-      "$ref": "https://nthdao.org/schemas/trade-proposal-v1.json"
-    },
+    "receiver_did": {"$ref": "#/$defs/did"},
+    "received_at": {"$ref": "#/$defs/timestamp"},
+    "audit_event_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"const": "retained-accepted"},
     "proof": {
       "type": "object",
       "additionalProperties": false,
@@ -52,7 +45,7 @@
           "maxLength": 300,
           "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+#z[1-9A-HJ-NP-Za-km-z]+$"
         },
-        "proof_purpose": {"const": "tradeProposalDelivery"},
+        "proof_purpose": {"const": "tradeOrderIntakeReceipt"},
         "proof_value": {"type": "string", "minLength": 86, "maxLength": 86}
       }
     }

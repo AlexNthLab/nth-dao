@@ -566,6 +566,52 @@ export interface TradeProposalDetail extends TradeProposalSummary {
   proposal: TradeProposalDocument;
 }
 
+export interface TradeOrderSummary {
+  order_digest: string;
+  order_id: string;
+  proposal_digest: string;
+  acceptance_digest: string;
+  offer_digest: string;
+  maker_did: string;
+  taker_did: string;
+  created_at: string;
+  audit_status: "prepared" | "cached" | "anchored" | "blocked";
+  audit_event_id: string;
+  audit_attempts: number;
+  last_error_code: string;
+  delivery_or_payment_proven: false;
+  dispatch_pending?: boolean;
+  dispatch_target_url?: string;
+  dispatch_attempts?: number;
+  dispatch_last_error?: string;
+  dispatch_updated_at_ms?: number;
+  remote_acknowledged?: boolean;
+  remote_receipt_digest?: string;
+  remote_audit_event_id?: string;
+  remote_received_at?: string;
+}
+
+export interface TradeOrderPage {
+  items: TradeOrderSummary[];
+  next_cursor: string;
+}
+
+export interface TradeOrderDetail extends TradeOrderSummary {
+  order: Record<string, unknown>;
+}
+
+export interface TradeProposalAcceptanceResult {
+  status: "accepted-and-delivered";
+  order: Record<string, unknown> & { order_id: string };
+  order_digest: string;
+  local_audit_event_id: string;
+  delivery_digest: string;
+  remote_intake_receipt: Record<string, unknown>;
+  remote_intake_receipt_digest: string;
+  remote_audit_event_id: string;
+  acknowledgement_persisted: true;
+}
+
 /** 类别分面(/api/v2/market/categories)。 */
 export interface TaskCategory {
   context: string;

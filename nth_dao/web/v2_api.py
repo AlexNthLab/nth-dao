@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -4445,6 +4445,57 @@ def _state_trade_proposal_delivery_global_limiter(
         return None
 
 
+def _state_trade_order_intake(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_intake
+    except AttributeError:
+        return None
+
+
+def _state_trade_order_audit(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_audit
+    except AttributeError:
+        return None
+
+
+def _state_trade_order_audit_outbox(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_audit_outbox
+    except AttributeError:
+        return None
+
+
+def _state_trade_order_dispatch(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_dispatch
+    except AttributeError:
+        return None
+
+
+def _state_trade_order_dispatch_store(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_dispatch_store
+    except AttributeError:
+        return None
+
+
+def _state_trade_order_delivery_limiter(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_delivery_limiter
+    except AttributeError:
+        return None
+
+
+def _state_trade_order_delivery_global_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_order_delivery_global_limiter
+    except AttributeError:
+        return None
+
+
 def _state_trade_rule_recognition_audit(
     request: Request,
 ) -> Optional[Any]:
@@ -6731,6 +6782,85 @@ def _normalize_configured_fed_peer(url: str) -> str:
         raise ValueError("peer_url must not include query or fragment")
     path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+def _resolve_operator_trade_peer_ip(url: str) -> str:
+    """Resolve an operator-selected trade peer once and reject unsafe targets."""
+
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise ValueError("trade peer URL must include a host")
+
+    def allowed(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        return not (
+            address.is_unspecified
+            or address.is_multicast
+            or address.is_link_local
+            or address.is_reserved
+        )
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not allowed(literal):
+            raise ValueError("trade peer IP is not routable")
+        return str(literal)
+
+    try:
+        infos = socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("trade peer host cannot be resolved") from exc
+    addresses: list[str] = []
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError("trade peer returned an invalid DNS address") from exc
+        if not allowed(address):
+            raise ValueError("trade peer DNS includes an unsafe address")
+        if address.is_loopback and host != "localhost":
+            raise ValueError(
+                "trade peer DNS must not redirect a hostname to loopback"
+            )
+        addresses.append(str(address))
+    if not addresses:
+        raise ValueError("trade peer host has no usable address")
+    if host == "localhost" and any(
+        not ipaddress.ip_address(address).is_loopback for address in addresses
+    ):
+        raise ValueError("localhost trade peer must resolve only to loopback")
+    return addresses[0]
+
+
+def _post_trade_order_delivery_to_peer(
+    peer_url: str,
+    document: dict[str, Any],
+    *,
+    timeout_seconds: float = 15.0,
+) -> tuple[int, dict[str, Any]]:
+    """POST one signed Order Delivery over a DNS-pinned connection."""
+
+    from .market_federation_poll import _urllib_post_json_pinned_raw
+
+    normalized = _normalize_configured_fed_peer(peer_url)
+    resolved_ip = _resolve_operator_trade_peer_ip(normalized)
+    status, raw = _urllib_post_json_pinned_raw(
+        normalized + "/api/v2/trade/federation/orders",
+        resolved_ip,
+        document,
+        timeout_s=timeout_seconds,
+        max_bytes=256 * 1024,
+    )
+    try:
+        response = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("trade peer returned invalid JSON") from exc
+    if not isinstance(response, dict):
+        raise ValueError("trade peer returned a non-object response")
+    return status, response
 
 
 def _federation_url_from_discovered_peer(peer: Any) -> str:
@@ -9935,6 +10065,341 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="Proposal not found")
         return _trade_proposal_view(view, include_document=True)
 
+    @app.post("/api/v2/trade/proposals/{digest}/accept")
+    async def v2_trade_proposal_accept(
+        digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Sign, retain, and deliver an accepted Order to its taker."""
+
+        from nth_dao.trade_rules import (
+            ORDER_ID_PREFIX,
+            RuleResolutionPolicy,
+            TradeAgreementRejected,
+            TradeOrderAuditBusy,
+            TradeOrderAuditCapacity,
+            TradeOrderAuditError,
+            TradeOrderDispatchBusy,
+            TradeOrderDispatchCapacity,
+            TradeOrderDispatchError,
+            TradeOrderIntakeReceipt,
+            TradeOrderRejected,
+            create_trade_acceptance,
+            create_trade_order,
+            create_trade_order_delivery,
+            proposal_digest,
+            resolve_canonical_offer_rules,
+            verify_trade_order_intake_receipt,
+            verify_trade_proposal_under_local_state,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="digest must be a lowercase sha256 digest",
+            )
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict) or not set(body).issubset(
+            {"target_url", "maker_policy"}
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="body accepts only target_url and maker_policy",
+            )
+        target_url = body.get("target_url")
+        if (
+            not isinstance(target_url, str)
+            or not target_url.strip()
+            or len(target_url) > 2_048
+        ):
+            raise HTTPException(status_code=400, detail="target_url is required")
+        try:
+            target_url = _normalize_configured_fed_peer(target_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        coordinator = _state_trade_proposal_audit(request)
+        identity = _state_node_identity(request)
+        offer_store = _state_trade_offer_store(request)
+        package_store = _state_trade_rule_package_store(request)
+        order_audit = _state_trade_order_audit(request)
+        order_dispatch = _state_trade_order_dispatch(request)
+        order_store = getattr(request.app.state.nth, "trade_order_store", None)
+        if (
+            coordinator is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+            or offer_store is None
+            or package_store is None
+            or order_audit is None
+            or order_dispatch is None
+            or order_store is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade acceptance runtime unavailable",
+            )
+        try:
+            view = await run_in_threadpool(coordinator.get_received, digest)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Proposal audit integrity failure",
+            ) from exc
+        if view is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        if not view.audit_verified:
+            raise HTTPException(
+                status_code=409,
+                detail="Proposal audit anchor is not verified",
+            )
+
+        proposal = view.proposal
+        proposal_document = proposal.to_dict()
+        if proposal_document["maker_did"] != identity.as_did():
+            raise HTTPException(
+                status_code=403,
+                detail="local identity is not the Proposal maker",
+            )
+        expected_order_id = (
+            ORDER_ID_PREFIX
+            + proposal_digest(proposal).removeprefix("sha256:")
+        )
+        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        created_at = moment.isoformat().replace("+00:00", "Z")
+        now_ms = int(moment.timestamp() * 1_000)
+
+        def _accept_locally() -> tuple[Any, Any]:
+            order = order_store.get(expected_order_id)
+            if order is None:
+                ok, reason = verify_trade_proposal_under_local_state(
+                    proposal,
+                    offer_store,
+                    package_store,
+                    at=moment,
+                )
+                if not ok:
+                    raise TradeAgreementRejected(reason)
+                offer = offer_store.get(proposal_document["offer_digest"])
+                if offer is None:
+                    raise TradeAgreementRejected(
+                        "Proposal Offer bytes are unavailable"
+                    )
+                raw_policy = body.get("maker_policy")
+                if raw_policy is None:
+                    policy = RuleResolutionPolicy(
+                        accepted_package_digests=frozenset(
+                            binding["digest"]
+                            for binding in proposal_document["rule_bindings"]
+                        )
+                    )
+                else:
+                    policy = RuleResolutionPolicy.from_dict(raw_policy)
+                resolution = resolve_canonical_offer_rules(
+                    proposal_document["maker_did"],
+                    proposal_document["offer_id"],
+                    offer_store,
+                    package_store,
+                    policy,
+                    at=moment,
+                )
+                acceptance = create_trade_acceptance(
+                    identity,
+                    proposal=proposal,
+                    resolution=resolution,
+                    offer=offer,
+                    offer_resolver=offer_store,
+                    created_at=created_at,
+                    now=moment,
+                )
+                order = create_trade_order(
+                    offer=offer,
+                    proposal=proposal,
+                    acceptance=acceptance,
+                )
+            if order.order_id != expected_order_id:
+                raise TradeOrderRejected(
+                    "retained Order does not match Proposal identity"
+                )
+            audit = order_audit.accept(order, now_ms=now_ms)
+            return order, audit
+
+        try:
+            order, local_audit = await run_in_threadpool(_accept_locally)
+            delivery = create_trade_order_delivery(
+                identity,
+                order=order,
+                created_at=created_at,
+                not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                now=moment,
+            )
+        except (TradeOrderAuditBusy,) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade acceptance runtime is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeOrderAuditCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade acceptance storage capacity exceeded",
+            ) from exc
+        except (
+            TradeAgreementRejected,
+            TradeOrderRejected,
+            TradeOrderAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Proposal cannot be accepted: {exc}",
+            ) from exc
+
+        def _acknowledged_response(acknowledgement: Any) -> Dict[str, Any]:
+            return {
+                "status": "accepted-and-delivered",
+                "order": order.to_dict(),
+                "order_digest": local_audit.record.order_digest,
+                "local_audit_event_id": local_audit.record.event_id,
+                "delivery_digest": acknowledgement.delivery_digest,
+                "remote_intake_receipt": acknowledgement.receipt.to_dict(),
+                "remote_intake_receipt_digest": (
+                    acknowledgement.receipt_digest
+                ),
+                "remote_audit_event_id": acknowledgement.remote_event_id,
+                "acknowledgement_persisted": True,
+            }
+
+        try:
+            existing_acknowledgement = await run_in_threadpool(
+                order_dispatch.recover_acknowledgement,
+                local_audit.record.order_digest,
+            )
+            if existing_acknowledgement is not None:
+                await run_in_threadpool(order_audit.finalize, local_audit)
+                return _acknowledged_response(existing_acknowledgement)
+            pending_dispatch = await run_in_threadpool(
+                order_dispatch.prepare,
+                delivery,
+                target_url=target_url,
+                now_ms=now_ms,
+            )
+            delivery = pending_dispatch.delivery
+        except TradeOrderDispatchCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Order dispatch storage capacity exceeded",
+            ) from exc
+        except (TradeOrderDispatchBusy, TradeOrderDispatchError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade Order dispatch persistence failed: {exc}",
+                headers={"Retry-After": "1"},
+            ) from exc
+
+        async def _note_dispatch_failure(message: str) -> None:
+            try:
+                await run_in_threadpool(
+                    order_dispatch.failed,
+                    local_audit.record.order_digest,
+                    error=message,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "unable to record failed trade Order dispatch: %s", exc
+                )
+
+        try:
+            peer_status, peer_body = await run_in_threadpool(
+                _post_trade_order_delivery_to_peer,
+                target_url,
+                delivery.to_dict(),
+            )
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+            await _note_dispatch_failure(str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Order is retained locally but delivery to the "
+                    f"taker failed: {exc}"
+                ),
+            ) from exc
+        if not 200 <= peer_status < 300:
+            await _note_dispatch_failure(f"peer returned HTTP {peer_status}")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Order is retained locally but the taker rejected "
+                    f"delivery with HTTP {peer_status}"
+                ),
+            )
+        try:
+            receipt = TradeOrderIntakeReceipt.from_dict(
+                peer_body["intake_receipt"]
+            )
+            peer_event_id = peer_body["audit_event_id"]
+            ok, reason = verify_trade_order_intake_receipt(
+                receipt,
+                delivery=delivery,
+                receiver_did=proposal_document["taker_did"],
+                audit_event_id=peer_event_id,
+                at=datetime.now(timezone.utc),
+            )
+            if not ok:
+                raise ValueError(reason)
+        except (KeyError, TypeError, ValueError) as exc:
+            await _note_dispatch_failure(f"invalid receipt: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"taker returned an invalid signed intake receipt: {exc}",
+            ) from exc
+        try:
+            acknowledgement = await run_in_threadpool(
+                order_dispatch.acknowledge,
+                delivery,
+                receipt,
+                target_url=target_url,
+                remote_event_id=peer_event_id,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote receipt verified but local acknowledgement "
+                    "persistence is incomplete"
+                ),
+                headers={"Retry-After": "1"},
+            ) from exc
+        try:
+            finalized = await run_in_threadpool(
+                order_audit.finalize,
+                local_audit,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote receipt is durable but local audit cleanup failed"
+                ),
+                headers={"Retry-After": "1"},
+            ) from exc
+        if not finalized:
+            raise HTTPException(
+                status_code=503,
+                detail="remote receipt verified but local audit work disappeared",
+                headers={"Retry-After": "1"},
+            )
+        return _acknowledged_response(acknowledgement)
+
     @app.post("/api/v2/trade/proposals/reconcile")
     async def v2_trade_proposal_reconcile(
         request: Request,
@@ -10019,6 +10484,360 @@ def register_v2_routes(app: FastAPI) -> None:
             "oldest_pending_age_seconds": metrics.oldest_pending_age_seconds,
             "measured_at": metrics.measured_at,
         }
+
+    @app.post(
+        "/api/v2/trade/federation/orders",
+        status_code=202,
+    )
+    async def v2_trade_order_receive(request: Request) -> Dict[str, Any]:
+        """Retain one accepted agreement; this is not delivery or payment."""
+
+        from nth_dao.trade_rules import (
+            TradeOrderAuditBusy,
+            TradeOrderAuditCapacity,
+            TradeOrderAuditError,
+            TradeOrderConflict,
+            TradeOrderDelivery,
+            TradeOrderDeliveryRejected,
+            TradeOrderStoreBusy,
+            TradeOrderStoreCapacity,
+        )
+
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail="trade Order delivery requires Content-Type application/json",
+            )
+        limiter = _state_trade_order_delivery_limiter(request)
+        global_limiter = _state_trade_order_delivery_global_limiter(request)
+        intake = _state_trade_order_intake(request)
+        if limiter is None or global_limiter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order delivery rate limiter unavailable",
+            )
+        if intake is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade Order receiver unavailable",
+            )
+        client_key = (
+            str(request.client.host).strip()
+            if request.client is not None and request.client.host
+            else "anonymous"
+        )
+        try:
+            decision = await run_in_threadpool(limiter.check, client_key)
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order delivery budget is unavailable",
+            ) from exc
+        if not decision.allowed:
+            retry_after = max(1, int(decision.retry_after_seconds) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail="trade Order delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        try:
+            global_decision = await run_in_threadpool(
+                global_limiter.check,
+                "global",
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="global trade Order delivery budget is unavailable",
+            ) from exc
+        if not global_decision.allowed:
+            retry_after = max(
+                1,
+                int(global_decision.retry_after_seconds) + 1,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="global trade Order delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        raw_body = await request.body()
+        received_at = datetime.now(timezone.utc)
+
+        def _receive() -> Any:
+            delivery = TradeOrderDelivery.from_json(raw_body)
+            return intake.receive(delivery, at=received_at)
+
+        try:
+            result = await run_in_threadpool(_receive)
+        except TradeOrderDeliveryRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TradeOrderConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Order conflicts with a retained accepted agreement",
+            ) from exc
+        except (TradeOrderAuditBusy, TradeOrderStoreBusy) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order receiver is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (TradeOrderAuditCapacity, TradeOrderStoreCapacity) as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Order receiver capacity exceeded",
+            ) from exc
+        except (
+            TradeOrderAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.warning("trade Order durable acceptance failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-order-acceptance-incomplete",
+                    "message": "Order acknowledgement is incomplete",
+                    "safe_to_redeliver": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        order_document = result.delivery.order.to_dict()
+        return {
+            "status": "accepted-agreement-retained",
+            "order_id": order_document["order_id"],
+            "order_digest": result.audit.record.order_digest,
+            "delivery_digest": result.delivery_digest,
+            "order_store_created": result.audit.cache_created,
+            "audit_anchor_created": result.audit.anchor_created,
+            "audit_event_id": result.audit.record.event_id,
+            "intake_receipt": result.receipt.to_dict(),
+            "intake_receipt_digest": result.receipt_digest,
+            "delivery_or_payment_proven": False,
+        }
+
+    def _trade_order_audit_view(
+        view: Any,
+        *,
+        include_document: bool,
+        pending_dispatch: Any = None,
+        acknowledgement: Any = None,
+    ) -> Dict[str, Any]:
+        from nth_dao.trade_rules import trade_order_digest
+
+        order = view.order
+        document = order.to_dict()
+        result = {
+            "order_digest": trade_order_digest(order),
+            "order_id": document["order_id"],
+            "proposal_digest": document["proposal_digest"],
+            "acceptance_digest": document["acceptance_digest"],
+            "offer_digest": document["offer_digest"],
+            "maker_did": document["maker_did"],
+            "taker_did": document["taker_did"],
+            "created_at": document["created_at"],
+            "audit_status": "anchored",
+            "audit_event_id": view.event.event_id,
+            "audit_attempts": 0,
+            "last_error_code": "",
+            "delivery_or_payment_proven": False,
+            "dispatch_pending": pending_dispatch is not None,
+            "dispatch_target_url": (
+                pending_dispatch.target_url if pending_dispatch else ""
+            ),
+            "dispatch_attempts": (
+                pending_dispatch.attempts if pending_dispatch else 0
+            ),
+            "dispatch_last_error": (
+                pending_dispatch.last_error if pending_dispatch else ""
+            ),
+            "dispatch_updated_at_ms": (
+                pending_dispatch.updated_at_ms if pending_dispatch else 0
+            ),
+            "remote_acknowledged": acknowledgement is not None,
+            "remote_receipt_digest": (
+                acknowledgement.receipt_digest if acknowledgement else ""
+            ),
+            "remote_audit_event_id": (
+                acknowledgement.remote_event_id if acknowledgement else ""
+            ),
+            "remote_received_at": (
+                acknowledgement.receipt.to_dict()["received_at"]
+                if acknowledgement else ""
+            ),
+        }
+        if include_document:
+            result["order"] = document
+        return result
+
+    @app.get("/api/v2/trade/orders")
+    def v2_trade_order_list(
+        request: Request,
+        cursor: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """List retained accepted agreements and local audit state."""
+
+        from nth_dao.trade_rules import TradeOrderAuditError
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be in 1..500")
+        if cursor and re.fullmatch(r"sha256:[0-9a-f]{64}", cursor) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="cursor must be a lowercase sha256 digest",
+            )
+        coordinator = _state_trade_order_audit(request)
+        dispatch_store = _state_trade_order_dispatch_store(request)
+        if coordinator is None or dispatch_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit coordinator unavailable",
+            )
+        try:
+            records = coordinator.list_accepted(
+                limit=limit + 1,
+                after=cursor or None,
+            )
+            page = records[:limit]
+            dispatch_states = dispatch_store.get_states(tuple(
+                record.event.payload["order_digest"] for record in page
+            ))
+            return {
+                "items": [
+                    _trade_order_audit_view(
+                        record,
+                        include_document=False,
+                        pending_dispatch=dispatch_states[
+                            record.event.payload["order_digest"]
+                        ][0],
+                        acknowledgement=dispatch_states[
+                            record.event.payload["order_digest"]
+                        ][1],
+                    )
+                    for record in page
+                ],
+                "next_cursor": (
+                    page[-1].event.payload["order_digest"]
+                    if len(records) > limit and page
+                    else ""
+                ),
+            }
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+
+    @app.post("/api/v2/trade/orders/reconcile")
+    async def v2_trade_order_reconcile(
+        request: Request,
+        limit: int = 100,
+        acknowledgement_cursor: str = "",
+    ) -> Dict[str, Any]:
+        """Retry Order Store/Spine projection without peer resubmission."""
+
+        from nth_dao.trade_rules import (
+            TradeOrderAuditBusy,
+            TradeOrderAuditError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 1_000:
+            raise HTTPException(status_code=400, detail="limit must be in 1..1000")
+        if acknowledgement_cursor and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", acknowledgement_cursor
+        ) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="acknowledgement_cursor must be a lowercase sha256 digest",
+            )
+        coordinator = _state_trade_order_audit(request)
+        dispatch_coordinator = _state_trade_order_dispatch(request)
+        if coordinator is None or dispatch_coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit coordinator unavailable",
+            )
+        try:
+            result = await run_in_threadpool(coordinator.reconcile, limit=limit)
+            dispatch_result = await run_in_threadpool(
+                dispatch_coordinator.reconcile,
+                limit=limit,
+                after=acknowledgement_cursor or None,
+            )
+        except TradeOrderAuditBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit reconciliation is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit reconciliation failed",
+                headers={"Retry-After": "1"},
+            ) from exc
+        return {
+            "scanned": result.scanned,
+            "anchored": result.anchored,
+            "verified_anchored": result.verified_anchored,
+            "blocked": result.blocked,
+            "failed": result.failed,
+            "acknowledgements_scanned": dispatch_result.scanned,
+            "acknowledgements_anchored": dispatch_result.anchored,
+            "dispatches_completed": dispatch_result.completed,
+            "acknowledgement_failures": dispatch_result.failed,
+            "acknowledgement_next_cursor": dispatch_result.next_cursor,
+            "acknowledgement_has_more": dispatch_result.has_more,
+        }
+
+    @app.get("/api/v2/trade/orders/{order_digest}")
+    def v2_trade_order_get(
+        order_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Return one exact accepted agreement and its audit status."""
+
+        from nth_dao.trade_rules import TradeOrderAuditError
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        coordinator = _state_trade_order_audit(request)
+        dispatch_store = _state_trade_order_dispatch_store(request)
+        if coordinator is None or dispatch_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit coordinator unavailable",
+            )
+        try:
+            record = coordinator.get_accepted(order_digest)
+            if record is None:
+                raise HTTPException(status_code=404, detail="Trade Order not found")
+            pending_dispatch, acknowledgement = dispatch_store.get_state(
+                order_digest
+            )
+            return _trade_order_audit_view(
+                record,
+                include_document=True,
+                pending_dispatch=pending_dispatch,
+                acknowledgement=acknowledgement,
+            )
+        except HTTPException:
+            raise
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
 
     @app.get("/api/v2/trade/offers")
     def v2_trade_offer_list(

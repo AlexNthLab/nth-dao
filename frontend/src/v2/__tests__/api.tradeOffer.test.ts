@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  acceptTradeProposal,
   fetchTradeProposals,
+  fetchTradeOrders,
   getTradeOfferInspection,
+  getTradeOrder,
   getTradeProposal,
   importCachedTradeOffer,
 } from "../api";
@@ -251,7 +254,16 @@ describe("Trade Offer inspection API wiring", () => {
     };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ items: [summary], next_cursor: "" }))
-      .mockResolvedValueOnce(jsonResponse({ ...summary, proposal: {} }));
+      .mockResolvedValueOnce(jsonResponse({ ...summary, proposal: {} }))
+      .mockResolvedValueOnce(jsonResponse({
+        status: "accepted-and-delivered",
+        order: { order_id: "nth-trade-order-sha256:" + "d".repeat(64) },
+        order_digest: "sha256:" + "d".repeat(64),
+        local_audit_event_id: "e".repeat(64),
+        delivery_digest: "sha256:" + "f".repeat(64),
+        remote_intake_receipt: {},
+        remote_intake_receipt_digest: "sha256:" + "1".repeat(64),
+      }));
     vi.stubGlobal("fetch", fetchMock);
     (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })
       .__NTH_CONSOLE_TOKEN__ = "console-secret";
@@ -264,9 +276,12 @@ describe("Trade Offer inspection API wiring", () => {
       ...summary,
       proposal: {},
     });
+    await expect(
+      acceptTradeProposal(digest, "http://peer.example:8080"),
+    ).resolves.toMatchObject({ status: "accepted-and-delivered" });
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "/api/v2/trade/proposals?limit=500",
+      "/api/v2/trade/proposals?limit=100",
       expect.objectContaining({
         credentials: "same-origin",
         headers: expect.objectContaining({
@@ -277,6 +292,62 @@ describe("Trade Offer inspection API wiring", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       `/api/v2/trade/proposals/${encodeURIComponent(digest)}`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      `/api/v2/trade/proposals/${encodeURIComponent(digest)}/accept`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ target_url: "http://peer.example:8080" }),
+      }),
+    );
+  });
+
+  it("uses authenticated operator reads for accepted Order list and detail", async () => {
+    const summary = {
+      order_digest: digest,
+      order_id: `nth:trade:order:${"b".repeat(64)}`,
+      proposal_digest: `sha256:${"c".repeat(64)}`,
+      acceptance_digest: `sha256:${"d".repeat(64)}`,
+      offer_digest: `sha256:${"e".repeat(64)}`,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-01T00:00:00Z",
+      audit_status: "anchored",
+      audit_event_id: "f".repeat(64),
+      audit_attempts: 0,
+      last_error_code: "",
+      delivery_or_payment_proven: false,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [summary], next_cursor: "" }))
+      .mockResolvedValueOnce(jsonResponse({ ...summary, order: {} }));
+    vi.stubGlobal("fetch", fetchMock);
+    (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })
+      .__NTH_CONSOLE_TOKEN__ = "console-secret";
+
+    await expect(fetchTradeOrders()).resolves.toEqual({
+      items: [summary],
+      next_cursor: "",
+    });
+    await expect(getTradeOrder(digest)).resolves.toEqual({
+      ...summary,
+      order: {},
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v2/trade/orders?limit=100",
+      expect.objectContaining({
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          Authorization: "Bearer console-secret",
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `/api/v2/trade/orders/${encodeURIComponent(digest)}`,
       expect.objectContaining({ credentials: "same-origin" }),
     );
   });

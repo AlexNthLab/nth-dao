@@ -46,10 +46,14 @@ import type {
   TradeOfferImportResult,
   TradeOfferInspection,
   TradeProposalDetail,
+  TradeProposalAcceptanceResult,
   TradeProposalPage,
+  TradeOrderDetail,
+  TradeOrderPage,
 } from "./types-v2";
 
 const BASE = "/api/v2";
+const TRADE_INBOX_PAGE_SIZE = "100";
 
 export class ApiHttpError extends Error {
   readonly status: number;
@@ -1028,7 +1032,7 @@ export async function fetchTradeProposals(
   cursor = "",
   signal?: AbortSignal,
 ): Promise<TradeProposalPage> {
-  const params = new URLSearchParams({ limit: "500" });
+  const params = new URLSearchParams({ limit: TRADE_INBOX_PAGE_SIZE });
   if (cursor) params.set("cursor", cursor);
   return getJson<TradeProposalPage>(
     `/trade/proposals?${params.toString()}`,
@@ -1042,6 +1046,38 @@ export async function getTradeProposal(
 ): Promise<TradeProposalDetail> {
   return getJson<TradeProposalDetail>(
     `/trade/proposals/${encodeURIComponent(digest)}`,
+    signal,
+  );
+}
+
+export async function acceptTradeProposal(
+  digest: string,
+  targetUrl: string,
+): Promise<TradeProposalAcceptanceResult> {
+  return postJson<TradeProposalAcceptanceResult>(
+    `/trade/proposals/${encodeURIComponent(digest)}/accept`,
+    { target_url: targetUrl },
+  );
+}
+
+export async function fetchTradeOrders(
+  cursor = "",
+  signal?: AbortSignal,
+): Promise<TradeOrderPage> {
+  const params = new URLSearchParams({ limit: TRADE_INBOX_PAGE_SIZE });
+  if (cursor) params.set("cursor", cursor);
+  return getJson<TradeOrderPage>(
+    `/trade/orders?${params.toString()}`,
+    signal,
+  );
+}
+
+export async function getTradeOrder(
+  digest: string,
+  signal?: AbortSignal,
+): Promise<TradeOrderDetail> {
+  return getJson<TradeOrderDetail>(
+    `/trade/orders/${encodeURIComponent(digest)}`,
     signal,
   );
 }

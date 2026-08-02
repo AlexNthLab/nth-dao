@@ -42,7 +42,18 @@ vi.mock("../api", () => ({
   fetchCommerceListings: vi.fn().mockResolvedValue([]),
   fetchCommerceOrders: vi.fn().mockResolvedValue([order]),
   fetchTradeProposals: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
+  fetchTradeOrders: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
   getTradeProposal: vi.fn().mockResolvedValue(null),
+  acceptTradeProposal: vi.fn().mockResolvedValue({
+    status: "accepted-and-delivered",
+    order: { order_id: "nth-trade-order-sha256:" + "f".repeat(64) },
+    order_digest: "sha256:" + "f".repeat(64),
+    local_audit_event_id: "a".repeat(64),
+    delivery_digest: "sha256:" + "d".repeat(64),
+    remote_intake_receipt: {},
+    remote_intake_receipt_digest: "sha256:" + "e".repeat(64),
+  }),
+  getTradeOrder: vi.fn().mockResolvedValue(null),
   listOpenTasks: vi.fn().mockResolvedValue([]),
   publishCommerceListing: vi.fn().mockResolvedValue({ digest: "sha256:x", warning: "" }),
   remoteCommerceCheckout: vi.fn().mockResolvedValue({ order, delivery: { status: "acknowledged" }, warning: "" }),
@@ -58,7 +69,10 @@ import {
   ApiHttpError,
   fetchCommerceOrders,
   fetchTradeProposals,
+  fetchTradeOrders,
+  getTradeOrder,
   getTradeProposal,
+  acceptTradeProposal,
   dispatchCommerceOutbox,
   listOpenTasks,
   publishCommerceListing,
@@ -236,7 +250,7 @@ describe("CommerceView", () => {
     expect(screen.getAllByText("Pending review").length).toBeGreaterThan(0);
     expect(screen.getByText(/It is not acceptance/)).toBeTruthy();
     expect(screen.getByText(/requested_quantity/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Accept" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Accept and send" }).hasAttribute("disabled")).toBe(true);
     expect(getTradeProposal).toHaveBeenCalledWith(digest, expect.any(AbortSignal));
 
     vi.mocked(fetchTradeProposals).mockRejectedValueOnce(
@@ -249,7 +263,148 @@ describe("CommerceView", () => {
     expect(screen.getByText("Missing")).toBeTruthy();
   });
 
-  it("loads Proposal rows beyond the first 500-item page", async () => {
+  it("accepts an audited Proposal after a taker DAO URL is provided", async () => {
+    const digest = "sha256:" + "8".repeat(64);
+    const summary = {
+      proposal_digest: digest,
+      offer_digest: "sha256:" + "6".repeat(64),
+      offer_id: "org.nthdao.tests/review-swap",
+      offer_revision: 2,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    };
+    vi.mocked(fetchTradeProposals).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeProposal).mockResolvedValueOnce({
+      ...summary,
+      proposal: {
+        kind: "nth.dao.trade.proposal",
+        protocol_version: "1",
+        offer_publisher_did: summary.maker_did,
+        offer_id: summary.offer_id,
+        offer_revision: summary.offer_revision,
+        offer_digest: summary.offer_digest,
+        canonical_chain_digests: [summary.offer_digest],
+        maker_did: summary.maker_did,
+        taker_did: summary.taker_did,
+        rule_bindings: [{
+          rule_id: "org.nthdao.rules/delivery",
+          digest: "sha256:" + "4".repeat(64),
+        }],
+        taker_policy_digest: "sha256:" + "3".repeat(64),
+        taker_policy: {},
+        terms: { requested_quantity: "1" },
+        created_at: summary.created_at,
+        not_after: summary.not_after,
+        proof: {},
+      },
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+    const target = await screen.findByPlaceholderText("http://peer-host:8080");
+    fireEvent.change(target, {
+      target: { value: "http://peer.example:8080" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept and send" }));
+
+    await waitFor(() => expect(acceptTradeProposal).toHaveBeenCalledWith(
+      digest,
+      "http://peer.example:8080",
+    ));
+  });
+
+  it("shows accepted agreements without claiming delivery or payment", async () => {
+    const digest = "sha256:" + "1".repeat(64);
+    const summary = {
+      order_digest: digest,
+      order_id: "nth:trade:order:" + "2".repeat(64),
+      proposal_digest: "sha256:" + "3".repeat(64),
+      acceptance_digest: "sha256:" + "4".repeat(64),
+      offer_digest: "sha256:" + "5".repeat(64),
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      audit_status: "anchored" as const,
+      audit_event_id: "6".repeat(64),
+      audit_attempts: 0,
+      last_error_code: "",
+      delivery_or_payment_proven: false as const,
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: {
+        kind: "nth.dao.trade.order",
+        snapshot: { proposal: { terms: { requested_quantity: "1" } } },
+      },
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Bilateral acceptance")).toBeTruthy();
+    expect(screen.getByText(/does not prove delivery, payment, quality, or completion/i)).toBeTruthy();
+    expect(screen.getByText("Not proven")).toBeTruthy();
+    expect(screen.getByText(/requested_quantity/)).toBeTruthy();
+    expect(getTradeOrder).toHaveBeenCalledWith(digest, expect.any(AbortSignal));
+  });
+
+  it("shows durable pending delivery state and retries with the server target", async () => {
+    const digest = "sha256:" + "1".repeat(64);
+    const summary = {
+      order_digest: digest,
+      order_id: "nth:trade:order:" + "2".repeat(64),
+      proposal_digest: "sha256:" + "3".repeat(64),
+      acceptance_digest: "sha256:" + "4".repeat(64),
+      offer_digest: "sha256:" + "5".repeat(64),
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      audit_status: "anchored" as const,
+      audit_event_id: "6".repeat(64),
+      audit_attempts: 0,
+      last_error_code: "",
+      delivery_or_payment_proven: false as const,
+      dispatch_pending: true,
+      dispatch_target_url: "http://peer.example:8080",
+      dispatch_attempts: 2,
+      dispatch_last_error: "peer unavailable",
+      remote_acknowledged: false,
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Delivery pending")).toBeTruthy();
+    expect(screen.getByText("Last attempt: peer unavailable")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry delivery" }));
+    await waitFor(() => expect(acceptTradeProposal).toHaveBeenCalledWith(
+      summary.proposal_digest,
+      summary.dispatch_target_url,
+    ));
+  });
+
+  it("loads Proposal rows beyond the first 100-item page", async () => {
     const makeSummary = (index: number) => ({
       proposal_digest: `sha256:${index.toString(16).padStart(64, "0")}`,
       offer_digest: "sha256:" + "6".repeat(64),
@@ -264,17 +419,17 @@ describe("CommerceView", () => {
       audit_verified: true,
       audit_event_id: "a".repeat(64),
     });
-    const firstPage = Array.from({ length: 500 }, (_, index) => makeSummary(index));
+    const firstPage = Array.from({ length: 100 }, (_, index) => makeSummary(index));
     vi.mocked(fetchTradeProposals)
-      .mockResolvedValueOnce({ items: firstPage, next_cursor: "cursor-500" })
-      .mockResolvedValueOnce({ items: [makeSummary(500)], next_cursor: "" });
+      .mockResolvedValueOnce({ items: firstPage, next_cursor: "cursor-100" })
+      .mockResolvedValueOnce({ items: [makeSummary(100)], next_cursor: "" });
 
     render(<ToastProvider><CommerceView /></ToastProvider>);
     fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
 
-    expect(await screen.findByText("org.nthdao.tests/page-500")).toBeTruthy();
-    expect(fetchTradeProposals).toHaveBeenNthCalledWith(2, "cursor-500");
+    expect(await screen.findByText("org.nthdao.tests/page-100")).toBeTruthy();
+    expect(fetchTradeProposals).toHaveBeenNthCalledWith(2, "cursor-100");
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 

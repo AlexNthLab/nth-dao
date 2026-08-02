@@ -150,6 +150,19 @@ def test_verified_snapshot_never_returns_unverified_events(
         log.verified_snapshot()
 
 
+def test_verified_snapshot_with_token_matches_the_verified_bytes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    event = log.append("test.original", {"id": "one"})
+
+    token, events = log.verified_snapshot_with_token()
+
+    assert token == log.storage_token()
+    assert events == (event,)
+
+
 def test_append_unique_is_idempotent_and_rejects_key_reuse(
     tmp_path: Path,
 ) -> None:

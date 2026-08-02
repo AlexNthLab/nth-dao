@@ -102,6 +102,9 @@ _TRADE_OFFER_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES = 256 * 1024
+_TRADE_ORDER_DELIVERY_MAX_BODY_BYTES = 256 * 1024
+_TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
+_TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
 
 
 class _RequestBodyTooLarge(Exception):
@@ -169,6 +172,17 @@ class _FederationBodyLimitMiddleware:
             and scope.get("method") == "POST"
             and path == "/api/v2/trade/federation/proposals"
         )
+        is_trade_order_delivery = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/trade/federation/orders"
+        )
+        is_trade_proposal_accept = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/v2/trade/proposals/")
+            and path.endswith("/accept")
+        )
         if not (
             is_foreign_claim
             or is_federation_hello
@@ -177,6 +191,8 @@ class _FederationBodyLimitMiddleware:
             or is_trade_recognition_write
             or is_trade_recognition_policy_write
             or is_trade_proposal_delivery
+            or is_trade_order_delivery
+            or is_trade_proposal_accept
         ):
             await self.app(scope, receive, send)
             return
@@ -205,6 +221,12 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_proposal_delivery:
             max_body_bytes = _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Proposal delivery"
+        elif is_trade_order_delivery:
+            max_body_bytes = _TRADE_ORDER_DELIVERY_MAX_BODY_BYTES
+            body_label = "trade Order delivery"
+        elif is_trade_proposal_accept:
+            max_body_bytes = _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES
+            body_label = "trade Proposal acceptance"
         else:
             max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
             body_label = "commerce write"
@@ -703,10 +725,36 @@ class WebState:
             OfferStore,
             RulePackageStore,
             RuleRecognitionStore,
+            TradeOrderAuditOutbox,
+            TradeOrderDispatchStore,
+            TradeOrderStore,
         )
         self.trade_offers = OfferStore(workspace)
         self.trade_rule_packages = RulePackageStore(workspace)
         self.trade_rule_recognitions = RuleRecognitionStore(workspace)
+        self.trade_order_store = TradeOrderStore(workspace)
+        self.trade_order_audit_outbox = TradeOrderAuditOutbox(workspace)
+        self.trade_order_dispatch_store = TradeOrderDispatchStore(workspace)
+        self.trade_order_audit: Optional[Any] = None
+        self.trade_order_intake: Optional[Any] = None
+        self.trade_order_dispatch: Optional[Any] = None
+        self.trade_order_delivery_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "order_delivery.json",
+            max_per_window=30,
+            window_seconds=60.0,
+        )
+        self.trade_order_delivery_global_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "order_delivery_global.json",
+            max_per_window=120,
+            window_seconds=60.0,
+            max_tracked_keys=4,
+        )
         self.trade_proposal_inbox: Optional[Any] = None
         self.trade_proposal_audit: Optional[Any] = None
         self.trade_proposal_delivery_limiter = PersistentRateLimiter(
@@ -1281,6 +1329,17 @@ def create_app(
         if (
             request.method == "POST"
             and request.url.path == "/api/v2/trade/federation/proposals"
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # A maker returns the fully signed accepted Order to its taker.
+        # The remote maker cannot possess this node's console token; the
+        # handler validates destination, freshness, nested signatures, and
+        # bounded persistence before acknowledging the agreement.
+        if (
+            request.method == "POST"
+            and request.url.path == "/api/v2/trade/federation/orders"
         ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
@@ -3547,6 +3606,112 @@ def _bootstrap(state: WebState) -> None:
                 "(feed-only). Run verify_chain to inspect the log.", exc,
             )
             state.spine = None
+    if state.spine is not None and node_identity is not None:
+        from ..trade_rules import (
+            TradeOrderAuditCoordinator,
+            TradeOrderDispatchCoordinator,
+            TradeOrderIntakeCoordinator,
+        )
+
+        state.trade_order_audit = TradeOrderAuditCoordinator(
+            state.trade_order_audit_outbox,
+            state.trade_order_store,
+            state.spine,
+        )
+        state.trade_order_intake = TradeOrderIntakeCoordinator(
+            state.trade_order_audit,
+            receiver_identity=node_identity,
+        )
+        state.trade_order_dispatch = TradeOrderDispatchCoordinator(
+            state.trade_order_dispatch_store,
+            state.spine,
+        )
+        try:
+            order_scanned = 0
+            order_anchored = 0
+            order_verified = 0
+            order_blocked = 0
+            order_failed = 0
+            order_recovery_pending = False
+            for _pass in range(_TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES):
+                order_recovery = state.trade_order_audit.reconcile(
+                    limit=_TRADE_ORDER_BOOT_RECOVERY_BATCH
+                )
+                order_scanned += order_recovery.scanned
+                order_anchored += order_recovery.anchored
+                order_verified += order_recovery.verified_anchored
+                order_blocked += order_recovery.blocked
+                order_failed += order_recovery.failed
+                order_recovery_pending = bool(
+                    state.trade_order_audit_outbox.pending(limit=1)
+                )
+                if not order_recovery_pending:
+                    break
+                if order_recovery.anchored == 0 and order_recovery.blocked == 0:
+                    # The remaining first page failed. Retain it for an
+                    # operator retry instead of spinning during boot.
+                    break
+            if order_recovery_pending:
+                logger.warning(
+                    "trade Order audit recovery stopped at the startup "
+                    "work budget; pending records remain for operator reconcile"
+                )
+            if order_anchored or order_blocked or order_failed:
+                logger.info(
+                    "trade Order audit recovery: scanned=%d anchored=%d "
+                    "verified=%d blocked=%d failed=%d",
+                    order_scanned,
+                    order_anchored,
+                    order_verified,
+                    order_blocked,
+                    order_failed,
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("trade Order audit recovery failed: %s", exc)
+        try:
+            dispatch_cursor: str | None = None
+            dispatch_scanned = 0
+            dispatch_anchored = 0
+            dispatch_completed = 0
+            dispatch_failed = 0
+            dispatch_has_more = False
+            for _pass in range(_TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES):
+                dispatch_recovery = state.trade_order_dispatch.reconcile(
+                    limit=_TRADE_ORDER_BOOT_RECOVERY_BATCH,
+                    after=dispatch_cursor,
+                )
+                dispatch_scanned += dispatch_recovery.scanned
+                dispatch_anchored += dispatch_recovery.anchored
+                dispatch_completed += dispatch_recovery.completed
+                dispatch_failed += dispatch_recovery.failed
+                dispatch_has_more = dispatch_recovery.has_more
+                dispatch_cursor = dispatch_recovery.next_cursor or None
+                if not dispatch_has_more:
+                    break
+            if dispatch_anchored or dispatch_completed:
+                logger.info(
+                    "trade Order acknowledgement recovery: scanned=%d "
+                    "anchored=%d completed=%d failed=%d",
+                    dispatch_scanned,
+                    dispatch_anchored,
+                    dispatch_completed,
+                    dispatch_failed,
+                )
+            if dispatch_failed:
+                logger.warning(
+                    "trade Order acknowledgement recovery retained %d "
+                    "record(s) for operator retry",
+                    dispatch_failed,
+                )
+            if dispatch_has_more:
+                logger.warning(
+                    "trade Order acknowledgement recovery stopped at the "
+                    "startup work budget; more records remain"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "trade Order acknowledgement recovery failed: %s", exc
+            )
     if state.spine is not None and state.trade_proposal_inbox is not None:
         from ..trade_rules import (
             RuleRecognitionAuditCoordinator,
