@@ -45,9 +45,23 @@ import type {
   TaskCategory,
   TradeOfferImportResult,
   TradeOfferInspection,
+  TradeProposalDetail,
+  TradeProposalPage,
 } from "./types-v2";
 
 const BASE = "/api/v2";
+
+export class ApiHttpError extends Error {
+  readonly status: number;
+  readonly path: string;
+
+  constructor(method: string, path: string, status: number) {
+    super(`${method} ${path} -> HTTP ${status}`);
+    this.name = "ApiHttpError";
+    this.status = status;
+    this.path = path;
+  }
+}
 
 /** Console Bearer token, injected into the served HTML by the hub
  *  (``window.__NTH_CONSOLE_TOKEN__``). v2 READ endpoints are open
@@ -259,7 +273,7 @@ export async function fetchReceiptDetail(
     credentials: "same-origin",
   });
   if (!res.ok) {
-    throw new Error(`GET ${path} → HTTP ${res.status}`);
+    throw new ApiHttpError("GET", path, res.status);
   }
   return (await res.json()) as ReceiptDetail;
 }
@@ -1008,6 +1022,28 @@ export async function importCachedTradeOffer(
     signal,
   );
   return validateTradeOfferImportResult(result, digest);
+}
+
+export async function fetchTradeProposals(
+  cursor = "",
+  signal?: AbortSignal,
+): Promise<TradeProposalPage> {
+  const params = new URLSearchParams({ limit: "500" });
+  if (cursor) params.set("cursor", cursor);
+  return getJson<TradeProposalPage>(
+    `/trade/proposals?${params.toString()}`,
+    signal,
+  );
+}
+
+export async function getTradeProposal(
+  digest: string,
+  signal?: AbortSignal,
+): Promise<TradeProposalDetail> {
+  return getJson<TradeProposalDetail>(
+    `/trade/proposals/${encodeURIComponent(digest)}`,
+    signal,
+  );
 }
 
 export async function getFederationStatus(

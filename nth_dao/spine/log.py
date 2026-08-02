@@ -21,6 +21,7 @@ from nth_dao.spine.event import GENESIS_PREV, SpineEvent, sign_event, verify_eve
 from nth_dao.util.io import InterProcessLock
 
 MAX_SPINE_LINE_BYTES = 2 * 1024 * 1024
+MAX_SPINE_APPEND_BATCH = 1_000
 DEFAULT_SPINE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
@@ -237,6 +238,28 @@ class SignedEventLog:
     ) -> tuple[SpineEvent, bool]:
         """Append once, rejecting any event that reuses a semantic key."""
 
+        return self.append_unique_many(
+            event_type,
+            (payload,),
+            unique_payload_fields=unique_payload_fields,
+            ts_ms=ts_ms,
+        )[0]
+
+    def append_unique_many(
+        self,
+        event_type: str,
+        payloads: tuple[dict, ...],
+        *,
+        unique_payload_fields: tuple[str, ...],
+        ts_ms: Optional[int] = None,
+    ) -> tuple[tuple[SpineEvent, bool], ...]:
+        """Append one idempotent batch after a single verified scan.
+
+        All semantic conflicts are checked before the first write. An I/O
+        failure may still leave a valid prefix, which remains retryable by the
+        same semantic keys.
+        """
+
         if (
             not isinstance(unique_payload_fields, tuple)
             or not unique_payload_fields
@@ -249,17 +272,26 @@ class SignedEventLog:
             raise ValueError(
                 "unique_payload_fields must be unique non-empty strings"
             )
-        if not isinstance(payload, dict):
-            raise ValueError("payload must be an object")
-        for field in unique_payload_fields:
-            if (
-                field not in payload
-                or not isinstance(payload[field], str)
-                or not payload[field]
-            ):
-                raise ValueError(
-                    f"unique payload field {field!r} must be a non-empty string"
-                )
+        if not isinstance(payloads, tuple):
+            raise ValueError("payloads must be a tuple")
+        if not payloads:
+            return ()
+        if len(payloads) > MAX_SPINE_APPEND_BATCH:
+            raise ValueError(
+                f"payload batch exceeds {MAX_SPINE_APPEND_BATCH} events"
+            )
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
+            for field in unique_payload_fields:
+                if (
+                    field not in payload
+                    or not isinstance(payload[field], str)
+                    or not payload[field]
+                ):
+                    raise ValueError(
+                        f"unique payload field {field!r} must be a non-empty string"
+                    )
         with self._lock:
             with InterProcessLock(
                 self._path,
@@ -271,33 +303,72 @@ class SignedEventLog:
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"appended: {reason}"
                     )
-                matches = [
-                    event
-                    for event in events
-                    if event.type == event_type
-                    and any(
-                        event.payload.get(field) == payload[field]
-                        for field in unique_payload_fields
-                    )
-                ]
-                if len(matches) > 1:
-                    raise ValueError(
-                        "spine contains duplicate semantic event keys"
-                    )
-                if matches:
-                    if matches[0].payload != payload:
-                        raise ValueError(
-                            "spine semantic event key has conflicting payload"
+                owners: dict[
+                    tuple[str, str], set[tuple[str, int]]
+                ] = {}
+                existing_by_seq = {event.seq: event for event in events}
+                for event in events:
+                    if event.type != event_type:
+                        continue
+                    for field in unique_payload_fields:
+                        value = event.payload.get(field)
+                        if isinstance(value, str) and value:
+                            owners.setdefault((field, value), set()).add(
+                                ("existing", event.seq)
+                            )
+
+                planned: list[dict] = []
+                resolutions: list[tuple[tuple[str, int], bool]] = []
+                for payload in payloads:
+                    matched: set[tuple[str, int]] = set()
+                    for field in unique_payload_fields:
+                        matched.update(
+                            owners.get((field, payload[field]), set())
                         )
-                    return matches[0], False
-                return (
-                    self._append_after_verified(
+                    if len(matched) > 1:
+                        raise ValueError(
+                            "spine contains duplicate semantic event keys"
+                        )
+                    if matched:
+                        owner = next(iter(matched))
+                        owner_payload = (
+                            existing_by_seq[owner[1]].payload
+                            if owner[0] == "existing"
+                            else planned[owner[1]]
+                        )
+                        if owner_payload != payload:
+                            raise ValueError(
+                                "spine semantic event key has conflicting payload"
+                            )
+                        resolutions.append((owner, False))
+                        continue
+                    owner = ("planned", len(planned))
+                    planned.append(payload)
+                    resolutions.append((owner, True))
+                    for field in unique_payload_fields:
+                        owners.setdefault((field, payload[field]), set()).add(
+                            owner
+                        )
+
+                appended: list[SpineEvent] = []
+                last = events[-1] if events else None
+                for payload in planned:
+                    event = self._append_after_verified(
                         event_type,
                         payload,
                         ts_ms=ts_ms,
-                        last=events[-1] if events else None,
-                    ),
-                    True,
+                        last=last,
+                    )
+                    appended.append(event)
+                    last = event
+                return tuple(
+                    (
+                        existing_by_seq[owner[1]]
+                        if owner[0] == "existing"
+                        else appended[owner[1]],
+                        created,
+                    )
+                    for owner, created in resolutions
                 )
 
     def verify_chain(self) -> Tuple[bool, str]:

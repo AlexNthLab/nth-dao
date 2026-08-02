@@ -4422,6 +4422,29 @@ def _state_trade_rule_package_store(request: Request) -> Optional[Any]:
         return None
 
 
+def _state_trade_proposal_audit(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_proposal_audit
+    except AttributeError:
+        return None
+
+
+def _state_trade_proposal_delivery_limiter(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_proposal_delivery_limiter
+    except AttributeError:
+        return None
+
+
+def _state_trade_proposal_delivery_global_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_proposal_delivery_global_limiter
+    except AttributeError:
+        return None
+
+
 def _state_trade_rule_recognition_audit(
     request: Request,
 ) -> Optional[Any]:
@@ -9668,6 +9691,333 @@ def register_v2_routes(app: FastAPI) -> None:
             "chain": _trade_offer_chain_to_wire(result.chain),
             "audit_event_id": audit_event_id,
             "audit_warning": audit_warning,
+        }
+
+    @app.post(
+        "/api/v2/trade/federation/proposals",
+        status_code=202,
+    )
+    async def v2_trade_proposal_receive(request: Request) -> Dict[str, Any]:
+        """Retain one signed Proposal delivery; this is not acceptance."""
+
+        from nth_dao.trade_rules import (
+            TradeProposalAuditError,
+            TradeProposalDelivery,
+            TradeProposalDeliveryRejected,
+            TradeProposalInboxBusy,
+            TradeProposalInboxCapacity,
+            TradeProposalInboxCorruption,
+            TradeProposalInboxError,
+            TradeProposalInboxRejected,
+        )
+
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail="trade Proposal delivery requires Content-Type application/json",
+            )
+        limiter = _state_trade_proposal_delivery_limiter(request)
+        global_limiter = _state_trade_proposal_delivery_global_limiter(request)
+        coordinator = _state_trade_proposal_audit(request)
+        identity = _state_node_identity(request)
+        offer_store = _state_trade_offer_store(request)
+        package_store = _state_trade_rule_package_store(request)
+        if limiter is None or global_limiter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Proposal delivery rate limiter unavailable",
+            )
+        if (
+            coordinator is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+            or offer_store is None
+            or package_store is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade Proposal receiver unavailable",
+            )
+        client_key = (
+            str(request.client.host).strip()
+            if request.client is not None and request.client.host
+            else "anonymous"
+        )
+        try:
+            decision = await run_in_threadpool(limiter.check, client_key)
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Proposal delivery budget is unavailable",
+            ) from exc
+        if not decision.allowed:
+            retry_after = max(1, int(decision.retry_after_seconds) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail="trade Proposal delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        try:
+            global_decision = await run_in_threadpool(
+                global_limiter.check,
+                "global",
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="global trade Proposal delivery budget is unavailable",
+            ) from exc
+        if not global_decision.allowed:
+            retry_after = max(
+                1,
+                int(global_decision.retry_after_seconds) + 1,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="global trade Proposal delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        raw_body = await request.body()
+        recipient_did = identity.as_did()
+        received_at = datetime.now(timezone.utc)
+
+        def _receive() -> Any:
+            # Parsing exact bytes preserves duplicate-key rejection before
+            # signature verification. All crypto, locks, fsync, and Spine
+            # scans stay off the ASGI event loop.
+            delivery = TradeProposalDelivery.from_json(raw_body)
+            return coordinator.receive(
+                delivery,
+                recipient_did=recipient_did,
+                offer_resolver=offer_store,
+                rule_resolver=package_store,
+                at=received_at,
+            )
+
+        try:
+            result = await run_in_threadpool(_receive)
+        except TradeProposalDeliveryRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TradeProposalInboxRejected as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Proposal does not match receiver state: {exc}",
+            ) from exc
+        except TradeProposalInboxBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeProposalInboxCapacity as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except (TradeProposalInboxCorruption, TradeProposalInboxError) as exc:
+            logger.warning("trade Proposal inbox persistence failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-proposal-inbox-unavailable",
+                    "message": "Proposal receiver persistence is unavailable",
+                },
+            ) from exc
+        except TradeProposalAuditError as exc:
+            logger.warning("trade Proposal Spine projection failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-proposal-audit-incomplete",
+                    "message": "Proposal was retained but its audit projection is incomplete",
+                    "retryable_without_resubmission": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        return {
+            "status": "retained-unaccepted",
+            "proposal_digest": result.inbox.digest,
+            "inbox_appended": result.inbox.appended,
+            "audit_event_id": result.event.event_id,
+            "audit_anchor_created": result.anchor_created,
+        }
+
+    def _trade_proposal_view(view: Any, *, include_document: bool) -> Dict[str, Any]:
+        from nth_dao.trade_rules import proposal_digest
+
+        proposal = view.proposal
+        document = proposal.to_dict()
+        result = {
+            "proposal_digest": proposal_digest(proposal),
+            "offer_digest": document["offer_digest"],
+            "offer_id": document["offer_id"],
+            "offer_revision": document["offer_revision"],
+            "maker_did": document["maker_did"],
+            "taker_did": document["taker_did"],
+            "created_at": document["created_at"],
+            "not_after": document["not_after"],
+            "rule_bindings_count": len(document["rule_bindings"]),
+            "status": "retained-unaccepted",
+            "audit_verified": view.audit_verified,
+            "audit_event_id": view.event.event_id if view.event else "",
+        }
+        if include_document:
+            result["proposal"] = document
+        return result
+
+    @app.get("/api/v2/trade/proposals")
+    def v2_trade_proposal_list(
+        request: Request,
+        cursor: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """List retained inbound negotiation claims with audit status."""
+
+        from nth_dao.trade_rules import (
+            TradeProposalAuditError,
+            TradeProposalInboxError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        coordinator = _state_trade_proposal_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade Proposal receiver unavailable",
+            )
+        try:
+            views, next_cursor = coordinator.list_received(
+                limit=limit,
+                after=cursor or None,
+            )
+        except (TradeProposalAuditError, TradeProposalInboxError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Proposal audit integrity failure: {exc}",
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "items": [
+                _trade_proposal_view(view, include_document=False)
+                for view in views
+            ],
+            "next_cursor": next_cursor or "",
+        }
+
+    @app.get("/api/v2/trade/proposals/{digest}")
+    def v2_trade_proposal_get(
+        digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Return one exact signed Proposal and its local audit status."""
+
+        from nth_dao.trade_rules import (
+            TradeProposalAuditError,
+            TradeProposalInboxError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        coordinator = _state_trade_proposal_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade Proposal receiver unavailable",
+            )
+        try:
+            view = coordinator.get_received(digest)
+        except (TradeProposalAuditError, TradeProposalInboxError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Proposal audit integrity failure: {exc}",
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if view is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        return _trade_proposal_view(view, include_document=True)
+
+    @app.post("/api/v2/trade/proposals/reconcile")
+    async def v2_trade_proposal_reconcile(
+        request: Request,
+        cursor: str = "",
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        """Retry signed inbox-to-Spine projection without peer resubmission."""
+
+        from nth_dao.trade_rules import (
+            TradeProposalAuditError,
+            TradeProposalInboxError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        coordinator = _state_trade_proposal_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade Proposal receiver unavailable",
+            )
+        try:
+            result = await run_in_threadpool(
+                coordinator.reconcile,
+                limit=limit,
+                after=cursor or None,
+            )
+        except (TradeProposalAuditError, TradeProposalInboxError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Proposal audit reconciliation failed: {exc}",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "scanned": result.scanned,
+            "anchored": result.anchored,
+            "verified_anchored": result.verified_anchored,
+            "failed": result.failed,
+            "failure_digests": list(result.failure_digests),
+            "failures": [
+                {
+                    "digest": failure.digest,
+                    "error_code": failure.error_code,
+                    "message": failure.message,
+                }
+                for failure in result.failures
+            ],
+            "next_cursor": result.next_cursor or "",
+            "has_more": result.has_more,
+        }
+
+    @app.get("/api/v2/trade/proposal-reconciliation/status")
+    def v2_trade_proposal_reconciliation_status(
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Return authenticated operator metrics for inbox-to-Spine lag."""
+
+        from nth_dao.trade_rules import (
+            TradeProposalAuditError,
+            TradeProposalInboxError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        coordinator = _state_trade_proposal_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="signed trade Proposal receiver unavailable",
+            )
+        try:
+            metrics = coordinator.pending_metrics()
+        except (TradeProposalAuditError, TradeProposalInboxError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Proposal audit metrics failed: {exc}",
+                headers={"Retry-After": "1"},
+            ) from exc
+        return {
+            "active_records": metrics.active_records,
+            "pending_anchors": metrics.pending_anchors,
+            "oldest_pending_age_seconds": metrics.oldest_pending_age_seconds,
+            "measured_at": metrics.measured_at,
         }
 
     @app.get("/api/v2/trade/offers")

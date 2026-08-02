@@ -186,6 +186,47 @@ def test_append_unique_is_idempotent_and_rejects_key_reuse(
     assert len(first_log.verified_snapshot()) == 1
 
 
+def test_append_unique_many_scans_once_and_prevalidates_conflicts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    original = log._verified_events_unlocked
+    scans = 0
+
+    def counted_scan():
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(log, "_verified_events_unlocked", counted_scan)
+    payloads = tuple(
+        {"execution_id": f"exec-{index}", "receipt_digest": f"digest-{index}"}
+        for index in range(3)
+    )
+    results = log.append_unique_many(
+        "trade.execution.recorded",
+        payloads,
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=1,
+    )
+
+    assert scans == 1
+    assert [created for _event, created in results] == [True, True, True]
+    before = log._path.read_bytes()
+    with pytest.raises(ValueError, match="conflicting payload"):
+        log.append_unique_many(
+            "trade.execution.recorded",
+            (
+                {"execution_id": "exec-4", "receipt_digest": "digest-4"},
+                {"execution_id": "exec-0", "receipt_digest": "changed"},
+            ),
+            unique_payload_fields=("execution_id", "receipt_digest"),
+            ts_ms=2,
+        )
+    assert log._path.read_bytes() == before
+
+
 def test_cross_process_append_serializes_and_reloads_chain(
     tmp_path: Path,
 ) -> None:

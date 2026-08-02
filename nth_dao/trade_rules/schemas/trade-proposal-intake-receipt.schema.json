@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-proposal-intake-receipt-v1.json",
+  "title": "NTH DAO Trade Proposal Intake Receipt v1",
+  "$comment": "Signature and Delivery binding require the protocol validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "proposal_digest",
+    "delivery_digest",
+    "sender_did",
+    "receiver_did",
+    "received_at",
+    "status",
+    "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.proposal-intake-receipt"},
+    "protocol_version": {"const": "1"},
+    "proposal_digest": {"$ref": "#/$defs/digest"},
+    "delivery_digest": {"$ref": "#/$defs/digest"},
+    "sender_did": {"$ref": "#/$defs/did"},
+    "receiver_did": {"$ref": "#/$defs/did"},
+    "received_at": {"$ref": "#/$defs/timestamp"},
+    "status": {"const": "retained-unaccepted"},
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "Ed25519Signature2020"},
+        "created": {"$ref": "#/$defs/timestamp"},
+        "verification_method": {
+          "type": "string",
+          "maxLength": 300,
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+#z[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "proof_purpose": {"const": "tradeProposalIntakeReceipt"},
+        "proof_value": {"type": "string", "minLength": 86, "maxLength": 86}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    }
+  }
+}

@@ -23,6 +23,12 @@ from nth_dao.trade_rules.agreement_order import (
     create_trade_order,
     trade_order_digest,
 )
+from nth_dao.trade_rules.agreement_transport import (
+    create_trade_proposal_intake_receipt,
+    create_trade_proposal_delivery,
+    trade_proposal_delivery_digest,
+    trade_proposal_intake_receipt_digest,
+)
 from nth_dao.trade_rules.execution_receipt import (
     EXECUTION_TERMS_KEY,
     _create_trade_execution_receipt,
@@ -73,6 +79,14 @@ from nth_dao.trade_rules.store import OfferStore
 VECTORS_PATH = Path(__file__).with_name("vectors") / "agreement-v1.json"
 PROPOSAL_SCHEMA_PATH = (
     Path(__file__).with_name("schemas") / "trade-proposal.schema.json"
+)
+PROPOSAL_DELIVERY_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-proposal-delivery.schema.json"
+)
+PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-proposal-intake-receipt.schema.json"
 )
 ACCEPTANCE_SCHEMA_PATH = (
     Path(__file__).with_name("schemas") / "trade-acceptance.schema.json"
@@ -298,6 +312,19 @@ def generate_vectors() -> dict[str, Any]:
             not_after="2026-08-02T00:00:00Z",
             now=_utc("2026-08-01T00:00:00Z"),
         )
+        proposal_delivery = create_trade_proposal_delivery(
+            taker,
+            proposal=proposal,
+            created_at="2026-08-01T00:00:00Z",
+            not_after="2026-08-01T00:10:00Z",
+            nonce="0123456789abcdef0123456789abcdef",
+            now=_utc("2026-08-01T00:00:00Z"),
+        )
+        proposal_intake_receipt = create_trade_proposal_intake_receipt(
+            maker,
+            delivery=proposal_delivery,
+            received_at="2026-08-01T00:00:01Z",
+        )
         acceptance = create_trade_acceptance(
             maker,
             proposal=proposal,
@@ -454,6 +481,16 @@ def generate_vectors() -> dict[str, Any]:
 
         proposal_unknown_field = proposal.to_dict()
         proposal_unknown_field["unexpected"] = True
+        proposal_delivery_tamper = proposal_delivery.to_dict()
+        proposal_delivery_tamper["nonce"] = (
+            "fedcba9876543210fedcba9876543210"
+        )
+        proposal_delivery_tamper["delivery_id"] = (
+            "nth:trade:proposal-delivery:"
+            + proposal_delivery_tamper["nonce"]
+        )
+        proposal_intake_tamper = proposal_intake_receipt.to_dict()
+        proposal_intake_tamper["delivery_digest"] = "sha256:" + ("0" * 64)
         acceptance_policy_mismatch = acceptance.to_dict()
         acceptance_policy_mismatch["maker_policy_digest"] = (
             "sha256:" + ("0" * 64)
@@ -529,6 +566,48 @@ def generate_vectors() -> dict[str, Any]:
         "warning": "Deterministic public test keys; never trust or reuse them.",
         "proposal": proposal.to_dict(),
         "proposal_digest": proposal_digest(proposal),
+        "proposal_delivery": proposal_delivery.to_dict(),
+        "proposal_delivery_digest": trade_proposal_delivery_digest(
+            proposal_delivery
+        ),
+        "proposal_intake_receipt": proposal_intake_receipt.to_dict(),
+        "proposal_intake_receipt_digest": (
+            trade_proposal_intake_receipt_digest(proposal_intake_receipt)
+        ),
+        "proposal_delivery_verification_cases": [
+            {
+                "case": "valid-recipient-and-window",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T00:00:01Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-recipient",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T00:00:01Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "expired-at-exclusive-boundary",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T00:10:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "created-too-far-in-future",
+                "recipient_did": maker.as_did(),
+                "at": "2026-07-31T23:54:59Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
         "acceptance": acceptance.to_dict(),
         "acceptance_digest": acceptance_digest(acceptance),
         "order": order.to_dict(),
@@ -597,6 +676,18 @@ def generate_vectors() -> dict[str, Any]:
                 "target": "proposal",
                 "expected_valid": False,
                 "document": proposal_unknown_field,
+            },
+            {
+                "case": "proposal-delivery-signed-nonce-tamper",
+                "target": "proposal_delivery",
+                "expected_valid": False,
+                "document": proposal_delivery_tamper,
+            },
+            {
+                "case": "proposal-intake-receipt-delivery-tamper",
+                "target": "proposal_intake_receipt",
+                "expected_valid": False,
+                "document": proposal_intake_tamper,
             },
             {
                 "case": "acceptance-policy-digest-mismatch",
@@ -705,6 +796,8 @@ __all__ = [
     "ORDER_SCHEMA_PATH",
     "ORDER_AUDIT_SCHEMA_PATH",
     "PROPOSAL_SCHEMA_PATH",
+    "PROPOSAL_DELIVERY_SCHEMA_PATH",
+    "PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH",
     "RECEIPT_REVIEW_AUDIT_SCHEMA_PATH",
     "RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH",
     "RECEIPT_REVIEW_SCHEMA_PATH",

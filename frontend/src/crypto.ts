@@ -5,7 +5,8 @@
 // produced here verify on the Python side and vice versa.
 //
 // Uses WebCrypto's native Ed25519 (Chrome 137+, Firefox 130+, Safari 17.4+).
-// Private key is stored as a non-extractable CryptoKey inside IndexedDB 鈥?// the UI never sees raw bytes. The public key is stored separately as hex
+// The private key is a non-extractable CryptoKey in IndexedDB. The UI never
+// sees raw private-key bytes; only the public key is exported as hex.
 // in localStorage for quick read access.
 
 const DB_NAME = "nth-dao-wallet";

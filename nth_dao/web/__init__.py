@@ -17,7 +17,7 @@ import secrets
 import socket
 import threading
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional, TYPE_CHECKING, Union
 from urllib.parse import urlsplit, urlunsplit
@@ -101,6 +101,7 @@ _COMMERCE_WRITE_MAX_BODY_BYTES = 768 * 1024
 _TRADE_OFFER_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES = 256 * 1024
+_TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 
 
 class _RequestBodyTooLarge(Exception):
@@ -163,6 +164,11 @@ class _FederationBodyLimitMiddleware:
                 "/api/v2/trade/recognition-policy/reconcile",
             }
         )
+        is_trade_proposal_delivery = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/trade/federation/proposals"
+        )
         if not (
             is_foreign_claim
             or is_federation_hello
@@ -170,6 +176,7 @@ class _FederationBodyLimitMiddleware:
             or is_trade_offer_write
             or is_trade_recognition_write
             or is_trade_recognition_policy_write
+            or is_trade_proposal_delivery
         ):
             await self.app(scope, receive, send)
             return
@@ -195,6 +202,9 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_recognition_policy_write:
             max_body_bytes = _TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES
             body_label = "trade rule recognition policy"
+        elif is_trade_proposal_delivery:
+            max_body_bytes = _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES
+            body_label = "trade Proposal delivery"
         else:
             max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
             body_label = "commerce write"
@@ -697,6 +707,25 @@ class WebState:
         self.trade_offers = OfferStore(workspace)
         self.trade_rule_packages = RulePackageStore(workspace)
         self.trade_rule_recognitions = RuleRecognitionStore(workspace)
+        self.trade_proposal_inbox: Optional[Any] = None
+        self.trade_proposal_audit: Optional[Any] = None
+        self.trade_proposal_delivery_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "proposal_delivery.json",
+            max_per_window=30,
+            window_seconds=60.0,
+        )
+        self.trade_proposal_delivery_global_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "proposal_delivery_global.json",
+            max_per_window=120,
+            window_seconds=60.0,
+            max_tracked_keys=4,
+        )
         self.trade_rule_recognition_audit: Optional[Any] = None
         self.trade_rule_recognition_policy_store: Optional[Any] = None
         self.trade_rule_recognition_policy_audit: Optional[Any] = None
@@ -1240,6 +1269,18 @@ def create_app(
         if (
             request.method == "POST"
             and request.url.path == "/api/v2/commerce/carts"
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # A remote taker cannot possess the operator console token. This
+        # route accepts only a short-lived, destination-bound DID-signed
+        # Proposal delivery; the handler performs rate limiting, signature
+        # verification, local Offer/Rule replay, CAS retention, and Spine
+        # projection before acknowledging it.
+        if (
+            request.method == "POST"
+            and request.url.path == "/api/v2/trade/federation/proposals"
         ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
@@ -3483,6 +3524,14 @@ def _bootstrap(state: WebState) -> None:
     # identity file on every request.
     state.node_identity = node_identity
 
+    if node_identity is not None and getattr(node_identity, "can_sign", False):
+        from ..trade_rules import TradeProposalInbox
+
+        state.trade_proposal_inbox = TradeProposalInbox(
+            state.workspace,
+            receiver_did=node_identity.as_did(),
+        )
+
     # Spine(Phase 2b):node_identity 就绪后建本 workspace 的签名因果日志(影子
     # 双写目标)。失败 / 日志损坏只降级为 None,**绝不阻断 hub 启动**(market
     # 回退到只写自身 feed;operator 可离线 verify_chain 排查)。
@@ -3498,12 +3547,81 @@ def _bootstrap(state: WebState) -> None:
                 "(feed-only). Run verify_chain to inspect the log.", exc,
             )
             state.spine = None
-    if state.spine is not None:
+    if state.spine is not None and state.trade_proposal_inbox is not None:
         from ..trade_rules import (
             RuleRecognitionAuditCoordinator,
             RuleRecognitionPolicyAuditCoordinator,
             RuleRecognitionPolicyStore,
+            TradeProposalAuditCoordinator,
         )
+
+        try:
+            proposal_usage = state.trade_proposal_inbox.reconcile_usage()
+            logger.info(
+                "trade Proposal inbox usage: records=%d bytes=%d",
+                proposal_usage["records"],
+                proposal_usage["bytes"],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("trade Proposal inbox usage rebuild failed: %s", exc)
+        state.trade_proposal_audit = TradeProposalAuditCoordinator(
+            state.trade_proposal_inbox,
+            state.spine,
+            node_identity,
+        )
+        try:
+            proposal_cursor = None
+            proposal_scanned = 0
+            proposal_anchored = 0
+            proposal_failed = 0
+            while True:
+                proposal_recovery = state.trade_proposal_audit.reconcile(
+                    limit=1_000,
+                    after=proposal_cursor,
+                )
+                proposal_scanned += proposal_recovery.scanned
+                proposal_anchored += proposal_recovery.anchored
+                proposal_failed += proposal_recovery.failed
+                proposal_cursor = proposal_recovery.next_cursor
+                if not proposal_recovery.has_more:
+                    break
+            if proposal_anchored or proposal_failed:
+                logger.info(
+                    "trade Proposal audit recovery: scanned=%d anchored=%d "
+                    "failed=%d",
+                    proposal_scanned,
+                    proposal_anchored,
+                    proposal_failed,
+                )
+            proposal_archive_scanned = 0
+            proposal_archived = 0
+            proposal_archive_failures = 0
+            while True:
+                proposal_archive = state.trade_proposal_audit.archive_expired(
+                    at=datetime.now(timezone.utc),
+                    limit=1_000,
+                )
+                proposal_archive_scanned += proposal_archive.scanned
+                proposal_archived += proposal_archive.archived
+                proposal_archive_failures += len(
+                    proposal_archive.failure_digests
+                )
+                if proposal_archive.scanned < 1_000:
+                    break
+                if proposal_archive.archived == 0:
+                    # Every item in this page failed. Avoid an infinite boot
+                    # loop while retaining the records for operator recovery.
+                    break
+            if proposal_archived or proposal_archive_failures:
+                logger.info(
+                    "trade Proposal expiry archive: scanned=%d archived=%d "
+                    "failed=%d",
+                    proposal_archive_scanned,
+                    proposal_archived,
+                    proposal_archive_failures,
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("trade Proposal audit recovery failed: %s", exc)
 
         state.trade_rule_recognition_audit = (
             RuleRecognitionAuditCoordinator(

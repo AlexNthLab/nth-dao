@@ -10,10 +10,13 @@ from pathlib import Path
 
 import pytest
 import nth_dao.trade_rules as trade_rules_api
+from fastapi.testclient import TestClient
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity, crypto_available
 from nth_dao.spine import SignedEventLog
+from nth_dao.web import create_app
+from nth_dao.web.rate_limit import RateLimiter
 from nth_dao.trade_rules import (
     RulePackageStore,
     RuleResolutionPolicy,
@@ -35,6 +38,19 @@ from nth_dao.trade_rules import (
     TradeOrderStore,
     TradeOrderStoreCapacity,
     TradeProposal,
+    TradeProposalDelivery,
+    TradeProposalDeliveryRejected,
+    TradeProposalIntakeReceipt,
+    TradeProposalIntakeReceiptRejected,
+    TradeProposalAuditCoordinator,
+    TradeProposalAuditError,
+    TradeProposalArchiveResult,
+    TradeProposalInbox,
+    TradeProposalInboxBusy,
+    TradeProposalInboxCapacity,
+    TradeProposalInboxCorruption,
+    TradeProposalInboxError,
+    TradeProposalInboxRejected,
     TradeExecutionReceipt,
     TradeExecutionReceiptRejected,
     JsonSchema202012Validator,
@@ -44,12 +60,18 @@ from nth_dao.trade_rules import (
     create_trade_order,
     create_trade_acceptance,
     create_trade_proposal,
+    create_trade_proposal_delivery,
+    create_trade_proposal_intake_receipt,
     execution_receipt_digest,
     execution_audit_payload,
     manifest_body,
     offer_body,
     offer_digest,
     proposal_digest,
+    trade_proposal_delivery_digest,
+    trade_proposal_intake_receipt_digest,
+    EVENT_TRADE_PROPOSAL_ARCHIVED,
+    EVENT_TRADE_PROPOSAL_RECEIVED,
     resolve_canonical_offer_rules,
     sign_manifest,
     sign_offer,
@@ -57,6 +79,10 @@ from nth_dao.trade_rules import (
     validate_execution_audit_binding,
     validate_execution_audit_payload,
     verify_acceptance_binding,
+    verify_trade_proposal_under_local_state,
+    verify_trade_proposal_delivery,
+    verify_trade_proposal_intake_receipt,
+    validate_proposal_received_audit_payload,
     verify_execution_receipt_order_binding,
     verify_execution_receipt_under_policy,
 )
@@ -97,6 +123,8 @@ from nth_dao.trade_rules.agreement_conformance import (
     ORDER_AUDIT_SCHEMA_PATH,
     ORDER_SCHEMA_PATH,
     PROPOSAL_SCHEMA_PATH,
+    PROPOSAL_DELIVERY_SCHEMA_PATH,
+    PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH,
     VECTORS_PATH,
     generate_vectors,
 )
@@ -187,6 +215,35 @@ def _process_put_execution_receipt(root, receipt, order, output):
         output.put(("error", type(exc).__name__, str(exc)))
 
 
+def _process_put_trade_proposal(
+    root, receiver_did, delivery, receipt, output,
+):
+    try:
+        result = TradeProposalInbox(
+            root,
+            receiver_did=receiver_did,
+            lock_timeout=20,
+        ).put(
+            delivery,
+            receipt,
+        )
+        output.put(("ok", result.appended, result.digest))
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
+
+
+def _process_list_trade_proposals(root, receiver_did, output):
+    try:
+        values = TradeProposalInbox(
+            root,
+            receiver_did=receiver_did,
+            lock_timeout=0.2,
+        ).list_digests()
+        output.put(("ok", values))
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
+
+
 def _process_put_receipt_review(root, review, receipt, order, output):
     try:
         stored, created = TradeReceiptReviewStore(
@@ -237,10 +294,11 @@ def _process_accept_audited_order(
 def _setup(
     tmp_path,
     *,
+    maker=None,
     dependency_permissions=(),
     hook_permissions=(),
 ):
-    maker = AgentIdentity.generate()
+    maker = maker or AgentIdentity.generate()
     taker = AgentIdentity.generate()
     rule_publisher = AgentIdentity.generate()
     package_store = RulePackageStore(tmp_path)
@@ -520,6 +578,1437 @@ def test_proposal_and_acceptance_round_trip_with_independent_policy(tmp_path):
         acceptance.to_dict()["maker_policy_digest"]
     )
     assert verify_acceptance_binding(proposal, acceptance) == (True, "ok")
+
+
+def test_receiver_replays_proposal_against_local_offer_and_rules(tmp_path):
+    context = _setup(tmp_path)
+    proposal = _proposal(context)
+
+    assert verify_trade_proposal_under_local_state(
+        proposal,
+        context["offer_store"],
+        context["package_store"],
+        at=_AT,
+    ) == (True, "ok")
+
+
+def test_receiver_rejects_self_consistent_proposal_for_wrong_offer_head(tmp_path):
+    context = _setup(tmp_path)
+    body = _proposal(context).to_dict()
+    body.pop("proof")
+    wrong_digest = "sha256:" + ("c" * 64)
+    body["offer_digest"] = wrong_digest
+    body["canonical_chain_digests"][-1] = wrong_digest
+    proposal = _sign_proposal_body(context["taker"], body)
+
+    ok, reason = verify_trade_proposal_under_local_state(
+        proposal,
+        context["offer_store"],
+        context["package_store"],
+        at=_AT,
+    )
+
+    assert ok is False
+    assert "offer_digest does not match local replay" in reason
+
+
+def test_receiver_rejects_proposal_when_rule_package_is_unavailable(tmp_path):
+    context = _setup(tmp_path / "source")
+    proposal = _proposal(context)
+    empty_packages = RulePackageStore(tmp_path / "receiver")
+
+    ok, reason = verify_trade_proposal_under_local_state(
+        proposal,
+        context["offer_store"],
+        empty_packages,
+        at=_AT,
+    )
+
+    assert ok is False
+    assert "required rule package is unavailable" in reason
+
+
+def test_receiver_maps_offer_store_failure_to_rejection(tmp_path):
+    context = _setup(tmp_path)
+
+    class BrokenOfferResolver:
+        def canonical_snapshot(self, _publisher_did, _offer_id):
+            raise RuntimeError("simulated Offer Store corruption")
+
+    ok, reason = verify_trade_proposal_under_local_state(
+        _proposal(context),
+        BrokenOfferResolver(),
+        context["package_store"],
+        at=_AT,
+    )
+
+    assert ok is False
+    assert reason == "simulated Offer Store corruption"
+
+
+@pytest.mark.parametrize(
+    ("at", "expected"),
+    [
+        (_AT - timedelta(minutes=6), "too far in the future"),
+        (_utc(_EXPIRES), "proposal has expired"),
+    ],
+)
+def test_receiver_enforces_proposal_receive_time(
+    tmp_path,
+    at,
+    expected,
+):
+    context = _setup(tmp_path)
+
+    ok, reason = verify_trade_proposal_under_local_state(
+        _proposal(context),
+        context["offer_store"],
+        context["package_store"],
+        at=at,
+    )
+
+    assert ok is False
+    assert expected in reason
+
+
+def test_receiver_preserves_nanoseconds_at_proposal_expiry(tmp_path):
+    context = _setup(tmp_path)
+    body = _proposal(context).to_dict()
+    body.pop("proof")
+    body["not_after"] = "2026-08-02T00:00:00.000000001Z"
+    proposal = _sign_proposal_body(context["taker"], body)
+
+    assert verify_trade_proposal_under_local_state(
+        proposal,
+        context["offer_store"],
+        context["package_store"],
+        at=_utc("2026-08-02T00:00:00Z"),
+    ) == (True, "ok")
+
+
+def test_receiver_preserves_nanoseconds_at_future_skew_boundary(tmp_path):
+    context = _setup(tmp_path)
+    body = _proposal(context).to_dict()
+    body.pop("proof")
+    body["created_at"] = "2026-08-01T00:00:00.000000001Z"
+    proposal = _sign_proposal_body(context["taker"], body)
+
+    ok, reason = verify_trade_proposal_under_local_state(
+        proposal,
+        context["offer_store"],
+        context["package_store"],
+        at=_AT,
+        clock_skew_seconds=0,
+    )
+
+    assert ok is False
+    assert reason == "proposal creation time is too far in the future"
+
+
+def _delivery(context, proposal=None):
+    selected = proposal or _proposal(context)
+    return create_trade_proposal_delivery(
+        context["taker"],
+        proposal=selected,
+        created_at="2026-08-01T00:00:00Z",
+        not_after="2026-08-01T00:10:00Z",
+        nonce="a" * 32,
+        now=_AT,
+    )
+
+
+def _intake_receipt(context, delivery):
+    return create_trade_proposal_intake_receipt(
+        context["maker"],
+        delivery=delivery,
+        received_at="2026-08-01T00:00:00Z",
+    )
+
+
+def _put_inbox(inbox, context, proposal):
+    delivery = _delivery(context, proposal)
+    return inbox.put(delivery, _intake_receipt(context, delivery))
+
+
+def test_proposal_delivery_round_trip_binds_both_parties_and_proposal(tmp_path):
+    context = _setup(tmp_path)
+    proposal = _proposal(context)
+    delivery = _delivery(context, proposal)
+
+    assert TradeProposalDelivery.from_json(delivery.canonical_bytes) == delivery
+    assert delivery.proposal == proposal
+    assert delivery.to_dict()["proposal_digest"] == proposal_digest(proposal)
+    assert trade_proposal_delivery_digest(delivery).startswith("sha256:")
+    assert verify_trade_proposal_delivery(
+        delivery,
+        recipient_did=context["maker"].as_did(),
+        at=_AT,
+    ) == (True, "ok")
+
+
+def test_proposal_delivery_tampering_breaks_outer_signature(tmp_path):
+    context = _setup(tmp_path)
+    document = _delivery(context).to_dict()
+    document["nonce"] = "b" * 32
+    document["delivery_id"] = "nth:trade:proposal-delivery:" + "b" * 32
+
+    with pytest.raises(
+        TradeProposalDeliveryRejected,
+        match="signature invalid",
+    ):
+        TradeProposalDelivery.from_dict(document)
+
+
+def test_proposal_delivery_rejects_wrong_receiver(tmp_path):
+    context = _setup(tmp_path)
+
+    ok, reason = verify_trade_proposal_delivery(
+        _delivery(context),
+        recipient_did=AgentIdentity.generate().as_did(),
+        at=_AT,
+    )
+
+    assert ok is False
+    assert reason == "delivery is addressed to another recipient"
+
+
+@pytest.mark.parametrize(
+    ("at", "expected"),
+    [
+        (_AT - timedelta(minutes=6), "too far in the future"),
+        (_AT + timedelta(minutes=10), "delivery has expired"),
+    ],
+)
+def test_proposal_delivery_enforces_receive_time(tmp_path, at, expected):
+    context = _setup(tmp_path)
+
+    ok, reason = verify_trade_proposal_delivery(
+        _delivery(context),
+        recipient_did=context["maker"].as_did(),
+        at=at,
+    )
+
+    assert ok is False
+    assert expected in reason
+
+
+def test_proposal_delivery_creation_rejects_excessive_ttl(tmp_path):
+    context = _setup(tmp_path)
+
+    with pytest.raises(
+        TradeProposalDeliveryRejected,
+        match="lifetime exceeds",
+    ):
+        create_trade_proposal_delivery(
+            context["taker"],
+            proposal=_proposal(context),
+            created_at="2026-08-01T00:00:00Z",
+            not_after="2026-08-01T00:10:01Z",
+            nonce="a" * 32,
+            now=_AT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("created_at", "not_after", "expected"),
+    [
+        (
+            "2026-07-31T23:59:59Z",
+            "2026-08-01T00:05:00Z",
+            "cannot predate",
+        ),
+        (
+            "2026-08-01T00:00:00Z",
+            "2026-08-02T00:00:01Z",
+            "cannot outlive",
+        ),
+    ],
+)
+def test_proposal_delivery_is_temporally_bounded_by_proposal(
+    tmp_path,
+    created_at,
+    not_after,
+    expected,
+):
+    context = _setup(tmp_path)
+
+    with pytest.raises(TradeProposalDeliveryRejected, match=expected):
+        create_trade_proposal_delivery(
+            context["taker"],
+            proposal=_proposal(context),
+            created_at=created_at,
+            not_after=not_after,
+            nonce="a" * 32,
+            now=_AT,
+            max_ttl_seconds=2 * 24 * 60 * 60,
+        )
+
+
+def test_proposal_delivery_ttl_preserves_nanosecond_boundary(tmp_path):
+    context = _setup(tmp_path)
+
+    with pytest.raises(
+        TradeProposalDeliveryRejected,
+        match="lifetime exceeds",
+    ):
+        create_trade_proposal_delivery(
+            context["taker"],
+            proposal=_proposal(context),
+            created_at="2026-08-01T00:00:00.000000001Z",
+            not_after="2026-08-01T00:00:00.000000002Z",
+            nonce="a" * 32,
+            now=_AT,
+            max_ttl_seconds=0,
+        )
+
+
+def test_proposal_delivery_receive_is_durable_and_exactly_once(tmp_path):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+    delivery = _delivery(context)
+
+    first = coordinator.receive(
+        delivery,
+        recipient_did=context["maker"].as_did(),
+        offer_resolver=context["offer_store"],
+        rule_resolver=context["package_store"],
+        at=_AT,
+    )
+    retry = coordinator.receive(
+        delivery.to_dict(),
+        recipient_did=context["maker"].as_did(),
+        offer_resolver=context["offer_store"],
+        rule_resolver=context["package_store"],
+        at=_AT,
+    )
+
+    assert first.inbox.appended is True
+    assert first.anchor_created is True
+    assert retry.inbox.appended is False
+    assert retry.anchor_created is False
+    assert retry.event.event_id == first.event.event_id
+    assert inbox.get(first.inbox.digest) == delivery.proposal
+    events = spine.verified_snapshot()
+    assert [event.type for event in events] == [EVENT_TRADE_PROPOSAL_RECEIVED]
+    assert validate_proposal_received_audit_payload(
+        events[0].payload,
+        proposal=delivery.proposal,
+    ) == events[0].payload
+
+
+def test_proposal_delivery_retry_returns_committed_result_after_offer_change(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+    delivery = _delivery(context)
+    first = coordinator.receive(
+        delivery,
+        recipient_did=context["maker"].as_did(),
+        offer_resolver=context["offer_store"],
+        rule_resolver=context["package_store"],
+        at=_AT,
+    )
+    previous = context["offer"].to_dict()
+    withdrawn = sign_offer(
+        context["maker"],
+        offer_body(
+            offer_id=previous["offer_id"],
+            revision=2,
+            previous_offer_digest=offer_digest(context["offer"]),
+            state="withdrawn",
+            publisher_did=previous["publisher_did"],
+            title=previous["title"],
+            summary=previous["summary"],
+            provides=previous["provides"],
+            requests=previous["requests"],
+            rule_refs=previous["rule_refs"],
+            published_at="2026-08-01T00:00:01Z",
+            not_after=previous["not_after"],
+            extensions=previous["extensions"],
+        ),
+        created="2026-08-01T00:00:01Z",
+    )
+    context["offer_store"].publish(withdrawn)
+
+    retry = coordinator.receive(
+        delivery,
+        recipient_did=context["maker"].as_did(),
+        offer_resolver=context["offer_store"],
+        rule_resolver=context["package_store"],
+        at=_utc("2026-08-01T00:01:00Z"),
+    )
+
+    assert retry.inbox.appended is False
+    assert retry.event.event_id == first.event.event_id
+
+
+def test_proposal_reconciliation_ignores_unsigned_orphan_delivery(tmp_path):
+    context = _setup(tmp_path)
+    delivery = _delivery(context)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    inbox.deliveries_root.mkdir(parents=True)
+    path = inbox.deliveries_root / f"{proposal_digest(delivery.proposal)[7:]}.json"
+    path.write_bytes(delivery.canonical_bytes)
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+
+    report = coordinator.reconcile()
+
+    assert report.scanned == 0
+    assert report.anchored == 0
+    assert spine.verified_snapshot() == ()
+
+
+def test_proposal_reconciliation_rejects_foreign_receiver_intake(tmp_path):
+    foreign_workspace = tmp_path / "foreign"
+    context = _setup(foreign_workspace)
+    local_identity = AgentIdentity.generate()
+    foreign_inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=local_identity.as_did(),
+    )
+    delivery = _delivery(context)
+    receipt = _intake_receipt(context, delivery)
+
+    with pytest.raises(
+        TradeProposalInboxRejected,
+        match="another receiver",
+    ):
+        foreign_inbox.put(delivery, receipt)
+
+    digest = proposal_digest(delivery.proposal)
+    foreign_inbox.deliveries_root.mkdir(parents=True)
+    foreign_inbox.receipts_root.mkdir(parents=True)
+    foreign_inbox._delivery_path(digest).write_bytes(delivery.canonical_bytes)
+    foreign_inbox._receipt_path(digest).write_bytes(receipt.canonical_bytes)
+    assert foreign_inbox.reconcile_usage() == {"records": 0, "bytes": 0}
+    assert foreign_inbox.list_digests() == ()
+    quarantine = foreign_inbox.quarantine_root / digest[7:]
+    assert (quarantine / "delivery.json").read_bytes() == delivery.canonical_bytes
+    assert (quarantine / "intake_receipt.json").read_bytes() == receipt.canonical_bytes
+
+    spine = SignedEventLog(tmp_path / "spine.jsonl", local_identity)
+    coordinator = TradeProposalAuditCoordinator(
+        foreign_inbox, spine, local_identity
+    )
+
+    report = coordinator.reconcile()
+
+    assert report.scanned == 0
+    assert report.failed == 0
+    assert report.anchored == 0
+    assert spine.verified_snapshot() == ()
+
+
+def test_proposal_reconciliation_batch_scans_spine_once(tmp_path, monkeypatch):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    second = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    _put_inbox(inbox, context, first)
+    _put_inbox(inbox, context, second)
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+    original = spine._verified_events_unlocked
+    scans = 0
+
+    def counted_scan():
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(spine, "_verified_events_unlocked", counted_scan)
+    report = coordinator.reconcile()
+
+    assert report.scanned == 2
+    assert report.anchored == 2
+    assert report.failed == 0
+    assert scans == 1
+
+
+def test_proposal_reconciliation_preserves_structured_failure(tmp_path, monkeypatch):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    retained = _put_inbox(inbox, context, _proposal(context))
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+
+    def corrupt_entry(_digest):
+        raise TradeProposalInboxCorruption("intake receipt hash mismatch")
+
+    monkeypatch.setattr(coordinator, "_verified_entry", corrupt_entry)
+    report = coordinator.reconcile()
+
+    assert report.failed == 1
+    assert report.failure_digests == (retained.digest,)
+    assert len(report.failures) == 1
+    assert report.failures[0].digest == retained.digest
+    assert report.failures[0].error_code == "inbox-corruption"
+    assert report.failures[0].message == "intake receipt hash mismatch"
+
+
+def test_expired_proposal_archives_after_signed_tombstone_and_frees_capacity(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    second = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=context["maker"].as_did(),
+        max_proposals=1,
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+    first_retained = _put_inbox(inbox, context, first)
+
+    report = coordinator.archive_expired(
+        at=_utc("2026-08-02T00:00:00Z")
+    )
+
+    assert report.scanned == 1
+    assert report.archived == 1
+    assert report.failure_digests == ()
+    assert inbox.list_digests() == ()
+    archive = inbox.archive_root / first_retained.digest[7:]
+    assert (archive / "delivery.json").is_file()
+    assert (archive / "intake_receipt.json").is_file()
+    events = spine.verified_snapshot()
+    assert [event.type for event in events] == [EVENT_TRADE_PROPOSAL_ARCHIVED]
+    assert events[0].payload["proposal_digest"] == first_retained.digest
+    assert _put_inbox(inbox, context, second).appended is True
+
+
+def test_archive_copy_failure_keeps_active_commit_marker(tmp_path, monkeypatch):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    retained = _put_inbox(inbox, context, _proposal(context))
+    original = inbox._atomic_write
+
+    def fail_archive_receipt(path, payload):
+        if path.name == "intake_receipt.json":
+            raise TradeProposalInboxError("simulated archive outage")
+        return original(path, payload)
+
+    monkeypatch.setattr(inbox, "_atomic_write", fail_archive_receipt)
+    with pytest.raises(TradeProposalInboxError, match="archive outage"):
+        inbox.archive_digests((retained.digest,))
+
+    assert inbox.list_digests() == (retained.digest,)
+    assert inbox.get(retained.digest) == retained.proposal
+
+
+def test_receive_archives_expired_record_on_capacity_and_retries(tmp_path):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=context["maker"].as_did(),
+        max_proposals=1,
+    )
+    expired = _put_inbox(inbox, context, _proposal(context))
+    moment = _utc("2026-08-02T00:01:00Z")
+    resolution = resolve_canonical_offer_rules(
+        context["maker"].as_did(),
+        context["offer"].offer_id,
+        context["offer_store"],
+        context["package_store"],
+        context["taker_policy"],
+        at=moment,
+    )
+    proposal = create_trade_proposal(
+        context["taker"],
+        resolution=resolution,
+        offer=context["offer"],
+        offer_resolver=context["offer_store"],
+        terms={"requested_quantity": "2"},
+        created_at="2026-08-02T00:01:00Z",
+        not_after="2026-08-03T00:01:00Z",
+        now=moment,
+    )
+    delivery = create_trade_proposal_delivery(
+        context["taker"],
+        proposal=proposal,
+        created_at="2026-08-02T00:01:00Z",
+        not_after="2026-08-02T00:11:00Z",
+        nonce="d" * 32,
+        now=moment,
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+
+    result = coordinator.receive(
+        delivery,
+        recipient_did=context["maker"].as_did(),
+        offer_resolver=context["offer_store"],
+        rule_resolver=context["package_store"],
+        at=moment,
+    )
+
+    assert result.inbox.appended is True
+    assert inbox.list_digests() == (proposal_digest(proposal),)
+    assert (inbox.archive_root / expired.digest[7:]).is_dir()
+    assert [event.type for event in spine.verified_snapshot()] == [
+        EVENT_TRADE_PROPOSAL_ARCHIVED,
+        EVENT_TRADE_PROPOSAL_RECEIVED,
+    ]
+
+
+def test_proposal_delivery_rejects_before_inbox_or_spine(tmp_path):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+
+    with pytest.raises(TradeProposalDeliveryRejected, match="another recipient"):
+        coordinator.receive(
+            _delivery(context),
+            recipient_did=AgentIdentity.generate().as_did(),
+            offer_resolver=context["offer_store"],
+            rule_resolver=context["package_store"],
+            at=_AT,
+        )
+
+    assert inbox.list_digests() == ()
+    assert spine.verified_snapshot() == ()
+
+
+def test_proposal_delivery_spine_failure_reconciles_without_resubmission(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+
+    def fail_before_append(*args, **kwargs):
+        raise OSError("simulated projection outage")
+
+    monkeypatch.setattr(spine, "append_unique", fail_before_append)
+    with pytest.raises(TradeProposalAuditError, match="projection outage"):
+        coordinator.receive(
+            _delivery(context),
+            recipient_did=context["maker"].as_did(),
+            offer_resolver=context["offer_store"],
+            rule_resolver=context["package_store"],
+            at=_AT,
+        )
+    assert len(inbox.list_digests()) == 1
+    assert spine.verified_snapshot() == ()
+    pending_view = coordinator.get_received(inbox.list_digests()[0])
+    assert pending_view is not None
+    assert pending_view.audit_verified is False
+
+    restarted = TradeProposalAuditCoordinator(
+        TradeProposalInbox(
+            tmp_path, receiver_did=context["maker"].as_did()
+        ),
+        SignedEventLog(tmp_path / "spine.jsonl", context["maker"]),
+        context["maker"],
+    )
+    report = restarted.reconcile()
+
+    assert report.scanned == 1
+    assert report.anchored == 1
+    assert report.verified_anchored == 0
+    assert report.failed == 0
+    assert report.has_more is False
+    recovered_view = restarted.get_received(inbox.list_digests()[0])
+    assert recovered_view is not None
+    assert recovered_view.audit_verified is True
+
+
+def test_proposal_delivery_projection_recovers_commit_then_raise(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+    original = spine.append_unique
+
+    def append_then_raise(*args, **kwargs):
+        original(*args, **kwargs)
+        raise OSError("simulated lost acknowledgement")
+
+    monkeypatch.setattr(spine, "append_unique", append_then_raise)
+    result = coordinator.receive(
+        _delivery(context),
+        recipient_did=context["maker"].as_did(),
+        offer_resolver=context["offer_store"],
+        rule_resolver=context["package_store"],
+        at=_AT,
+    )
+
+    assert result.inbox.appended is True
+    assert result.anchor_created is False
+    assert len(spine.verified_snapshot()) == 1
+
+
+def test_proposal_delivery_projection_does_not_mask_spine_corruption(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine_path = tmp_path / "spine.jsonl"
+    spine = SignedEventLog(spine_path, context["maker"])
+    coordinator = TradeProposalAuditCoordinator(inbox, spine, context["maker"])
+
+    def corrupt_then_raise(*args, **kwargs):
+        spine_path.write_bytes(b"not-json\n")
+        raise OSError("simulated projection outage")
+
+    monkeypatch.setattr(spine, "append_unique", corrupt_then_raise)
+    with pytest.raises(
+        TradeProposalAuditError,
+        match="Spine integrity check failed",
+    ):
+        coordinator.receive(
+            _delivery(context),
+            recipient_did=context["maker"].as_did(),
+            offer_resolver=context["offer_store"],
+            rule_resolver=context["package_store"],
+            at=_AT,
+        )
+
+
+def test_proposal_delivery_view_rejects_signed_malformed_audit_payload(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    proposal = _proposal(context)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    retained = _put_inbox(inbox, context, proposal)
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    payload = trade_rules_api.proposal_received_audit_payload(proposal)
+    payload["maker_did"] = "not-a-did"
+    spine.append(EVENT_TRADE_PROPOSAL_RECEIVED, payload)
+
+    with pytest.raises(
+        TradeProposalAuditError,
+        match="maker_did is invalid",
+    ):
+        TradeProposalAuditCoordinator(
+            inbox, spine, context["maker"]
+        ).get_received(
+            retained.digest
+        )
+
+
+def _live_proposal_delivery(tmp_path, app, *, nonce="b" * 32):
+    context = _setup(tmp_path, maker=app.state.nth.node_identity)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    created_at = now.isoformat().replace("+00:00", "Z")
+    proposal_not_after = (now + timedelta(hours=1)).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+    live_resolution = resolve_canonical_offer_rules(
+        context["maker"].as_did(),
+        context["offer"].offer_id,
+        context["offer_store"],
+        context["package_store"],
+        context["taker_policy"],
+        at=now,
+    )
+    proposal = create_trade_proposal(
+        context["taker"],
+        resolution=live_resolution,
+        offer=context["offer"],
+        offer_resolver=context["offer_store"],
+        terms={"requested_quantity": "1"},
+        created_at=created_at,
+        not_after=proposal_not_after,
+        now=now,
+    )
+    delivery = create_trade_proposal_delivery(
+        context["taker"],
+        proposal=proposal,
+        created_at=created_at,
+        not_after=(now + timedelta(minutes=10)).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        nonce=nonce,
+        now=now,
+    )
+    return context, proposal, delivery, created_at, proposal_not_after
+
+
+def test_public_proposal_delivery_endpoint_retains_but_does_not_accept(
+    tmp_path,
+):
+    app = create_app(tmp_path, require_console_auth=True)
+    context, proposal, delivery, created_at, proposal_not_after = (
+        _live_proposal_delivery(tmp_path, app)
+    )
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    retry = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert first.status_code == 202
+    assert first.json()["status"] == "retained-unaccepted"
+    assert first.json()["inbox_appended"] is True
+    assert first.json()["audit_anchor_created"] is True
+    assert retry.status_code == 202
+    assert retry.json()["inbox_appended"] is False
+    assert retry.json()["audit_anchor_created"] is False
+    assert retry.json()["audit_event_id"] == first.json()["audit_event_id"]
+    unauthenticated = client.get("/api/v2/trade/proposals")
+    authenticated = client.get(
+        "/api/v2/trade/proposals",
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}",
+        },
+    )
+    detail = client.get(
+        "/api/v2/trade/proposals/" + first.json()["proposal_digest"],
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}",
+        },
+    )
+
+    assert unauthenticated.status_code == 401
+    assert authenticated.status_code == 200
+    assert authenticated.json()["items"] == [{
+        "proposal_digest": proposal_digest(proposal),
+        "offer_digest": proposal.to_dict()["offer_digest"],
+        "offer_id": proposal.to_dict()["offer_id"],
+        "offer_revision": 1,
+        "maker_did": context["maker"].as_did(),
+        "taker_did": context["taker"].as_did(),
+        "created_at": created_at,
+        "not_after": proposal_not_after,
+        "rule_bindings_count": 2,
+        "status": "retained-unaccepted",
+        "audit_verified": True,
+        "audit_event_id": first.json()["audit_event_id"],
+    }]
+    assert detail.status_code == 200
+    assert detail.json()["proposal"] == proposal.to_dict()
+
+
+def test_proposal_reconcile_endpoint_repairs_without_peer_resubmission(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path, require_console_auth=True)
+    _context, _proposal_value, delivery, _created, _expiry = (
+        _live_proposal_delivery(tmp_path, app)
+    )
+    spine = app.state.nth.spine
+    original = spine.append_unique
+
+    def fail_projection(*args, **kwargs):
+        raise OSError("simulated projection outage")
+
+    monkeypatch.setattr(spine, "append_unique", fail_projection)
+    client = TestClient(app)
+    pending = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    monkeypatch.setattr(spine, "append_unique", original)
+
+    assert pending.status_code == 503
+    assert "simulated projection outage" not in pending.text
+    assert pending.json()["detail"] == {
+        "code": "trade-proposal-audit-incomplete",
+        "message": "Proposal was retained but its audit projection is incomplete",
+        "retryable_without_resubmission": True,
+    }
+    assert client.post("/api/v2/trade/proposals/reconcile").status_code == 401
+    recovered = client.post(
+        "/api/v2/trade/proposals/reconcile",
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}",
+        },
+    )
+    assert recovered.status_code == 200
+    assert recovered.json()["anchored"] == 1
+    assert recovered.json()["failed"] == 0
+    assert recovered.json()["failure_digests"] == []
+    assert recovered.json()["failures"] == []
+
+
+def test_proposal_reconciliation_status_is_authenticated_and_tracks_lag(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path, require_console_auth=True)
+    _context, _proposal_value, delivery, _created, _expiry = (
+        _live_proposal_delivery(tmp_path, app)
+    )
+    spine = app.state.nth.spine
+    original = spine.append_unique
+
+    def fail_projection(*args, **kwargs):
+        raise OSError("simulated projection outage")
+
+    monkeypatch.setattr(spine, "append_unique", fail_projection)
+    client = TestClient(app)
+    pending = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    monkeypatch.setattr(spine, "append_unique", original)
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+
+    assert pending.status_code == 503
+    assert client.get(
+        "/api/v2/trade/proposal-reconciliation/status"
+    ).status_code == 401
+    before = client.get(
+        "/api/v2/trade/proposal-reconciliation/status",
+        headers=auth,
+    )
+    assert before.status_code == 200
+    assert before.json()["active_records"] == 1
+    assert before.json()["pending_anchors"] == 1
+    assert before.json()["oldest_pending_age_seconds"] >= 0
+    assert before.json()["measured_at"].endswith("Z")
+
+    recovered = client.post(
+        "/api/v2/trade/proposals/reconcile",
+        headers=auth,
+    )
+    after = client.get(
+        "/api/v2/trade/proposal-reconciliation/status",
+        headers=auth,
+    )
+    assert recovered.status_code == 200
+    assert after.status_code == 200
+    assert after.json()["active_records"] == 1
+    assert after.json()["pending_anchors"] == 0
+    assert after.json()["oldest_pending_age_seconds"] is None
+
+
+def test_web_bootstrap_drains_all_expired_proposal_archive_pages(
+    tmp_path,
+    monkeypatch,
+):
+    calls = 0
+
+    def archive_pages(self, *, at=None, limit=1_000):
+        nonlocal calls
+        calls += 1
+        assert at is not None
+        assert limit == 1_000
+        scanned = 1_000 if calls == 1 else 1
+        return TradeProposalArchiveResult(
+            scanned=scanned,
+            archived=scanned,
+            already_anchored=0,
+            failure_digests=(),
+        )
+
+    monkeypatch.setattr(
+        TradeProposalAuditCoordinator,
+        "archive_expired",
+        archive_pages,
+    )
+
+    create_app(tmp_path)
+
+    assert calls == 2
+
+
+def test_proposal_reconcile_api_exposes_bounded_structured_failures(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path, require_console_auth=True)
+    _context, _proposal_value, delivery, _created, _expiry = (
+        _live_proposal_delivery(tmp_path, app)
+    )
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+
+    def corrupt_entry(_digest):
+        raise TradeProposalInboxCorruption("receipt mismatch: " + ("x" * 500))
+
+    monkeypatch.setattr(
+        app.state.nth.trade_proposal_audit,
+        "_verified_entry",
+        corrupt_entry,
+    )
+    response = client.post(
+        "/api/v2/trade/proposals/reconcile",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["failed"] == 1
+    assert body["failure_digests"] == [accepted.json()["proposal_digest"]]
+    assert body["failures"][0]["digest"] == accepted.json()["proposal_digest"]
+    assert body["failures"][0]["error_code"] == "inbox-corruption"
+    assert body["failures"][0]["message"].startswith("receipt mismatch:")
+    assert len(body["failures"][0]["message"]) == 300
+
+
+def test_public_proposal_receiver_does_not_expose_local_io_paths(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path, require_console_auth=True)
+    _context, _proposal_value, delivery, _created, _expiry = (
+        _live_proposal_delivery(tmp_path, app)
+    )
+
+    def fail_with_private_path(*args, **kwargs):
+        raise TradeProposalInboxError(
+            r"write failed at X:\operator-home\identity.json"
+        )
+
+    monkeypatch.setattr(
+        app.state.nth.trade_proposal_audit,
+        "receive",
+        fail_with_private_path,
+    )
+    response = TestClient(app).post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 503
+    assert "operator-home" not in response.text
+    assert "identity.json" not in response.text
+    assert response.json()["detail"] == {
+        "code": "trade-proposal-inbox-unavailable",
+        "message": "Proposal receiver persistence is unavailable",
+    }
+
+
+def test_public_proposal_delivery_endpoint_enforces_preparse_body_limit(
+    tmp_path,
+):
+    client = TestClient(create_app(tmp_path, require_console_auth=True))
+
+    response = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=b"{" + (b"x" * (256 * 1024)) + b"}",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert "256 KiB" in response.json()["detail"]
+
+
+def test_public_proposal_delivery_endpoint_has_global_crypto_budget(tmp_path):
+    app = create_app(tmp_path, require_console_auth=True)
+    app.state.nth.trade_proposal_delivery_global_limiter = RateLimiter(
+        max_per_window=1,
+        window_seconds=60,
+    )
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=b"{}",
+        headers={"Content-Type": "application/json"},
+    )
+    second = client.post(
+        "/api/v2/trade/federation/proposals",
+        content=b"{}",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert first.status_code == 400
+    assert second.status_code == 429
+    assert second.json()["detail"] == (
+        "global trade Proposal delivery rate exceeded"
+    )
+
+
+def test_trade_proposal_audit_recovers_on_web_restart_without_resubmission(
+    tmp_path,
+    monkeypatch,
+):
+    first_app = create_app(tmp_path, require_console_auth=True)
+    _context, proposal, delivery, _created, _expiry = _live_proposal_delivery(
+        tmp_path,
+        first_app,
+        nonce="c" * 32,
+    )
+
+    def fail_before_append(*args, **kwargs):
+        raise OSError("simulated Spine outage")
+
+    monkeypatch.setattr(
+        first_app.state.nth.spine,
+        "append_unique",
+        fail_before_append,
+    )
+    failed = TestClient(first_app).post(
+        "/api/v2/trade/federation/proposals",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert failed.status_code == 503
+    assert failed.json()["detail"]["retryable_without_resubmission"] is True
+
+    restarted = create_app(tmp_path, require_console_auth=True)
+    recovered = TestClient(restarted).get(
+        "/api/v2/trade/proposals",
+        headers={
+            "Authorization": f"Bearer {restarted.state.nth_console_token}",
+        },
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.json()["items"][0]["proposal_digest"] == (
+        proposal_digest(proposal)
+    )
+    assert recovered.json()["items"][0]["audit_verified"] is True
+
+
+def test_proposal_inbox_is_content_addressed_and_idempotent(tmp_path):
+    context = _setup(tmp_path)
+    proposal = _proposal(context)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+
+    first = _put_inbox(inbox, context, proposal)
+    retry = inbox.put(
+        _delivery(context, proposal).to_dict(),
+        _intake_receipt(context, _delivery(context, proposal)).to_dict(),
+    )
+
+    assert first.appended is True
+    assert retry.appended is False
+    assert first.digest == proposal_digest(proposal)
+    assert retry.proposal.canonical_bytes == proposal.canonical_bytes
+    assert inbox.get(first.digest) == proposal
+    assert inbox.list_digests() == (first.digest,)
+
+
+def test_proposal_inbox_listing_has_deterministic_cursor_pagination(tmp_path):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    second = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    digests = sorted(
+        _put_inbox(inbox, context, proposal).digest
+        for proposal in (first, second)
+    )
+
+    assert inbox.list_digests(limit=1) == (digests[0],)
+    assert inbox.list_digests(limit=1, after=digests[0]) == (digests[1],)
+    assert inbox.list_digests(limit=1, after=digests[1]) == ()
+
+
+def test_proposal_inbox_rejects_before_persistence(tmp_path):
+    context = _setup(tmp_path)
+    body = _proposal(context).to_dict()
+    body.pop("proof")
+    wrong_digest = "sha256:" + ("c" * 64)
+    body["offer_digest"] = wrong_digest
+    body["canonical_chain_digests"][-1] = wrong_digest
+    proposal = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", context["maker"])
+    coordinator = TradeProposalAuditCoordinator(
+        inbox, spine, context["maker"]
+    )
+
+    with pytest.raises(
+        TradeProposalInboxRejected,
+        match="offer_digest does not match local replay",
+    ):
+        coordinator.receive(
+            _delivery(context, proposal),
+            recipient_did=context["maker"].as_did(),
+            offer_resolver=context["offer_store"],
+            rule_resolver=context["package_store"],
+            at=_AT,
+        )
+
+    assert inbox.list_digests() == ()
+
+
+def test_proposal_inbox_normalizes_malformed_input_to_rejection(tmp_path):
+    inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=AgentIdentity.generate().as_did(),
+    )
+
+    with pytest.raises(TradeProposalInboxRejected):
+        inbox.put({"not": "a Delivery"}, {"not": "an intake receipt"})
+
+    assert inbox.list_digests() == ()
+
+
+@pytest.mark.parametrize("limit_kind", ["records", "bytes"])
+def test_proposal_inbox_enforces_capacity_before_second_write(
+    tmp_path,
+    limit_kind,
+):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    second = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=context["maker"].as_did(),
+        max_proposals=1 if limit_kind == "records" else 10,
+        max_bytes=(
+            10_000_000
+            if limit_kind == "records"
+            else (
+                len(_delivery(context, first).canonical_bytes)
+                + len(
+                    _intake_receipt(
+                        context, _delivery(context, first)
+                    ).canonical_bytes
+                )
+                + len(_delivery(context, second).canonical_bytes)
+                + len(
+                    _intake_receipt(
+                        context, _delivery(context, second)
+                    ).canonical_bytes
+                )
+                - 1
+            )
+        ),
+    )
+    _put_inbox(inbox, context, first)
+
+    with pytest.raises(TradeProposalInboxCapacity):
+        _put_inbox(inbox, context, second)
+
+    assert inbox.list_digests() == (proposal_digest(first),)
+
+
+@pytest.mark.parametrize(
+    ("limit_field", "expected"),
+    [("taker", "taker capacity"), ("offer", "Offer capacity")],
+)
+def test_proposal_inbox_enforces_principal_and_offer_quotas(
+    tmp_path,
+    limit_field,
+    expected,
+):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    second = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=context["maker"].as_did(),
+        max_per_taker=1 if limit_field == "taker" else 10,
+        max_per_offer=1 if limit_field == "offer" else 10,
+    )
+    _put_inbox(inbox, context, first)
+
+    with pytest.raises(TradeProposalInboxCapacity, match=expected):
+        _put_inbox(inbox, context, second)
+
+
+def test_proposal_inbox_usage_avoids_history_scan_on_each_write(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    second = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    _put_inbox(inbox, context, first)
+
+    def unexpected_scan():
+        raise AssertionError("committed history was rescanned")
+
+    monkeypatch.setattr(inbox, "_proposal_files", unexpected_scan)
+    result = _put_inbox(inbox, context, second)
+
+    assert result.appended is True
+
+
+def test_proposal_inbox_usage_recovers_failed_reservation(tmp_path, monkeypatch):
+    context = _setup(tmp_path)
+    proposal = _proposal(context)
+    inbox = TradeProposalInbox(
+        tmp_path,
+        receiver_did=context["maker"].as_did(),
+        max_proposals=1,
+    )
+    original = inbox._atomic_write
+    calls = 0
+
+    def fail_first_payload(path, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TradeProposalInboxError("simulated payload outage")
+        return original(path, payload)
+
+    monkeypatch.setattr(inbox, "_atomic_write", fail_first_payload)
+    with pytest.raises(TradeProposalInboxError, match="payload outage"):
+        _put_inbox(inbox, context, proposal)
+    monkeypatch.setattr(inbox, "_atomic_write", original)
+
+    assert inbox.reconcile_usage() == {"records": 0, "bytes": 0}
+    assert _put_inbox(inbox, context, proposal).appended is True
+
+
+def test_proposal_inbox_detects_replaced_content_address(tmp_path):
+    context = _setup(tmp_path)
+    first = _proposal(context)
+    body = first.to_dict()
+    body.pop("proof")
+    body["terms"]["requested_quantity"] = "2"
+    replacement = _sign_proposal_body(context["taker"], body)
+    inbox = TradeProposalInbox(
+        tmp_path, receiver_did=context["maker"].as_did()
+    )
+    result = _put_inbox(inbox, context, first)
+    stored_path = inbox.proposals_root / f"{result.digest[7:]}.json"
+    stored_path.write_bytes(_delivery(context, replacement).canonical_bytes)
+
+    with pytest.raises(
+        TradeProposalInboxCorruption,
+        match="unbound",
+    ):
+        inbox.get(result.digest)
+
+
+def test_proposal_inbox_is_exactly_once_across_processes(tmp_path):
+    context = _setup(tmp_path)
+    proposal = _proposal(context)
+    delivery = _delivery(context, proposal)
+    receipt = _intake_receipt(context, delivery)
+    process_context = multiprocessing.get_context("spawn")
+    output = process_context.Queue()
+    processes = [
+        process_context.Process(
+            target=_process_put_trade_proposal,
+            args=(
+                str(tmp_path),
+                context["maker"].as_did(),
+                delivery.to_dict(),
+                receipt.to_dict(),
+                output,
+            ),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+    try:
+        assert [process.exitcode for process in processes] == [0, 0]
+        results = [output.get(timeout=2) for _ in processes]
+        assert all(result[0] == "ok" for result in results)
+        assert sorted(result[1] for result in results) == [False, True]
+        assert {result[2] for result in results} == {
+            proposal_digest(proposal)
+        }
+        assert TradeProposalInbox(
+            tmp_path,
+            receiver_did=context["maker"].as_did(),
+        ).list_digests() == (
+            proposal_digest(proposal),
+        )
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+
+
+def test_proposal_inbox_listing_uses_the_cross_process_write_lock(tmp_path):
+    receiver_did = AgentIdentity.generate().as_did()
+    inbox = TradeProposalInbox(tmp_path, receiver_did=receiver_did)
+    process_context = multiprocessing.get_context("spawn")
+    output = process_context.Queue()
+    with inbox._acquire():
+        process = process_context.Process(
+            target=_process_list_trade_proposals,
+            args=(str(tmp_path), receiver_did, output),
+        )
+        process.start()
+        process.join(timeout=10)
+    try:
+        assert process.exitcode == 0
+        assert output.get(timeout=2) == (
+            "error",
+            TradeProposalInboxBusy.__name__,
+            "Proposal inbox is busy",
+        )
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
 
 
 def test_proposal_tampering_breaks_signature(tmp_path):
@@ -1299,9 +2788,36 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
 
     assert stored == generate_vectors()
     proposal = TradeProposal.from_dict(stored["proposal"])
+    proposal_delivery = TradeProposalDelivery.from_dict(
+        stored["proposal_delivery"]
+    )
+    proposal_intake_receipt = TradeProposalIntakeReceipt.from_dict(
+        stored["proposal_intake_receipt"]
+    )
     acceptance = TradeAcceptance.from_dict(stored["acceptance"])
     order = TradeOrder.from_dict(stored["order"])
     assert proposal_digest(proposal) == stored["proposal_digest"]
+    assert trade_proposal_delivery_digest(proposal_delivery) == (
+        stored["proposal_delivery_digest"]
+    )
+    assert proposal_delivery.proposal == proposal
+    assert trade_proposal_intake_receipt_digest(
+        proposal_intake_receipt
+    ) == stored["proposal_intake_receipt_digest"]
+    assert verify_trade_proposal_intake_receipt(
+        proposal_intake_receipt,
+        delivery=proposal_delivery,
+        receiver_did=proposal.to_dict()["maker_did"],
+    ) == (True, "ok")
+    for case in stored["proposal_delivery_verification_cases"]:
+        ok, _reason = verify_trade_proposal_delivery(
+            proposal_delivery,
+            recipient_did=case["recipient_did"],
+            at=_utc(case["at"]),
+            max_ttl_seconds=case["max_ttl_seconds"],
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
     assert acceptance_digest(acceptance) == stored["acceptance_digest"]
     assert trade_order_digest(order) == stored["order_digest"]
     adapter = TradeExecutionAdapter.from_dict(stored["execution_adapter"])
@@ -1403,6 +2919,8 @@ def test_negative_agreement_vectors_fail_closed():
     stored = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
     parsers = {
         "proposal": TradeProposal.from_dict,
+        "proposal_delivery": TradeProposalDelivery.from_dict,
+        "proposal_intake_receipt": TradeProposalIntakeReceipt.from_dict,
         "acceptance": TradeAcceptance.from_dict,
         "order": TradeOrder.from_dict,
         "order_audit_payload": validate_order_audit_payload,
@@ -1442,6 +2960,8 @@ def test_negative_agreement_vectors_fail_closed():
         with pytest.raises(
             (
                 TradeAgreementRejected,
+                TradeProposalDeliveryRejected,
+                TradeProposalIntakeReceiptRejected,
                 TradeOrderAuditError,
                 TradeOrderRejected,
                 TradeExecutionReceiptRejected,
@@ -1456,6 +2976,12 @@ def test_negative_agreement_vectors_fail_closed():
 
 def test_agreement_schemas_are_packaged_and_match_wire_constants():
     proposal = json.loads(PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8"))
+    proposal_delivery = json.loads(
+        PROPOSAL_DELIVERY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    proposal_intake_receipt = json.loads(
+        PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
     acceptance = json.loads(
         ACCEPTANCE_SCHEMA_PATH.read_text(encoding="utf-8")
     )
@@ -1497,6 +3023,21 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert proposal["properties"]["rule_bindings"]["$ref"].endswith(
         "ruleBindings"
     )
+    assert proposal_delivery["properties"]["kind"]["const"] == (
+        "nth.dao.trade.proposal-delivery"
+    )
+    assert proposal_delivery["properties"]["proposal"]["$ref"] == (
+        proposal["$id"]
+    )
+    assert proposal_delivery["properties"]["proof"]["properties"][
+        "proof_purpose"
+    ]["const"] == "tradeProposalDelivery"
+    assert proposal_intake_receipt["properties"]["kind"]["const"] == (
+        "nth.dao.trade.proposal-intake-receipt"
+    )
+    assert proposal_intake_receipt["properties"]["proof"]["properties"][
+        "proof_purpose"
+    ]["const"] == "tradeProposalIntakeReceipt"
     assert acceptance["properties"]["kind"]["const"] == (
         "nth.dao.trade.acceptance"
     )
@@ -1569,6 +3110,42 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert receipt_review_conflict_audit["properties"][
         "candidate_review_digest"
     ]["$ref"].endswith("/digest")
+
+
+def test_proposal_transport_schemas_resolve_and_validate_public_vectors():
+    jsonschema = pytest.importorskip("jsonschema")
+    referencing = pytest.importorskip("referencing")
+    stored = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+    proposal_schema = json.loads(
+        PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    delivery_schema = json.loads(
+        PROPOSAL_DELIVERY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    intake_schema = json.loads(
+        PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    registry = referencing.Registry().with_resource(
+        proposal_schema["$id"],
+        referencing.Resource.from_contents(proposal_schema),
+    )
+    delivery_validator = jsonschema.validators.validator_for(delivery_schema)
+    intake_validator = jsonschema.validators.validator_for(intake_schema)
+    delivery_validator.check_schema(delivery_schema)
+    intake_validator.check_schema(intake_schema)
+    delivery_validator(delivery_schema, registry=registry).validate(
+        stored["proposal_delivery"]
+    )
+    intake_validator(intake_schema).validate(
+        stored["proposal_intake_receipt"]
+    )
+
+    malformed = copy.deepcopy(stored["proposal_delivery"])
+    malformed["proposal"]["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        delivery_validator(delivery_schema, registry=registry).validate(
+            malformed
+        )
 
 
 def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():

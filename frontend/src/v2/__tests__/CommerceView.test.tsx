@@ -30,8 +30,19 @@ const { order } = vi.hoisted(() => ({ order: {
 } }));
 
 vi.mock("../api", () => ({
+  ApiHttpError: class ApiHttpError extends Error {
+    status: number;
+    path: string;
+    constructor(_method: string, path: string, status: number) {
+      super(`HTTP ${status}`);
+      this.status = status;
+      this.path = path;
+    }
+  },
   fetchCommerceListings: vi.fn().mockResolvedValue([]),
   fetchCommerceOrders: vi.fn().mockResolvedValue([order]),
+  fetchTradeProposals: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
+  getTradeProposal: vi.fn().mockResolvedValue(null),
   listOpenTasks: vi.fn().mockResolvedValue([]),
   publishCommerceListing: vi.fn().mockResolvedValue({ digest: "sha256:x", warning: "" }),
   remoteCommerceCheckout: vi.fn().mockResolvedValue({ order, delivery: { status: "acknowledged" }, warning: "" }),
@@ -44,7 +55,10 @@ vi.mock("../api", () => ({
 }));
 
 import {
+  ApiHttpError,
   fetchCommerceOrders,
+  fetchTradeProposals,
+  getTradeProposal,
   dispatchCommerceOutbox,
   listOpenTasks,
   publishCommerceListing,
@@ -164,5 +178,340 @@ describe("CommerceView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Retry pending Outbox" }));
     expect(await screen.findByText(/still pending/)).toBeTruthy();
     expect(screen.queryByText("Outbox retry completed")).toBeNull();
+  });
+
+  it("shows inbound Proposals as signed claims, never accepted trades", async () => {
+    const digest = "sha256:" + "7".repeat(64);
+    const summary = {
+      proposal_digest: digest,
+      offer_digest: "sha256:" + "6".repeat(64),
+      offer_id: "org.nthdao.tests/review-swap",
+      offer_revision: 2,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    };
+    vi.mocked(fetchTradeProposals).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    const detail = {
+      ...summary,
+      proposal: {
+        kind: "nth.dao.trade.proposal",
+        protocol_version: "1",
+        offer_publisher_did: summary.maker_did,
+        offer_id: summary.offer_id,
+        offer_revision: 2,
+        offer_digest: summary.offer_digest,
+        canonical_chain_digests: ["sha256:" + "5".repeat(64), summary.offer_digest],
+        maker_did: summary.maker_did,
+        taker_did: summary.taker_did,
+        rule_bindings: [{ rule_id: "org.nthdao.rules/delivery", digest: "sha256:" + "4".repeat(64) }],
+        taker_policy_digest: "sha256:" + "3".repeat(64),
+        taker_policy: {},
+        terms: { requested_quantity: "1" },
+        created_at: summary.created_at,
+        not_after: summary.not_after,
+        proof: {},
+      },
+    };
+    vi.mocked(getTradeProposal)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({
+        ...detail,
+        audit_verified: false,
+        audit_event_id: "",
+      });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+
+    expect(await screen.findByText("Inbound negotiation")).toBeTruthy();
+    expect(screen.getAllByText("Pending review").length).toBeGreaterThan(0);
+    expect(screen.getByText(/It is not acceptance/)).toBeTruthy();
+    expect(screen.getByText(/requested_quantity/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Accept" })).toBeNull();
+    expect(getTradeProposal).toHaveBeenCalledWith(digest, expect.any(AbortSignal));
+
+    vi.mocked(fetchTradeProposals).mockRejectedValueOnce(
+      new Error("temporary Proposal outage"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText(/showing last known data/)).toBeTruthy();
+    expect(screen.getByText(/requested_quantity/)).toBeTruthy();
+    await waitFor(() => expect(getTradeProposal).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Missing")).toBeTruthy();
+  });
+
+  it("loads Proposal rows beyond the first 500-item page", async () => {
+    const makeSummary = (index: number) => ({
+      proposal_digest: `sha256:${index.toString(16).padStart(64, "0")}`,
+      offer_digest: "sha256:" + "6".repeat(64),
+      offer_id: `org.nthdao.tests/page-${index}`,
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    });
+    const firstPage = Array.from({ length: 500 }, (_, index) => makeSummary(index));
+    vi.mocked(fetchTradeProposals)
+      .mockResolvedValueOnce({ items: firstPage, next_cursor: "cursor-500" })
+      .mockResolvedValueOnce({ items: [makeSummary(500)], next_cursor: "" });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+
+    expect(await screen.findByText("org.nthdao.tests/page-500")).toBeTruthy();
+    expect(fetchTradeProposals).toHaveBeenNthCalledWith(2, "cursor-500");
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("clears all cached Proposal pages when pagination loses authorization", async () => {
+    const summary = {
+      proposal_digest: "sha256:" + "8".repeat(64),
+      offer_digest: "sha256:" + "7".repeat(64),
+      offer_id: "org.nthdao.tests/private-page",
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    };
+    vi.mocked(fetchTradeProposals)
+      .mockResolvedValueOnce({ items: [summary], next_cursor: "private-next" })
+      .mockRejectedValueOnce(
+        new ApiHttpError("GET", "/api/v2/trade/proposals", 403),
+      );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+    expect(await screen.findByText(summary.offer_id)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    expect(await screen.findByText(/cached data cleared/)).toBeTruthy();
+    expect(screen.queryByText(summary.offer_id)).toBeNull();
+    expect(screen.queryByText(/showing last known data/)).toBeNull();
+  });
+
+  it("does not let an older Proposal refresh overwrite a newer result", async () => {
+    const summary = (name: string, digit: string) => ({
+      proposal_digest: `sha256:${digit.repeat(64)}`,
+      offer_digest: "sha256:" + "6".repeat(64),
+      offer_id: name,
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    });
+    let resolveOld!: (value: { items: ReturnType<typeof summary>[]; next_cursor: string }) => void;
+    let resolveNew!: (value: { items: ReturnType<typeof summary>[]; next_cursor: string }) => void;
+    vi.mocked(fetchTradeProposals)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveNew = resolve; }));
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("tab", { name: /Proposals/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    resolveNew({ items: [summary("new-result", "9")], next_cursor: "" });
+    expect(await screen.findByText("new-result")).toBeTruthy();
+    resolveOld({ items: [summary("old-result", "8")], next_cursor: "" });
+    await Promise.resolve();
+
+    expect(screen.queryByText("old-result")).toBeNull();
+    expect(screen.getByText("new-result")).toBeTruthy();
+  });
+
+  it("does not append an old pagination response after a newer refresh", async () => {
+    const summary = (name: string, digit: string) => ({
+      proposal_digest: `sha256:${digit.repeat(64)}`,
+      offer_digest: "sha256:" + "6".repeat(64),
+      offer_id: name,
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    });
+    let resolveOldPage!: (value: {
+      items: ReturnType<typeof summary>[];
+      next_cursor: string;
+    }) => void;
+    const oldPage = new Promise<{
+      items: ReturnType<typeof summary>[];
+      next_cursor: string;
+    }>((resolve) => { resolveOldPage = resolve; });
+    vi.mocked(fetchTradeProposals)
+      .mockResolvedValueOnce({
+        items: [summary("first-page", "1")],
+        next_cursor: "old-next",
+      })
+      .mockReturnValueOnce(oldPage)
+      .mockResolvedValueOnce({
+        items: [summary("fresh-page", "2")],
+        next_cursor: "",
+      });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("fresh-page")).toBeTruthy();
+    resolveOldPage({ items: [summary("stale-page", "3")], next_cursor: "" });
+    await Promise.resolve();
+
+    expect(screen.queryByText("first-page")).toBeNull();
+    expect(screen.queryByText("stale-page")).toBeNull();
+  });
+
+  it("labels retained detail as last-known when its refresh fails", async () => {
+    const digest = "sha256:" + "9".repeat(64);
+    const summary = {
+      proposal_digest: digest,
+      offer_digest: "sha256:" + "6".repeat(64),
+      offer_id: "org.nthdao.tests/detail-cache",
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    };
+    vi.mocked(fetchTradeProposals).mockResolvedValue({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeProposal)
+      .mockResolvedValueOnce({
+        ...summary,
+        proposal: {
+          kind: "nth.dao.trade.proposal",
+          protocol_version: "1",
+          offer_publisher_did: summary.maker_did,
+          offer_id: summary.offer_id,
+          offer_revision: summary.offer_revision,
+          offer_digest: summary.offer_digest,
+          canonical_chain_digests: [summary.offer_digest],
+          maker_did: summary.maker_did,
+          taker_did: summary.taker_did,
+          rule_bindings: [{
+            rule_id: "org.nthdao.rules/delivery",
+            digest: "sha256:" + "4".repeat(64),
+          }],
+          taker_policy_digest: "sha256:" + "3".repeat(64),
+          taker_policy: {},
+          terms: { requested_quantity: "1" },
+          created_at: summary.created_at,
+          not_after: summary.not_after,
+          proof: {},
+        },
+      })
+      .mockRejectedValueOnce(new Error("detail endpoint unavailable"));
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+    expect(await screen.findByText(/requested_quantity/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText(/showing last known data/)).toBeTruthy();
+    expect(screen.getByText(/requested_quantity/)).toBeTruthy();
+  });
+
+  it("keeps existing Market orders usable when Proposal inbox is unavailable", async () => {
+    vi.mocked(fetchTradeProposals).mockRejectedValueOnce(
+      new Error("signed receiver unavailable"),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    expect(await screen.findAllByText("Adversarial review")).not.toHaveLength(0);
+    fireEvent.click(screen.getByRole("tab", { name: /Proposals/ }));
+
+    expect(await screen.findByText(/Proposal inbox unavailable/)).toBeTruthy();
+    expect(screen.getByText(/signed receiver unavailable/)).toBeTruthy();
+  });
+
+  it("clears cached Proposal data when console authorization is rejected", async () => {
+    const summary = {
+      proposal_digest: "sha256:" + "4".repeat(64),
+      offer_digest: "sha256:" + "5".repeat(64),
+      offer_id: "org.nthdao.tests/private-proposal",
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    };
+    vi.mocked(fetchTradeProposals)
+      .mockResolvedValueOnce({ items: [summary], next_cursor: "" })
+      .mockRejectedValueOnce(Object.assign(new Error("HTTP 401"), { status: 401 }));
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+    expect(await screen.findByText(summary.offer_id)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText(/cached data cleared/)).toBeTruthy();
+    expect(screen.queryByText(summary.offer_id)).toBeNull();
+    expect(screen.queryByText(/showing last known data/)).toBeNull();
+  });
+
+  it("updates Proposals even when an unrelated commerce endpoint fails", async () => {
+    const summary = {
+      proposal_digest: "sha256:" + "3".repeat(64),
+      offer_digest: "sha256:" + "2".repeat(64),
+      offer_id: "org.nthdao.tests/independent-proposal",
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-02T00:00:00Z",
+      not_after: "2026-08-03T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted" as const,
+      audit_verified: true,
+      audit_event_id: "a".repeat(64),
+    };
+    const api = await import("../api");
+    vi.mocked(api.fetchCommerceListings).mockRejectedValueOnce(
+      new Error("listing store unavailable"),
+    );
+    vi.mocked(fetchTradeProposals).mockResolvedValueOnce({
+      items: [summary], next_cursor: "",
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Proposals/ }));
+
+    expect(await screen.findByText(summary.offer_id)).toBeTruthy();
   });
 });

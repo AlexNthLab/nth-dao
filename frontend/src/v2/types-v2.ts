@@ -523,6 +523,49 @@ export interface TradeOfferImportResult {
   warning: string;
 }
 
+export interface TradeProposalSummary {
+  proposal_digest: string;
+  offer_digest: string;
+  offer_id: string;
+  offer_revision: number;
+  maker_did: string;
+  taker_did: string;
+  created_at: string;
+  not_after: string;
+  rule_bindings_count: number;
+  status: "retained-unaccepted";
+  audit_verified: boolean;
+  audit_event_id: string;
+}
+
+export interface TradeProposalPage {
+  items: TradeProposalSummary[];
+  next_cursor: string;
+}
+
+export interface TradeProposalDocument {
+  kind: string;
+  protocol_version: string;
+  offer_publisher_did: string;
+  offer_id: string;
+  offer_revision: number;
+  offer_digest: string;
+  canonical_chain_digests: string[];
+  maker_did: string;
+  taker_did: string;
+  rule_bindings: Array<{ rule_id: string; digest: string }>;
+  taker_policy_digest: string;
+  taker_policy: Record<string, unknown>;
+  terms: Record<string, unknown>;
+  created_at: string;
+  not_after: string;
+  proof: Record<string, unknown>;
+}
+
+export interface TradeProposalDetail extends TradeProposalSummary {
+  proposal: TradeProposalDocument;
+}
+
 /** 类别分面(/api/v2/market/categories)。 */
 export interface TaskCategory {
   context: string;

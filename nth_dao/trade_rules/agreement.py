@@ -21,6 +21,7 @@ from nth_dao.trade_rules.negotiation import (
     CanonicalRuleResolution,
     RuleNegotiationError,
     RuleResolutionPolicy,
+    resolve_canonical_offer_rules,
     resolve_offer_rules,
 )
 from nth_dao.trade_rules.offer import (
@@ -176,6 +177,16 @@ def _utc_now(value: datetime | None) -> datetime:
     ):
         raise TradeAgreementRejected("now must be timezone-aware")
     return moment.astimezone(timezone.utc)
+
+
+def _datetime_timestamp(value: datetime) -> tuple[datetime, int]:
+    moment = _utc_now(value)
+    return moment.replace(microsecond=0), moment.microsecond * 1_000
+
+
+def _timestamp_ceiling_datetime(value: tuple[datetime, int]) -> datetime:
+    base, nanos = value
+    return base + timedelta(microseconds=(nanos + 999) // 1_000)
 
 
 def _duration_seconds(value: Any, *, label: str) -> float:
@@ -519,10 +530,8 @@ class TradeAcceptance:
 
 
 def proposal_digest(proposal: TradeProposal | dict[str, Any]) -> str:
-    verified = (
-        TradeProposal.from_json(proposal.canonical_bytes)
-        if isinstance(proposal, TradeProposal)
-        else TradeProposal.from_dict(proposal)
+    verified = proposal if isinstance(proposal, TradeProposal) else (
+        TradeProposal.from_dict(proposal)
     )
     return "sha256:" + hashlib.sha256(verified.canonical_bytes).hexdigest()
 
@@ -530,10 +539,8 @@ def proposal_digest(proposal: TradeProposal | dict[str, Any]) -> str:
 def acceptance_digest(
     acceptance: TradeAcceptance | dict[str, Any],
 ) -> str:
-    verified = (
-        TradeAcceptance.from_json(acceptance.canonical_bytes)
-        if isinstance(acceptance, TradeAcceptance)
-        else TradeAcceptance.from_dict(acceptance)
+    verified = acceptance if isinstance(acceptance, TradeAcceptance) else (
+        TradeAcceptance.from_dict(acceptance)
     )
     return "sha256:" + hashlib.sha256(verified.canonical_bytes).hexdigest()
 
@@ -896,6 +903,144 @@ def create_trade_acceptance(
     return acceptance
 
 
+def verify_trade_proposal_under_local_state(
+    proposal: TradeProposal | dict[str, Any],
+    offer_resolver: CanonicalOfferResolver,
+    rule_resolver: Any,
+    *,
+    at: datetime | None = None,
+    max_ttl_seconds: float = DEFAULT_MAX_PROPOSAL_TTL_SECONDS,
+    clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS,
+) -> tuple[bool, str]:
+    """Replay a remote Proposal against the receiver's current local state.
+
+    A valid Proposal signature proves only what the taker signed. Before the
+    maker retains or accepts it, this verifier independently selects the
+    current canonical Offer head, resolves every Rule Package under the
+    taker's signed policy snapshot, and compares the resulting bindings.
+    """
+
+    try:
+        verified = (
+            proposal
+            if isinstance(proposal, TradeProposal)
+            else TradeProposal.from_dict(proposal)
+        )
+        document = verified.to_dict()
+        moment = _utc_now(at)
+        moment_timestamp = _datetime_timestamp(moment)
+        created_timestamp = _timestamp(
+            document["created_at"],
+            label="proposal.created_at",
+        )
+        created_moment = _timestamp_ceiling_datetime(created_timestamp)
+        expires_timestamp = _timestamp(
+            document["not_after"],
+            label="proposal.not_after",
+        )
+        skew = _duration_seconds(
+            clock_skew_seconds,
+            label="clock_skew_seconds",
+        )
+        skew_nanos = int(skew * 1_000_000_000)
+        created_base, created_nanos = created_timestamp
+        moment_base, moment_nanos = moment_timestamp
+        created_delta = created_base - moment_base
+        created_delta_nanos = (
+            (
+                created_delta.days * 86_400
+                + created_delta.seconds
+            ) * 1_000_000_000
+            + created_nanos
+            - moment_nanos
+        )
+        if created_delta_nanos > skew_nanos:
+            _reject("proposal creation time is too far in the future")
+        if expires_timestamp <= moment_timestamp:
+            _reject("proposal has expired")
+        _assert_proposal_ttl(
+            document["created_at"],
+            document["not_after"],
+            max_ttl_seconds=max_ttl_seconds,
+        )
+
+        policy = RuleResolutionPolicy.from_dict(document["taker_policy"])
+        resolution = resolve_canonical_offer_rules(
+            document["offer_publisher_did"],
+            document["offer_id"],
+            offer_resolver,
+            rule_resolver,
+            policy,
+            at=created_moment,
+        )
+        snapshot = offer_resolver.canonical_snapshot(
+            document["offer_publisher_did"],
+            document["offer_id"],
+        )
+        if not isinstance(snapshot, tuple) or len(snapshot) != 2:
+            _reject("offer resolver returned an invalid canonical snapshot")
+        lifecycle, selected = snapshot
+        if (
+            getattr(lifecycle, "status", None) != "canonical"
+            or not isinstance(selected, TradeOffer)
+            or getattr(lifecycle, "canonical_head_digest", None)
+            != resolution.offer_digest
+            or getattr(lifecycle, "canonical_digests", None)
+            != resolution.canonical_chain_digests
+        ):
+            _reject("proposal does not target the current canonical Offer")
+        offer_document = selected.to_dict()
+        if offer_document["state"] != "active":
+            _reject("proposal Offer is not active")
+        offer_expiry_raw = offer_document["not_after"]
+        if offer_expiry_raw is not None:
+            offer_expiry_timestamp = _timestamp(
+                offer_expiry_raw,
+                label="offer.not_after",
+            )
+            if offer_expiry_timestamp <= moment_timestamp:
+                _reject("proposal Offer has expired")
+            if expires_timestamp > offer_expiry_timestamp:
+                _reject("proposal cannot outlive the signed Offer")
+
+        bindings = sorted(
+            (
+                {
+                    "rule_id": package.manifest.rule_id,
+                    "digest": package.digest,
+                }
+                for package in resolution.packages
+            ),
+            key=lambda item: (item["rule_id"], item["digest"]),
+        )
+        expected = {
+            "offer_publisher_did": resolution.offer_publisher_did,
+            "offer_id": resolution.offer_id,
+            "offer_revision": resolution.offer_revision,
+            "offer_digest": resolution.offer_digest,
+            "canonical_chain_digests": list(
+                resolution.canonical_chain_digests
+            ),
+            "maker_did": resolution.offer_publisher_did,
+            "rule_bindings": bindings,
+            "taker_policy_digest": resolution.policy_digest,
+        }
+        for field, value in expected.items():
+            if document[field] != value:
+                _reject(f"proposal {field} does not match local replay")
+    except (
+        OSError,
+        RuleNegotiationError,
+        RuntimeError,
+        TradeAgreementRejected,
+        TradeCanonicalJSONError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        return False, str(exc)
+    return True, "ok"
+
+
 def verify_acceptance_binding(
     proposal: TradeProposal | dict[str, Any],
     acceptance: TradeAcceptance | dict[str, Any],
@@ -958,5 +1103,6 @@ __all__ = [
     "create_trade_acceptance",
     "create_trade_proposal",
     "proposal_digest",
+    "verify_trade_proposal_under_local_state",
     "verify_acceptance_binding",
 ]

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getTradeOfferInspection, importCachedTradeOffer } from "../api";
+import {
+  fetchTradeProposals,
+  getTradeOfferInspection,
+  getTradeProposal,
+  importCachedTradeOffer,
+} from "../api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -227,5 +232,52 @@ describe("Trade Offer inspection API wiring", () => {
     );
 
     await expect(importCachedTradeOffer(digest)).resolves.toEqual(recovered);
+  });
+
+  it("uses authenticated operator reads for Proposal list and detail", async () => {
+    const summary = {
+      proposal_digest: digest,
+      offer_digest: `sha256:${"b".repeat(64)}`,
+      offer_id: "org.nthdao.tests/swap",
+      offer_revision: 1,
+      maker_did: "did:key:zMaker",
+      taker_did: "did:key:zTaker",
+      created_at: "2026-08-01T00:00:00Z",
+      not_after: "2026-08-02T00:00:00Z",
+      rule_bindings_count: 1,
+      status: "retained-unaccepted",
+      audit_verified: true,
+      audit_event_id: "c".repeat(64),
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [summary], next_cursor: "" }))
+      .mockResolvedValueOnce(jsonResponse({ ...summary, proposal: {} }));
+    vi.stubGlobal("fetch", fetchMock);
+    (window as unknown as { __NTH_CONSOLE_TOKEN__?: string })
+      .__NTH_CONSOLE_TOKEN__ = "console-secret";
+
+    await expect(fetchTradeProposals()).resolves.toEqual({
+      items: [summary],
+      next_cursor: "",
+    });
+    await expect(getTradeProposal(digest)).resolves.toEqual({
+      ...summary,
+      proposal: {},
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v2/trade/proposals?limit=500",
+      expect.objectContaining({
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          Authorization: "Bearer console-secret",
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `/api/v2/trade/proposals/${encodeURIComponent(digest)}`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
   });
 });

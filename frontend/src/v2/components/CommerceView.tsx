@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  ApiHttpError,
   dispatchCommerceOutbox,
   disputeCommerceOrder,
   fetchCommerceListings,
   fetchCommerceOrders,
+  fetchTradeProposals,
+  getTradeProposal,
   listOpenTasks,
   publishCommerceListing,
   remoteCommerceCheckout,
@@ -13,10 +16,16 @@ import {
   submitCommerceDelivery,
   verifyCommerceDelivery,
 } from "../api";
-import type { CommerceListingRow, CommerceOrderView, TaskAnnouncement } from "../types-v2";
+import type {
+  CommerceListingRow,
+  CommerceOrderView,
+  TaskAnnouncement,
+  TradeProposalDetail,
+  TradeProposalSummary,
+} from "../types-v2";
 import { useToast } from "./Toast";
 
-type Scope = "purchases" | "sales" | "offers";
+type Scope = "purchases" | "sales" | "offers" | "proposals";
 
 function short(value: string, size = 18) {
   return value.length <= size ? value : `${value.slice(0, size - 5)}...${value.slice(-4)}`;
@@ -25,6 +34,19 @@ function short(value: string, size = 18) {
 function formatTime(ms: number) {
   if (!ms) return "-";
   return new Date(ms).toLocaleString();
+}
+
+function httpStatus(error: unknown): number | undefined {
+  if (error instanceof ApiHttpError) return error.status;
+  if (error && typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    return typeof status === "number" ? status : undefined;
+  }
+  return undefined;
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 async function sha256Text(value: string): Promise<string> {
@@ -39,6 +61,15 @@ export function CommerceView() {
   const [listings, setListings] = useState<CommerceListingRow[]>([]);
   const [orders, setOrders] = useState<CommerceOrderView[]>([]);
   const [discovered, setDiscovered] = useState<TaskAnnouncement[]>([]);
+  const [proposals, setProposals] = useState<TradeProposalSummary[]>([]);
+  const [proposalNextCursor, setProposalNextCursor] = useState("");
+  const [proposalPageBusy, setProposalPageBusy] = useState(false);
+  const [proposalDetailVersion, setProposalDetailVersion] = useState(0);
+  const refreshSequence = useRef(0);
+  const [proposalError, setProposalError] = useState("");
+  const [proposalDataPreserved, setProposalDataPreserved] = useState(false);
+  const [selectedProposalDigest, setSelectedProposalDigest] = useState("");
+  const [selectedProposal, setSelectedProposal] = useState<TradeProposalDetail | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [busy, setBusy] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -56,22 +87,94 @@ export function CommerceView() {
   const [checkoutAttemptKey, setCheckoutAttemptKey] = useState("");
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    const [nextListings, nextOrders, marketRows] = await Promise.all([
+    const sequence = ++refreshSequence.current;
+    const [listingResult, orderResult, marketResult, proposalResult] = await Promise.allSettled([
       fetchCommerceListings(signal), fetchCommerceOrders(undefined, signal),
       listOpenTasks({ context: "commerce", listingType: "service" }, signal),
+      fetchTradeProposals("", signal),
     ]);
-    setListings(nextListings);
-    setOrders(nextOrders);
-    setDiscovered(marketRows.filter((row) => Boolean(
-      row.federated && !row.federation_stale && row.source_peer
-      && row.offer_digest && row.price_asset === "NTH-TEST",
-    )));
-    setSelectedId((current) =>
-      current && nextOrders.some((row) => row.order_id === current)
-        ? current
-        : nextOrders[0]?.order_id ?? "",
-    );
-  }, []);
+    if (signal?.aborted || sequence !== refreshSequence.current) return;
+    if (listingResult.status === "fulfilled") setListings(listingResult.value);
+    if (orderResult.status === "fulfilled") {
+      const nextOrders = orderResult.value;
+      setOrders(nextOrders);
+      setSelectedId((current) =>
+        current && nextOrders.some((row) => row.order_id === current)
+          ? current
+          : nextOrders[0]?.order_id ?? "",
+      );
+    }
+    if (marketResult.status === "fulfilled") {
+      setDiscovered(marketResult.value.filter((row) => Boolean(
+        row.federated && !row.federation_stale && row.source_peer
+        && row.offer_digest && row.price_asset === "NTH-TEST",
+      )));
+    }
+    for (const result of [listingResult, orderResult, marketResult]) {
+      if (result.status === "rejected" && !isAbort(result.reason)) {
+        toast.push(
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+          "error",
+        );
+      }
+    }
+    if (proposalResult.status === "fulfilled") {
+      const nextProposals = proposalResult.value.items;
+      setProposalError("");
+      setProposalDataPreserved(false);
+      setProposals(nextProposals);
+      setProposalNextCursor(proposalResult.value.next_cursor);
+      setSelectedProposalDigest((current) =>
+        current && nextProposals.some((row) => row.proposal_digest === current)
+          ? current
+          : nextProposals[0]?.proposal_digest ?? "",
+      );
+    } else if (!isAbort(proposalResult.reason)) {
+      const error = proposalResult.reason;
+      setProposalError(error instanceof Error ? error.message : String(error));
+      if ([401, 403].includes(httpStatus(error) ?? 0)) {
+        setProposalDataPreserved(false);
+        setProposals([]);
+        setProposalNextCursor("");
+        setSelectedProposalDigest("");
+        setSelectedProposal(null);
+      } else {
+        setProposalDataPreserved(true);
+      }
+    }
+  }, [toast]);
+
+  const loadMoreProposals = useCallback(async () => {
+    if (!proposalNextCursor || proposalPageBusy) return;
+    const sequence = refreshSequence.current;
+    setProposalPageBusy(true);
+    try {
+      const page = await fetchTradeProposals(proposalNextCursor);
+      if (sequence !== refreshSequence.current) return;
+      setProposals((current) => {
+        const known = new Set(current.map((item) => item.proposal_digest));
+        return current.concat(
+          page.items.filter((item) => !known.has(item.proposal_digest)),
+        );
+      });
+      setProposalNextCursor(page.next_cursor);
+    } catch (error) {
+      if (sequence !== refreshSequence.current) return;
+      setProposalError(error instanceof Error ? error.message : String(error));
+      if ([401, 403].includes(httpStatus(error) ?? 0)) {
+        setProposalDataPreserved(false);
+        setProposals([]);
+        setProposalNextCursor("");
+        setSelectedProposalDigest("");
+        setSelectedProposal(null);
+      } else {
+        setProposalDataPreserved(true);
+      }
+      toast.push(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setProposalPageBusy(false);
+    }
+  }, [proposalNextCursor, proposalPageBusy, toast]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -82,6 +185,43 @@ export function CommerceView() {
     });
     return () => controller.abort();
   }, [refresh, toast]);
+
+  useEffect(() => {
+    if (scope !== "proposals" || !selectedProposalDigest) {
+      if (!selectedProposalDigest) setSelectedProposal(null);
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    getTradeProposal(selectedProposalDigest, controller.signal)
+      .then((value) => {
+        if (active) setSelectedProposal(value);
+      })
+      .catch((error) => {
+        if (active && !isAbort(error)) {
+          if ([401, 403].includes(httpStatus(error) ?? 0)) {
+            setProposals([]);
+            setProposalNextCursor("");
+            setSelectedProposalDigest("");
+            setSelectedProposal(null);
+            setProposalDataPreserved(false);
+            setProposalError(
+              error instanceof Error ? error.message : String(error),
+            );
+          } else {
+            setProposalDataPreserved(true);
+            setProposalError(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+          toast.push(error instanceof Error ? error.message : String(error), "error");
+        }
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [scope, selectedProposalDigest, proposalDetailVersion, toast]);
 
   const visibleOrders = useMemo(() => orders.filter((order) =>
     scope === "purchases" ? order.role === "buyer" : scope === "sales" ? order.role === "seller" : false,
@@ -187,16 +327,16 @@ export function CommerceView() {
           <span className="sidebar-title">Market</span>
         </div>
         <div className="commerce-scope" role="tablist" aria-label="Commerce views">
-          {(["purchases", "sales", "offers"] as Scope[]).map((item) => (
+          {(["purchases", "sales", "offers", "proposals"] as Scope[]).map((item) => (
             <button key={item} type="button" role="tab" aria-selected={scope === item}
               className={scope === item ? "active" : ""} onClick={() => setScope(item)}>
-              {item === "purchases" ? "Purchases" : item === "sales" ? "Seller orders" : "My services"}
-              <span>{item === "offers" ? listings.length + discovered.length : orders.filter((o) => o.role === (item === "purchases" ? "buyer" : "seller")).length}</span>
+              {item === "purchases" ? "Purchases" : item === "sales" ? "Seller orders" : item === "offers" ? "My services" : "Proposals"}
+              <span>{item === "offers" ? listings.length + discovered.length : item === "proposals" ? proposals.length : orders.filter((o) => o.role === (item === "purchases" ? "buyer" : "seller")).length}</span>
             </button>
           ))}
         </div>
         <div className="sidebar-list">
-          {scope !== "offers" && visibleOrders.map((order) => (
+          {scope !== "offers" && scope !== "proposals" && visibleOrders.map((order) => (
             <button key={order.order_id} className={`sidebar-item ${selectedId === order.order_id ? "active" : ""}`}
               onClick={() => setSelectedId(order.order_id)}>
               <div className="sidebar-item-title"><span className="truncate">{order.title}</span></div>
@@ -218,7 +358,22 @@ export function CommerceView() {
               <button className="btn btn-secondary" type="button" onClick={() => selectDiscovered(row)}>Buy</button>
             </div>
           ))}
-          {((scope === "offers" && listings.length + discovered.length === 0) || (scope !== "offers" && visibleOrders.length === 0)) &&
+          {scope === "proposals" && proposals.map((proposal) => (
+            <button key={proposal.proposal_digest} className={`sidebar-item ${selectedProposalDigest === proposal.proposal_digest ? "active" : ""}`}
+              onClick={() => { setSelectedProposal(null); setSelectedProposalDigest(proposal.proposal_digest); }}>
+              <div className="sidebar-item-title"><span className="truncate">{proposal.offer_id}</span></div>
+              <div className="sidebar-item-meta"><span>Pending review</span><span>{proposal.audit_verified ? "Audited" : "Audit missing"}</span></div>
+            </button>
+          ))}
+          {scope === "proposals" && proposalNextCursor && (
+            <button
+              className="btn btn-secondary commerce-load-more"
+              type="button"
+              disabled={proposalPageBusy}
+              onClick={loadMoreProposals}
+            >{proposalPageBusy ? "Loading..." : "Load more"}</button>
+          )}
+          {((scope === "offers" && listings.length + discovered.length === 0) || (scope === "proposals" && proposals.length === 0) || (!(["offers", "proposals"] as Scope[]).includes(scope) && visibleOrders.length === 0)) &&
             <p className="muted" style={{ padding: "12px 14px" }}>Nothing here yet.</p>}
         </div>
       </aside>
@@ -227,10 +382,10 @@ export function CommerceView() {
         <div className="main-head commerce-head">
           <div>
             <p className="main-eyebrow">A2A Commerce</p>
-            <h1 className="main-title">Digital services</h1>
-            <p className="main-subtitle">Signed orders, verifiable delivery, and manual NTH-TEST settlement. No real funds.</p>
+            <h1 className="main-title">{scope === "proposals" ? "Trade proposals" : "Digital services"}</h1>
+            <p className="main-subtitle">{scope === "proposals" ? "Signed inbound negotiation claims awaiting independent review." : "Signed orders, verifiable delivery, and manual NTH-TEST settlement. No real funds."}</p>
           </div>
-          <div className="commerce-head-actions">
+          {scope !== "proposals" && <div className="commerce-head-actions">
             <button className="btn btn-secondary" onClick={() => {
               setShowBuy((value) => {
                 if (!value) setCheckoutAttemptKey(crypto.randomUUID());
@@ -238,10 +393,19 @@ export function CommerceView() {
               });
             }}>Buy from peer</button>
             <button className="btn btn-primary" onClick={() => setShowPublish((value) => !value)}>Publish service</button>
-          </div>
+          </div>}
+          {scope === "proposals" && <div className="commerce-head-actions">
+            <button className="btn btn-secondary" type="button" onClick={() => {
+              refresh()
+                .then(() => setProposalDetailVersion((value) => value + 1))
+                .catch((error) => {
+                  toast.push(error instanceof Error ? error.message : String(error), "error");
+                });
+            }}>Refresh</button>
+          </div>}
         </div>
         <div className="main-body commerce-main">
-          {showPublish && <form className="commerce-form" onSubmit={publish}>
+          {scope !== "proposals" && showPublish && <form className="commerce-form" onSubmit={publish}>
             <h2>Publish a signed service</h2>
             <div className="commerce-form-grid">
               <label>Service ID<input value={listingId} onChange={(e) => setListingId(e.target.value)} required maxLength={128} /></label>
@@ -252,7 +416,7 @@ export function CommerceView() {
             <div className="commerce-form-actions"><button type="button" className="btn btn-secondary" onClick={() => setShowPublish(false)}>Cancel</button><button className="btn btn-primary" disabled={busy}>Publish</button></div>
           </form>}
 
-          {showBuy && <form className="commerce-form" onSubmit={buy}>
+          {scope !== "proposals" && showBuy && <form className="commerce-form" onSubmit={buy}>
             <h2>Buy from a configured DAO peer</h2>
             <p className="muted">The node verifies the seller Listing and Cart before creating one idempotent order.</p>
             <div className="commerce-form-grid">
@@ -267,8 +431,11 @@ export function CommerceView() {
             <p>Your signed service catalog is shown on the left.</p>
             <p className="muted">Its discovery summaries federate through the existing Tasks network.</p>
           </div>}
-          {!showPublish && !showBuy && scope !== "offers" && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
-          {!showPublish && !showBuy && scope !== "offers" && selected && <OrderWorkbench order={selected} busy={busy}
+          {scope === "proposals" && !selectedProposal && <div className="main-empty"><p>Select a signed Proposal to inspect its claims.</p></div>}
+          {scope === "proposals" && proposalError && <p className="trade-proposal-warning" role="status">{proposalDataPreserved ? "Proposal inbox unavailable; showing last known data" : "Proposal authorization failed; cached data cleared"}: {proposalError}</p>}
+          {scope === "proposals" && selectedProposal && <ProposalWorkbench proposal={selectedProposal} />}
+          {!showPublish && !showBuy && scope !== "offers" && scope !== "proposals" && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
+          {!showPublish && !showBuy && scope !== "offers" && scope !== "proposals" && selected && <OrderWorkbench order={selected} busy={busy}
             targetUrl={targetUrl} setTargetUrl={(value) => {
               setTargetUrl(value);
               window.localStorage.setItem(`nth-commerce-peer:${selected.order_id}`, value);
@@ -285,9 +452,17 @@ export function CommerceView() {
       </section>
 
       <aside className="detail">
-        <div className="detail-head"><span className="detail-title">Order audit</span></div>
+        <div className="detail-head"><span className="detail-title">{scope === "proposals" ? "Proposal audit" : "Order audit"}</span></div>
         <div className="detail-body">
-          {selected ? <>
+          {scope === "proposals" ? (selectedProposal ? <>
+            <div className="detail-section">
+              <div className="detail-section-label">Signed claim</div>
+              <div className="detail-row"><span className="key">Signer</span><code className="value" title={selectedProposal.taker_did}>{short(selectedProposal.taker_did, 24)}</code></div>
+              <div className="detail-row"><span className="key">Status</span><span className="value">Pending review</span></div>
+              <div className="detail-row"><span className="key">Spine</span><span className="value">{selectedProposal.audit_verified ? "Verified" : "Missing"}</span></div>
+              <div className="detail-row"><span className="key">Rules</span><span className="value">{selectedProposal.rule_bindings_count}</span></div>
+            </div>
+          </> : <p className="muted">Select a Proposal to inspect signer and audit status.</p>) : selected ? <>
             <div className="detail-section">
               <div className="detail-section-label">Identity</div>
               <div className="detail-row"><span className="key">Order</span><code className="value" title={selected.order_id}>{short(selected.order_id, 22)}</code></div>
@@ -303,6 +478,31 @@ export function CommerceView() {
       </aside>
     </>
   );
+}
+
+function ProposalWorkbench({ proposal }: { proposal: TradeProposalDetail }) {
+  return <div className="commerce-workbench trade-proposal-workbench">
+    <div className="commerce-order-heading">
+      <div><p className="main-eyebrow">Inbound negotiation</p><h2>{proposal.offer_id}</h2></div>
+      <span className="pill wait">Pending review</span>
+    </div>
+    <p className="trade-proposal-warning">A valid signature proves who made this claim and that its bytes were retained unchanged. It is not acceptance and does not prove the terms are correct or safe.</p>
+    <dl className="commerce-facts">
+      <div><dt>Proposer</dt><dd><code title={proposal.taker_did}>{short(proposal.taker_did, 28)}</code></dd></div>
+      <div><dt>Offer revision</dt><dd>{proposal.offer_revision}</dd></div>
+      <div><dt>Expires</dt><dd>{new Date(proposal.not_after).toLocaleString()}</dd></div>
+    </dl>
+    <div className="commerce-action">
+      <h3>Signed terms</h3>
+      <pre>{JSON.stringify(proposal.proposal.terms, null, 2)}</pre>
+    </div>
+    <div className="commerce-action">
+      <h3>Rule bindings</h3>
+      <ul className="trade-proposal-rules">
+        {proposal.proposal.rule_bindings.map((binding) => <li key={`${binding.rule_id}:${binding.digest}`}><strong>{binding.rule_id}</strong><code title={binding.digest}>{short(binding.digest, 28)}</code></li>)}
+      </ul>
+    </div>
+  </div>;
 }
 
 function OrderWorkbench(props: {

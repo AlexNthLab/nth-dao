@@ -303,6 +303,45 @@ claim rather than a trusted global timestamp. A receiving node needs a durable
 receipt or timestamp witness before claiming when a remote signature was
 actually produced.
 
+Proposal federation uses a separate `nth.dao.trade.proposal-delivery` v1
+envelope. The taker signs the exact Proposal digest, embedded Proposal,
+sender DID, recipient DID, a 128-bit-or-larger nonce, and a delivery window no
+longer than ten minutes. A Delivery cannot predate or outlive its Proposal.
+The envelope authorizes only retention by the named maker; it does not grant
+acceptance, reservation, execution, or settlement authority. The public HTTP
+receiver applies per-source and aggregate persistent budgets before parsing,
+then replays the Proposal against its current local Offer lifecycle and Rule
+Package state. Valid Proposals enter a bounded content-addressed inbox and one
+idempotent `trade.agreement.proposal.received` Spine projection. The Proposal
+digest is the semantic idempotency key, so replaying the same or a newly
+wrapped Delivery cannot create a second retained claim. Retention commits only
+when the maker writes a receiver-signed `tradeProposalIntakeReceipt` after the
+Delivery and Proposal replay succeed. The receipt binds the Delivery digest,
+Proposal digest, sender, receiver, and local receive time. A bare Proposal or
+Delivery file is therefore not sufficient for startup recovery to make the
+maker sign a Spine event. Existing committed results are returned before
+replaying later Offer state, so retry acknowledgement remains stable after an
+Offer revision or withdrawal.
+
+Startup reconciliation repairs an interrupted intake-to-Spine projection
+without peer resubmission. Operators can retry the same recovery through the
+authenticated `POST /api/v2/trade/proposals/reconcile` endpoint. Reconciliation
+failure responses identify each affected digest with a bounded error code and
+operator message. The authenticated
+`GET /api/v2/trade/proposal-reconciliation/status` reports active records,
+pending anchors, and the oldest pending age without exposing Proposal content.
+Public federation errors use stable codes and do not disclose local paths or
+raw persistence exceptions. A persistent
+usage ledger removes per-write history scans and is rebuilt at startup; global,
+per-taker, and per-Offer quotas limit active inbox exhaustion. Signed intake
+records remain immutable evidence and are not silently deleted at expiry.
+Expired records leave active quotas only after the receiver appends a signed
+`trade.agreement.proposal.archived` Spine tombstone. The complete Delivery and
+intake receipt are copied into content-addressed archive storage before the
+active receipt commit marker is removed. Startup recovery and
+capacity-pressure intake retry this process, so archive failure leaves either
+the original active record or a complete archived copy.
+
 The Order adds no fictitious third agreement signature. It is a deterministic,
 content-addressed snapshot of the already signed Offer, Proposal, and
 Acceptance. Any conforming node with those three objects must derive identical
@@ -478,10 +517,14 @@ policy. The two signed objects have different purposes and are never
 implicitly converted.
 
 The Agreement conformance vector uses deterministic public test keys and
-contains the exact Offer, Proposal, Acceptance, Order, Rule Package and
+contains the exact Offer, Proposal, Proposal Delivery, receiver-signed intake
+receipt, Acceptance, Order, Rule Package and
 resources, verifier and Adapter policies, Adapter artifact, execution content,
-expected readiness, execution Receipt, and content digests. Those keys must
-never be reused or trusted.
+expected readiness, execution Receipt, and content digests. Delivery vectors
+also specify recipient, verification time, TTL, clock skew, wrong-recipient,
+expiry, and future-time outcomes so another implementation must exercise wire
+semantics rather than only parse a signature. Those keys must never be reused
+or trusted.
 
 ## Compatibility
 
@@ -541,6 +584,10 @@ The reviewed protocol kernel currently contains:
   resolution;
 - signed bilateral Proposal and Acceptance statements with independent local
   policy snapshots, exact policy digests, and strict local time limits;
+- destination-bound, short-lived DID-signed Proposal delivery with per-source
+  and aggregate budgets, independent receiver replay, bounded cross-process
+  CAS retention, restart reconciliation, and an explicit
+  `retained-unaccepted` operator view;
 - deterministic, self-verifying Order snapshots containing the exact signed
   Offer, Proposal, and Acceptance;
 - bounded, cross-process-safe Order CAS caching with retained equivocation
@@ -575,7 +622,7 @@ The reviewed protocol kernel currently contains:
   serialization, restart-safe idempotent completion anchoring, and explicit
   non-trust/non-acceptance semantics;
 - schemas and deterministic positive and negative conformance vectors,
-  including Agreement v1, Execution Receipt v1, Receipt Review v1, and the
+  including Agreement v1, Proposal Delivery v1, Execution Receipt v1, Receipt Review v1, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
   Rule Recognition, Recognition Policy, and Receipt Review audit payloads;
 - focused tests.
@@ -591,8 +638,9 @@ signature still proves authorship rather than truth or global freshness.
 The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
 renewal requires a new publisher signature.
 
-Globally convergent latest-revision proofs, Agreement federation, inventory or asset reservation,
-fulfillment, payment, federation of Receipt anchors, delegation, and sandboxed
+Globally convergent latest-revision proofs, Acceptance federation, inventory
+or asset reservation, fulfillment, payment, federation of Receipt anchors,
+delegation, and sandboxed
 executable Adapters remain separate, independently reviewed slices. Durable
 remote retention preserves the complete chain disclosed by one signed,
 short-lived publisher head claim; it does not prove that the publisher did not

@@ -1444,6 +1444,31 @@ select option {
   font-size: 12px;
   line-height: 1.5;
 }
+.trade-proposal-warning {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--status-wait);
+  background: var(--bg-elevated);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.trade-proposal-workbench pre {
+  max-height: 280px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg-secondary);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.trade-proposal-rules { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.trade-proposal-rules li { display: grid; gap: 3px; min-width: 0; }
+.trade-proposal-rules strong { font-size: 12px; overflow-wrap: anywhere; }
+.trade-proposal-rules code { color: var(--fg-tertiary); font-size: 10px; overflow-wrap: anywhere; }
 .commerce-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .commerce-head-actions, .commerce-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .commerce-main { display: grid; align-content: start; gap: 16px; }
