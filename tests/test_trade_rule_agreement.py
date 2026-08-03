@@ -3,6 +3,7 @@ import hashlib
 import json
 import multiprocessing
 import tempfile
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -27,8 +28,10 @@ from nth_dao.trade_rules import (
     TradeExecutionAdapter,
     TradeExecutionAdapterRejected,
     TradeExecutionAuditError,
+    TradeExecutionAuditBusy,
     TradeExecutionAuditCapacity,
     TradeExecutionReceiptConflict,
+    TradeExecutionRuntimeHealth,
     TradeExecutionAuditOutbox,
     TradeExecutionCoordinator,
     TradeExecutionReceiptStore,
@@ -72,6 +75,7 @@ from nth_dao.trade_rules import (
     create_trade_proposal_intake_receipt,
     execution_receipt_digest,
     execution_audit_payload,
+    project_trade_order_execution,
     manifest_body,
     offer_body,
     offer_digest,
@@ -4482,6 +4486,363 @@ def test_public_order_delivery_retains_agreement_and_operator_can_read(
     assert listed.json()["items"][0]["delivery_or_payment_proven"] is False
     assert detail.status_code == 200
     assert detail.json()["order"] == order.to_dict()
+    execution = detail.json()["execution"]
+    assert execution["order_digest"] == trade_order_digest(order)
+    assert execution["coordinator"]["available"] is True
+    assert execution["coordinator"]["execution_endpoint_enabled"] is False
+    assert execution["local_executor"]["role"] == "taker"
+    assert execution["status"] == "blocked"
+    assert execution["executor_policy"]["status"] == "not-configured"
+    assert execution["funds"]["enabled"] is False
+    assert any(skill["status"] == "missing" for skill in execution["skills"])
+
+
+def test_agreement_rest_reports_execution_recovery_failure_without_false_health(
+    tmp_path,
+    monkeypatch,
+):
+    def fail_recovery(self, **_kwargs):
+        raise OSError("sensitive-execution-audit-location")
+
+    monkeypatch.setattr(TradeExecutionCoordinator, "reconcile", fail_recovery)
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert detail.status_code == 200, detail.text
+    coordinator = detail.json()["execution"]["coordinator"]
+    assert coordinator == {
+        "available": True,
+        "status": "degraded",
+        "receipt_persistence_available": False,
+        "recovery_pending": True,
+        "error_code": "runtime-recovery-failed",
+        "execution_endpoint_enabled": False,
+    }
+    assert "sensitive-execution-audit-location" not in json.dumps(
+        detail.json()
+    )
+
+
+def test_agreement_rest_keeps_verified_order_when_execution_projection_fails(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+    app.state.nth.trade_rule_packages = None
+
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["order"] == order.to_dict()
+    execution = detail.json()["execution"]
+    assert execution["status"] == "unavailable"
+    assert execution["error_code"] == "projection-failed"
+    assert execution["order_digest"] == trade_order_digest(order)
+    assert execution["funds"]["enabled"] is False
+
+
+def test_agreement_rest_keeps_order_with_malformed_execution_extension(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        taker=app.state.nth.node_identity,
+    )
+    body = _proposal(context).to_dict()
+    body.pop("proof")
+    body["terms"][EXECUTION_TERMS_KEY] = {"grants": "not-a-list"}
+    proposal = _sign_proposal_body(context["taker"], body)
+    order = create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+    created = datetime.now(timezone.utc).replace(microsecond=0)
+    delivery = create_trade_order_delivery(
+        context["maker"],
+        order=order,
+        created_at=created.isoformat().replace("+00:00", "Z"),
+        not_after=(created + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        nonce="de" * 16,
+        now=created,
+    )
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert accepted.status_code == 202, accepted.text
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["order"] == order.to_dict()
+    execution = detail.json()["execution"]
+    assert execution["status"] == "unavailable"
+    assert execution["error_code"] == "projection-failed"
+    assert execution["order_digest"] == trade_order_digest(order)
+    assert execution["operation_grants"] == []
+    assert execution["funds"]["enabled"] is False
+
+
+def test_agreement_rest_distinguishes_history_failure_from_empty_history(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+
+    class BrokenHistoryCoordinator:
+        def history(self, _order, *, limit, before_seq=None):
+            assert limit == 100
+            assert before_seq is None
+            raise OSError("sensitive-receipt-history-location")
+
+    app.state.nth.trade_execution_coordinator = BrokenHistoryCoordinator()
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert detail.status_code == 200, detail.text
+    execution = detail.json()["execution"]
+    assert execution["status"] == "blocked"
+    assert execution["history"] == {
+        "status": "unavailable",
+            "items": [],
+            "has_more": False,
+            "next_cursor": None,
+            "error_code": "receipt-history-verification-failed",
+        }
+    assert execution["coordinator"]["status"] == "degraded"
+    assert execution["coordinator"]["error_code"] == (
+        "receipt-history-verification-failed"
+    )
+    serialized = json.dumps(detail.json())
+    assert "sensitive-receipt-history-location" not in serialized
+
+
+def test_agreement_rest_pages_execution_receipts_by_spine_sequence(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        taker=app.state.nth.node_identity,
+    )
+    operation_ids = [f"deliver-service-rest-{index}" for index in range(3)]
+    proposal = _proposal(context, grants=[{
+        "operation_id": operation_id,
+        "rule_id": "org.nthdao.test.delivery",
+        "package_digest": context["package_digest"],
+        "hook_name": "fulfillment.deliver",
+        "hook_version": "1",
+        "executor_role": "maker",
+    } for operation_id in operation_ids])
+    order = create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+    created = datetime.now(timezone.utc).replace(microsecond=0)
+    delivery = create_trade_order_delivery(
+        context["maker"],
+        order=order,
+        created_at=created.isoformat().replace("+00:00", "Z"),
+        not_after=(created + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        nonce="ad" * 16,
+        now=created,
+    )
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202, accepted.text
+    for operation_id in operation_ids:
+        _execution_receipt(
+            context,
+            order,
+            coordinator=app.state.nth.trade_execution_coordinator,
+            operation_id=operation_id,
+        )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        "/execution-receipts"
+    )
+
+    newest = client.get(path, params={"limit": 2}, headers=auth)
+    cursor = newest.json()["next_cursor"]
+    older = client.get(
+        path,
+        params={"limit": 2, "before_seq": cursor},
+        headers=auth,
+    )
+
+    assert newest.status_code == 200, newest.text
+    assert newest.json()["status"] == "available"
+    assert newest.json()["has_more"] is True
+    assert isinstance(cursor, int)
+    assert len(newest.json()["items"]) == 2
+    assert older.status_code == 200, older.text
+    assert older.json()["has_more"] is False
+    assert older.json()["next_cursor"] is None
+    assert len(older.json()["items"]) == 1
+    assert {
+        item["execution_id"]
+        for item in newest.json()["items"] + older.json()["items"]
+    } == {
+        item.receipt.execution_id
+        for item in app.state.nth.trade_execution_coordinator.history(
+            order,
+            limit=3,
+        ).items
+    }
+    assert client.get(path, params={"limit": 2}).status_code == 401
+    assert client.get(
+        path,
+        params={"before_seq": -1},
+        headers=auth,
+    ).status_code == 400
+
+
+def test_agreement_rest_projects_explicit_local_execution_runtime(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+
+    # A deployment must configure these local-only trust/runtime objects.
+    # They are never copied from the signed bilateral policy by the API.
+    app.state.nth.trade_rule_packages = context["package_store"]
+    app.state.nth.trade_executor_policy = context["taker_policy"]
+    app.state.nth.trade_execution_adapter_resolver = context[
+        "adapter_resolver"
+    ]
+    app.state.nth.trade_execution_adapter_policy = context["adapter_policy"]
+    app.state.nth.trade_execution_content_resolver = context[
+        "content_resolver"
+    ]
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert detail.status_code == 200, detail.text
+    execution = detail.json()["execution"]
+    assert execution["local_executor"]["role"] == "taker"
+    assert execution["executor_policy"]["status"] == "ready"
+    assert execution["adapter"]["status"] == "selection-required"
+    assert execution["content"] == {
+        "resolver_configured": True,
+        "contract_schema_content_available": True,
+        "runtime_payloads_ready": False,
+        "status": "awaiting-operation-input",
+    }
+    assert execution["funds"]["enabled"] is False
+    assert execution["status"] == "blocked"
+
+
+def test_agreement_rest_exposes_verified_execution_receipt_history(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+    receipt = _execution_receipt(
+        context,
+        order,
+        coordinator=app.state.nth.trade_execution_coordinator,
+    )
+
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert detail.status_code == 200, detail.text
+    history = detail.json()["execution"]["history"]
+    assert history["status"] == "available"
+    assert history["has_more"] is False
+    assert history["error_code"] == ""
+    assert history["items"] == [{
+        "execution_id": receipt.execution_id,
+        "receipt_digest": execution_receipt_digest(receipt, order=order),
+        "audit_event_id": app.state.nth.spine.verified_snapshot()[-1].event_id,
+        "audit_seq": app.state.nth.spine.verified_snapshot()[-1].seq,
+        "executor_did": context["maker"].as_did(),
+        "executor_role": "maker",
+        "operation_id": "deliver-service",
+        "hook_name": "fulfillment.deliver",
+        "side_effect": "none",
+        "adapter_id": context["adapter"].to_dict()["adapter_id"],
+        "adapter_version": context["adapter"].to_dict()["adapter_version"],
+        "execution_mode": "declarative",
+        "outcome": "succeeded",
+        "started_at": "2026-09-01T00:00:00Z",
+        "completed_at": "2026-09-01T00:01:00Z",
+    }]
+
+
+def test_web_boot_connects_execution_coordinator_without_enabling_funds(
+    tmp_path,
+):
+    app = create_app(tmp_path, require_console_auth=True)
+
+    assert isinstance(
+        app.state.nth.trade_execution_coordinator,
+        TradeExecutionCoordinator,
+    )
+    assert app.state.nth.trade_executor_policy is None
+    assert app.state.nth.trade_execution_adapter_resolver is None
+    assert app.state.nth.trade_execution_adapter_policy is None
+    assert app.state.nth.trade_execution_content_resolver is None
 
 
 def test_operator_accepts_proposal_and_requires_signed_remote_receipt(
@@ -5241,6 +5602,301 @@ def test_order_execution_gate_rejects_missing_transitive_dependency(tmp_path):
         )
 
 
+def test_agreement_execution_projection_is_fail_closed_without_local_runtime(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+
+    projection = project_trade_order_execution(
+        order,
+        context["package_store"],
+        local_did=context["maker"].as_did(),
+        coordinator_health=TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=True,
+        ),
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    assert projection["status"] == "blocked"
+    assert projection["order_digest"] == trade_order_digest(order)
+    assert projection["error_code"] == ""
+    assert projection["coordinator"] == {
+        "available": True,
+        "status": "healthy",
+        "receipt_persistence_available": True,
+        "recovery_pending": False,
+        "error_code": "",
+        "execution_endpoint_enabled": False,
+    }
+    assert projection["local_executor"]["role"] == "maker"
+    assert projection["local_executor"]["authorized_operation_count"] == 1
+    assert projection["executor_policy"]["status"] == "not-configured"
+    assert projection["adapter"]["status"] == "not-configured"
+    assert projection["content"]["contract_schema_content_available"] is True
+    assert projection["content"]["runtime_payloads_ready"] is False
+    assert projection["funds"]["enabled"] is False
+    assert {skill["rule_id"] for skill in projection["skills"]} == {
+        "org.nthdao.test.delivery",
+        "org.nthdao.test.settlement",
+    }
+    delivery_skill = next(
+        skill
+        for skill in projection["skills"]
+        if skill["rule_id"] == "org.nthdao.test.delivery"
+    )
+    assert delivery_skill["installed"] is True
+    assert delivery_skill["current"] is True
+    assert projection["operation_grants"] == [{
+        "operation_id": "deliver-service",
+        "rule_id": "org.nthdao.test.delivery",
+        "package_digest": context["package_digest"],
+        "hook_name": "fulfillment.deliver",
+        "hook_version": "1",
+        "executor_role": "maker",
+        "local_executor": True,
+        "contract_available": True,
+        "input_schema_content_available": True,
+        "output_schema_content_available": True,
+        "side_effect": "none",
+        "permissions": [],
+        "funds_execution_enabled": False,
+    }]
+
+
+def test_agreement_execution_projection_accepts_legacy_order_without_grants(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    proposal = create_trade_proposal(
+        context["taker"],
+        resolution=context["taker_resolution"],
+        offer=context["offer"],
+        offer_resolver=context["offer_store"],
+        terms={"requested_quantity": "1"},
+        created_at=_CREATED,
+        not_after=_EXPIRES,
+        now=_AT,
+    )
+    order = create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+
+    projection = project_trade_order_execution(
+        order,
+        context["package_store"],
+        local_did=context["maker"].as_did(),
+        coordinator_health=TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=True,
+        ),
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    assert projection["operation_grants"] == []
+    assert projection["local_executor"]["authorized_operation_count"] == 0
+    assert "Agreement has no operation grants" in projection[
+        "blocking_reasons"
+    ]
+    assert projection["content"][
+        "contract_schema_content_available"
+    ] is False
+    assert projection["status"] == "blocked"
+
+
+def test_agreement_execution_projection_revalidates_explicit_local_policy(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+
+    projection = project_trade_order_execution(
+        _order(context),
+        context["package_store"],
+        local_did=context["maker"].as_did(),
+        coordinator_health=TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=True,
+        ),
+        executor_policy=context["maker_policy"],
+        adapter_resolver=context["adapter_resolver"],
+        adapter_policy=context["adapter_policy"],
+        content_resolver=context["content_resolver"],
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    assert projection["executor_policy"]["status"] == "ready"
+    assert projection["executor_policy"]["readiness"][
+        "order_digest"
+    ] == trade_order_digest(_order(context))
+    assert projection["adapter"]["configured"] is True
+    assert projection["adapter"]["status"] == "selection-required"
+    assert projection["content"]["resolver_configured"] is True
+    assert projection["status"] == "blocked"
+    assert any(
+        "exact approved Adapter" in reason
+        for reason in projection["blocking_reasons"]
+    )
+
+
+def test_agreement_execution_projection_exposes_missing_package_and_observer(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    missing = context["package_digest"]
+
+    class MissingResolver:
+        def load(self, digest):
+            if digest == missing:
+                return None
+            return context["package_store"].load(digest)
+
+    projection = project_trade_order_execution(
+        _order(context),
+        MissingResolver(),
+        local_did=AgentIdentity.generate().as_did(),
+        coordinator_health=TradeExecutionRuntimeHealth(
+            status="unavailable",
+            receipt_persistence_available=False,
+            error_code="not-configured",
+        ),
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    assert projection["local_executor"]["role"] == "observer"
+    assert projection["local_executor"]["authorized_operation_count"] == 0
+    skill = next(
+        item for item in projection["skills"] if item["package_digest"] == missing
+    )
+    assert skill["status"] == "missing"
+    assert projection["operation_grants"][0]["contract_available"] is False
+    assert "TradeExecutionCoordinator is unavailable" in (
+        projection["blocking_reasons"]
+    )
+
+
+def test_agreement_execution_projection_does_not_leak_package_lookup_details(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+
+    class FailingResolver:
+        def load(self, _digest):
+            raise OSError("sensitive-trade-package-location")
+
+    projection = project_trade_order_execution(
+        _order(context),
+        FailingResolver(),
+        local_did=context["maker"].as_did(),
+        coordinator_health=TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=True,
+        ),
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    assert all(
+        "sensitive-trade-package-location" not in skill["reason"]
+        for skill in projection["skills"]
+    )
+    assert {skill["reason"] for skill in projection["skills"]} == {
+        "Rule Package lookup failed (OSError)"
+    }
+
+
+def test_agreement_execution_projection_does_not_leak_invalid_package_details(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+
+    class InvalidPackage:
+        @property
+        def manifest(self):
+            raise ValueError("sensitive-invalid-package-location")
+
+    class InvalidResolver:
+        def load(self, _digest):
+            return InvalidPackage()
+
+    projection = project_trade_order_execution(
+        _order(context),
+        InvalidResolver(),
+        local_did=context["maker"].as_did(),
+        coordinator_health=TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=True,
+        ),
+        at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    serialized = json.dumps(projection)
+    assert "sensitive-invalid-package-location" not in serialized
+    assert {skill["reason"] for skill in projection["skills"]} == {
+        "Installed Rule Package is invalid (ValueError)"
+    }
+
+
+def test_execution_runtime_health_rejects_inconsistent_or_fake_values():
+    with pytest.raises(ValueError, match="inconsistent"):
+        TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=False,
+        )
+    with pytest.raises(ValueError, match="error_code"):
+        TradeExecutionRuntimeHealth(
+            status="degraded",
+            receipt_persistence_available=False,
+            error_code="invalid error code",
+        )
+    with pytest.raises(ValueError, match="requires error_code"):
+        TradeExecutionRuntimeHealth(
+            status="degraded",
+            receipt_persistence_available=False,
+        )
+
+
+def test_agreement_execution_projection_rejects_fake_runtime_resolvers(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    policy = context["adapter_policy"]
+
+    with pytest.raises(
+        trade_rules_api.TradeExecutionProjectionError,
+        match="adapter_resolver must provide",
+    ):
+        project_trade_order_execution(
+            _order(context),
+            context["package_store"],
+            local_did=context["maker"].as_did(),
+            coordinator_health=TradeExecutionRuntimeHealth(
+                status="healthy",
+                receipt_persistence_available=True,
+            ),
+            adapter_resolver=object(),
+            adapter_policy=policy,
+            at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+    with pytest.raises(
+        trade_rules_api.TradeExecutionProjectionError,
+        match="content_resolver must provide",
+    ):
+        project_trade_order_execution(
+            _order(context),
+            context["package_store"],
+            local_did=context["maker"].as_did(),
+            coordinator_health=TradeExecutionRuntimeHealth(
+                status="healthy",
+                receipt_persistence_available=True,
+            ),
+            content_resolver=object(),
+            at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+
 def test_order_execution_gate_honors_current_executor_revocation(tmp_path):
     context = _setup(tmp_path)
     order = _order(context)
@@ -5720,6 +6376,89 @@ def test_execution_coordinator_anchors_once_and_is_idempotent(tmp_path):
     assert events[0].event_id == record.event_id
 
 
+def test_execution_coordinator_history_reverifies_receipt_and_spine(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    _store, _outbox, _spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    receipt = _execution_receipt(context, order, coordinator=coordinator)
+
+    history = coordinator.history(order)
+
+    assert history.has_more is False
+    assert len(history.items) == 1
+    assert history.items[0].receipt == receipt
+    assert history.items[0].event.payload == execution_audit_payload(
+        receipt,
+        order=order,
+    )
+    with pytest.raises(ValueError, match="limit must be in 1..500"):
+        coordinator.history(order, limit=0)
+
+
+def test_execution_history_uses_stable_spine_cursor_and_verified_cache(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    operation_ids = [f"deliver-service-page-{index}" for index in range(3)]
+    grants = [{
+        "operation_id": operation_id,
+        "rule_id": "org.nthdao.test.delivery",
+        "package_digest": context["package_digest"],
+        "hook_name": "fulfillment.deliver",
+        "hook_version": "1",
+        "executor_role": "maker",
+    } for operation_id in operation_ids]
+    proposal = _proposal(context, grants=grants)
+    order = create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+    _store, _outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    for operation_id in operation_ids:
+        _execution_receipt(
+            context,
+            order,
+            coordinator=coordinator,
+            operation_id=operation_id,
+        )
+    original = spine.verified_snapshot_with_token
+    snapshot_calls = 0
+
+    def counted_snapshot():
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return original()
+
+    monkeypatch.setattr(spine, "verified_snapshot_with_token", counted_snapshot)
+
+    newest = coordinator.history(order, limit=2)
+    repeated = coordinator.history(order, limit=2)
+    older = coordinator.history(
+        order,
+        limit=2,
+        before_seq=newest.next_cursor,
+    )
+
+    assert newest.has_more is True
+    assert newest.next_cursor is not None
+    assert [item.event.seq for item in newest.items] == [1, 2]
+    assert repeated.items == newest.items
+    assert older.has_more is False
+    assert older.next_cursor is None
+    assert [item.event.seq for item in older.items] == [0]
+    assert snapshot_calls == 1
+    with pytest.raises(ValueError, match="before_seq"):
+        coordinator.history(order, before_seq=True)
+
+
 @pytest.mark.parametrize("crash_after", ["prepare", "store", "spine"])
 def test_execution_audit_reconciles_each_crash_window(
     tmp_path,
@@ -5931,6 +6670,133 @@ def test_execution_audit_reconcile_limit_pages_all_statuses(tmp_path):
     assert sum(report.scanned for report in reports) == 3
     assert sum(report.verified_anchored for report in reports) == 3
     assert reports[-1].next_cursor is None
+
+
+def test_execution_audit_pending_recovery_skips_terminal_prefix(tmp_path):
+    context = _setup(tmp_path)
+    _, outbox, _spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    for index in range(3):
+        operation_id = f"deliver-service-anchored-{index}"
+        _execution_receipt(
+            context,
+            _order_for_operation(context, operation_id),
+            coordinator=coordinator,
+            operation_id=operation_id,
+        )
+    pending_order = _order_for_operation(context, "deliver-service-pending")
+    pending_receipt = _execution_receipt(
+        context,
+        pending_order,
+        operation_id="deliver-service-pending",
+    )
+    outbox.prepare(
+        pending_receipt,
+        order=pending_order,
+        now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
+    )
+
+    recovered = coordinator.reconcile(limit=1, pending_only=True)
+    empty = coordinator.reconcile(limit=1, pending_only=True)
+
+    assert recovered.scanned == 1
+    assert recovered.anchored == 1
+    assert recovered.has_more is False
+    assert empty.scanned == 0
+    assert empty.has_more is False
+
+
+def test_execution_runtime_recovery_advances_cursor_until_healthy(tmp_path):
+    from types import SimpleNamespace
+
+    from nth_dao.web import _advance_trade_execution_recovery
+
+    context = _setup(tmp_path)
+    _, outbox, _spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    for index in range(3):
+        operation_id = f"deliver-service-pending-{index}"
+        order = _order_for_operation(context, operation_id)
+        receipt = _execution_receipt(
+            context,
+            order,
+            operation_id=operation_id,
+        )
+        outbox.prepare(
+            receipt,
+            order=order,
+            now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
+        )
+    state = SimpleNamespace(
+        trade_execution_coordinator=coordinator,
+        trade_execution_health_lock=threading.RLock(),
+        trade_execution_recovery_lock=threading.Lock(),
+        trade_execution_recovery_cursor=None,
+        trade_execution_recovery_failures=0,
+        trade_execution_health=TradeExecutionRuntimeHealth(
+            status="unavailable",
+            receipt_persistence_available=False,
+            error_code="coordinator-not-initialized",
+        ),
+    )
+
+    reports = [
+        _advance_trade_execution_recovery(state, limit=1)
+        for _ in range(3)
+    ]
+
+    assert [report.scanned for report in reports] == [1, 1, 1]
+    assert [report.has_more for report in reports] == [True, True, False]
+    assert state.trade_execution_recovery_cursor is None
+    assert state.trade_execution_health.status == "healthy"
+    assert state.trade_execution_health.recovery_pending is False
+
+
+def test_execution_runtime_recovery_rejects_concurrent_cursor_advance():
+    from types import SimpleNamespace
+
+    from nth_dao.web import _advance_trade_execution_recovery
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowCoordinator:
+        def reconcile(self, **_kwargs):
+            entered.set()
+            assert release.wait(timeout=5.0)
+            return type("Recovery", (), {
+                "scanned": 0,
+                "anchored": 0,
+                "blocked": 0,
+                "failed": 0,
+                "next_cursor": None,
+                "has_more": False,
+            })()
+
+    state = SimpleNamespace(
+        trade_execution_coordinator=SlowCoordinator(),
+        trade_execution_health_lock=threading.RLock(),
+        trade_execution_recovery_lock=threading.Lock(),
+        trade_execution_recovery_cursor=None,
+        trade_execution_recovery_failures=0,
+        trade_execution_health=TradeExecutionRuntimeHealth(
+            status="healthy",
+            receipt_persistence_available=True,
+        ),
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        running = executor.submit(_advance_trade_execution_recovery, state)
+        assert entered.wait(timeout=5.0)
+        with pytest.raises(TradeExecutionAuditBusy, match="already running"):
+            _advance_trade_execution_recovery(state)
+        release.set()
+        running.result(timeout=5.0)
+
+    assert state.trade_execution_health.status == "healthy"
 
 
 def test_execution_audit_concurrent_issue_has_one_anchor(tmp_path):

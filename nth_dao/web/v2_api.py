@@ -4422,6 +4422,13 @@ def _state_trade_rule_package_store(request: Request) -> Optional[Any]:
         return None
 
 
+def _state_trade_execution_coordinator(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_execution_coordinator
+    except AttributeError:
+        return None
+
+
 def _state_trade_proposal_audit(request: Request) -> Optional[Any]:
     try:
         return request.app.state.nth.trade_proposal_audit
@@ -10625,6 +10632,7 @@ def register_v2_routes(app: FastAPI) -> None:
         include_document: bool,
         pending_dispatch: Any = None,
         acknowledgement: Any = None,
+        execution: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from nth_dao.trade_rules import trade_order_digest
 
@@ -10678,7 +10686,190 @@ def register_v2_routes(app: FastAPI) -> None:
         }
         if include_document:
             result["order"] = document
+            if execution is not None:
+                result["execution"] = execution
         return result
+
+    def _trade_execution_runtime_health(request: Request) -> Any:
+        from nth_dao.trade_rules import TradeExecutionRuntimeHealth
+
+        health = getattr(request.app.state.nth, "trade_execution_health", None)
+        if isinstance(health, TradeExecutionRuntimeHealth):
+            return health
+        return TradeExecutionRuntimeHealth(
+            status="unavailable",
+            receipt_persistence_available=False,
+            error_code="runtime-health-invalid",
+        )
+
+    def _record_trade_execution_history_health(
+        request: Request,
+        *,
+        available: bool,
+    ) -> None:
+        from nth_dao.trade_rules import TradeExecutionRuntimeHealth
+
+        state = request.app.state.nth
+        lock = getattr(state, "trade_execution_health_lock", None)
+        if lock is None:
+            return
+        with lock:
+            current = _trade_execution_runtime_health(request)
+            if available:
+                if (
+                    current.error_code
+                    == "receipt-history-verification-failed"
+                    and not current.recovery_pending
+                ):
+                    state.trade_execution_health = TradeExecutionRuntimeHealth(
+                        status="healthy",
+                        receipt_persistence_available=True,
+                    )
+                return
+            if current.status == "unavailable":
+                return
+            state.trade_execution_health = TradeExecutionRuntimeHealth(
+                status="degraded",
+                receipt_persistence_available=(
+                    current.receipt_persistence_available
+                ),
+                recovery_pending=current.recovery_pending,
+                error_code="receipt-history-verification-failed",
+            )
+
+    def _trade_execution_history_view(
+        request: Request,
+        order: Any,
+        *,
+        limit: int = 100,
+        before_seq: int | None = None,
+    ) -> Dict[str, Any]:
+        from nth_dao.trade_rules import execution_receipt_digest
+
+        health = _trade_execution_runtime_health(request)
+        coordinator = _state_trade_execution_coordinator(request)
+        unavailable = {
+            "status": "unavailable",
+            "items": [],
+            "has_more": False,
+            "next_cursor": None,
+            "error_code": "receipt-history-unavailable",
+        }
+        if (
+            coordinator is None
+            or not health.receipt_persistence_available
+            or not callable(getattr(coordinator, "history", None))
+        ):
+            return unavailable
+        try:
+            history = coordinator.history(
+                order,
+                limit=limit,
+                before_seq=before_seq,
+            )
+            items = []
+            for item in history.items:
+                document = item.receipt.to_dict()
+                operation = document["operation"]
+                adapter = document["adapter"]
+                items.append({
+                    "execution_id": document["execution_id"],
+                    "receipt_digest": execution_receipt_digest(
+                        item.receipt,
+                        order=order,
+                    ),
+                    "audit_event_id": item.event.event_id,
+                    "audit_seq": item.event.seq,
+                    "executor_did": document["executor_did"],
+                    "executor_role": document["executor_role"],
+                    "operation_id": operation["operation_id"],
+                    "hook_name": operation["hook_name"],
+                    "side_effect": operation["side_effect"],
+                    "adapter_id": adapter["adapter_id"],
+                    "adapter_version": adapter["adapter_version"],
+                    "execution_mode": adapter["execution_mode"],
+                    "outcome": document["outcome"],
+                    "started_at": document["started_at"],
+                    "completed_at": document["completed_at"],
+                })
+            _record_trade_execution_history_health(
+                request,
+                available=True,
+            )
+            return {
+                "status": "available",
+                "items": items,
+                "has_more": history.has_more,
+                "next_cursor": history.next_cursor,
+                "error_code": "",
+            }
+        except Exception as exc:  # noqa: BLE001 - history isolation boundary
+            logger.warning(
+                "trade execution history unavailable (%s)",
+                type(exc).__name__,
+            )
+            _record_trade_execution_history_health(
+                request,
+                available=False,
+            )
+            return {
+                **unavailable,
+                "error_code": "receipt-history-verification-failed",
+            }
+
+    def _trade_order_execution_view(
+        request: Request,
+        order: Any,
+        *,
+        order_digest: str,
+    ) -> Dict[str, Any]:
+        from nth_dao.trade_rules import (
+            project_trade_order_execution,
+            unavailable_trade_order_execution_projection,
+        )
+
+        identity = _state_node_identity(request)
+        local_did = (
+            identity.as_did()
+            if identity is not None and callable(getattr(identity, "as_did", None))
+            else None
+        )
+        state = request.app.state.nth
+        history_view = _trade_execution_history_view(request, order)
+        health = _trade_execution_runtime_health(request)
+        moment = datetime.now(timezone.utc)
+        try:
+            projection = project_trade_order_execution(
+                order,
+                _state_trade_rule_package_store(request),
+                local_did=local_did,
+                coordinator_health=health,
+                executor_policy=getattr(state, "trade_executor_policy", None),
+                adapter_resolver=getattr(
+                    state, "trade_execution_adapter_resolver", None
+                ),
+                adapter_policy=getattr(
+                    state, "trade_execution_adapter_policy", None
+                ),
+                content_resolver=getattr(
+                    state, "trade_execution_content_resolver", None
+                ),
+                at=moment,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional projection isolation boundary
+            logger.warning(
+                "trade execution projection unavailable (%s)",
+                type(exc).__name__,
+            )
+            projection = unavailable_trade_order_execution_projection(
+                order_digest=order_digest,
+                local_did=local_did,
+                coordinator_health=health,
+                error_code="projection-failed",
+                at=moment,
+            )
+        projection["history"] = history_view
+        return projection
 
     @app.get("/api/v2/trade/orders")
     def v2_trade_order_list(
@@ -10749,6 +10940,7 @@ def register_v2_routes(app: FastAPI) -> None:
         """Retry Order Store/Spine projection without peer resubmission."""
 
         from nth_dao.trade_rules import (
+            TradeExecutionAuditBusy,
             TradeOrderAuditBusy,
             TradeOrderAuditError,
         )
@@ -10777,7 +10969,14 @@ def register_v2_routes(app: FastAPI) -> None:
                 limit=limit,
                 after=acknowledgement_cursor or None,
             )
-        except TradeOrderAuditBusy as exc:
+            from nth_dao.web import _advance_trade_execution_recovery
+
+            execution_result = await run_in_threadpool(
+                _advance_trade_execution_recovery,
+                request.app.state.nth,
+                limit=limit,
+            )
+        except (TradeExecutionAuditBusy, TradeOrderAuditBusy) as exc:
             raise HTTPException(
                 status_code=503,
                 detail="trade Order audit reconciliation is busy",
@@ -10801,6 +11000,10 @@ def register_v2_routes(app: FastAPI) -> None:
             "acknowledgement_failures": dispatch_result.failed,
             "acknowledgement_next_cursor": dispatch_result.next_cursor,
             "acknowledgement_has_more": dispatch_result.has_more,
+            "executions_scanned": execution_result.scanned,
+            "executions_anchored": execution_result.anchored,
+            "execution_failures": execution_result.failed,
+            "execution_recovery_pending": request.app.state.nth.trade_execution_health.recovery_pending,
         }
 
     @app.get("/api/v2/trade/orders/{order_digest}")
@@ -10837,6 +11040,61 @@ def register_v2_routes(app: FastAPI) -> None:
                 include_document=True,
                 pending_dispatch=pending_dispatch,
                 acknowledgement=acknowledgement,
+                execution=_trade_order_execution_view(
+                    request,
+                    record.order,
+                    order_digest=record.event.payload["order_digest"],
+                ),
+            )
+        except HTTPException:
+            raise
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+
+    @app.get(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts"
+    )
+    def v2_trade_order_execution_receipts(
+        order_digest: str,
+        request: Request,
+        limit: int = 100,
+        before_seq: int | None = None,
+    ) -> Dict[str, Any]:
+        """Page backward through CAS/Spine-verified execution Receipts."""
+
+        from nth_dao.trade_rules import TradeOrderAuditError
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be in 1..500")
+        if before_seq is not None and before_seq < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="before_seq must be a non-negative integer",
+            )
+        coordinator = _state_trade_order_audit(request)
+        if coordinator is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit coordinator unavailable",
+            )
+        try:
+            record = coordinator.get_accepted(order_digest)
+            if record is None:
+                raise HTTPException(status_code=404, detail="Trade Order not found")
+            return _trade_execution_history_view(
+                request,
+                record.order,
+                limit=limit,
+                before_seq=before_seq,
             )
         except HTTPException:
             raise

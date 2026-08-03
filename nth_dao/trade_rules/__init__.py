@@ -167,6 +167,7 @@ from nth_dao.trade_rules.execution_receipt import (
     TradeExecutionReceipt,
     TradeExecutionReceiptRejected,
     execution_receipt_digest,
+    trade_order_execution_grants,
     verify_execution_receipt_order_binding,
     verify_execution_receipt_under_policy,
 )
@@ -174,6 +175,14 @@ from nth_dao.trade_rules.execution_coordinator import (
     TradeExecutionAuditReconciliation,
     TradeExecutionAuditResult,
     TradeExecutionCoordinator,
+    TradeExecutionHistory,
+    TradeExecutionHistoryItem,
+)
+from nth_dao.trade_rules.execution_projection import (
+    TradeExecutionProjectionError,
+    TradeExecutionRuntimeHealth,
+    project_trade_order_execution,
+    unavailable_trade_order_execution_projection,
 )
 from nth_dao.trade_rules.execution_audit import (
     DEFAULT_MAX_EXECUTION_AUDIT_BYTES,
@@ -612,9 +621,16 @@ __all__ = [
     "TradeExecutionReceipt",
     "TradeExecutionReceiptRejected",
     "execution_receipt_digest",
+    "trade_order_execution_grants",
     "verify_execution_receipt_order_binding",
     "verify_execution_receipt_under_policy",
     "TradeExecutionCoordinator",
+    "TradeExecutionHistory",
+    "TradeExecutionHistoryItem",
+    "TradeExecutionProjectionError",
+    "TradeExecutionRuntimeHealth",
+    "project_trade_order_execution",
+    "unavailable_trade_order_execution_projection",
     "TradeExecutionAuditReconciliation",
     "TradeExecutionAuditResult",
     "DEFAULT_MAX_EXECUTION_AUDIT_BYTES",

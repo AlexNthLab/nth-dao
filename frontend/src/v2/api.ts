@@ -48,6 +48,7 @@ import type {
   TradeProposalDetail,
   TradeProposalAcceptanceResult,
   TradeProposalPage,
+  TradeExecutionHistoryPage,
   TradeOrderDetail,
   TradeOrderPage,
 } from "./types-v2";
@@ -1078,6 +1079,21 @@ export async function getTradeOrder(
 ): Promise<TradeOrderDetail> {
   return getJson<TradeOrderDetail>(
     `/trade/orders/${encodeURIComponent(digest)}`,
+    signal,
+  );
+}
+
+export async function getTradeExecutionReceipts(
+  digest: string,
+  beforeSeq: number,
+  signal?: AbortSignal,
+): Promise<TradeExecutionHistoryPage> {
+  const params = new URLSearchParams({
+    limit: TRADE_INBOX_PAGE_SIZE,
+    before_seq: String(beforeSeq),
+  });
+  return getJson<TradeExecutionHistoryPage>(
+    `/trade/orders/${encodeURIComponent(digest)}/execution-receipts?${params.toString()}`,
     signal,
   );
 }

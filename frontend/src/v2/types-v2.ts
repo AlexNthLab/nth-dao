@@ -598,8 +598,112 @@ export interface TradeOrderPage {
   next_cursor: string;
 }
 
+export interface TradeExecutionSkillView {
+  package_digest: string;
+  rule_id: string;
+  version?: string;
+  publisher_did?: string;
+  summary?: string;
+  execution_mode?: string;
+  installed: boolean;
+  current: boolean;
+  status: "available" | "missing" | "unavailable" | "invalid" | "expired";
+  reason: string;
+}
+
+export interface TradeOperationGrantView {
+  operation_id: string;
+  rule_id: string;
+  package_digest: string;
+  hook_name: string;
+  hook_version: string;
+  executor_role: "maker" | "taker";
+  local_executor: boolean;
+  contract_available: boolean;
+  input_schema_content_available: boolean;
+  output_schema_content_available: boolean;
+  side_effect: "none" | "local" | "external" | "funds" | "unknown";
+  permissions: string[];
+  funds_execution_enabled: false;
+}
+
+export interface TradeExecutionHistoryItem {
+  execution_id: string;
+  receipt_digest: string;
+  audit_event_id: string;
+  audit_seq: number;
+  executor_did: string;
+  executor_role: "maker" | "taker";
+  operation_id: string;
+  hook_name: string;
+  side_effect: "none" | "local" | "external" | "funds";
+  adapter_id: string;
+  adapter_version: string;
+  execution_mode: string;
+  outcome: "succeeded" | "failed" | "cancelled";
+  started_at: string;
+  completed_at: string;
+}
+
+export interface TradeExecutionHistoryPage {
+  status: "available" | "unavailable";
+  items: TradeExecutionHistoryItem[];
+  has_more: boolean;
+  next_cursor: number | null;
+  error_code: string;
+}
+
+export interface TradeExecutionView {
+  order_digest: string;
+  status: "ready" | "blocked" | "unavailable";
+  error_code: string;
+  coordinator: {
+    available: boolean;
+    status: "healthy" | "recovering" | "degraded" | "unavailable";
+    receipt_persistence_available: boolean;
+    recovery_pending: boolean;
+    error_code: string;
+    execution_endpoint_enabled: false;
+  };
+  local_executor: {
+    did: string;
+    role: "maker" | "taker" | "observer" | "unavailable";
+    authorized_operation_count: number;
+  };
+  skills: TradeExecutionSkillView[];
+  operation_grants: TradeOperationGrantView[];
+  executor_policy: {
+    configured: boolean;
+    status: "ready" | "blocked" | "not-configured" | "unavailable";
+    digest: string;
+    reason: string;
+    readiness: Record<string, unknown> | null;
+  };
+  adapter: {
+    configured: boolean;
+    status: "not-configured" | "selection-required" | "unavailable";
+    policy_digest: string;
+    accepted_adapter_count: number;
+  };
+  content: {
+    resolver_configured: boolean;
+    contract_schema_content_available: boolean;
+    runtime_payloads_ready: false;
+    status: "not-configured" | "awaiting-operation-input" | "unavailable";
+  };
+  funds: {
+    enabled: false;
+    grant_count: number;
+    reason: string;
+  };
+  history: TradeExecutionHistoryPage;
+  blocking_reasons: string[];
+  evaluated_at: string;
+}
+
 export interface TradeOrderDetail extends TradeOrderSummary {
   order: Record<string, unknown>;
+  execution?: TradeExecutionView;
 }
 
 export interface TradeProposalAcceptanceResult {

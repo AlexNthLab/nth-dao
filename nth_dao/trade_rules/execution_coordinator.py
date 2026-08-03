@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,7 +10,7 @@ from typing import Any, NoReturn
 
 from nth_dao.spine import SignedEventLog, SpineEvent
 from nth_dao.trade_rules.agreement import DEFAULT_CLOCK_SKEW_SECONDS
-from nth_dao.trade_rules.agreement_order import TradeOrder
+from nth_dao.trade_rules.agreement_order import TradeOrder, trade_order_digest
 from nth_dao.trade_rules.execution_audit import (
     EVENT_TRADE_EXECUTION_RECORDED,
     EXECUTION_AUDIT_ERROR_RECEIPT_CONFLICT,
@@ -67,6 +68,23 @@ class TradeExecutionAuditReconciliation:
     has_more: bool
 
 
+@dataclass(frozen=True)
+class TradeExecutionHistoryItem:
+    """One Receipt whose CAS bytes and signed Spine anchor agree."""
+
+    receipt: TradeExecutionReceipt
+    event: SpineEvent
+
+
+@dataclass(frozen=True)
+class TradeExecutionHistory:
+    """Newest bounded execution history for one exact Agreement."""
+
+    items: tuple[TradeExecutionHistoryItem, ...]
+    has_more: bool
+    next_cursor: int | None
+
+
 class TradeExecutionCoordinator:
     """Issue through write-ahead audit, Receipt CAS, then signed Spine."""
 
@@ -87,34 +105,57 @@ class TradeExecutionCoordinator:
         self.store = store
         self.audit_outbox = audit_outbox
         self.spine = spine
+        self._anchor_cache_lock = threading.RLock()
+        self._anchor_cache_token: tuple[int, int, int, int, int] | None = None
+        self._anchor_cache: tuple[
+            dict[str, SpineEvent],
+            dict[str, SpineEvent],
+        ] | None = None
 
     def _anchor_index(
         self,
     ) -> tuple[dict[str, SpineEvent], dict[str, SpineEvent]]:
-        try:
-            events = self.spine.verified_snapshot()
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise TradeExecutionAuditError(
-                f"Spine integrity check failed: {exc}"
-            ) from exc
-        by_execution_id: dict[str, SpineEvent] = {}
-        by_receipt_digest: dict[str, SpineEvent] = {}
-        for event in events:
-            if event.type != EVENT_TRADE_EXECUTION_RECORDED:
-                continue
-            payload = validate_execution_audit_payload(event.payload)
-            execution_id = payload["execution_id"]
-            receipt_digest = payload["receipt_digest"]
+        token = self.spine.storage_token()
+        with self._anchor_cache_lock:
             if (
-                execution_id in by_execution_id
-                or receipt_digest in by_receipt_digest
+                token == self._anchor_cache_token
+                and self._anchor_cache is not None
             ):
-                raise TradeExecutionAuditError(
-                    "Spine contains duplicate or conflicting execution anchors"
+                return (
+                    dict(self._anchor_cache[0]),
+                    dict(self._anchor_cache[1]),
                 )
-            by_execution_id[execution_id] = event
-            by_receipt_digest[receipt_digest] = event
-        return by_execution_id, by_receipt_digest
+            try:
+                verified_token, events = (
+                    self.spine.verified_snapshot_with_token()
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise TradeExecutionAuditError(
+                    f"Spine integrity check failed: {exc}"
+                ) from exc
+            by_execution_id: dict[str, SpineEvent] = {}
+            by_receipt_digest: dict[str, SpineEvent] = {}
+            for event in events:
+                if event.type != EVENT_TRADE_EXECUTION_RECORDED:
+                    continue
+                payload = validate_execution_audit_payload(event.payload)
+                execution_id = payload["execution_id"]
+                receipt_digest = payload["receipt_digest"]
+                if (
+                    execution_id in by_execution_id
+                    or receipt_digest in by_receipt_digest
+                ):
+                    raise TradeExecutionAuditError(
+                        "Spine contains duplicate or conflicting execution anchors"
+                    )
+                by_execution_id[execution_id] = event
+                by_receipt_digest[receipt_digest] = event
+            self._anchor_cache_token = verified_token
+            self._anchor_cache = (
+                dict(by_execution_id),
+                dict(by_receipt_digest),
+            )
+            return by_execution_id, by_receipt_digest
 
     @staticmethod
     def _find_anchor(
@@ -467,17 +508,81 @@ class TradeExecutionCoordinator:
             ) from exc
         return result.receipt
 
+    def history(
+        self,
+        order: TradeOrder | dict[str, Any],
+        *,
+        limit: int = 100,
+        before_seq: int | None = None,
+    ) -> TradeExecutionHistory:
+        """Read Receipt history only through verified CAS/Spine bindings."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be in 1..500")
+        if before_seq is not None and (
+            isinstance(before_seq, bool)
+            or not isinstance(before_seq, int)
+            or before_seq < 0
+        ):
+            raise ValueError("before_seq must be a non-negative integer")
+        verified_order = (
+            TradeOrder.from_json(order.canonical_bytes)
+            if isinstance(order, TradeOrder)
+            else TradeOrder.from_dict(order)
+        )
+        expected_order_digest = trade_order_digest(verified_order)
+        by_execution_id, _ = self._anchor_index()
+        matching = sorted(
+            (
+                event
+                for event in by_execution_id.values()
+                if event.payload["order_digest"] == expected_order_digest
+                and (before_seq is None or event.seq < before_seq)
+            ),
+            key=lambda event: event.seq,
+        )
+        has_more = len(matching) > limit
+        items: list[TradeExecutionHistoryItem] = []
+        for event in matching[-limit:]:
+            payload = validate_execution_audit_payload(event.payload)
+            try:
+                receipt = self.store.get(
+                    payload["execution_id"],
+                    order=verified_order,
+                )
+            except TradeExecutionReceiptStoreError as exc:
+                raise TradeExecutionAuditError(
+                    "execution history Receipt CAS verification failed"
+                ) from exc
+            if receipt is None:
+                raise TradeExecutionAuditError(
+                    "execution history anchor has no retained Receipt"
+                )
+            if execution_audit_payload(receipt, order=verified_order) != payload:
+                raise TradeExecutionAuditError(
+                    "execution history Receipt does not match its Spine anchor"
+                )
+            items.append(TradeExecutionHistoryItem(receipt=receipt, event=event))
+        return TradeExecutionHistory(
+            items=tuple(items),
+            has_more=has_more,
+            next_cursor=(items[0].event.seq if has_more and items else None),
+        )
+
     def reconcile(
         self,
         *,
         limit: int = 100,
         now_ms: int | None = None,
         after_execution_id: str | None = None,
+        pending_only: bool = False,
     ) -> TradeExecutionAuditReconciliation:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         if after_execution_id is not None:
             self.audit_outbox._path(after_execution_id)
+        if not isinstance(pending_only, bool):
+            raise TypeError("pending_only must be a boolean")
         moment = (
             time.time_ns() // 1_000_000
             if now_ms is None
@@ -497,13 +602,25 @@ class TradeExecutionCoordinator:
         failed = 0
         try:
             with self.audit_outbox.acquire_reconcile():
-                anchor_index = self._anchor_index()
                 records, has_more = (
                     self.audit_outbox._reconcile_batch_locked(
                         limit=limit,
                         after_execution_id=after_execution_id,
+                        pending_only=pending_only,
                     )
                 )
+                if not records:
+                    return TradeExecutionAuditReconciliation(
+                        scanned=0,
+                        anchored=0,
+                        verified_anchored=0,
+                        blocked=0,
+                        verified_blocked=0,
+                        failed=0,
+                        next_cursor=None,
+                        has_more=False,
+                    )
+                anchor_index = self._anchor_index()
                 for record in records:
                     scanned += 1
                     if record.status in {"prepared", "stored"}:
@@ -580,4 +697,6 @@ __all__ = [
     "TradeExecutionAuditReconciliation",
     "TradeExecutionAuditResult",
     "TradeExecutionCoordinator",
+    "TradeExecutionHistory",
+    "TradeExecutionHistoryItem",
 ]

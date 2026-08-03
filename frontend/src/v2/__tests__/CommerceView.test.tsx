@@ -2,6 +2,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TradeExecutionView } from "../types-v2";
+
 const { order } = vi.hoisted(() => ({ order: {
   order_id: "nth-order-sha256:" + "a".repeat(64),
   role: "buyer" as const,
@@ -29,6 +31,122 @@ const { order } = vi.hoisted(() => ({ order: {
   }],
 } }));
 
+function executionProjection(): TradeExecutionView {
+  const packageDigest = "sha256:" + "7".repeat(64);
+  return {
+    order_digest: "sha256:" + "1".repeat(64),
+    status: "blocked" as const,
+    error_code: "",
+    coordinator: {
+      available: true,
+      status: "healthy" as const,
+      receipt_persistence_available: true,
+      recovery_pending: false,
+      error_code: "",
+      execution_endpoint_enabled: false as const,
+    },
+    local_executor: {
+      did: "did:key:zMaker",
+      role: "maker" as const,
+      authorized_operation_count: 1,
+    },
+    skills: [{
+      package_digest: packageDigest,
+      rule_id: "org.nthdao.rules/delivery",
+      version: "1.0.0",
+      publisher_did: "did:key:zPublisher",
+      summary: "Signed digital delivery Skill",
+      execution_mode: "declarative",
+      installed: true,
+      current: true,
+      status: "available" as const,
+      reason: "active",
+    }],
+    operation_grants: [{
+      operation_id: "deliver-service",
+      rule_id: "org.nthdao.rules/delivery",
+      package_digest: packageDigest,
+      hook_name: "fulfillment.deliver",
+      hook_version: "1",
+      executor_role: "maker" as const,
+      local_executor: true,
+      contract_available: true,
+      input_schema_content_available: true,
+      output_schema_content_available: true,
+      side_effect: "none" as const,
+      permissions: [],
+      funds_execution_enabled: false as const,
+    }],
+    executor_policy: {
+      configured: true,
+      status: "ready" as const,
+      digest: "sha256:" + "8".repeat(64),
+      reason: "Current local policy revalidated the Agreement",
+      readiness: {},
+    },
+    adapter: {
+      configured: true,
+      status: "selection-required" as const,
+      policy_digest: "sha256:" + "9".repeat(64),
+      accepted_adapter_count: 1,
+    },
+    content: {
+      resolver_configured: true,
+      contract_schema_content_available: true,
+      runtime_payloads_ready: false as const,
+      status: "awaiting-operation-input" as const,
+    },
+    funds: {
+      enabled: false as const,
+      grant_count: 0,
+      reason: "Real-funds execution is disabled",
+    },
+    history: {
+      status: "available" as const,
+      has_more: false,
+      next_cursor: null,
+      error_code: "",
+      items: [{
+        execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+        receipt_digest: "sha256:" + "b".repeat(64),
+        audit_event_id: "c".repeat(64),
+        audit_seq: 42,
+        executor_did: "did:key:zMaker",
+        executor_role: "maker" as const,
+        operation_id: "deliver-service",
+        hook_name: "fulfillment.deliver",
+        side_effect: "none" as const,
+        adapter_id: "org.nthdao.adapter/declarative",
+        adapter_version: "1.0.0",
+        execution_mode: "declarative",
+        outcome: "succeeded" as const,
+        started_at: "2026-08-03T00:00:00Z",
+        completed_at: "2026-08-03T00:01:00Z",
+      }],
+    },
+    blocking_reasons: ["An exact approved Adapter must be selected per operation"],
+    evaluated_at: "2026-08-03T00:00:00Z",
+  };
+}
+
+function agreementSummary() {
+  return {
+    order_digest: "sha256:" + "1".repeat(64),
+    order_id: "nth:trade:order:" + "2".repeat(64),
+    proposal_digest: "sha256:" + "3".repeat(64),
+    acceptance_digest: "sha256:" + "4".repeat(64),
+    offer_digest: "sha256:" + "5".repeat(64),
+    maker_did: "did:key:zMaker",
+    taker_did: "did:key:zTaker",
+    created_at: "2026-08-02T00:00:00Z",
+    audit_status: "anchored" as const,
+    audit_event_id: "6".repeat(64),
+    audit_attempts: 0,
+    last_error_code: "",
+    delivery_or_payment_proven: false as const,
+  };
+}
+
 vi.mock("../api", () => ({
   ApiHttpError: class ApiHttpError extends Error {
     status: number;
@@ -54,6 +172,13 @@ vi.mock("../api", () => ({
     remote_intake_receipt_digest: "sha256:" + "e".repeat(64),
   }),
   getTradeOrder: vi.fn().mockResolvedValue(null),
+  getTradeExecutionReceipts: vi.fn().mockResolvedValue({
+    status: "available",
+    items: [],
+    has_more: false,
+    next_cursor: null,
+    error_code: "",
+  }),
   listOpenTasks: vi.fn().mockResolvedValue([]),
   publishCommerceListing: vi.fn().mockResolvedValue({ digest: "sha256:x", warning: "" }),
   remoteCommerceCheckout: vi.fn().mockResolvedValue({ order, delivery: { status: "acknowledged" }, warning: "" }),
@@ -71,6 +196,7 @@ import {
   fetchTradeProposals,
   fetchTradeOrders,
   getTradeOrder,
+  getTradeExecutionReceipts,
   getTradeProposal,
   acceptTradeProposal,
   dispatchCommerceOutbox,
@@ -323,22 +449,8 @@ describe("CommerceView", () => {
   });
 
   it("shows accepted agreements without claiming delivery or payment", async () => {
-    const digest = "sha256:" + "1".repeat(64);
-    const summary = {
-      order_digest: digest,
-      order_id: "nth:trade:order:" + "2".repeat(64),
-      proposal_digest: "sha256:" + "3".repeat(64),
-      acceptance_digest: "sha256:" + "4".repeat(64),
-      offer_digest: "sha256:" + "5".repeat(64),
-      maker_did: "did:key:zMaker",
-      taker_did: "did:key:zTaker",
-      created_at: "2026-08-02T00:00:00Z",
-      audit_status: "anchored" as const,
-      audit_event_id: "6".repeat(64),
-      audit_attempts: 0,
-      last_error_code: "",
-      delivery_or_payment_proven: false as const,
-    };
+    const summary = agreementSummary();
+    const digest = summary.order_digest;
     vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
       items: [summary],
       next_cursor: "",
@@ -349,6 +461,7 @@ describe("CommerceView", () => {
         kind: "nth.dao.trade.order",
         snapshot: { proposal: { terms: { requested_quantity: "1" } } },
       },
+      execution: executionProjection(),
     });
 
     render(<ToastProvider><CommerceView /></ToastProvider>);
@@ -358,7 +471,135 @@ describe("CommerceView", () => {
     expect(screen.getByText(/does not prove delivery, payment, quality, or completion/i)).toBeTruthy();
     expect(screen.getByText("Not proven")).toBeTruthy();
     expect(screen.getByText(/requested_quantity/)).toBeTruthy();
+    expect(screen.getByText("Execution readiness")).toBeTruthy();
+    expect(screen.getByText("Trade Skills")).toBeTruthy();
+    expect(screen.getByText("org.nthdao.rules/delivery")).toBeTruthy();
+    expect(screen.getAllByText("deliver-service")).toHaveLength(2);
+    expect(screen.getByText("Execution Receipts")).toBeTruthy();
+    expect(screen.getByText("Succeeded")).toBeTruthy();
+    expect(screen.getByText(/CAS Receipt bytes.*signed Spine anchor/i)).toBeTruthy();
+    expect(screen.getByText("Runtime health")).toBeTruthy();
+    expect(screen.getByText("Healthy")).toBeTruthy();
+    expect(screen.getByText("Selection Required")).toBeTruthy();
+    expect(screen.getAllByText("Disabled").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Execute" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
     expect(getTradeOrder).toHaveBeenCalledWith(digest, expect.any(AbortSignal));
+  });
+
+  it("loads older verified execution receipts with the stable cursor", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    projection.history.has_more = true;
+    projection.history.next_cursor = 42;
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(getTradeExecutionReceipts).mockResolvedValueOnce({
+      status: "available",
+      has_more: false,
+      next_cursor: null,
+      error_code: "",
+      items: [{
+        ...projection.history.items[0],
+        execution_id: "nth-trade-execution-sha256:" + "d".repeat(64),
+        audit_event_id: "e".repeat(64),
+        audit_seq: 17,
+        operation_id: "prepare-service",
+      }],
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: "Load earlier Receipts",
+    }));
+
+    await waitFor(() => expect(getTradeExecutionReceipts).toHaveBeenCalledWith(
+      summary.order_digest,
+      42,
+    ));
+    expect(await screen.findByText("prepare-service")).toBeTruthy();
+    expect(screen.getAllByText("deliver-service")).toHaveLength(2);
+    expect(screen.queryByRole("button", {
+      name: "Load earlier Receipts",
+    })).toBeNull();
+  });
+
+  it("keeps verified receipts visible when older history loading fails", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    projection.history.has_more = true;
+    projection.history.next_cursor = 42;
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(getTradeExecutionReceipts).mockRejectedValueOnce(
+      new Error("history backend unavailable"),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: "Load earlier Receipts",
+    }));
+
+    expect(await screen.findByText(/history backend unavailable/)).toBeTruthy();
+    expect(screen.getByText(/Existing verified Receipts remain visible/)).toBeTruthy();
+    expect(screen.getAllByText("deliver-service")).toHaveLength(2);
+  });
+
+  it("makes degraded execution and unverifiable history explicit", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: {
+        ...projection,
+        status: "unavailable" as const,
+        error_code: "projection-failed",
+        coordinator: {
+          ...projection.coordinator,
+          status: "degraded" as const,
+          receipt_persistence_available: false,
+          recovery_pending: true,
+          error_code: "startup-recovery-failed",
+        },
+        history: {
+          status: "unavailable" as const,
+          items: [],
+          has_more: false,
+          next_cursor: null,
+          error_code: "receipt-history-verification-failed",
+        },
+      },
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Degraded")).toBeTruthy();
+    expect(screen.getByText(/Execution projection unavailable/)).toBeTruthy();
+    expect(screen.getByText(/empty list must not be treated as proof/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Execute" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
   });
 
   it("shows durable pending delivery state and retries with the server target", async () => {

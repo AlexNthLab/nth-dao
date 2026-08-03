@@ -683,6 +683,24 @@ def _verified_order(
     )
 
 
+def trade_order_execution_grants(
+    order: TradeOrder | dict[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    """Return validated signed operation grants without executing them.
+
+    Agreements created before the execution extension are valid and expose an
+    empty grant set.  When the extension is present, this uses the same exact
+    parser as Receipt issuance so UI/readiness projections cannot interpret a
+    looser contract than :class:`TradeExecutionCoordinator`.
+    """
+
+    document = _verified_order(order).to_dict()
+    terms = document["snapshot"]["proposal"]["terms"]
+    if EXECUTION_TERMS_KEY not in terms:
+        return ()
+    return _execution_grants(document)
+
+
 def _resolve_adapter_for_receipt(
     *,
     adapter: dict[str, Any],
@@ -1074,6 +1092,7 @@ __all__ = [
     "TradeExecutionReceipt",
     "TradeExecutionReceiptRejected",
     "execution_receipt_digest",
+    "trade_order_execution_grants",
     "verify_execution_receipt_order_binding",
     "verify_execution_receipt_under_policy",
 ]

@@ -4,6 +4,7 @@ import {
   acceptTradeProposal,
   fetchTradeProposals,
   fetchTradeOrders,
+  getTradeExecutionReceipts,
   getTradeOfferInspection,
   getTradeOrder,
   getTradeProposal,
@@ -348,6 +349,24 @@ describe("Trade Offer inspection API wiring", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       `/api/v2/trade/orders/${encodeURIComponent(digest)}`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("requests older execution Receipts with a stable Spine cursor", async () => {
+    const page = {
+      status: "available",
+      items: [],
+      has_more: false,
+      next_cursor: null,
+      error_code: "",
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(page));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getTradeExecutionReceipts(digest, 42)).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/trade/orders/${encodeURIComponent(digest)}/execution-receipts?limit=100&before_seq=42`,
       expect.objectContaining({ credentials: "same-origin" }),
     );
   });

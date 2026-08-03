@@ -105,6 +105,7 @@ _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
 _TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
+_TRADE_EXECUTION_RECOVERY_POLL_SECONDS = 30.0
 
 
 class _RequestBodyTooLarge(Exception):
@@ -724,7 +725,10 @@ class WebState:
         from ..trade_rules import (
             OfferStore,
             RulePackageStore,
+            TradeExecutionRuntimeHealth,
             RuleRecognitionStore,
+            TradeExecutionAuditOutbox,
+            TradeExecutionReceiptStore,
             TradeOrderAuditOutbox,
             TradeOrderDispatchStore,
             TradeOrderStore,
@@ -732,6 +736,25 @@ class WebState:
         self.trade_offers = OfferStore(workspace)
         self.trade_rule_packages = RulePackageStore(workspace)
         self.trade_rule_recognitions = RuleRecognitionStore(workspace)
+        self.trade_execution_receipts = TradeExecutionReceiptStore(workspace)
+        self.trade_execution_audit_outbox = TradeExecutionAuditOutbox(workspace)
+        self.trade_execution_coordinator: Optional[Any] = None
+        self.trade_execution_health_lock = threading.RLock()
+        self.trade_execution_recovery_lock = threading.Lock()
+        self.trade_execution_recovery_cursor: Optional[str] = None
+        self.trade_execution_recovery_failures = 0
+        self.trade_execution_health = TradeExecutionRuntimeHealth(
+            status="unavailable",
+            receipt_persistence_available=False,
+            error_code="coordinator-not-initialized",
+        )
+        # Execution trust is deliberately not inferred from bilateral signed
+        # Agreement policy. Deployments must inject a current local policy and
+        # exact content-addressed Adapter/content resolvers explicitly.
+        self.trade_executor_policy: Optional[Any] = None
+        self.trade_execution_adapter_resolver: Optional[Any] = None
+        self.trade_execution_adapter_policy: Optional[Any] = None
+        self.trade_execution_content_resolver: Optional[Any] = None
         self.trade_order_store = TradeOrderStore(workspace)
         self.trade_order_audit_outbox = TradeOrderAuditOutbox(workspace)
         self.trade_order_dispatch_store = TradeOrderDispatchStore(workspace)
@@ -980,6 +1003,171 @@ class MandateVerifyPayload(BaseModel):
     actor_id: str
 
 
+def _advance_trade_execution_recovery_locked(
+    state: WebState,
+    *,
+    limit: int = _TRADE_ORDER_BOOT_RECOVERY_BATCH,
+) -> Any:
+    """Advance one bounded page of pending Receipt audit recovery."""
+
+    from ..trade_rules import (
+        TradeExecutionAuditBusy,
+        TradeExecutionRuntimeHealth,
+    )
+
+    coordinator = state.trade_execution_coordinator
+    if coordinator is None:
+        raise RuntimeError("trade execution coordinator is unavailable")
+    with state.trade_execution_health_lock:
+        cursor = state.trade_execution_recovery_cursor
+        prior_failures = state.trade_execution_recovery_failures
+        current_health = state.trade_execution_health
+        state.trade_execution_health = TradeExecutionRuntimeHealth(
+            status="recovering",
+            receipt_persistence_available=(
+                current_health.receipt_persistence_available
+                if isinstance(current_health, TradeExecutionRuntimeHealth)
+                else False
+            ),
+            recovery_pending=True,
+            error_code="runtime-recovery",
+        )
+    try:
+        report = coordinator.reconcile(
+            limit=limit,
+            after_execution_id=cursor,
+            pending_only=True,
+        )
+    except TradeExecutionAuditBusy:
+        with state.trade_execution_health_lock:
+            current_health = state.trade_execution_health
+            state.trade_execution_health = TradeExecutionRuntimeHealth(
+                status="recovering",
+                receipt_persistence_available=(
+                    current_health.receipt_persistence_available
+                ),
+                recovery_pending=True,
+                error_code="runtime-recovery-busy",
+            )
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
+        with state.trade_execution_health_lock:
+            state.trade_execution_health = TradeExecutionRuntimeHealth(
+                status="degraded",
+                receipt_persistence_available=False,
+                recovery_pending=True,
+                error_code="runtime-recovery-failed",
+            )
+        raise
+
+    cycle_failures = prior_failures + report.failed
+    with state.trade_execution_health_lock:
+        if report.has_more:
+            if not report.next_cursor:
+                state.trade_execution_health = TradeExecutionRuntimeHealth(
+                    status="degraded",
+                    receipt_persistence_available=False,
+                    recovery_pending=True,
+                    error_code="runtime-recovery-invalid-cursor",
+                )
+                raise RuntimeError("execution recovery omitted its next cursor")
+            state.trade_execution_recovery_cursor = report.next_cursor
+            state.trade_execution_recovery_failures = cycle_failures
+            state.trade_execution_health = TradeExecutionRuntimeHealth(
+                status=("degraded" if cycle_failures else "recovering"),
+                receipt_persistence_available=True,
+                recovery_pending=True,
+                error_code=(
+                    "recovery-record-failures"
+                    if cycle_failures
+                    else "recovery-pending"
+                ),
+            )
+        else:
+            state.trade_execution_recovery_cursor = None
+            state.trade_execution_recovery_failures = 0
+            state.trade_execution_health = TradeExecutionRuntimeHealth(
+                status=("degraded" if cycle_failures else "healthy"),
+                receipt_persistence_available=True,
+                recovery_pending=bool(cycle_failures),
+                error_code=(
+                    "recovery-record-failures" if cycle_failures else ""
+                ),
+            )
+    return report
+
+
+def _advance_trade_execution_recovery(
+    state: WebState,
+    *,
+    limit: int = _TRADE_ORDER_BOOT_RECOVERY_BATCH,
+) -> Any:
+    """Serialize one recovery page across worker and operator requests."""
+
+    from ..trade_rules import TradeExecutionAuditBusy
+
+    lock = getattr(state, "trade_execution_recovery_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        raise TradeExecutionAuditBusy(
+            "execution audit recovery cycle is already running"
+        )
+    try:
+        return _advance_trade_execution_recovery_locked(state, limit=limit)
+    finally:
+        lock.release()
+
+
+class _TradeExecutionRecoveryWorker:
+    """Lifecycle-owned recovery for crash-interrupted Receipt audit writes."""
+
+    def __init__(self, state: WebState) -> None:
+        self._state = state
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._state.trade_execution_coordinator is None:
+            return
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._cancel.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="nth-trade-execution-recovery",
+                daemon=True,
+            )
+            thread = self._thread
+        thread.start()
+
+    def stop(self) -> None:
+        self._cancel.set()
+        with self._lock:
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        try:
+            while not self._cancel.is_set():
+                try:
+                    report = _advance_trade_execution_recovery(self._state)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "trade execution audit background recovery failed (%s)",
+                        type(exc).__name__,
+                    )
+                    self._cancel.wait(_TRADE_EXECUTION_RECOVERY_POLL_SECONDS)
+                    continue
+                if report.has_more:
+                    continue
+                self._cancel.wait(_TRADE_EXECUTION_RECOVERY_POLL_SECONDS)
+        finally:
+            with self._lock:
+                self._thread = None
+
+
 class _MDNSPublisher:
     """Own a non-blocking mDNS advertisement for one web app."""
 
@@ -1083,6 +1271,7 @@ def create_app(
     state = WebState(root)
     _bootstrap(state)
     mdns_publisher = _MDNSPublisher(state)
+    trade_execution_recovery = _TradeExecutionRecoveryWorker(state)
 
     # Network services are owned by FastAPI lifespan, not create_app().
     # This keeps application construction side-effect free and prevents
@@ -1122,6 +1311,7 @@ def create_app(
                 supervisor.shutdown()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent supervisor shutdown failed: %s", exc)
+        trade_execution_recovery.stop()
         mdns_publisher.stop()
 
     def _shutdown_at_exit() -> None:
@@ -1133,6 +1323,7 @@ def create_app(
         v2_runtime = None
         try:
             mdns_publisher.start()
+            trade_execution_recovery.start()
             if not shutdown_registered:
                 _atexit.register(_shutdown_at_exit)
                 shutdown_registered = True
@@ -3608,6 +3799,7 @@ def _bootstrap(state: WebState) -> None:
             state.spine = None
     if state.spine is not None and node_identity is not None:
         from ..trade_rules import (
+            TradeExecutionCoordinator,
             TradeOrderAuditCoordinator,
             TradeOrderDispatchCoordinator,
             TradeOrderIntakeCoordinator,
@@ -3626,6 +3818,29 @@ def _bootstrap(state: WebState) -> None:
             state.trade_order_dispatch_store,
             state.spine,
         )
+        state.trade_execution_coordinator = TradeExecutionCoordinator(
+            state.trade_execution_receipts,
+            state.trade_execution_audit_outbox,
+            state.spine,
+        )
+        try:
+            execution_recovery = _advance_trade_execution_recovery(state)
+            if execution_recovery.anchored or execution_recovery.blocked:
+                logger.info(
+                    "trade execution audit recovery: scanned=%d anchored=%d "
+                    "blocked=%d failed=%d",
+                    execution_recovery.scanned,
+                    execution_recovery.anchored,
+                    execution_recovery.blocked,
+                    execution_recovery.failed,
+                )
+            if execution_recovery.has_more:
+                logger.warning(
+                    "trade execution audit recovery stopped at the startup "
+                    "work budget; background recovery will continue"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("trade execution audit recovery failed: %s", exc)
         try:
             order_scanned = 0
             order_anchored = 0

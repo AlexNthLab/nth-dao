@@ -9,6 +9,7 @@ import {
   fetchCommerceOrders,
   fetchTradeProposals,
   fetchTradeOrders,
+  getTradeExecutionReceipts,
   getTradeOrder,
   getTradeProposal,
   listOpenTasks,
@@ -645,6 +646,9 @@ export function CommerceView() {
               <div className="detail-row"><span className="key">Taker</span><code className="value" title={selectedAgreement.taker_did}>{short(selectedAgreement.taker_did, 24)}</code></div>
               <div className="detail-row"><span className="key">Audit</span><span className="value">{selectedAgreement.audit_status}</span></div>
               <div className="detail-row"><span className="key">Fulfilment</span><span className="value">Not proven</span></div>
+              <div className="detail-row"><span className="key">Executor</span><span className="value">{selectedAgreement.execution?.local_executor.role ?? "Unavailable"}</span></div>
+              <div className="detail-row"><span className="key">Execution</span><span className="value">{selectedAgreement.execution?.status ?? "Unavailable"}</span></div>
+              <div className="detail-row"><span className="key">Real funds</span><span className="value">Disabled</span></div>
             </div>
           </> : <p className="muted">Select an agreement to inspect parties and audit status.</p>) : selected ? <>
             <div className="detail-section">
@@ -728,6 +732,7 @@ function AgreementWorkbench({
       <div><dt>Accepted</dt><dd>{new Date(agreement.created_at).toLocaleString()}</dd></div>
       <div><dt>Remote acknowledgement</dt><dd>{agreement.remote_acknowledged ? "Persisted" : "Not observed"}</dd></div>
     </dl>
+    <AgreementExecutionReadiness agreement={agreement} />
     {agreement.remote_acknowledged && <div className="commerce-action">
       <h3>Receiver-signed acknowledgement</h3>
       <p className="muted">This proves the receiver signed a retention claim. It does not independently prove the receiver's filesystem or Spine contents.</p>
@@ -746,6 +751,143 @@ function AgreementWorkbench({
     <div className="commerce-action">
       <h3>Signed Order snapshot</h3>
       <pre>{JSON.stringify(agreement.order, null, 2)}</pre>
+    </div>
+  </div>;
+}
+
+function readinessLabel(value: string) {
+  return value.split("-").map((part) => (
+    part ? `${part[0].toUpperCase()}${part.slice(1)}` : part
+  )).join(" ");
+}
+
+function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetail }) {
+  const execution = agreement.execution;
+  const initialHistoryKey = execution
+    ? `${execution.order_digest}:${execution.history.items.map((item) => item.execution_id).join(",")}`
+    : "";
+  const [historyItems, setHistoryItems] = useState(
+    execution?.history.items ?? [],
+  );
+  const [historyHasMore, setHistoryHasMore] = useState(
+    execution?.history.has_more ?? false,
+  );
+  const [historyCursor, setHistoryCursor] = useState<number | null>(
+    execution?.history.next_cursor ?? null,
+  );
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
+  useEffect(() => {
+    setHistoryItems(execution?.history.items ?? []);
+    setHistoryHasMore(execution?.history.has_more ?? false);
+    setHistoryCursor(execution?.history.next_cursor ?? null);
+    setHistoryError("");
+  }, [initialHistoryKey, execution?.history.has_more, execution?.history.next_cursor]);
+
+  if (!execution) {
+    return <div className="commerce-action">
+      <h3>Execution readiness</h3>
+      <p className="trade-proposal-warning" role="status">This node did not return an execution readiness projection. No execution should be attempted.</p>
+    </div>;
+  }
+  const executionDigest = execution.order_digest;
+  async function loadOlderReceipts() {
+    if (historyBusy || historyCursor === null) return;
+    setHistoryBusy(true);
+    setHistoryError("");
+    try {
+      const page = await getTradeExecutionReceipts(
+        executionDigest,
+        historyCursor,
+      );
+      if (page.status !== "available") {
+        setHistoryError(
+          `Receipt history unavailable (${page.error_code || "verification-failed"}).`,
+        );
+        return;
+      }
+      setHistoryItems((current) => {
+        const known = new Set(current.map((item) => item.execution_id));
+        return [
+          ...page.items.filter((item) => !known.has(item.execution_id)),
+          ...current,
+        ];
+      });
+      setHistoryHasMore(page.has_more);
+      setHistoryCursor(page.next_cursor);
+    } catch (error) {
+      setHistoryError(
+        error instanceof Error
+          ? error.message
+          : "Receipt history request failed.",
+      );
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+  return <div className="commerce-action trade-execution-readiness">
+    <div className="commerce-order-heading">
+      <h3>Execution readiness</h3>
+      <span className={`pill ${execution.status === "ready" ? "ok" : "wait"}`}>{readinessLabel(execution.status)}</span>
+    </div>
+    <p className="trade-proposal-warning">Readiness is a current local projection, not a promise that an operation is correct or safe. Real-funds execution is disabled.</p>
+    <dl className="commerce-facts">
+      <div><dt>Local role</dt><dd>{readinessLabel(execution.local_executor.role)}</dd></div>
+      <div><dt>Runtime health</dt><dd>{readinessLabel(execution.coordinator.status)}</dd></div>
+      <div><dt>Receipt audit</dt><dd>{execution.coordinator.receipt_persistence_available ? "Connected" : "Unavailable"}</dd></div>
+      <div><dt>Local policy</dt><dd>{readinessLabel(execution.executor_policy.status)}</dd></div>
+      <div><dt>Adapter</dt><dd>{readinessLabel(execution.adapter.status)}</dd></div>
+      <div><dt>Content</dt><dd>{readinessLabel(execution.content.status)}</dd></div>
+      <div><dt>Real funds</dt><dd>Disabled</dd></div>
+    </dl>
+    <code title={execution.order_digest}>{short(execution.order_digest, 42)}</code>
+    {execution.error_code && <p className="trade-proposal-warning" role="status">Execution projection unavailable ({execution.error_code}). The signed Agreement remains readable, but no operation is authorized.</p>}
+    <div className="trade-execution-column">
+      <h3>Trade Skills</h3>
+      {execution.skills.length === 0 ? <p className="muted">No signed Rule Packages are bound to this Agreement.</p> : <ul className="trade-proposal-rules">
+        {execution.skills.map((skill) => <li key={skill.package_digest}>
+          <div className="trade-execution-row"><strong>{skill.rule_id}</strong><span className={`pill ${skill.status === "available" ? "ok" : "wait"}`}>{readinessLabel(skill.status)}</span></div>
+          {skill.summary && <span>{skill.summary}</span>}
+          <span className="muted">{skill.version ? `v${skill.version} · ` : ""}{skill.execution_mode ?? "mode unavailable"}</span>
+          <code title={skill.package_digest}>{short(skill.package_digest, 34)}</code>
+          {skill.status !== "available" && <span className="trade-proposal-warning">{skill.reason}</span>}
+        </li>)}
+      </ul>}
+    </div>
+    <div className="trade-execution-column">
+      <h3>Operation grants</h3>
+      {execution.operation_grants.length === 0 ? <p className="muted">No signed operations were granted.</p> : <ul className="trade-proposal-rules">
+        {execution.operation_grants.map((grant) => <li key={grant.operation_id}>
+          <div className="trade-execution-row"><strong>{grant.operation_id}</strong><span className="pill wait">{grant.local_executor ? "Role match" : readinessLabel(grant.executor_role)}</span></div>
+          <span>{grant.hook_name} · {grant.side_effect}</span>
+          <span className="muted">Schema content: {grant.input_schema_content_available && grant.output_schema_content_available ? "available" : "missing"} · Local role: {grant.local_executor ? "authorized" : "not authorized"}</span>
+          {grant.permissions.length > 0 && <code>{grant.permissions.join(", ")}</code>}
+          {grant.side_effect === "funds" && <span className="trade-proposal-warning">Funds grant retained as signed intent only; execution remains disabled.</span>}
+        </li>)}
+      </ul>}
+    </div>
+    {execution.blocking_reasons.length > 0 && <div className="trade-execution-column">
+      <h3>Before execution</h3>
+      <ul className="trade-readiness-blockers">{execution.blocking_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+    </div>}
+    <div className="trade-execution-column">
+      <h3>Execution Receipts</h3>
+      <p className="muted">Each item revalidates retained CAS Receipt bytes against its signed Spine anchor. It proves the recorded claim and signer, not delivery quality or payment truth.</p>
+      {execution.history.status === "unavailable" && <p className="trade-proposal-warning" role="status">Receipt history unavailable ({execution.history.error_code}). An empty list must not be treated as proof that no execution occurred.</p>}
+      {execution.history.status === "available" && historyItems.length === 0 && <p className="muted">No verified execution Receipt is retained for this Agreement.</p>}
+      {execution.history.status === "available" && historyItems.length > 0 && <ul className="trade-proposal-rules">
+        {historyItems.map((item) => <li key={item.execution_id}>
+          <div className="trade-execution-row"><strong>{item.operation_id}</strong><span className={`pill ${item.outcome === "succeeded" ? "ok" : "wait"}`}>{readinessLabel(item.outcome)}</span></div>
+          <span>{item.hook_name} · {item.side_effect} · {item.executor_role}</span>
+          <span className="muted">Completed {new Date(item.completed_at).toLocaleString()} · Adapter {item.adapter_id} v{item.adapter_version}</span>
+          <code title={item.executor_did}>Signer {short(item.executor_did, 30)}</code>
+          <code title={item.receipt_digest}>Receipt {short(item.receipt_digest, 34)}</code>
+          <code title={item.audit_event_id}>Spine {short(item.audit_event_id, 34)}</code>
+        </li>)}
+      </ul>}
+      {historyError && <p className="trade-proposal-warning" role="status">{historyError} Existing verified Receipts remain visible.</p>}
+      {execution.history.status === "available" && historyHasMore && historyCursor !== null && <button className="btn btn-secondary" type="button" disabled={historyBusy} onClick={loadOlderReceipts}>{historyBusy ? "Loading..." : "Load earlier Receipts"}</button>}
     </div>
   </div>;
 }

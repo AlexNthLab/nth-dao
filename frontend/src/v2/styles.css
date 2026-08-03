@@ -1469,6 +1469,10 @@ select option {
 .trade-proposal-rules li { display: grid; gap: 3px; min-width: 0; }
 .trade-proposal-rules strong { font-size: 12px; overflow-wrap: anywhere; }
 .trade-proposal-rules code { color: var(--fg-tertiary); font-size: 10px; overflow-wrap: anywhere; }
+.trade-execution-column { margin-top: 14px; }
+.trade-execution-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.trade-execution-row strong { min-width: 0; overflow-wrap: anywhere; }
+.trade-readiness-blockers { display: grid; gap: 6px; margin: 0; padding-left: 18px; color: var(--fg-secondary); font-size: 12px; }
 .commerce-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .commerce-head-actions, .commerce-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .commerce-main { display: grid; align-content: start; gap: 16px; }

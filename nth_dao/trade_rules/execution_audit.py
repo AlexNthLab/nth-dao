@@ -699,6 +699,7 @@ class TradeExecutionAuditOutbox:
         *,
         limit: int,
         after_execution_id: str | None,
+        pending_only: bool = False,
     ) -> tuple[tuple[TradeExecutionAuditRecord, ...], bool]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
@@ -712,8 +713,14 @@ class TradeExecutionAuditOutbox:
             record
             for record in ordered
             if (
-                after_execution_id is None
-                or record.execution_id > after_execution_id
+                (
+                    after_execution_id is None
+                    or record.execution_id > after_execution_id
+                )
+                and (
+                    not pending_only
+                    or record.status in {"prepared", "stored"}
+                )
             )
         ]
         return tuple(eligible[:limit]), len(eligible) > limit
