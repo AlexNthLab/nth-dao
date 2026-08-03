@@ -189,6 +189,75 @@ def test_store_install_load_list_and_idempotent_retry(tmp_path):
     assert loaded.manifest.canonical_bytes == manifest.canonical_bytes
     assert dict(loaded.resources) == resources
     assert store.list_digests() == (first.digest,)
+    assert store.provenance_sources(first.digest) == ()
+
+
+def test_store_persists_explicit_provenance_and_merges_sources(tmp_path):
+    store = RulePackageStore(tmp_path)
+    manifest, resources = _package()
+
+    local = store.install(manifest, resources, source="local")
+    federated = store.install(manifest, resources, source="federated")
+
+    assert local.installed is True
+    assert federated.installed is False
+    assert store.provenance_sources(local.digest) == ("federated", "local")
+    assert store.provenance_sources_many((local.digest,)) == {
+        local.digest: ("federated", "local")
+    }
+
+
+def test_store_rejects_invalid_or_tampered_provenance(tmp_path):
+    store = RulePackageStore(tmp_path)
+    manifest, resources = _package()
+
+    with pytest.raises(ValueError, match="source"):
+        store.install(manifest, resources, source="peer")
+
+    installed = store.install(manifest, resources, source="local")
+    store._provenance_path(installed.digest).write_text(
+        '{"package_digest":"wrong","sources":["local"],"version":1}',
+        encoding="ascii",
+    )
+    with pytest.raises(RulePackageCorruptionError, match="provenance"):
+        store.provenance_sources(installed.digest)
+
+
+def test_store_rejects_orphan_provenance(tmp_path):
+    store = RulePackageStore(tmp_path)
+    manifest, resources = _package()
+    installed = store.install(manifest, resources, source="local")
+    store._manifest_path(installed.digest).unlink()
+
+    with pytest.raises(RulePackageCorruptionError, match="no stored manifest"):
+        store.list_digests()
+
+
+def test_provenance_write_failure_fails_closed_and_retry_repairs(
+    tmp_path,
+    monkeypatch,
+):
+    store = RulePackageStore(tmp_path)
+    manifest, resources = _package()
+    real_write = store._atomic_write
+
+    def fail_provenance(path, payload):
+        if path.parent == store.provenance_root:
+            raise RulePackageError("injected provenance failure")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(store, "_atomic_write", fail_provenance)
+    with pytest.raises(RulePackageError, match="injected provenance"):
+        store.install(manifest, resources, source="federated")
+
+    digest = build_rule_package(manifest, resources).digest
+    assert store.load(digest) is not None
+    assert store.provenance_sources(digest) == ()
+
+    monkeypatch.setattr(store, "_atomic_write", real_write)
+    retried = store.install(manifest, resources, source="federated")
+    assert retried.installed is False
+    assert store.provenance_sources(digest) == ("federated",)
 
 
 def test_store_deduplicates_shared_resource_blobs(tmp_path):

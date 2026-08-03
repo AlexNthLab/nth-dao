@@ -2,25 +2,36 @@ import copy
 import hashlib
 import json
 import multiprocessing
+import os
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import urllib.request
 
 import pytest
 import nth_dao.trade_rules as trade_rules_api
+import nth_dao.trade_rules.order_dispatch as order_dispatch_api
 import nth_dao.web.v2_api as web_v2_api
 from fastapi.testclient import TestClient
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity, crypto_available
 from nth_dao.spine import SignedEventLog
+from nth_dao.util import InterProcessLock
 from nth_dao.web import create_app
+from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
 from nth_dao.web.rate_limit import RateLimiter
 from nth_dao.trade_rules import (
     RulePackageStore,
+    RulePackageCorruptionError,
     RuleResolutionPolicy,
     TradeAcceptance,
     TradeAgreementRejected,
@@ -47,6 +58,7 @@ from nth_dao.trade_rules import (
     TradeOrderIntakeReceiptRejected,
     TradeOrderIntakeCoordinator,
     TradeOrderDispatchCoordinator,
+    TradeOrderDispatchResidue,
     TradeOrderDispatchStore,
     TradeProposal,
     TradeProposalDelivery,
@@ -139,6 +151,7 @@ from nth_dao.trade_rules.agreement_conformance import (
     RECEIPT_REVIEW_AUDIT_SCHEMA_PATH,
     RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH,
     RECEIPT_REVIEW_SCHEMA_PATH,
+    RULE_PACKAGE_BUNDLE_SCHEMA_PATH,
     ORDER_AUDIT_SCHEMA_PATH,
     ORDER_DELIVERY_SCHEMA_PATH,
     ORDER_INTAKE_RECEIPT_SCHEMA_PATH,
@@ -149,6 +162,12 @@ from nth_dao.trade_rules.agreement_conformance import (
     PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH,
     VECTORS_PATH,
     generate_vectors,
+)
+from nth_dao.trade_rules.package_transport import (
+    RULE_PACKAGE_BUNDLE_KIND,
+    RULE_PACKAGE_BUNDLE_PROTOCOL_VERSION,
+    RulePackageBundleRejected,
+    parse_rule_package_bundle,
 )
 from nth_dao.trade_rules.agreement import (
     _sign_acceptance_body,
@@ -360,6 +379,7 @@ def _setup(
     dependency_digest = package_store.install(
         dependency_manifest,
         {dependency_resource_digest: dependency_resource},
+        source="local",
     ).digest
     resource = b'{"rule":"delivery"}'
     resource_digest = _digest(resource)
@@ -438,6 +458,7 @@ def _setup(
             input_schema_digest: input_schema,
             output_schema_digest: output_schema,
         },
+        source="local",
     ).digest
     adapter_artifact = b"test adapter artifact v1"
     adapter = build_execution_adapter(
@@ -2455,6 +2476,23 @@ def test_unknown_fields_and_noncanonical_rule_order_fail_closed(tmp_path):
         TradeProposal.from_dict(document)
 
 
+def test_rule_bindings_reject_one_digest_under_multiple_rule_ids(tmp_path):
+    proposal = _proposal(_setup(tmp_path))
+    document = proposal.to_dict()
+    duplicate = copy.deepcopy(document["rule_bindings"][0])
+    duplicate["rule_id"] = "org.nthdao.test.second-binding"
+    document["rule_bindings"] = sorted(
+        [*document["rule_bindings"], duplicate],
+        key=lambda item: (item["rule_id"], item["digest"]),
+    )
+
+    with pytest.raises(
+        TradeAgreementRejected,
+        match="one digest to multiple rule_ids",
+    ):
+        TradeProposal.from_dict(document)
+
+
 def test_oversized_terms_and_direct_construction_are_rejected(tmp_path):
     context = _setup(tmp_path)
     with pytest.raises(TradeAgreementRejected, match="terms exceeds"):
@@ -2987,6 +3025,14 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
         order=order,
     )
     package_vector = stored["rule_package"]
+    package_bundle = stored["rule_package_bundle"]
+    parsed_bundle = parse_rule_package_bundle(
+        package_bundle,
+        expected_offer_digest=order.to_dict()["offer_digest"],
+        expected_package_digest=package_vector["digest"],
+        expected_offer_publisher_did=stored["proposal"]["offer_publisher_did"],
+    )
+    assert parsed_bundle.digest == package_vector["digest"]
     with tempfile.TemporaryDirectory() as directory:
         package_store = RulePackageStore(directory)
         installed = package_store.install(
@@ -2997,6 +3043,7 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
                 item["digest"]: bytes.fromhex(item["bytes_hex"])
                 for item in package_vector["resources"]
             },
+            source="local",
         )
         assert installed.digest == package_vector["digest"]
         adapter_policy = TradeExecutionAdapterPolicy(
@@ -3071,9 +3118,21 @@ def test_negative_agreement_vectors_fail_closed():
                 order=stored["order"],
             )
         ),
+        "rule_package_bundle": lambda document: parse_rule_package_bundle(
+            document,
+            expected_offer_digest=stored["rule_package_bundle"][
+                "offer_digest"
+            ],
+            expected_package_digest=stored["rule_package"]["digest"],
+            expected_offer_publisher_did=stored["proposal"][
+                "offer_publisher_did"
+            ],
+        ),
     }
 
-    assert len(stored["negative_cases"]) >= 4
+    assert "rule-package-bundle-binding-wrong-signer" in {
+        case["case"] for case in stored["negative_cases"]
+    }
     for case in stored["negative_cases"]:
         assert case["expected_valid"] is False
         with pytest.raises(
@@ -3090,6 +3149,7 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeExecutionAuditError,
                 TradeReceiptReviewRejected,
                 TradeReceiptReviewAuditError,
+                RulePackageBundleRejected,
             )
         ):
             parsers[case["target"]](case["document"])
@@ -3144,8 +3204,23 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
             encoding="utf-8"
         )
     )
+    rule_package_bundle = json.loads(
+        RULE_PACKAGE_BUNDLE_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
 
     assert proposal["$schema"].endswith("2020-12/schema")
+    assert rule_package_bundle["properties"]["kind"]["const"] == (
+        RULE_PACKAGE_BUNDLE_KIND
+    )
+    assert rule_package_bundle["properties"]["protocol_version"][
+        "const"
+    ] == RULE_PACKAGE_BUNDLE_PROTOCOL_VERSION
+    assert rule_package_bundle["properties"]["manifest"]["$ref"] == (
+        "urn:nth-dao:schema:trade-rule-manifest:1"
+    )
+    assert rule_package_bundle["properties"]["resources"][
+        "maxItems"
+    ] == 128
     assert proposal["properties"]["kind"]["const"] == (
         "nth.dao.trade.proposal"
     )
@@ -4100,6 +4175,76 @@ def test_order_dispatch_crash_residue_requires_unchanged_inspection(tmp_path):
     assert not residue.exists()
 
 
+def test_order_dispatch_residue_keeps_legacy_constructor_compatible():
+    residue = TradeOrderDispatchResidue(
+        area="pending",
+        filename="record.tmp",
+        size_bytes=7,
+        modified_at_ns=9,
+    )
+
+    assert residue.content_sha256 == ""
+
+
+def test_order_dispatch_residue_rejects_path_swap_while_opening(
+    tmp_path,
+    monkeypatch,
+):
+    store = TradeOrderDispatchStore(tmp_path / "runtime")
+    store.pending_root.mkdir(parents=True)
+    suffix = "2" * 64
+    residue = store.pending_root / f"{suffix}.json.crash.tmp"
+    replacement = store.pending_root / f"{suffix}.json.replacement.tmp"
+    residue.write_bytes(b"first")
+    replacement.write_bytes(b"other")
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == residue and not swapped:
+            swapped = True
+            replacement.replace(residue)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(order_dispatch_api.os, "open", swap_before_open)
+
+    with pytest.raises(TradeOrderDispatchError, match="changed while opening"):
+        store.inspect_crash_residue()
+
+
+def test_order_dispatch_prune_does_not_delete_post_inspection_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    store = TradeOrderDispatchStore(tmp_path / "runtime")
+    store.pending_root.mkdir(parents=True)
+    suffix = "3" * 64
+    residue = store.pending_root / f"{suffix}.json.crash.tmp"
+    attacker = tmp_path / "replacement.bin"
+    residue.write_bytes(b"inspected residue")
+    attacker.write_bytes(b"replacement must survive")
+    inspected = store.inspect_crash_residue()
+    original_replace = os.replace
+    swapped = False
+
+    def swap_before_quarantine(source, destination):
+        nonlocal swapped
+        if Path(source) == residue and not swapped:
+            swapped = True
+            original_replace(attacker, residue)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(order_dispatch_api.os, "replace", swap_before_quarantine)
+
+    with pytest.raises(TradeOrderDispatchError, match="changed during prune"):
+        store.prune_crash_residue(expected=inspected)
+
+    assert swapped is True
+    assert residue.read_bytes() == b"replacement must survive"
+    assert not list(store.pending_root.glob("*.prune-*.tmp"))
+
+
 def test_order_dispatch_reads_are_bounded_before_json_decode(tmp_path):
     context = _setup(tmp_path / "fixtures")
     delivery = _order_delivery(context)
@@ -4432,6 +4577,110 @@ def _live_order_delivery(tmp_path, app, *, nonce="ef" * 16):
         now=created,
     )
     return context, order, delivery
+
+
+def _free_tcp_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _process_http_json(url, *, payload=None, headers=None):
+    body = None
+    request_headers = dict(headers or {})
+    method = "GET"
+    if payload is not None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+        method = "POST"
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=request_headers,
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=20.0) as response:  # noqa: S310
+        return json.loads(response.read().decode("utf-8"))
+
+
+class _UvicornProcessServer:
+    """Run one authenticated NTH DAO node in an independent OS process."""
+
+    _BOOT = (
+        "import sys,uvicorn;"
+        "from pathlib import Path;"
+        "from nth_dao.web import create_app;"
+        "app=create_app(Path(sys.argv[1]),require_console_auth=True);"
+        "Path(sys.argv[3]).write_text(app.state.nth_console_token,encoding='ascii');"
+        "uvicorn.run(app,host='127.0.0.1',port=int(sys.argv[2]),"
+        "log_level='error',access_log=False)"
+    )
+
+    def __init__(self, workspace: Path, port: int) -> None:
+        self.workspace = workspace
+        self.port = port
+        self.url = f"http://127.0.0.1:{port}"
+        self.process = None
+        self.token = ""
+        self._generation = 0
+
+    def start(self) -> None:
+        self._generation += 1
+        token_path = self.workspace.parent / (
+            f"{self.workspace.name}-token-{self._generation}.txt"
+        )
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                self._BOOT,
+                str(self.workspace),
+                str(self.port),
+                str(token_path),
+            ],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env={
+                **os.environ,
+                "NTH_LAN_PUBLISH": "0",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            ),
+        )
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError("Rule Package node process exited during startup")
+            if token_path.exists():
+                try:
+                    _process_http_json(
+                        f"{self.url}/.well-known/nth-dao/identity.json"
+                    )
+                except OSError:
+                    pass
+                else:
+                    self.token = token_path.read_text(encoding="ascii")
+                    return
+            time.sleep(0.025)
+        raise RuntimeError("Rule Package node process did not start")
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5.0)
+        self.process = None
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
 
 
 def test_public_order_delivery_retains_agreement_and_operator_can_read(
@@ -4785,6 +5034,769 @@ def test_agreement_rest_projects_explicit_local_execution_runtime(tmp_path):
     assert execution["status"] == "blocked"
 
 
+def test_operator_imports_exact_order_bound_rule_package(tmp_path, monkeypatch):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202
+    package_digest = context["package_digest"]
+    package = context["package_store"].load(package_digest)
+    assert package is not None
+    assert app.state.nth.trade_rule_packages.load(package_digest) is None
+    calls = []
+
+    def fetch(
+        peer_url,
+        *,
+        offer_digest,
+        package_digest,
+        offer_publisher_did,
+        timeout_seconds=15.0,
+    ):
+        calls.append((
+            peer_url,
+            offer_digest,
+            package_digest,
+            offer_publisher_did,
+            timeout_seconds,
+        ))
+        return package
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_package_from_peer",
+        fetch,
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package_digest}/import"
+    )
+    first = client.post(path, json={"peer_url": "http://localhost:19090"}, headers=auth)
+    second = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090/private/operator-path"},
+        headers=auth,
+    )
+
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "installed"
+    assert first.json()["audit_created"] is True
+    assert first.json()["trust_granted"] is False
+    assert first.json()["execution_authority_granted"] is False
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "already-installed"
+    assert second.json()["audit_created"] is False
+    assert second.json()["audit_event_id"] == first.json()["audit_event_id"]
+    assert len(calls) == 1
+    assert calls[0][2] == package_digest
+    assert app.state.nth.trade_rule_packages.load(package_digest).digest == package_digest
+    import_events = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == "trade.rule-package.imported"
+    ]
+    assert len(import_events) == 1
+    assert import_events[0].event_id == first.json()["audit_event_id"]
+    assert import_events[0].payload == {
+        "import_id": web_v2_api._trade_rule_package_import_id(
+            order_digest=trade_order_digest(order),
+            package_digest=package_digest,
+        ),
+        "order_digest": trade_order_digest(order),
+        "offer_digest": calls[0][1],
+        "package_digest": package_digest,
+        "rule_id": package.manifest.rule_id,
+        "package_publisher_did": package.manifest.publisher_did,
+        "source_origin": "http://localhost:19090",
+        "action": "verified-cache-import",
+    }
+    proposal_events = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == "trade.rule-package.import.proposed"
+    ]
+    assert len(proposal_events) == 1
+    assert proposal_events[0].payload["import_id"] == import_events[0].payload[
+        "import_id"
+    ]
+    assert client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+    ).status_code == 401
+
+
+def test_two_nodes_serve_import_restart_and_catalog_rule_package(tmp_path):
+    source_workspace = tmp_path / "source"
+    target_workspace = tmp_path / "target"
+    source_app = create_app(source_workspace, require_console_auth=True)
+    target_app = create_app(target_workspace, require_console_auth=True)
+    context = _setup(
+        tmp_path / "agreement-fixtures",
+        maker=source_app.state.nth.node_identity,
+        taker=target_app.state.nth.node_identity,
+    )
+    package_digest = context["package_digest"]
+    for digest in (context["dependency_digest"], package_digest):
+        package = context["package_store"].load(digest)
+        assert package is not None
+        source_app.state.nth.trade_rule_packages.install(
+            package.manifest,
+            package.resources,
+            source="local",
+        )
+
+    source_client = TestClient(source_app)
+    source_auth = {
+        "Authorization": f"Bearer {source_app.state.nth_console_token}"
+    }
+    published = source_client.post(
+        "/api/v2/trade/offers",
+        json=context["offer"].to_dict(),
+        headers=source_auth,
+    )
+    assert published.status_code == 200, published.text
+    source_offer_digest = offer_digest(context["offer"])
+    announced = source_client.post(
+        f"/api/v2/trade/offers/{source_offer_digest}/announce",
+        json={},
+        headers=source_auth,
+    )
+    assert announced.status_code == 200, announced.text
+
+    order = _order(context)
+    created = datetime.now(timezone.utc).replace(microsecond=0)
+    delivery = create_trade_order_delivery(
+        context["maker"],
+        order=order,
+        created_at=created.isoformat().replace("+00:00", "Z"),
+        not_after=(created + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        nonce="9a" * 16,
+        now=created,
+    )
+    target_client = TestClient(target_app)
+    accepted = target_client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202, accepted.text
+    source_client.close()
+    target_client.close()
+    source_node = _UvicornProcessServer(source_workspace, _free_tcp_port())
+    target_node = _UvicornProcessServer(target_workspace, _free_tcp_port())
+    import_path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package_digest}/import"
+    )
+    try:
+        source_node.start()
+        target_node.start()
+        imported = _process_http_json(
+            target_node.url + import_path,
+            payload={"peer_url": source_node.url},
+            headers={"Authorization": f"Bearer {target_node.token}"},
+        )
+        assert imported["status"] == "installed"
+        assert imported["package_digest"] == package_digest
+        audit_event_id = imported["audit_event_id"]
+        target_node.restart()
+        catalog = _process_http_json(
+            target_node.url + "/api/v2/trade/rule-packages",
+            headers={"Authorization": f"Bearer {target_node.token}"},
+        )
+    finally:
+        target_node.stop()
+        source_node.stop()
+
+    assert package_digest in {
+        item["package_digest"] for item in catalog["items"]
+    }
+    catalog_item = next(
+        item for item in catalog["items"]
+        if item["package_digest"] == package_digest
+    )
+    assert catalog_item["import_audit"]["status"] == "anchored"
+    assert catalog_item["provenance"] == {
+        "status": "explicit",
+        "sources": ["federated"],
+    }
+    restarted = create_app(target_workspace, require_console_auth=True)
+    import_events = [
+        event
+        for event in restarted.state.nth.spine.verified_snapshot()
+        if event.type == "trade.rule-package.imported"
+    ]
+    assert len(import_events) == 1
+    assert import_events[0].event_id == audit_event_id
+    assert import_events[0].payload["source_origin"] == source_node.url
+
+
+def test_rule_package_detail_does_not_expose_store_exception_text(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    package_digest = "sha256:" + ("d" * 64)
+
+    class BrokenPackageStore:
+        def load(self, digest):
+            assert digest == package_digest
+            raise RulePackageCorruptionError(
+                "secret-backend-detail token=do-not-leak"
+            )
+
+    app.state.nth.trade_rule_packages = BrokenPackageStore()
+    response = TestClient(app).get(
+        f"/api/v2/trade/rule-packages/{package_digest}",
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}"
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "trade rule package integrity failure"
+    }
+    assert "secret-backend-detail" not in response.text
+    assert "token" not in response.text
+
+
+def test_operator_package_import_recovers_missing_spine_audit_without_refetch(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package_digest = context["package_digest"]
+    package = context["package_store"].load(package_digest)
+    assert package is not None
+    fetch_calls = 0
+
+    def fetch(*_args, **_kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return package
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_package_from_peer",
+        fetch,
+    )
+    original_append_unique = app.state.nth.spine.append_unique
+    audit_attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal audit_attempts
+        audit_attempts += 1
+        if audit_attempts == 2:
+            raise OSError("simulated Spine outage")
+        return original_append_unique(*args, **kwargs)
+
+    monkeypatch.setattr(app.state.nth.spine, "append_unique", fail_once)
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package_digest}/import"
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+
+    failed = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=headers,
+    )
+
+    assert failed.status_code == 503
+    assert failed.headers["retry-after"] == "1"
+    assert failed.json()["detail"] == {
+        "code": "trade-rule-package-audit-incomplete",
+        "message": "signed Trade Rule Package import audit is incomplete",
+        "package_digest": package_digest,
+        "retryable": True,
+    }
+    assert app.state.nth.trade_rule_packages.load(package_digest) is not None
+    incomplete = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers=headers,
+    )
+    assert incomplete.status_code == 200, incomplete.text
+    assert incomplete.json()["execution"]["skills"][0]["status"] == "unavailable"
+    catalog = client.get(
+        "/api/v2/trade/rule-packages",
+        headers=headers,
+    )
+    assert catalog.status_code == 200, catalog.text
+    cached = next(
+        item for item in catalog.json()["items"]
+        if item["package_digest"] == package_digest
+    )
+    assert cached["import_audit"] == {
+        "status": "incomplete",
+        "proposed_count": 1,
+        "anchored_count": 0,
+        "incomplete_count": 1,
+    }
+    assert cached["provenance"] == {
+        "status": "explicit",
+        "sources": ["federated"],
+    }
+    recovered = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=headers,
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["status"] == "already-installed"
+    assert recovered.json()["audit_created"] is True
+    assert fetch_calls == 1
+    assert audit_attempts == 4
+    assert len([
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == "trade.rule-package.imported"
+    ]) == 1
+
+
+def test_import_audit_recomputes_semantic_key_and_blocks_cross_order_cache(
+    tmp_path,
+):
+    identity = AgentIdentity.generate(label="import-audit-reader")
+    spine = SignedEventLog(tmp_path / "spine.jsonl", identity)
+    package_digest = f"sha256:{'a' * 64}"
+    first_order = f"sha256:{'b' * 64}"
+    second_order = f"sha256:{'c' * 64}"
+    import_id = web_v2_api._trade_rule_package_import_id(
+        order_digest=first_order,
+        package_digest=package_digest,
+    )
+    payload = {
+        "import_id": import_id,
+        "order_digest": first_order,
+        "offer_digest": f"sha256:{'d' * 64}",
+        "package_digest": package_digest,
+        "rule_id": "org.nthdao.rules/delivery",
+        "package_publisher_did": identity.as_did(),
+        "source_origin": "https://peer.example",
+        "action": "verified-cache-import-proposed",
+    }
+    spine.append("trade.rule-package.import.proposed", payload)
+    cached_package = object()
+
+    class Cache:
+        @staticmethod
+        def provenance_sources(digest):
+            assert digest == package_digest
+            return ("federated",)
+
+        @staticmethod
+        def load(digest):
+            assert digest == package_digest
+            return cached_package
+
+    resolver = web_v2_api._OrderAuditedRulePackageResolver(
+        Cache(),
+        spine,
+        second_order,
+        tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="audit is incomplete"):
+        resolver.load(package_digest)
+
+    spine.append(
+        "trade.rule-package.imported",
+        {**payload, "action": "verified-cache-import"},
+    )
+    assert resolver.load(package_digest) is cached_package
+
+    malformed = SignedEventLog(tmp_path / "malformed.jsonl", identity)
+    malformed.append(
+        "trade.rule-package.import.proposed",
+        {**payload, "import_id": "e" * 64},
+    )
+    with pytest.raises(RuntimeError, match="binding is invalid"):
+        web_v2_api._trade_rule_package_import_audit_index(malformed)
+
+    orphan = SignedEventLog(tmp_path / "orphan.jsonl", identity)
+    orphan.append(
+        "trade.rule-package.imported",
+        {**payload, "action": "verified-cache-import"},
+    )
+    with pytest.raises(RuntimeError, match="missing its write-ahead intent"):
+        web_v2_api._trade_rule_package_import_audit_index(orphan)
+
+    conflicting = SignedEventLog(tmp_path / "conflicting.jsonl", identity)
+    conflicting.append("trade.rule-package.import.proposed", payload)
+    conflicting.append(
+        "trade.rule-package.imported",
+        {
+            **payload,
+            "offer_digest": f"sha256:{'e' * 64}",
+            "rule_id": "org.nthdao.rules/conflicting",
+            "source_origin": "https://other.example",
+            "action": "verified-cache-import",
+        },
+    )
+    with pytest.raises(RuntimeError, match="binding conflicts across stages"):
+        web_v2_api._trade_rule_package_import_audit_index(conflicting)
+
+    duplicate = SignedEventLog(tmp_path / "duplicate.jsonl", identity)
+    duplicate.append("trade.rule-package.import.proposed", payload)
+    duplicate.append("trade.rule-package.import.proposed", payload)
+    with pytest.raises(RuntimeError, match="duplicate semantic event"):
+        web_v2_api._trade_rule_package_import_audit_index(duplicate)
+
+
+def test_order_audited_resolver_reuses_snapshot_and_shares_import_lock(tmp_path):
+    identity = AgentIdentity.generate(label="import-audit-cache")
+    signed_spine = SignedEventLog(tmp_path / "spine.jsonl", identity)
+
+    class CountingSpine:
+        def __init__(self):
+            self.verified_calls = 0
+
+        def storage_token(self):
+            return signed_spine.storage_token()
+
+        def verified_snapshot_with_token(self):
+            self.verified_calls += 1
+            return signed_spine.verified_snapshot_with_token()
+
+    packages = {
+        f"sha256:{'6' * 64}": object(),
+        f"sha256:{'7' * 64}": object(),
+    }
+
+    class Cache:
+        @staticmethod
+        def provenance_sources(digest):
+            assert digest in packages
+            return ("local",)
+
+        @staticmethod
+        def load(digest):
+            return packages.get(digest)
+
+    spine = CountingSpine()
+    resolver = web_v2_api._OrderAuditedRulePackageResolver(
+        Cache(),
+        spine,
+        f"sha256:{'8' * 64}",
+        tmp_path,
+    )
+    first_digest, second_digest = packages
+    held = InterProcessLock(
+        web_v2_api._trade_rule_package_import_lock_target(
+            tmp_path,
+            first_digest,
+        ),
+        timeout=1.0,
+    )
+    held.acquire()
+    released = False
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(resolver.load, first_digest)
+            time.sleep(0.1)
+            assert not pending.done()
+            held.release()
+            released = True
+            assert pending.result(timeout=3) is packages[first_digest]
+    finally:
+        if not released:
+            held.release()
+
+    assert resolver.load(second_digest) is packages[second_digest]
+    assert resolver.load(first_digest) is packages[first_digest]
+    assert spine.verified_calls == 1
+
+
+def test_order_audited_resolver_rejects_unclassified_and_unaudited_federation(
+    tmp_path,
+):
+    identity = AgentIdentity.generate(label="provenance-reader")
+    spine = SignedEventLog(tmp_path / "spine.jsonl", identity)
+    package_digest = f"sha256:{'9' * 64}"
+    package = object()
+
+    class Cache:
+        sources: tuple[str, ...] = ()
+
+        @classmethod
+        def provenance_sources(cls, digest):
+            assert digest == package_digest
+            return cls.sources
+
+        @staticmethod
+        def load(digest):
+            assert digest == package_digest
+            return package
+
+    resolver = web_v2_api._OrderAuditedRulePackageResolver(
+        Cache(),
+        spine,
+        f"sha256:{'8' * 64}",
+        tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="provenance is unclassified"):
+        resolver.load(package_digest)
+
+    Cache.sources = ("federated",)
+    with pytest.raises(RuntimeError, match="lacks a signed import anchor"):
+        resolver.load(package_digest)
+
+    Cache.sources = ("local",)
+    assert resolver.load(package_digest) is package
+
+
+def test_operator_package_import_rejects_digest_outside_order_before_fetch(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+
+    def forbidden_fetch(*_args, **_kwargs):
+        raise AssertionError("unbound package must not trigger network I/O")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_package_from_peer",
+        forbidden_fetch,
+    )
+    response = client.post(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"sha256:{'e' * 64}/import",
+        json={"peer_url": "http://localhost:19090"},
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+    assert response.status_code == 409
+
+
+def test_operator_package_import_rejects_unknown_request_fields_before_fetch(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+
+    def forbidden_fetch(*_args, **_kwargs):
+        raise AssertionError("invalid request must not trigger network I/O")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_package_from_peer",
+        forbidden_fetch,
+    )
+    response = client.post(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{context['package_digest']}/import",
+        json={
+            "peer_url": "http://localhost:19090",
+            "unexpected": "silently accepted before this fix",
+        },
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_operator_package_import_single_flights_concurrent_fetches(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package_digest = context["package_digest"]
+    package = context["package_store"].load(package_digest)
+    assert package is not None
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def fetch(
+        peer_url,
+        *,
+        offer_digest,
+        package_digest,
+        offer_publisher_did,
+        timeout_seconds=15.0,
+    ):
+        del (
+            peer_url,
+            offer_digest,
+            package_digest,
+            offer_publisher_did,
+            timeout_seconds,
+        )
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.2)
+        return package
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_package_from_peer",
+        fetch,
+    )
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package_digest}/import"
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        responses = list(pool.map(
+            lambda _index: client.post(
+                path,
+                json={"peer_url": "http://localhost:19090"},
+                headers=headers,
+            ),
+            range(6),
+        ))
+
+    assert [response.status_code for response in responses] == [200] * 6
+    assert calls == 1
+    assert sum(response.json()["installed"] for response in responses) == 1
+    assert sum(response.json()["audit_created"] for response in responses) == 1
+    assert len({response.json()["audit_event_id"] for response in responses}) == 1
+    assert len([
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == "trade.rule-package.imported"
+    ]) == 1
+
+
+def test_operator_package_import_uses_cross_process_global_slots(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package_digest = context["package_digest"]
+    package = context["package_store"].load(package_digest)
+    assert package is not None
+    fetch_calls = 0
+
+    def fetch(*_args, **_kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return package
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_package_from_peer",
+        fetch,
+    )
+    slot_root = (
+        Path(app.state.nth.workspace)
+        / "trade"
+        / "rule_package_import_slots"
+    )
+    holders = []
+    hold_script = (
+        "import sys,time;"
+        "from pathlib import Path;"
+        "from nth_dao.util import InterProcessLock;"
+        "lock=InterProcessLock(Path(sys.argv[1]),timeout=5.0);"
+        "lock.acquire();"
+        "Path(sys.argv[2]).write_text('ready',encoding='ascii');"
+        "time.sleep(120)"
+    )
+    for index in range(web_v2_api._TRADE_RULE_PACKAGE_IMPORT_MAX_CONCURRENCY):
+        ready = tmp_path / f"slot-{index}.ready"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                hold_script,
+                str(slot_root / str(index)),
+                str(ready),
+            ],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            ),
+        )
+        deadline = time.monotonic() + 10.0
+        while not ready.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.025)
+        assert ready.exists()
+        holders.append(process)
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package_digest}/import"
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    try:
+        blocked = client.post(
+            path,
+            json={"peer_url": "http://localhost:19090"},
+            headers=headers,
+        )
+        assert blocked.status_code == 503
+        assert blocked.headers["retry-after"] == "1"
+        assert blocked.json()["detail"] == (
+            "Trade Rule Package import concurrency is full"
+        )
+        assert fetch_calls == 0
+
+        crashed = holders.pop()
+        crashed.terminate()
+        crashed.wait(timeout=10.0)
+        recovered = client.post(
+            path,
+            json={"peer_url": "http://localhost:19090"},
+            headers=headers,
+        )
+        assert recovered.status_code == 200, recovered.text
+        assert fetch_calls == 1
+    finally:
+        for process in holders:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=10.0)
+
+
 def test_agreement_rest_exposes_verified_execution_receipt_history(tmp_path):
     app = create_app(tmp_path / "node", require_console_auth=True)
     context, order, delivery = _live_order_delivery(tmp_path, app)
@@ -5039,6 +6051,61 @@ def test_trade_peer_resolution_rejects_dns_loopback_rebinding(monkeypatch):
         )
         == "127.0.0.1"
     )
+
+
+def test_trade_peer_localhost_dual_stack_uses_dialable_ipv4_fallback():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    url = f"http://localhost:{server.server_port}/probe"
+    try:
+        addresses = web_v2_api._resolve_operator_trade_peer_ips(url)
+        body = web_v2_api._call_operator_trade_peer_with_fallback(
+            url,
+            lambda address: _urllib_get_bytes_pinned(
+                url,
+                address,
+                timeout_s=2.0,
+                max_bytes=16,
+            ),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2.0)
+
+    assert "127.0.0.1" in addresses
+    assert body == b"ok"
+
+
+def test_trade_peer_address_fallback_retries_connections_not_http_errors(monkeypatch):
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("192.0.2.1", "192.0.2.2"),
+    )
+    attempted = []
+
+    def operation(address):
+        attempted.append(address)
+        if address == "192.0.2.1":
+            raise ConnectionRefusedError("first address unavailable")
+        return "connected"
+
+    assert web_v2_api._call_operator_trade_peer_with_fallback(
+        "https://peer.example",
+        operation,
+    ) == "connected"
+    assert attempted == ["192.0.2.1", "192.0.2.2"]
 
 
 def test_public_order_delivery_rejects_foreign_recipient_without_write(

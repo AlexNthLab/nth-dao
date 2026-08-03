@@ -320,7 +320,13 @@ class PersistentRateLimiter:
             # Wall time is required for cross-process persistence. Clamp it to
             # the last committed observation so an NTP/manual clock rollback
             # cannot erase a caller's active budget.
-            now_ms_value = max(observed_ms, int(state.get("last_now_ms") or 0))
+            last_now_ms = int(state.get("last_now_ms") or 0)
+            rebase_ms = (
+                last_now_ms - observed_ms
+                if last_now_ms - observed_ms > self._window_ms
+                else 0
+            )
+            now_ms_value = observed_ms if rebase_ms else max(observed_ms, last_now_ms)
             cutoff = now_ms_value - self._window_ms
             salt = str(state.get("salt") or secrets.token_hex(32))
             raw_buckets = state.get("buckets")
@@ -332,8 +338,10 @@ class PersistentRateLimiter:
                 if not isinstance(bucket_key, str) or not isinstance(values, list):
                     continue
                 timestamps = sorted(
-                    item for item in values
-                    if type(item) is int and cutoff < item <= now_ms_value
+                    item - rebase_ms
+                    for item in values
+                    if type(item) is int
+                    and cutoff < item - rebase_ms <= now_ms_value
                 )[-self._max :]
                 if timestamps:
                     cleaned[bucket_key] = timestamps
@@ -342,10 +350,20 @@ class PersistentRateLimiter:
             if len(bucket) >= self._max:
                 retry_ms = max(0, bucket[0] + self._window_ms - now_ms_value)
                 retry_after = retry_ms / 1000.0
+                if rebase_ms:
+                    atomic_write_json(
+                        self._path,
+                        {
+                            "version": self.VERSION,
+                            "salt": salt,
+                            "buckets": cleaned,
+                            "last_now_ms": now_ms_value,
+                        },
+                    )
                 # The persistent state is unchanged on rejection. Rewriting
-                # it would let a blocked caller turn every 429 into fsync and
-                # os.replace work. A short process-local negative cache also
-                # avoids repeated lock and JSON reads during the same window.
+                # it normally would let a blocked caller turn every 429 into
+                # fsync and os.replace work. A clock-anomaly rebase is the one
+                # bounded exception because it must survive process restart.
                 self._remember_denial(
                     key,
                     retry_after,
@@ -373,6 +391,188 @@ class PersistentRateLimiter:
             return RateLimitDecision(True, 0.0, self._max - len(bucket))
 
 
+class RateBudgetLimiter:
+    """Process-local fixed-window limiter for integer resource costs."""
+
+    def __init__(
+        self,
+        *,
+        max_cost_per_window: int,
+        window_seconds: float,
+        max_tracked_keys: int = RateLimiter.DEFAULT_MAX_TRACKED_KEYS,
+        clock=time.monotonic,
+    ) -> None:
+        if type(max_cost_per_window) is not int or max_cost_per_window <= 0:
+            raise ValueError("max_cost_per_window must be a positive integer")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if max_tracked_keys <= 0:
+            raise ValueError("max_tracked_keys must be positive")
+        self._max = max_cost_per_window
+        self._window = float(window_seconds)
+        self._max_tracked_keys = max_tracked_keys
+        self._clock = clock
+        self._buckets: Dict[str, tuple[float, int]] = {}
+        self._lock = Lock()
+
+    def check(self, key: str, cost: int) -> RateLimitDecision:
+        if type(cost) is not int or cost <= 0:
+            raise ValueError("cost must be a positive integer")
+        if not isinstance(key, str) or not key:
+            return RateLimitDecision(True, 0.0, self._max)
+        now = float(self._clock())
+        if not math.isfinite(now) or now < 0:
+            raise ValueError("rate-budget clock is invalid")
+        with self._lock:
+            expired = [
+                bucket_key
+                for bucket_key, (started, _used) in self._buckets.items()
+                if now - started >= self._window
+            ]
+            for bucket_key in expired:
+                self._buckets.pop(bucket_key, None)
+            started, used = self._buckets.get(key, (now, 0))
+            if used + cost > self._max:
+                return RateLimitDecision(
+                    False,
+                    max(0.0, started + self._window - now),
+                    max(0, self._max - used),
+                )
+            if key not in self._buckets and len(self._buckets) >= self._max_tracked_keys:
+                oldest = min(self._buckets, key=lambda item: self._buckets[item][0])
+                self._buckets.pop(oldest, None)
+            used += cost
+            self._buckets[key] = (started, used)
+            return RateLimitDecision(True, 0.0, self._max - used)
+
+
+class PersistentRateBudgetLimiter:
+    """Cross-process fixed-window limiter for weighted public resources."""
+
+    VERSION = 1
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_cost_per_window: int,
+        window_seconds: float,
+        max_tracked_keys: int = 4096,
+        clock=time.time,
+    ) -> None:
+        if type(max_cost_per_window) is not int or max_cost_per_window <= 0:
+            raise ValueError("max_cost_per_window must be a positive integer")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if max_tracked_keys <= 0:
+            raise ValueError("max_tracked_keys must be positive")
+        self._path = Path(path)
+        self._max = max_cost_per_window
+        self._window_ms = max(1, int(float(window_seconds) * 1000))
+        self._max_tracked_keys = max_tracked_keys
+        self._clock = clock
+
+    def check(self, key: str, cost: int) -> RateLimitDecision:
+        if type(cost) is not int or cost <= 0:
+            raise ValueError("cost must be a positive integer")
+        if not isinstance(key, str) or not key:
+            return RateLimitDecision(True, 0.0, self._max)
+        observed = float(self._clock())
+        if not math.isfinite(observed) or observed < 0:
+            raise ValueError("persistent rate-budget clock is invalid")
+        observed_ms = int(observed * 1000)
+        with InterProcessLock(self._path, timeout=5.0):
+            existed = self._path.exists()
+            raw = safe_load_json(self._path, fallback=None)
+            if raw is None and existed:
+                raise ValueError("persistent rate-budget state is malformed")
+            if raw is not None and not isinstance(raw, dict):
+                raise ValueError("persistent rate-budget state is malformed")
+            state = raw if isinstance(raw, dict) else {}
+            if state and state.get("version") != self.VERSION:
+                raise ValueError("persistent rate-budget state is malformed")
+            salt = state.get("salt") or secrets.token_hex(32)
+            buckets_value = state.get("buckets") or {}
+            last_now_ms = state.get("last_now_ms", 0)
+            if (
+                not isinstance(salt, str)
+                or len(salt) != 64
+                or not isinstance(buckets_value, dict)
+                or type(last_now_ms) is not int
+                or last_now_ms < 0
+            ):
+                raise ValueError("persistent rate-budget state is malformed")
+            try:
+                bytes.fromhex(salt)
+            except ValueError as exc:
+                raise ValueError("persistent rate-budget salt is malformed") from exc
+            rebase_ms = (
+                last_now_ms - observed_ms
+                if last_now_ms - observed_ms > self._window_ms
+                else 0
+            )
+            now_ms = observed_ms if rebase_ms else max(observed_ms, last_now_ms)
+            cleaned: Dict[str, dict[str, int]] = {}
+            for bucket_key, bucket in list(buckets_value.items())[
+                : self._max_tracked_keys * 2
+            ]:
+                if not isinstance(bucket_key, str) or not isinstance(bucket, dict):
+                    continue
+                started_ms = bucket.get("started_ms")
+                used = bucket.get("used")
+                if type(started_ms) is int:
+                    started_ms -= rebase_ms
+                if (
+                    type(started_ms) is int
+                    and type(used) is int
+                    and 0 <= started_ms <= now_ms
+                    and 0 <= used <= self._max
+                    and now_ms - started_ms < self._window_ms
+                ):
+                    cleaned[bucket_key] = {
+                        "started_ms": started_ms,
+                        "used": used,
+                    }
+            private_key = PersistentRateLimiter._private_key(salt, key)
+            bucket = cleaned.get(private_key, {"started_ms": now_ms, "used": 0})
+            used = bucket["used"]
+            if used + cost > self._max:
+                retry_ms = max(
+                    0,
+                    bucket["started_ms"] + self._window_ms - now_ms,
+                )
+                if rebase_ms:
+                    atomic_write_json(
+                        self._path,
+                        {
+                            "version": self.VERSION,
+                            "salt": salt,
+                            "buckets": cleaned,
+                            "last_now_ms": now_ms,
+                        },
+                    )
+                return RateLimitDecision(
+                    False,
+                    retry_ms / 1000.0,
+                    max(0, self._max - used),
+                )
+            if private_key not in cleaned and len(cleaned) >= self._max_tracked_keys:
+                oldest = min(cleaned, key=lambda item: cleaned[item]["started_ms"])
+                cleaned.pop(oldest, None)
+            bucket["used"] = used + cost
+            cleaned[private_key] = bucket
+            atomic_write_json(
+                self._path,
+                {
+                    "version": self.VERSION,
+                    "salt": salt,
+                    "buckets": cleaned,
+                    "last_now_ms": now_ms,
+                },
+            )
+            return RateLimitDecision(True, 0.0, self._max - bucket["used"])
+
+
 async def enforce_min_response_time(start_monotonic: float, floor_seconds: float) -> None:
     """Pad the request handler's response time up to a floor.
 
@@ -396,7 +596,9 @@ async def enforce_min_response_time(start_monotonic: float, floor_seconds: float
 
 __all__ = [
     "RateLimitDecision",
+    "RateBudgetLimiter",
     "RateLimiter",
+    "PersistentRateBudgetLimiter",
     "PersistentRateLimiter",
     "enforce_min_response_time",
 ]

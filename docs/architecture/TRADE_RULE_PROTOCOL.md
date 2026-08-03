@@ -131,6 +131,64 @@ manifest is the package commit marker. Loading re-verifies the publisher
 signature and every resource. The cache never imports or executes Python,
 JavaScript, shell code, WASM, or remote services.
 
+Rule Package Bundle v1 is the bounded federation envelope for that immutable
+content. It carries an Offer-publisher-signed, domain-separated assertion over
+one exact Offer digest and Package digest, plus the signed Manifest and
+digest-sorted, canonical-base64url resources.
+The public endpoint serves only Packages reachable through a currently live,
+locally published Offer; it is not a Package-store enumeration API. Import is
+an explicit operator action bound to an already-audited local Order. Parsing
+rechecks the Manifest signature, every resource hash and size, the Package
+digest, and the Offer/Order binding before installing the non-executing cache.
+A successful import explicitly grants neither publisher trust nor Adapter or
+funds execution authority. The Offer-to-Package binding signer must be the
+exact publisher DID carried by the signed Offer; a valid signature from any
+other DID is unauthorized. Public Package responses have a dedicated
+cross-process request budget, are conservatively byte-budgeted before signing
+or base64 encoding, and hold a concurrency slot across the full verification
+and encoding path;
+stable tuple ETags permit a verified live Offer to return 304 without
+rebuilding the Bundle. Imports single-flight per Package digest across local
+processes before writing the content-addressed cache and share a bounded set
+of OS-backed cross-process import slots across different digests. Before cache
+installation, the importer writes an idempotent
+`trade.rule-package.import.proposed` Spine event. The final
+`trade.rule-package.imported` event uses the same semantic ID derived only from
+the Order and Package digests; changing a peer URL cannot create a second
+semantic import. Both events bind the Order, Offer, Package, Rule ID, Package
+publisher, and the peer origin. URL paths, queries, fragments, and credentials
+are not retained in audit data. If cache installation succeeds but the final
+Spine append fails, execution fails closed for that Order and for any other
+Order attempting to reuse the as-yet-unanchored cache. A later retry reuses the
+verified cache and repairs the missing signed audit before reporting success.
+
+The Package Store persists a canonical, bounded provenance sidecar after the
+content-addressed Manifest commit. Acquisition sources are explicit:
+`local` means an operator-controlled local installation and `federated` means
+the package passed through the peer importer. A Package with no sidecar is
+`unclassified`; this is the safe migration state for legacy or interrupted
+installs and is inspectable but not executable. Federated-only provenance must
+have at least one complete, semantically bound proposed/final Spine import
+pair. Explicit local provenance does not require a federation import event,
+but it grants neither publisher trust, Rule Recognition, nor execution
+authority; current local policy must still approve the exact signed Package.
+An interrupted provenance write therefore fails closed and can be repaired by
+an idempotent reinstall without rewriting immutable Package content.
+
+The authenticated local Trade Skill catalog exposes bounded summaries and one
+exact signed Manifest through `/api/v2/trade/rule-packages`. Under one package
+store lock, a page scan checks the bounded store shape and replays full Package
+verification only for the selected page. It never returns resource bodies, and
+responses are marked `Cache-Control: no-store`. Catalog responses call
+the Package a verified cache entry, set recognition to `not-evaluated`, and set
+execution authority to false. They also expose the derived import-audit state
+(`not-applicable`, `anchored`, `incomplete`, or `mixed`) from signature-verified
+Spine events and the persisted acquisition provenance (`explicit` sources or
+`unclassified`). The Market UI preserves and displays those distinctions and
+must not infer "local" merely from the absence of an import event.
+`/api/v2/rules` is reserved for local automation/approval Rules and must not
+project Trade Rule Packages into that unrelated data contract.
+
 Rule resolution is policy-driven and exact-digest only. The resolver walks
 bounded dependency graphs, rejects missing packages, conflicting packages,
 multiple digests for one Rule ID, inactive manifests, unavailable
@@ -568,6 +626,9 @@ The reviewed protocol kernel currently contains:
 - signed content digests;
 - append-only local Offer storage and deterministic revision projections;
 - content-addressed, non-executing Rule Package storage;
+- bounded Rule Package Bundle v1 federation for exact live-Offer dependencies,
+  with operator-directed, Order-bound, reverified cache import and explicit
+  non-trust/non-execution semantics;
 - explicit local recognition policy and bounded exact-digest dependency
   resolution;
 - signed, sequence-linked local Recognition policy revisions with deterministic
@@ -611,6 +672,9 @@ The reviewed protocol kernel currently contains:
   `trade.receipt.reviewed` / `trade.receipt.review.conflicted` Spine
   projections;
 - bounded package-store reconciliation with explicit cleanup;
+- authenticated, paginated local Trade Skill catalog inspection with strict
+  frontend response validation, metadata-only resource projection, and
+  explicit non-recognition/non-execution semantics;
 - strict local operator APIs for signed publish, paginated chain listing, and
   exact digest retrieval;
 - user-directed durable import of a reverified federated Offer into the local

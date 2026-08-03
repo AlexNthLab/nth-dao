@@ -655,6 +655,7 @@ export interface TradeExecutionHistoryPage {
 
 export interface TradeExecutionView {
   order_digest: string;
+  source_offer_digest: string;
   status: "ready" | "blocked" | "unavailable";
   error_code: string;
   coordinator: {
@@ -699,6 +700,75 @@ export interface TradeExecutionView {
   history: TradeExecutionHistoryPage;
   blocking_reasons: string[];
   evaluated_at: string;
+}
+
+export interface TradeRulePackageImportResult {
+  status: "installed" | "already-installed";
+  installed: boolean;
+  offer_digest: string;
+  package_digest: string;
+  rule_id: string;
+  version: string;
+  publisher_did: string;
+  audit_event_id: string;
+  audit_created: boolean;
+  resource_count: number;
+  resource_bytes: number;
+  trust_granted: false;
+  execution_authority_granted: false;
+  warning: string;
+}
+
+export interface TradeRulePackageCatalogItem {
+  package_digest: string;
+  rule_id: string;
+  version: string;
+  publisher_did: string;
+  summary: string;
+  applies_to: string[];
+  families: string[];
+  published_at: string;
+  not_after: string | null;
+  execution: {
+    mode: "declarative" | "adapter" | "sandboxed_wasm" | "external_service";
+    permissions: string[];
+  };
+  required_capabilities: string[];
+  resource_count: number;
+  resource_bytes: number;
+  dependency_count: number;
+  conflict_count: number;
+  verification: {
+    status: "verified-cache";
+    publisher_signature: true;
+    resource_digests: true;
+  };
+  import_audit: {
+    status: "not-applicable" | "anchored" | "incomplete" | "mixed";
+    proposed_count: number;
+    anchored_count: number;
+    incomplete_count: number;
+  };
+  provenance: {
+    status: "explicit" | "unclassified";
+    sources: Array<"federated" | "local">;
+  };
+  trust: {
+    status: "not-evaluated";
+    advisory: true;
+    execution_authorized: false;
+  };
+}
+
+export interface TradeRulePackageCatalogPage {
+  items: TradeRulePackageCatalogItem[];
+  next_cursor: string;
+  cache_only: true;
+  execution_authorized: false;
+}
+
+export interface TradeRulePackageDetail extends TradeRulePackageCatalogItem {
+  manifest: Record<string, unknown>;
 }
 
 export interface TradeOrderDetail extends TradeOrderSummary {

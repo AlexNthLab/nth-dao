@@ -9,9 +9,12 @@ import {
   fetchCommerceOrders,
   fetchTradeProposals,
   fetchTradeOrders,
+  fetchTradeRulePackages,
   getTradeExecutionReceipts,
   getTradeOrder,
   getTradeProposal,
+  getTradeRulePackage,
+  importTradeRulePackage,
   listOpenTasks,
   publishCommerceListing,
   remoteCommerceCheckout,
@@ -28,10 +31,12 @@ import type {
   TradeProposalSummary,
   TradeOrderDetail,
   TradeOrderSummary,
+  TradeRulePackageCatalogItem,
+  TradeRulePackageDetail,
 } from "../types-v2";
 import { useToast } from "./Toast";
 
-type Scope = "purchases" | "sales" | "offers" | "proposals" | "agreements";
+type Scope = "purchases" | "sales" | "offers" | "proposals" | "agreements" | "skills";
 
 function short(value: string, size = 18) {
   return value.length <= size ? value : `${value.slice(0, size - 5)}...${value.slice(-4)}`;
@@ -85,6 +90,13 @@ export function CommerceView() {
   const [agreementDataPreserved, setAgreementDataPreserved] = useState(false);
   const [selectedAgreementDigest, setSelectedAgreementDigest] = useState("");
   const [selectedAgreement, setSelectedAgreement] = useState<TradeOrderDetail | null>(null);
+  const [skills, setSkills] = useState<TradeRulePackageCatalogItem[]>([]);
+  const [skillNextCursor, setSkillNextCursor] = useState("");
+  const [skillPageBusy, setSkillPageBusy] = useState(false);
+  const [skillError, setSkillError] = useState("");
+  const [skillDataPreserved, setSkillDataPreserved] = useState(false);
+  const [selectedSkillDigest, setSelectedSkillDigest] = useState("");
+  const [selectedSkill, setSelectedSkill] = useState<TradeRulePackageDetail | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [busy, setBusy] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -103,11 +115,12 @@ export function CommerceView() {
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++refreshSequence.current;
-    const [listingResult, orderResult, marketResult, proposalResult, agreementResult] = await Promise.allSettled([
+    const [listingResult, orderResult, marketResult, proposalResult, agreementResult, skillResult] = await Promise.allSettled([
       fetchCommerceListings(signal), fetchCommerceOrders(undefined, signal),
       listOpenTasks({ context: "commerce", listingType: "service" }, signal),
       fetchTradeProposals("", signal),
       fetchTradeOrders("", signal),
+      fetchTradeRulePackages("", signal),
     ]);
     if (signal?.aborted || sequence !== refreshSequence.current) return;
     if (listingResult.status === "fulfilled") setListings(listingResult.value);
@@ -182,6 +195,30 @@ export function CommerceView() {
         setAgreementDataPreserved(true);
       }
     }
+    if (skillResult.status === "fulfilled") {
+      const nextSkills = skillResult.value.items;
+      setSkillError("");
+      setSkillDataPreserved(false);
+      setSkills(nextSkills);
+      setSkillNextCursor(skillResult.value.next_cursor);
+      setSelectedSkillDigest((current) =>
+        current && nextSkills.some((row) => row.package_digest === current)
+          ? current
+          : nextSkills[0]?.package_digest ?? "",
+      );
+    } else if (!isAbort(skillResult.reason)) {
+      const error = skillResult.reason;
+      setSkillError(error instanceof Error ? error.message : String(error));
+      if ([401, 403].includes(httpStatus(error) ?? 0)) {
+        setSkillDataPreserved(false);
+        setSkills([]);
+        setSkillNextCursor("");
+        setSelectedSkillDigest("");
+        setSelectedSkill(null);
+      } else {
+        setSkillDataPreserved(true);
+      }
+    }
   }, [toast]);
 
   const loadMoreProposals = useCallback(async () => {
@@ -247,6 +284,40 @@ export function CommerceView() {
       setAgreementPageBusy(false);
     }
   }, [agreementNextCursor, agreementPageBusy, toast]);
+
+  const loadMoreSkills = useCallback(async () => {
+    if (!skillNextCursor || skillPageBusy) return;
+    const sequence = refreshSequence.current;
+    setSkillPageBusy(true);
+    try {
+      const page = await fetchTradeRulePackages(skillNextCursor);
+      if (sequence !== refreshSequence.current) return;
+      setSkills((current) => {
+        const known = new Set(current.map((item) => item.package_digest));
+        return current.concat(
+          page.items.filter((item) => !known.has(item.package_digest)),
+        );
+      });
+      setSkillNextCursor(page.next_cursor);
+      setSkillError("");
+      setSkillDataPreserved(false);
+    } catch (error) {
+      if (sequence !== refreshSequence.current) return;
+      setSkillError(error instanceof Error ? error.message : String(error));
+      if ([401, 403].includes(httpStatus(error) ?? 0)) {
+        setSkills([]);
+        setSkillNextCursor("");
+        setSelectedSkillDigest("");
+        setSelectedSkill(null);
+        setSkillDataPreserved(false);
+      } else {
+        setSkillDataPreserved(true);
+      }
+      toast.push(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setSkillPageBusy(false);
+    }
+  }, [skillNextCursor, skillPageBusy, toast]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -339,11 +410,48 @@ export function CommerceView() {
     };
   }, [scope, selectedAgreementDigest, agreementDetailVersion, toast]);
 
+  useEffect(() => {
+    if (scope !== "skills" || !selectedSkillDigest) {
+      if (!selectedSkillDigest) setSelectedSkill(null);
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    setSelectedSkill(null);
+    getTradeRulePackage(selectedSkillDigest, controller.signal)
+      .then((value) => {
+        if (active) {
+          setSelectedSkill(value);
+          setSkillError("");
+          setSkillDataPreserved(false);
+        }
+      })
+      .catch((error) => {
+        if (active && !isAbort(error)) {
+          if ([401, 403].includes(httpStatus(error) ?? 0)) {
+            setSkills([]);
+            setSkillNextCursor("");
+            setSelectedSkillDigest("");
+            setSelectedSkill(null);
+            setSkillDataPreserved(false);
+          } else {
+            setSkillDataPreserved(true);
+          }
+          setSkillError(error instanceof Error ? error.message : String(error));
+          toast.push(error instanceof Error ? error.message : String(error), "error");
+        }
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [scope, selectedSkillDigest, toast]);
+
   const visibleOrders = useMemo(() => orders.filter((order) =>
     scope === "purchases" ? order.role === "buyer" : scope === "sales" ? order.role === "seller" : false,
   ), [orders, scope]);
   const selected = orders.find((order) => order.order_id === selectedId) ?? null;
-  const isProtocolInbox = scope === "proposals" || scope === "agreements";
+  const isProtocolInbox = scope === "proposals" || scope === "agreements" || scope === "skills";
 
   async function run(action: () => Promise<unknown>, success: string) {
     if (busy) return;
@@ -475,11 +583,11 @@ export function CommerceView() {
           <span className="sidebar-title">Market</span>
         </div>
         <div className="commerce-scope" role="tablist" aria-label="Commerce views">
-          {(["purchases", "sales", "offers", "proposals", "agreements"] as Scope[]).map((item) => (
+          {(["purchases", "sales", "offers", "proposals", "agreements", "skills"] as Scope[]).map((item) => (
             <button key={item} type="button" role="tab" aria-selected={scope === item}
               className={scope === item ? "active" : ""} onClick={() => setScope(item)}>
-              {item === "purchases" ? "Purchases" : item === "sales" ? "Seller orders" : item === "offers" ? "My services" : item === "proposals" ? "Proposals" : "Agreements"}
-              <span>{item === "offers" ? listings.length + discovered.length : item === "proposals" ? proposals.length : item === "agreements" ? agreements.length : orders.filter((o) => o.role === (item === "purchases" ? "buyer" : "seller")).length}</span>
+              {item === "purchases" ? "Purchases" : item === "sales" ? "Seller orders" : item === "offers" ? "My services" : item === "proposals" ? "Proposals" : item === "agreements" ? "Agreements" : "Trade Skills"}
+              <span>{item === "offers" ? listings.length + discovered.length : item === "proposals" ? proposals.length : item === "agreements" ? agreements.length : item === "skills" ? skills.length : orders.filter((o) => o.role === (item === "purchases" ? "buyer" : "seller")).length}</span>
             </button>
           ))}
         </div>
@@ -534,7 +642,20 @@ export function CommerceView() {
               {agreementPageBusy ? "Loading..." : "Load more"}
             </button>
           )}
-          {((scope === "offers" && listings.length + discovered.length === 0) || (scope === "proposals" && proposals.length === 0) || (scope === "agreements" && agreements.length === 0) || (!(["offers", "proposals", "agreements"] as Scope[]).includes(scope) && visibleOrders.length === 0)) &&
+          {scope === "skills" && skills.map((skill) => (
+            <button key={skill.package_digest} className={`sidebar-item ${selectedSkillDigest === skill.package_digest ? "active" : ""}`}
+              onClick={() => { setSelectedSkill(null); setSelectedSkillDigest(skill.package_digest); }}>
+              <div className="sidebar-item-title"><span className="truncate">{skill.rule_id}</span></div>
+              <div className="sidebar-item-meta"><span>v{skill.version}</span><span>{skill.execution.mode}</span></div>
+            </button>
+          ))}
+          {scope === "skills" && skillNextCursor && (
+            <button className="btn btn-secondary commerce-load-more" type="button"
+              disabled={skillPageBusy} onClick={loadMoreSkills}>
+              {skillPageBusy ? "Loading..." : "Load more"}
+            </button>
+          )}
+          {((scope === "offers" && listings.length + discovered.length === 0) || (scope === "proposals" && proposals.length === 0) || (scope === "agreements" && agreements.length === 0) || (scope === "skills" && skills.length === 0) || (!(["offers", "proposals", "agreements", "skills"] as Scope[]).includes(scope) && visibleOrders.length === 0)) &&
             <p className="muted" style={{ padding: "12px 14px" }}>Nothing here yet.</p>}
         </div>
       </aside>
@@ -543,8 +664,8 @@ export function CommerceView() {
         <div className="main-head commerce-head">
           <div>
             <p className="main-eyebrow">A2A Commerce</p>
-            <h1 className="main-title">{scope === "proposals" ? "Trade proposals" : scope === "agreements" ? "Accepted agreements" : "Digital services"}</h1>
-            <p className="main-subtitle">{scope === "proposals" ? "Signed inbound negotiation claims awaiting independent review." : scope === "agreements" ? "Bilateral signed terms retained by this DAO. Delivery and payment remain separate." : "Signed orders, verifiable delivery, and manual NTH-TEST settlement. No real funds."}</p>
+            <h1 className="main-title">{scope === "proposals" ? "Trade proposals" : scope === "agreements" ? "Accepted agreements" : scope === "skills" ? "Trade Skills" : "Digital services"}</h1>
+            <p className="main-subtitle">{scope === "proposals" ? "Signed inbound negotiation claims awaiting independent review." : scope === "agreements" ? "Bilateral signed terms retained by this DAO. Delivery and payment remain separate." : scope === "skills" ? "Verified local Rule Packages that define optional transaction behavior." : "Signed orders, verifiable delivery, and manual NTH-TEST settlement. No real funds."}</p>
           </div>
           {!isProtocolInbox && <div className="commerce-head-actions">
             <button className="btn btn-secondary" onClick={() => {
@@ -610,9 +731,13 @@ export function CommerceView() {
             agreement={selectedAgreement}
             busy={busy}
             onRetryDispatch={retrySelectedAgreementDispatch}
+            onRefresh={() => setAgreementDetailVersion((value) => value + 1)}
           />}
-          {!showPublish && !showBuy && !(["offers", "proposals", "agreements"] as Scope[]).includes(scope) && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
-          {!showPublish && !showBuy && !(["offers", "proposals", "agreements"] as Scope[]).includes(scope) && selected && <OrderWorkbench order={selected} busy={busy}
+          {scope === "skills" && skillError && <p className="trade-proposal-warning" role="status">{skillDataPreserved ? "Trade Skill catalog unavailable; showing last known data" : "Trade Skill authorization failed; cached UI data cleared"}: {skillError}</p>}
+          {scope === "skills" && !selectedSkill && <div className="main-empty"><p>{skills.length > 0 ? "Select a Trade Skill to inspect its signed manifest." : "No verified Trade Skills are cached locally."}</p></div>}
+          {scope === "skills" && selectedSkill && <TradeSkillWorkbench skill={selectedSkill} />}
+          {!showPublish && !showBuy && !(["offers", "proposals", "agreements", "skills"] as Scope[]).includes(scope) && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
+          {!showPublish && !showBuy && !(["offers", "proposals", "agreements", "skills"] as Scope[]).includes(scope) && selected && <OrderWorkbench order={selected} busy={busy}
             targetUrl={targetUrl} setTargetUrl={(value) => {
               setTargetUrl(value);
               window.localStorage.setItem(`nth-commerce-peer:${selected.order_id}`, value);
@@ -629,7 +754,7 @@ export function CommerceView() {
       </section>
 
       <aside className="detail">
-        <div className="detail-head"><span className="detail-title">{scope === "proposals" ? "Proposal audit" : scope === "agreements" ? "Agreement audit" : "Order audit"}</span></div>
+        <div className="detail-head"><span className="detail-title">{scope === "proposals" ? "Proposal audit" : scope === "agreements" ? "Agreement audit" : scope === "skills" ? "Skill verification" : "Order audit"}</span></div>
         <div className="detail-body">
           {scope === "proposals" ? (selectedProposal ? <>
             <div className="detail-section">
@@ -650,7 +775,19 @@ export function CommerceView() {
               <div className="detail-row"><span className="key">Execution</span><span className="value">{selectedAgreement.execution?.status ?? "Unavailable"}</span></div>
               <div className="detail-row"><span className="key">Real funds</span><span className="value">Disabled</span></div>
             </div>
-          </> : <p className="muted">Select an agreement to inspect parties and audit status.</p>) : selected ? <>
+          </> : <p className="muted">Select an agreement to inspect parties and audit status.</p>) : scope === "skills" ? (selectedSkill ? <>
+            <div className="detail-section">
+              <div className="detail-section-label">Local cache claim</div>
+              <div className="detail-row"><span className="key">Signature</span><span className="value">Verified</span></div>
+              <div className="detail-row"><span className="key">Resources</span><span className="value">Verified</span></div>
+              <div className="detail-row"><span className="key">Recognition</span><span className="value">Not evaluated</span></div>
+              <div className="detail-row"><span className="key">Execution</span><span className="value">Not authorized</span></div>
+            </div>
+            <div className="detail-section">
+              <div className="detail-section-label">Content address</div>
+              <code title={selectedSkill.package_digest}>{short(selectedSkill.package_digest, 30)}</code>
+            </div>
+          </> : <p className="muted">Select a Trade Skill to inspect verification status.</p>) : selected ? <>
             <div className="detail-section">
               <div className="detail-section-label">Identity</div>
               <div className="detail-row"><span className="key">Order</span><code className="value" title={selected.order_id}>{short(selected.order_id, 22)}</code></div>
@@ -666,6 +803,85 @@ export function CommerceView() {
       </aside>
     </>
   );
+}
+
+function TradeSkillWorkbench({ skill }: { skill: TradeRulePackageDetail }) {
+  const resources = Array.isArray(skill.manifest.resources)
+    ? skill.manifest.resources as Array<Record<string, unknown>>
+    : [];
+  const dependencies = Array.isArray(skill.manifest.dependencies)
+    ? skill.manifest.dependencies as Array<Record<string, unknown>>
+    : [];
+  const hooks = Array.isArray(skill.manifest.hook_contracts)
+    ? skill.manifest.hook_contracts as Array<Record<string, unknown>>
+    : [];
+  const importAuditLabel = skill.import_audit.status === "not-applicable"
+    ? "No signed import audit"
+    : `${skill.import_audit.status[0].toUpperCase()}${skill.import_audit.status.slice(1)} (${skill.import_audit.anchored_count}/${skill.import_audit.proposed_count})`;
+  const provenanceLabel = skill.provenance.status === "unclassified"
+    ? "Unclassified"
+    : skill.provenance.sources.map((source) => source === "local" ? "Local install" : "Federated import").join(" + ");
+  return <div className="commerce-workbench trade-skill-workbench">
+    <div className="commerce-order-heading">
+      <div><p className="main-eyebrow">Verified local package</p><h2>{skill.rule_id}</h2></div>
+      <span className="pill ok">Signature verified</span>
+    </div>
+    <p>{skill.summary}</p>
+    <p className="trade-proposal-warning">Verified bytes prove publisher authorship and package integrity. They do not prove the rule is fair, recognized, safe to execute, or suitable for this trade.</p>
+    <dl className="commerce-facts">
+      <div><dt>Version</dt><dd>{skill.version}</dd></div>
+      <div><dt>Mode</dt><dd>{skill.execution.mode}</dd></div>
+      <div><dt>Resources</dt><dd>{skill.resource_count} / {skill.resource_bytes.toLocaleString()} bytes</dd></div>
+      <div><dt>Expires</dt><dd>{skill.not_after ? new Date(skill.not_after).toLocaleString() : "No expiry"}</dd></div>
+      <div><dt>Import audit</dt><dd>{importAuditLabel}</dd></div>
+      <div><dt>Acquisition</dt><dd>{provenanceLabel}</dd></div>
+    </dl>
+    {(skill.import_audit.status === "incomplete" || skill.import_audit.status === "mixed")
+      && <p className="trade-proposal-warning" role="status">A signed import intent is missing its final Spine anchor. Treat this cache entry as incomplete until the import audit is repaired.</p>}
+    {skill.provenance.status === "unclassified"
+      && <p className="trade-proposal-warning" role="status">This package predates persisted acquisition provenance or was installed without an explicit source. It may be inspected, but execution must remain blocked.</p>}
+    {skill.provenance.sources.includes("federated") && skill.import_audit.status === "not-applicable"
+      && <p className="trade-proposal-warning" role="status">Federated provenance has no signed import anchor. Execution must remain blocked until the audit is repaired.</p>}
+    <div className="trade-execution-column">
+      <h3>Publisher and content address</h3>
+      <code title={skill.publisher_did}>Publisher {short(skill.publisher_did, 48)}</code>
+      <code title={skill.package_digest}>Package {short(skill.package_digest, 48)}</code>
+    </div>
+    <div className="trade-execution-column">
+      <h3>Declared scope</h3>
+      <p>{skill.applies_to.join(", ")} · {skill.families.join(", ")}</p>
+      {skill.required_capabilities.length > 0
+        ? <code>{skill.required_capabilities.join(", ")}</code>
+        : <p className="muted">No additional capabilities declared.</p>}
+      {skill.execution.permissions.length > 0
+        ? <p className="trade-proposal-warning">Requested permissions: {skill.execution.permissions.join(", ")}</p>
+        : <p className="muted">No execution permissions requested.</p>}
+    </div>
+    <div className="trade-execution-column">
+      <h3>Content-addressed resources</h3>
+      <ul className="trade-proposal-rules">
+        {resources.map((resource) => <li key={`${String(resource.purpose)}:${String(resource.digest)}`}>
+          <div className="trade-execution-row"><strong>{String(resource.purpose)}</strong><span>{String(resource.media_type)}</span></div>
+          <span className="muted">{Number(resource.size).toLocaleString()} bytes</span>
+          <code title={String(resource.digest)}>{short(String(resource.digest), 42)}</code>
+        </li>)}
+      </ul>
+    </div>
+    {dependencies.length > 0 && <div className="trade-execution-column">
+      <h3>Exact dependencies</h3>
+      <ul className="trade-proposal-rules">{dependencies.map((dependency) => <li key={String(dependency.digest)}>
+        <strong>{String(dependency.rule_id)}</strong>
+        <code title={String(dependency.digest)}>{short(String(dependency.digest), 42)}</code>
+      </li>)}</ul>
+    </div>}
+    {hooks.length > 0 && <div className="trade-execution-column">
+      <h3>Hook contracts</h3>
+      <ul className="trade-proposal-rules">{hooks.map((hook) => <li key={`${String(hook.name)}:${String(hook.version)}`}>
+        <div className="trade-execution-row"><strong>{String(hook.name)}</strong><span>v{String(hook.version)}</span></div>
+        <span className="muted">Side effect: {String(hook.side_effect)}</span>
+      </li>)}</ul>
+    </div>}
+  </div>;
 }
 
 function ProposalWorkbench({
@@ -715,10 +931,12 @@ function AgreementWorkbench({
   agreement,
   busy,
   onRetryDispatch,
+  onRefresh,
 }: {
   agreement: TradeOrderDetail;
   busy: boolean;
   onRetryDispatch: () => void;
+  onRefresh: () => void;
 }) {
   return <div className="commerce-workbench trade-proposal-workbench">
     <div className="commerce-order-heading">
@@ -732,7 +950,7 @@ function AgreementWorkbench({
       <div><dt>Accepted</dt><dd>{new Date(agreement.created_at).toLocaleString()}</dd></div>
       <div><dt>Remote acknowledgement</dt><dd>{agreement.remote_acknowledged ? "Persisted" : "Not observed"}</dd></div>
     </dl>
-    <AgreementExecutionReadiness agreement={agreement} />
+    <AgreementExecutionReadiness agreement={agreement} onRefresh={onRefresh} />
     {agreement.remote_acknowledged && <div className="commerce-action">
       <h3>Receiver-signed acknowledgement</h3>
       <p className="muted">This proves the receiver signed a retention claim. It does not independently prove the receiver's filesystem or Spine contents.</p>
@@ -761,7 +979,31 @@ function readinessLabel(value: string) {
   )).join(" ");
 }
 
-function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetail }) {
+function loadTradeSkillPeer(orderDigest: string, dispatchTarget?: string | null) {
+  if (dispatchTarget) return dispatchTarget;
+  try {
+    return window.localStorage.getItem(`nth-trade-skill-peer:${orderDigest}`) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberTradeSkillPeer(orderDigest: string, peerUrl: string) {
+  try {
+    window.localStorage.setItem(`nth-trade-skill-peer:${orderDigest}`, peerUrl);
+  } catch {
+    // Preference persistence must not turn a verified import into a failure.
+  }
+}
+
+function AgreementExecutionReadiness({
+  agreement,
+  onRefresh,
+}: {
+  agreement: TradeOrderDetail;
+  onRefresh: () => void;
+}) {
+  const toast = useToast();
   const execution = agreement.execution;
   const initialHistoryKey = execution
     ? `${execution.order_digest}:${execution.history.items.map((item) => item.execution_id).join(",")}`
@@ -777,6 +1019,15 @@ function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetai
   );
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [skillPeerUrl, setSkillPeerUrl] = useState(() => loadTradeSkillPeer(
+    agreement.order_digest,
+    agreement.dispatch_target_url,
+  ));
+  const [importingSkill, setImportingSkill] = useState("");
+  const [skillImportMessages, setSkillImportMessages] = useState<Record<string, string>>({});
+  const [skillImportErrors, setSkillImportErrors] = useState<Record<string, boolean>>({});
+  const skillImportAbort = useRef<AbortController | null>(null);
+  const skillImportGeneration = useRef(0);
 
   useEffect(() => {
     setHistoryItems(execution?.history.items ?? []);
@@ -784,6 +1035,24 @@ function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetai
     setHistoryCursor(execution?.history.next_cursor ?? null);
     setHistoryError("");
   }, [initialHistoryKey, execution?.history.has_more, execution?.history.next_cursor]);
+
+  useEffect(() => {
+    skillImportGeneration.current += 1;
+    skillImportAbort.current?.abort();
+    skillImportAbort.current = null;
+    setSkillPeerUrl(loadTradeSkillPeer(
+      agreement.order_digest,
+      agreement.dispatch_target_url,
+    ));
+    setSkillImportMessages({});
+    setSkillImportErrors({});
+    setImportingSkill("");
+    return () => {
+      skillImportGeneration.current += 1;
+      skillImportAbort.current?.abort();
+      skillImportAbort.current = null;
+    };
+  }, [agreement.order_digest, agreement.dispatch_target_url]);
 
   if (!execution) {
     return <div className="commerce-action">
@@ -826,6 +1095,56 @@ function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetai
       setHistoryBusy(false);
     }
   }
+  async function fetchMissingSkill(packageDigest: string) {
+    const peerUrl = skillPeerUrl.trim();
+    if (!peerUrl || importingSkill) return;
+    const generation = skillImportGeneration.current;
+    const agreementDigest = agreement.order_digest;
+    const controller = new AbortController();
+    skillImportAbort.current?.abort();
+    skillImportAbort.current = controller;
+    const isCurrent = () => (
+      !controller.signal.aborted
+      && skillImportGeneration.current === generation
+      && agreement.order_digest === agreementDigest
+    );
+    setImportingSkill(packageDigest);
+    setSkillImportMessages((current) => ({ ...current, [packageDigest]: "" }));
+    setSkillImportErrors((current) => ({ ...current, [packageDigest]: false }));
+    try {
+      const result = await importTradeRulePackage(
+        executionDigest,
+        packageDigest,
+        peerUrl,
+        controller.signal,
+      );
+      if (!isCurrent()) return;
+      rememberTradeSkillPeer(agreement.order_digest, peerUrl);
+      const message = result.installed
+        ? `Signature and content verified; cached locally and signed in Spine ${short(result.audit_event_id, 20)}. Not trusted or executed.`
+        : result.audit_created
+          ? `Exact verified package was already cached; its missing signed audit was repaired in Spine ${short(result.audit_event_id, 20)}.`
+          : `Exact verified package and Spine audit ${short(result.audit_event_id, 20)} already exist; no network retry was needed.`;
+      setSkillImportMessages((current) => ({
+        ...current,
+        [packageDigest]: message,
+      }));
+      toast.push(result.installed ? "Trade Skill verified and cached" : "Trade Skill already cached", "success");
+      onRefresh();
+    } catch (error) {
+      if (isAbort(error) || !isCurrent()) return;
+      const message = error instanceof Error ? error.message : "Trade Skill import failed.";
+      setSkillImportMessages((current) => ({ ...current, [packageDigest]: message }));
+      setSkillImportErrors((current) => ({ ...current, [packageDigest]: true }));
+      toast.push(message, "error");
+    } finally {
+      if (isCurrent()) {
+        skillImportAbort.current = null;
+        setImportingSkill("");
+      }
+    }
+  }
+  const missingSkills = execution.skills.filter((skill) => skill.status === "missing");
   return <div className="commerce-action trade-execution-readiness">
     <div className="commerce-order-heading">
       <h3>Execution readiness</h3>
@@ -845,6 +1164,17 @@ function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetai
     {execution.error_code && <p className="trade-proposal-warning" role="status">Execution projection unavailable ({execution.error_code}). The signed Agreement remains readable, but no operation is authorized.</p>}
     <div className="trade-execution-column">
       <h3>Trade Skills</h3>
+      {missingSkills.length > 0 && <div className="commerce-action">
+        <label className="commerce-target">NTH DAO source URL
+          <input
+            type="url"
+            value={skillPeerUrl}
+            onChange={(event) => setSkillPeerUrl(event.target.value)}
+            placeholder="http://peer-host:8080"
+          />
+        </label>
+        <p className="muted">Fetching is operator-directed. The node verifies the signed Manifest, every resource digest, the Offer binding, and the accepted Order binding before caching. Cache installation does not grant trust or execution authority.</p>
+      </div>}
       {execution.skills.length === 0 ? <p className="muted">No signed Rule Packages are bound to this Agreement.</p> : <ul className="trade-proposal-rules">
         {execution.skills.map((skill) => <li key={skill.package_digest}>
           <div className="trade-execution-row"><strong>{skill.rule_id}</strong><span className={`pill ${skill.status === "available" ? "ok" : "wait"}`}>{readinessLabel(skill.status)}</span></div>
@@ -852,6 +1182,18 @@ function AgreementExecutionReadiness({ agreement }: { agreement: TradeOrderDetai
           <span className="muted">{skill.version ? `v${skill.version} · ` : ""}{skill.execution_mode ?? "mode unavailable"}</span>
           <code title={skill.package_digest}>{short(skill.package_digest, 34)}</code>
           {skill.status !== "available" && <span className="trade-proposal-warning">{skill.reason}</span>}
+          {(skill.status === "missing"
+            || skill.reason === "Trade Rule Package import audit is incomplete") && <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={!skillPeerUrl.trim() || Boolean(importingSkill)}
+            onClick={() => fetchMissingSkill(skill.package_digest)}
+          >{importingSkill === skill.package_digest
+              ? "Verifying..."
+              : skill.status === "missing"
+                ? "Fetch and verify"
+                : "Repair signed audit"}</button>}
+          {skillImportMessages[skill.package_digest] && <span className={skillImportErrors[skill.package_digest] ? "trade-proposal-warning" : "muted"} role="status">{skillImportMessages[skill.package_digest]}</span>}
         </li>)}
       </ul>}
     </div>

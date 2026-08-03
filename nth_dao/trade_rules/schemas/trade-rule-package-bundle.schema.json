@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-rule-package-bundle-v1.json",
+  "title": "NTH DAO Trade Rule Package Bundle v1",
+  "$comment": "The protocol validator additionally verifies the Offer publisher's domain-separated Offer-to-Package signature, canonical base64url, digest-sorted unique resources, resource hashes and sizes, the signed Manifest, Package digest, and expected Offer/Order bindings. Importing a valid bundle grants neither trust nor execution authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "offer_digest",
+    "offer_package_binding",
+    "package_digest",
+    "manifest",
+    "resources"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.rule-package-bundle"},
+    "protocol_version": {"const": "1"},
+    "offer_digest": {"$ref": "#/$defs/digest"},
+    "offer_package_binding": {"$ref": "#/$defs/offerPackageBinding"},
+    "package_digest": {"$ref": "#/$defs/digest"},
+    "manifest": {"$ref": "urn:nth-dao:schema:trade-rule-manifest:1"},
+    "resources": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["digest", "bytes_b64u"],
+        "properties": {
+          "digest": {"$ref": "#/$defs/digest"},
+          "bytes_b64u": {
+            "type": "string",
+            "maxLength": 1398104,
+            "pattern": "^[A-Za-z0-9_-]*$"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "offerPackageBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "protocol_version",
+        "offer_digest",
+        "package_digest",
+        "publisher_did",
+        "proof"
+      ],
+      "properties": {
+        "kind": {"const": "nth.dao.trade.offer-package-binding"},
+        "protocol_version": {"const": "1"},
+        "offer_digest": {"$ref": "#/$defs/digest"},
+        "package_digest": {"$ref": "#/$defs/digest"},
+        "publisher_did": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 256,
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "created",
+            "verification_method",
+            "proof_purpose",
+            "proof_value"
+          ],
+          "properties": {
+            "type": {"const": "NthEd25519SignatureV1"},
+            "created": {"type": "string", "maxLength": 35},
+            "verification_method": {"type": "string", "maxLength": 512},
+            "proof_purpose": {"const": "assertionMethod"},
+            "proof_value": {
+              "type": "string",
+              "minLength": 86,
+              "maxLength": 86,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

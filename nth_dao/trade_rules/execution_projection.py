@@ -17,6 +17,7 @@ from nth_dao.trade_rules.order_execution import (
     TradeOrderExecutionRejected,
     verify_trade_order_execution,
 )
+from nth_dao.trade_rules.offer import TradeOffer, offer_digest
 
 
 class TradeExecutionProjectionError(ValueError):
@@ -213,6 +214,9 @@ def project_trade_order_execution(
         else TradeOrder.from_dict(order)
     )
     document = verified.to_dict()
+    source_offer_digest = offer_digest(
+        TradeOffer.from_dict(document["snapshot"]["offer"])
+    )
     moment = _utc(at)
     role = _local_role(document, local_did)
     grants = trade_order_execution_grants(verified)
@@ -338,6 +342,7 @@ def project_trade_order_execution(
 
     return {
         "order_digest": trade_order_digest(verified),
+        "source_offer_digest": source_offer_digest,
         "status": "blocked" if blocking_reasons else "ready",
         "error_code": "",
         "coordinator": coordinator_health.to_dict(),
@@ -420,6 +425,7 @@ def unavailable_trade_order_execution_projection(
         local_did = None
     return {
         "order_digest": order_digest,
+        "source_offer_digest": "",
         "status": "unavailable",
         "error_code": error_code,
         "coordinator": coordinator_health.to_dict(),

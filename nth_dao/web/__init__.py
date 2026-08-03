@@ -13,6 +13,7 @@ import logging
 import os
 import hmac
 import json
+import re
 import secrets
 import socket
 import threading
@@ -1404,12 +1405,17 @@ def create_app(
             return True
         trade_offer_prefix = "/api/v2/trade/federation/offers/"
         if path.startswith(trade_offer_prefix):
-            digest = path[len(trade_offer_prefix):]
-            return (
-                len(digest) == 71
-                and digest.startswith("sha256:")
-                and all(character in "0123456789abcdef" for character in digest[7:])
-            )
+            suffix = path[len(trade_offer_prefix):]
+            if (
+                len(suffix) == 71
+                and suffix.startswith("sha256:")
+                and all(character in "0123456789abcdef" for character in suffix[7:])
+            ):
+                return True
+            return re.fullmatch(
+                r"sha256:[0-9a-f]{64}/rule-packages/sha256:[0-9a-f]{64}",
+                suffix,
+            ) is not None
         return path.startswith("/api/v2/commerce/federation/listings/")
 
     @app.middleware("http")

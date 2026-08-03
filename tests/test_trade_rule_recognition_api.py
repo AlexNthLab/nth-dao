@@ -69,6 +69,14 @@ def test_recognition_api_records_lists_and_retries_idempotently(tmp_path):
     )
     listed = client.get(_url(package.digest))
     rules = client.get("/api/v2/rules")
+    trade_skills = client.get(
+        "/api/v2/trade/rule-packages",
+        headers={
+            "Authorization": (
+                f"Bearer {client.app.state.nth_console_token}"
+            )
+        },
+    )
 
     assert first.status_code == 200
     assert first.json()["store_created"] is True
@@ -83,7 +91,11 @@ def test_recognition_api_records_lists_and_retries_idempotently(tmp_path):
     )
     assert listed.status_code == 200
     assert listed.json()["items"] == [statement.to_dict()]
-    assert rules.json() == [{"package_digest": package.digest}]
+    assert rules.json() == []
+    assert trade_skills.status_code == 200
+    assert [
+        item["package_digest"] for item in trade_skills.json()["items"]
+    ] == [package.digest]
 
 
 def test_recognition_api_rejects_invalid_or_uninstalled_input(tmp_path):

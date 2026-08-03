@@ -283,6 +283,9 @@ def _rule_bindings(value: Any) -> tuple[tuple[str, str], ...]:
     rule_ids = [rule_id for rule_id, _digest_value in output]
     if len(set(rule_ids)) != len(rule_ids):
         _reject("rule_bindings binds one rule_id to multiple digests")
+    digests = [digest_value for _rule_id, digest_value in output]
+    if len(set(digests)) != len(digests):
+        _reject("rule_bindings binds one digest to multiple rule_ids")
     if output != sorted(output):
         _reject("rule_bindings must be sorted by rule_id and digest")
     return tuple(output)

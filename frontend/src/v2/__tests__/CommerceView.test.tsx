@@ -35,6 +35,7 @@ function executionProjection(): TradeExecutionView {
   const packageDigest = "sha256:" + "7".repeat(64);
   return {
     order_digest: "sha256:" + "1".repeat(64),
+    source_offer_digest: "sha256:" + "5".repeat(64),
     status: "blocked" as const,
     error_code: "",
     coordinator: {
@@ -147,6 +148,63 @@ function agreementSummary() {
   };
 }
 
+function tradeSkillSummary(suffix = "7") {
+  return {
+    package_digest: "sha256:" + suffix.repeat(64),
+    rule_id: `org.nthdao.rules/delivery-${suffix}`,
+    version: "1.0.0",
+    publisher_did: "did:key:zPublisher",
+    summary: "Signed delivery behavior",
+    applies_to: ["service"],
+    families: ["fulfillment"],
+    published_at: "2026-08-01T00:00:00Z",
+    not_after: "2026-09-01T00:00:00Z",
+    execution: { mode: "declarative" as const, permissions: [] },
+    required_capabilities: [],
+    resource_count: 1,
+    resource_bytes: 24,
+    dependency_count: 0,
+    conflict_count: 0,
+    verification: {
+      status: "verified-cache" as const,
+      publisher_signature: true as const,
+      resource_digests: true as const,
+    },
+    import_audit: {
+      status: "anchored" as const,
+      proposed_count: 1,
+      anchored_count: 1,
+      incomplete_count: 0,
+    },
+    provenance: {
+      status: "explicit" as const,
+      sources: ["federated" as const],
+    },
+    trust: {
+      status: "not-evaluated" as const,
+      advisory: true as const,
+      execution_authorized: false as const,
+    },
+  };
+}
+
+function tradeSkillDetail(suffix = "7") {
+  const summary = tradeSkillSummary(suffix);
+  return {
+    ...summary,
+    manifest: {
+      resources: [{
+        purpose: "terms",
+        media_type: "application/json",
+        digest: "sha256:" + "8".repeat(64),
+        size: 24,
+      }],
+      dependencies: [],
+      hook_contracts: [],
+    },
+  };
+}
+
 vi.mock("../api", () => ({
   ApiHttpError: class ApiHttpError extends Error {
     status: number;
@@ -161,6 +219,9 @@ vi.mock("../api", () => ({
   fetchCommerceOrders: vi.fn().mockResolvedValue([order]),
   fetchTradeProposals: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
   fetchTradeOrders: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
+  fetchTradeRulePackages: vi.fn().mockResolvedValue({
+    items: [], next_cursor: "", cache_only: true, execution_authorized: false,
+  }),
   getTradeProposal: vi.fn().mockResolvedValue(null),
   acceptTradeProposal: vi.fn().mockResolvedValue({
     status: "accepted-and-delivered",
@@ -172,12 +233,29 @@ vi.mock("../api", () => ({
     remote_intake_receipt_digest: "sha256:" + "e".repeat(64),
   }),
   getTradeOrder: vi.fn().mockResolvedValue(null),
+  getTradeRulePackage: vi.fn().mockResolvedValue(null),
   getTradeExecutionReceipts: vi.fn().mockResolvedValue({
     status: "available",
     items: [],
     has_more: false,
     next_cursor: null,
     error_code: "",
+  }),
+  importTradeRulePackage: vi.fn().mockResolvedValue({
+    status: "installed",
+    installed: true,
+    offer_digest: "sha256:" + "5".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    rule_id: "org.nthdao.rules/delivery",
+    version: "1.0.0",
+    publisher_did: "did:key:zPublisher",
+    audit_event_id: "b".repeat(64),
+    audit_created: true,
+    resource_count: 1,
+    resource_bytes: 10,
+    trust_granted: false,
+    execution_authority_granted: false,
+    warning: "Cached only",
   }),
   listOpenTasks: vi.fn().mockResolvedValue([]),
   publishCommerceListing: vi.fn().mockResolvedValue({ digest: "sha256:x", warning: "" }),
@@ -195,9 +273,12 @@ import {
   fetchCommerceOrders,
   fetchTradeProposals,
   fetchTradeOrders,
+  fetchTradeRulePackages,
   getTradeOrder,
   getTradeExecutionReceipts,
   getTradeProposal,
+  getTradeRulePackage,
+  importTradeRulePackage,
   acceptTradeProposal,
   dispatchCommerceOutbox,
   listOpenTasks,
@@ -212,6 +293,7 @@ import { ToastProvider } from "../components/Toast";
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
@@ -273,6 +355,154 @@ describe("CommerceView", () => {
     await waitFor(() => expect(publishCommerceListing).toHaveBeenCalledWith({
       listingId: "svc-1", title: "Review", description: "", priceValue: "2",
     }));
+  });
+
+  it("shows verified-cache Trade Skills without claiming trust or execution", async () => {
+    const summary = tradeSkillSummary();
+    const detail = tradeSkillDetail();
+    vi.mocked(fetchTradeRulePackages).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+      cache_only: true,
+      execution_authorized: false,
+    });
+    vi.mocked(getTradeRulePackage).mockResolvedValueOnce(detail);
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Trade Skills/ }));
+
+    expect(await screen.findByRole("heading", { name: summary.rule_id })).toBeTruthy();
+    expect(screen.getByText(/do not prove the rule is fair/)).toBeTruthy();
+    expect(screen.getByText("Not evaluated")).toBeTruthy();
+    expect(screen.getByText("Anchored (1/1)")).toBeTruthy();
+    expect(screen.getByText("Not authorized")).toBeTruthy();
+    expect(screen.getByText("application/json")).toBeTruthy();
+    expect(screen.queryByText(/<script>/)).toBeNull();
+    expect(getTradeRulePackage).toHaveBeenCalledWith(
+      summary.package_digest,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it.each([
+    ["incomplete", { status: "incomplete" as const, proposed_count: 1, anchored_count: 0, incomplete_count: 1 }, "Incomplete (0/1)"],
+    ["mixed", { status: "mixed" as const, proposed_count: 2, anchored_count: 1, incomplete_count: 1 }, "Mixed (1/2)"],
+  ])("warns when a Trade Skill import audit is %s", async (_case, importAudit, label) => {
+    const summary = tradeSkillSummary();
+    vi.mocked(fetchTradeRulePackages).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+      cache_only: true,
+      execution_authorized: false,
+    });
+    vi.mocked(getTradeRulePackage).mockResolvedValueOnce({
+      ...tradeSkillDetail(),
+      import_audit: importAudit,
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Trade Skills/ }));
+
+    expect(await screen.findByText(label)).toBeTruthy();
+    expect(screen.getByText(/missing its final Spine anchor/)).toBeTruthy();
+  });
+
+  it("distinguishes explicit local provenance from an unclassified cache", async () => {
+    const summary = tradeSkillSummary();
+    vi.mocked(fetchTradeRulePackages).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+      cache_only: true,
+      execution_authorized: false,
+    });
+    vi.mocked(getTradeRulePackage).mockResolvedValueOnce({
+      ...tradeSkillDetail(),
+      import_audit: {
+        status: "not-applicable",
+        proposed_count: 0,
+        anchored_count: 0,
+        incomplete_count: 0,
+      },
+      provenance: { status: "explicit", sources: ["local"] },
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Trade Skills/ }));
+
+    expect(await screen.findByText("No signed import audit")).toBeTruthy();
+    expect(screen.getByText("Local install")).toBeTruthy();
+    expect(screen.queryByText(/predates persisted acquisition provenance/)).toBeNull();
+  });
+
+  it("warns for unclassified and unaudited federated provenance", async () => {
+    const summary = tradeSkillSummary();
+    vi.mocked(fetchTradeRulePackages)
+      .mockResolvedValueOnce({
+        items: [summary],
+        next_cursor: "",
+        cache_only: true,
+        execution_authorized: false,
+      })
+      .mockResolvedValueOnce({
+        items: [summary],
+        next_cursor: "",
+        cache_only: true,
+        execution_authorized: false,
+      });
+    vi.mocked(getTradeRulePackage)
+      .mockResolvedValueOnce({
+        ...tradeSkillDetail(),
+        import_audit: {
+          status: "not-applicable",
+          proposed_count: 0,
+          anchored_count: 0,
+          incomplete_count: 0,
+        },
+        provenance: { status: "unclassified", sources: [] },
+      })
+      .mockResolvedValueOnce({
+        ...tradeSkillDetail(),
+        import_audit: {
+          status: "not-applicable",
+          proposed_count: 0,
+          anchored_count: 0,
+          incomplete_count: 0,
+        },
+        provenance: { status: "explicit", sources: ["federated"] },
+      });
+
+    const first = render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Trade Skills/ }));
+    expect(await screen.findByText(/predates persisted acquisition provenance/)).toBeTruthy();
+    first.unmount();
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Trade Skills/ }));
+    expect(await screen.findByText(/Federated provenance has no signed import anchor/)).toBeTruthy();
+  });
+
+  it("clears stale Trade Skill details while switching packages", async () => {
+    const first = tradeSkillSummary("7");
+    const second = tradeSkillSummary("9");
+    let resolveSecond!: (value: ReturnType<typeof tradeSkillDetail>) => void;
+    vi.mocked(fetchTradeRulePackages).mockResolvedValueOnce({
+      items: [first, second],
+      next_cursor: "",
+      cache_only: true,
+      execution_authorized: false,
+    });
+    vi.mocked(getTradeRulePackage)
+      .mockResolvedValueOnce(tradeSkillDetail("7"))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Trade Skills/ }));
+    expect(await screen.findByRole("heading", { name: first.rule_id })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(second.rule_id) }));
+    expect(screen.queryByRole("heading", { name: first.rule_id })).toBeNull();
+    expect(screen.getByText("Select a Trade Skill to inspect its signed manifest.")).toBeTruthy();
+    resolveSecond(tradeSkillDetail("9"));
+    expect(await screen.findByRole("heading", { name: second.rule_id })).toBeTruthy();
   });
 
   it("starts one-click checkout with a configured peer and digest", async () => {
@@ -472,7 +702,7 @@ describe("CommerceView", () => {
     expect(screen.getByText("Not proven")).toBeTruthy();
     expect(screen.getByText(/requested_quantity/)).toBeTruthy();
     expect(screen.getByText("Execution readiness")).toBeTruthy();
-    expect(screen.getByText("Trade Skills")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Trade Skills" })).toBeTruthy();
     expect(screen.getByText("org.nthdao.rules/delivery")).toBeTruthy();
     expect(screen.getAllByText("deliver-service")).toHaveLength(2);
     expect(screen.getByText("Execution Receipts")).toBeTruthy();
@@ -485,6 +715,247 @@ describe("CommerceView", () => {
     expect(screen.queryByRole("button", { name: "Execute" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
     expect(getTradeOrder).toHaveBeenCalledWith(digest, expect.any(AbortSignal));
+  });
+
+  it("lets the operator fetch and verify a missing Order-bound Trade Skill", async () => {
+    const summary = {
+      ...agreementSummary(),
+      dispatch_target_url: "http://peer.example:8080",
+    };
+    const missing = executionProjection();
+    missing.skills = [{
+      ...missing.skills[0],
+      installed: false,
+      current: false,
+      status: "missing" as const,
+      reason: "Exact signed Rule Package is not installed locally",
+    }];
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder)
+      .mockResolvedValueOnce({
+        ...summary,
+        order: { kind: "nth.dao.trade.order" },
+        execution: missing,
+      })
+      .mockResolvedValueOnce({
+        ...summary,
+        order: { kind: "nth.dao.trade.order" },
+        execution: executionProjection(),
+      });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    const source = await screen.findByLabelText("NTH DAO source URL");
+    expect((source as HTMLInputElement).value).toBe("http://peer.example:8080");
+    fireEvent.click(screen.getByRole("button", { name: "Fetch and verify" }));
+
+    await waitFor(() => expect(importTradeRulePackage).toHaveBeenCalledWith(
+      summary.order_digest,
+      missing.skills[0].package_digest,
+      summary.dispatch_target_url,
+      expect.any(AbortSignal),
+    ));
+    await waitFor(() => expect(getTradeOrder).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Trade Skill verified and cached")).toBeTruthy();
+    expect(screen.getByText(/signed in Spine/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Execute" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
+  });
+
+  it("states when an existing cache entry only repaired its signed audit", async () => {
+    const summary = {
+      ...agreementSummary(),
+      dispatch_target_url: "http://peer.example:8080",
+    };
+    const missing = executionProjection();
+    missing.skills = [{
+      ...missing.skills[0],
+      installed: false,
+      current: false,
+      status: "unavailable" as const,
+      reason: "Trade Rule Package import audit is incomplete",
+    }];
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder)
+      .mockResolvedValueOnce({
+        ...summary,
+        order: { kind: "nth.dao.trade.order" },
+        execution: missing,
+      })
+      .mockResolvedValueOnce({
+        ...summary,
+        order: { kind: "nth.dao.trade.order" },
+        execution: executionProjection(),
+      });
+    vi.mocked(importTradeRulePackage).mockResolvedValueOnce({
+      status: "already-installed",
+      installed: false,
+      offer_digest: "sha256:" + "5".repeat(64),
+      package_digest: missing.skills[0].package_digest,
+      rule_id: missing.skills[0].rule_id,
+      version: "1.0.0",
+      publisher_did: "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+      audit_event_id: "d".repeat(64),
+      audit_created: true,
+      resource_count: 1,
+      resource_bytes: 10,
+      trust_granted: false,
+      execution_authority_granted: false,
+      warning: "Cached only",
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Repair signed audit" }));
+
+    expect(await screen.findByText(/missing signed audit was repaired/)).toBeTruthy();
+    expect(screen.queryByText(/cached locally and signed in Spine/)).toBeNull();
+  });
+
+  it("does not carry a Trade Skill peer URL across Agreements", async () => {
+    const first = {
+      ...agreementSummary(),
+      dispatch_target_url: "http://first.example:8080",
+    };
+    const second = {
+      ...agreementSummary(),
+      order_digest: "sha256:" + "8".repeat(64),
+      order_id: "nth:trade:order:" + "9".repeat(64),
+      dispatch_target_url: "http://second.example:8080",
+    };
+    const missing = executionProjection();
+    missing.skills = [{
+      ...missing.skills[0],
+      installed: false,
+      current: false,
+      status: "missing" as const,
+      reason: "Exact signed Rule Package is not installed locally",
+    }];
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [first, second],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockImplementation(async (digest) => ({
+      ...(digest === second.order_digest ? second : first),
+      order: { kind: "nth.dao.trade.order" },
+      execution: { ...missing, order_digest: digest },
+    }));
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    expect((await screen.findByLabelText("NTH DAO source URL") as HTMLInputElement).value)
+      .toBe(first.dispatch_target_url);
+    const rows = await screen.findAllByText("Accepted terms");
+    fireEvent.click(rows[1].closest("button") as HTMLButtonElement);
+    await waitFor(() => expect(
+      (screen.getByLabelText("NTH DAO source URL") as HTMLInputElement).value,
+    ).toBe(second.dispatch_target_url));
+  });
+
+  it("aborts a stale Trade Skill import when the Agreement changes", async () => {
+    const first = {
+      ...agreementSummary(),
+      dispatch_target_url: "http://first.example:8080",
+    };
+    const second = {
+      ...agreementSummary(),
+      order_digest: "sha256:" + "8".repeat(64),
+      order_id: "nth:trade:order:" + "9".repeat(64),
+      dispatch_target_url: "http://second.example:8080",
+    };
+    const missing = executionProjection();
+    missing.skills = [{
+      ...missing.skills[0],
+      installed: false,
+      current: false,
+      status: "missing" as const,
+      reason: "Exact signed Rule Package is not installed locally",
+    }];
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [first, second],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockImplementation(async (digest) => ({
+      ...(digest === second.order_digest ? second : first),
+      order: { kind: "nth.dao.trade.order" },
+      execution: { ...missing, order_digest: digest },
+    }));
+    let resolveImport!: (value: Awaited<ReturnType<typeof importTradeRulePackage>>) => void;
+    vi.mocked(importTradeRulePackage).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveImport = resolve; }),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Fetch and verify" }));
+    const signal = vi.mocked(importTradeRulePackage).mock.calls[0][3];
+    const rows = await screen.findAllByText("Accepted terms");
+    fireEvent.click(rows[1].closest("button") as HTMLButtonElement);
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    resolveImport({
+      status: "installed",
+      installed: true,
+      offer_digest: "sha256:" + "5".repeat(64),
+      package_digest: missing.skills[0].package_digest,
+      rule_id: missing.skills[0].rule_id,
+      version: "1.0.0",
+      publisher_did: "did:key:zPublisher",
+      audit_event_id: "c".repeat(64),
+      audit_created: true,
+      resource_count: 1,
+      resource_bytes: 10,
+      trust_granted: false,
+      execution_authority_granted: false,
+      warning: "Cached only",
+    });
+
+    await waitFor(() => expect(
+      (screen.getByLabelText("NTH DAO source URL") as HTMLInputElement).value,
+    ).toBe(second.dispatch_target_url));
+    expect(screen.queryByText("Trade Skill verified and cached")).toBeNull();
+  });
+
+  it("does not report a verified import as failed when preference storage fails", async () => {
+    const summary = {
+      ...agreementSummary(),
+      dispatch_target_url: "http://peer.example:8080",
+    };
+    const missing = executionProjection();
+    missing.skills = [{
+      ...missing.skills[0],
+      installed: false,
+      current: false,
+      status: "missing" as const,
+      reason: "Exact signed Rule Package is not installed locally",
+    }];
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder)
+      .mockResolvedValueOnce({
+        ...summary,
+        order: { kind: "nth.dao.trade.order" },
+        execution: missing,
+      })
+      .mockResolvedValueOnce({
+        ...summary,
+        order: { kind: "nth.dao.trade.order" },
+        execution: executionProjection(),
+      });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new DOMException("storage disabled", "SecurityError");
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Fetch and verify" }));
+
+    expect(await screen.findByText("Trade Skill verified and cached")).toBeTruthy();
+    expect(screen.queryByText(/storage disabled/i)).toBeNull();
   });
 
   it("loads older verified execution receipts with the stable cursor", async () => {

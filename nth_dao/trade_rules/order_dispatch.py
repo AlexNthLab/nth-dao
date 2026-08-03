@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import stat
 import tempfile
 import time
@@ -167,6 +169,7 @@ class TradeOrderDispatchResidue:
     filename: str
     size_bytes: int
     modified_at_ns: int
+    content_sha256: str = ""
 
 
 class TradeOrderDispatchStore:
@@ -339,12 +342,16 @@ class TradeOrderDispatchStore:
             for path in directory.iterdir():
                 if _TEMP_FILE.fullmatch(path.name) is None:
                     continue
-                metadata = path.stat()
+                raw, metadata = self._read_bounded_snapshot(
+                    path,
+                    label="dispatch crash residue",
+                )
                 output.append(TradeOrderDispatchResidue(
                     area=area,
                     filename=path.name,
                     size_bytes=metadata.st_size,
                     modified_at_ns=metadata.st_mtime_ns,
+                    content_sha256=hashlib.sha256(raw).hexdigest(),
                 ))
         return tuple(sorted(output, key=lambda item: (item.area, item.filename)))
 
@@ -377,16 +384,51 @@ class TradeOrderDispatchStore:
                         "dispatch crash residue changed since inspection"
                     )
                 touched: set[Path] = set()
-                for item in current:
-                    directory = (
-                        self.pending_root
-                        if item.area == "pending"
-                        else self.ack_root
-                    )
-                    path = directory / item.filename
-                    self._assert_path(path)
-                    path.unlink()
-                    touched.add(directory)
+                quarantined: list[tuple[Path, Path]] = []
+                try:
+                    for item in current:
+                        directory = (
+                            self.pending_root
+                            if item.area == "pending"
+                            else self.ack_root
+                        )
+                        path = directory / item.filename
+                        suffix = item.filename.split(".json.", 1)[0]
+                        quarantine = directory / (
+                            f"{suffix}.json.prune-{secrets.token_hex(16)}.tmp"
+                        )
+                        self._assert_path(path)
+                        self._assert_path(quarantine)
+                        if quarantine.exists():
+                            raise TradeOrderDispatchError(
+                                "dispatch residue quarantine collision"
+                            )
+                        os.replace(path, quarantine)
+                        quarantined.append((path, quarantine))
+                        raw, metadata = self._read_bounded_snapshot(
+                            quarantine,
+                            label="quarantined dispatch crash residue",
+                        )
+                        if (
+                            metadata.st_size != item.size_bytes
+                            or metadata.st_mtime_ns != item.modified_at_ns
+                            or hashlib.sha256(raw).hexdigest()
+                            != item.content_sha256
+                        ):
+                            raise TradeOrderDispatchError(
+                                "dispatch crash residue changed during prune"
+                            )
+                        touched.add(directory)
+                except (OSError, TradeOrderDispatchError):
+                    for original, quarantine in reversed(quarantined):
+                        try:
+                            if quarantine.exists() and not original.exists():
+                                os.replace(quarantine, original)
+                        except OSError:
+                            pass
+                    raise
+                for _original, quarantine in quarantined:
+                    quarantine.unlink()
                 if os.name != "nt":
                     for directory_path in touched:
                         descriptor = os.open(
@@ -406,14 +448,71 @@ class TradeOrderDispatchStore:
             ) from exc
 
     @staticmethod
-    def _read_bounded(path: Path, *, label: str) -> bytes:
+    def _read_bounded_snapshot(
+        path: Path,
+        *,
+        label: str,
+    ) -> tuple[bytes, os.stat_result]:
+        """Read one unchanged regular file without following a replaced link."""
+
+        descriptor: int | None = None
         try:
-            with path.open("rb") as stream:
-                raw = stream.read(MAX_DISPATCH_RECORD_BYTES + 1)
+            before = os.lstat(path)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or bool(
+                    getattr(before, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                )
+            ):
+                raise TradeOrderDispatchError(
+                    f"{label} must be an unlinked regular file"
+                )
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            after_open = os.lstat(path)
+            if (
+                not os.path.samestat(before, opened)
+                or not os.path.samestat(opened, after_open)
+                or opened.st_nlink != 1
+                or bool(
+                    getattr(opened, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                )
+            ):
+                raise TradeOrderDispatchError(f"{label} changed while opening")
+            if opened.st_size > MAX_DISPATCH_RECORD_BYTES:
+                raise TradeOrderDispatchError(f"{label} is too large")
+            chunks = []
+            remaining = MAX_DISPATCH_RECORD_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            final = os.fstat(descriptor)
+            if (
+                not os.path.samestat(opened, final)
+                or final.st_size != opened.st_size
+                or final.st_mtime_ns != opened.st_mtime_ns
+            ):
+                raise TradeOrderDispatchError(f"{label} changed while reading")
         except OSError as exc:
             raise TradeOrderDispatchError(f"unable to read {label}") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         if len(raw) > MAX_DISPATCH_RECORD_BYTES:
             raise TradeOrderDispatchError(f"{label} is too large")
+        return raw, final
+
+    def _read_bounded(self, path: Path, *, label: str) -> bytes:
+        raw, _metadata = self._read_bounded_snapshot(path, label=label)
         return raw
 
     def _read_pending(self, path: Path) -> TradeOrderDispatchRecord:

@@ -26,9 +26,9 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
@@ -4160,6 +4160,13 @@ class AnnounceTradeOfferBody(_Model):
     availability_summary: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ImportTradeRulePackageBody(_Model):
+    """Operator-selected peer for an exact Order-bound Rule Package import."""
+
+    model_config = {"extra": "forbid"}
+    peer_url: str = Field(min_length=1, max_length=2048)
+
+
 class AnnounceStepBody(_Model):
     """POST .../missions/{mid}/steps/{sid}/announce 请求体:把 mission step
     发成可认领的市场 Task(Mission↔Task 之桥)。能力/标题/描述取自 step,
@@ -4556,11 +4563,25 @@ def _load_trade_rule_package(request: Request, digest: str) -> Any:
     try:
         package = store.load(digest)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning(
+            "Trade Rule Package lookup rejected %s: %s",
+            digest,
+            exc,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="trade rule package digest is invalid",
+        ) from exc
     except RulePackageError as exc:
+        logger.error(
+            "Trade Rule Package integrity failure for %s (%s): %s",
+            digest,
+            type(exc).__name__,
+            exc,
+        )
         raise HTTPException(
             status_code=503,
-            detail=f"trade rule package integrity failure: {exc}",
+            detail="trade rule package integrity failure",
         ) from exc
     if package is None:
         raise HTTPException(
@@ -4568,6 +4589,630 @@ def _load_trade_rule_package(request: Request, digest: str) -> Any:
             detail="trade rule package not found",
         )
     return package
+
+
+def _trade_rule_package_catalog_item(
+    package: Any,
+    *,
+    include_manifest: bool,
+    import_audit: Dict[str, Any],
+    provenance_sources: tuple[str, ...],
+) -> Dict[str, Any]:
+    """Project verified Package metadata without exposing resource bodies.
+
+    ``RulePackageStore.load`` has already replayed the publisher signature and
+    every declared resource digest.  The projection deliberately says nothing
+    about social trust or execution authority; those are separate, current
+    local-policy decisions.
+    """
+
+    document = package.manifest.to_dict()
+    resources = document["resources"]
+    result: Dict[str, Any] = {
+        "package_digest": package.digest,
+        "rule_id": document["rule_id"],
+        "version": document["version"],
+        "publisher_did": document["publisher_did"],
+        "summary": document["summary"],
+        "applies_to": list(document["applies_to"]),
+        "families": list(document["families"]),
+        "published_at": document["published_at"],
+        "not_after": document["not_after"],
+        "execution": {
+            "mode": document["execution"]["mode"],
+            "permissions": list(document["execution"]["permissions"]),
+        },
+        "required_capabilities": list(document["required_capabilities"]),
+        "resource_count": len(resources),
+        "resource_bytes": sum(len(payload) for payload in package.resources.values()),
+        "dependency_count": len(document["dependencies"]),
+        "conflict_count": len(document["conflicts"]),
+        "verification": {
+            "status": "verified-cache",
+            "publisher_signature": True,
+            "resource_digests": True,
+        },
+        "import_audit": import_audit,
+        "provenance": {
+            "status": "explicit" if provenance_sources else "unclassified",
+            "sources": list(provenance_sources),
+        },
+        "trust": {
+            "status": "not-evaluated",
+            "advisory": True,
+            "execution_authorized": False,
+        },
+    }
+    if include_manifest:
+        result["manifest"] = document
+    return result
+
+
+def _validated_trade_rule_package_import_binding(
+    event_type: str,
+    payload: Any,
+) -> tuple[str, str, str, tuple[str, str, str, str]]:
+    """Return a verified semantic binding from one import-audit payload."""
+
+    expected_actions = {
+        "trade.rule-package.import.proposed": "verified-cache-import-proposed",
+        "trade.rule-package.imported": "verified-cache-import",
+    }
+    expected_fields = {
+        "import_id",
+        "order_digest",
+        "offer_digest",
+        "package_digest",
+        "rule_id",
+        "package_publisher_did",
+        "source_origin",
+        "action",
+    }
+    if event_type not in expected_actions:
+        raise RuntimeError("Trade Rule Package import audit type is invalid")
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise RuntimeError("Trade Rule Package import audit payload is invalid")
+    order_digest = payload.get("order_digest")
+    offer_digest = payload.get("offer_digest")
+    package_digest = payload.get("package_digest")
+    import_id = payload.get("import_id")
+    rule_id = payload.get("rule_id")
+    publisher_did = payload.get("package_publisher_did")
+    source_origin = payload.get("source_origin")
+    try:
+        from nth_dao.did_key import is_did_key
+
+        parsed_origin = urlsplit(source_origin) if isinstance(source_origin, str) else None
+        valid_origin = bool(
+            parsed_origin is not None
+            and parsed_origin.scheme in {"http", "https"}
+            and parsed_origin.hostname
+            and not parsed_origin.username
+            and not parsed_origin.password
+            and parsed_origin.path == ""
+            and not parsed_origin.query
+            and not parsed_origin.fragment
+            and source_origin
+            == f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+        )
+    except (TypeError, ValueError):
+        valid_origin = False
+    if (
+        not isinstance(order_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None
+        or not isinstance(offer_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", offer_digest) is None
+        or not isinstance(package_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", package_digest) is None
+        or not isinstance(import_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", import_id) is None
+        or not isinstance(rule_id, str)
+        or not 3 <= len(rule_id) <= 160
+        or not isinstance(publisher_did, str)
+        or not is_did_key(publisher_did)
+        or not valid_origin
+        or payload.get("action") != expected_actions[event_type]
+        or import_id != _trade_rule_package_import_id(
+            order_digest=order_digest,
+            package_digest=package_digest,
+        )
+    ):
+        raise RuntimeError("Trade Rule Package import audit binding is invalid")
+    return (
+        order_digest,
+        package_digest,
+        import_id,
+        (offer_digest, rule_id, publisher_did, source_origin),
+    )
+
+
+def _trade_rule_package_import_audit_records(
+    events: tuple[Any, ...],
+) -> Dict[str, Dict[str, Dict[str, tuple[str, str, str, str]]]]:
+    """Parse one verified Spine snapshot into immutable import bindings."""
+
+    states: Dict[str, Dict[str, Dict[str, tuple[str, str, str, str]]]] = {}
+    for event in events:
+        if event.type not in {
+            "trade.rule-package.import.proposed",
+            "trade.rule-package.imported",
+        }:
+            continue
+        _order_digest, package_digest, import_id, binding = (
+            _validated_trade_rule_package_import_binding(
+                event.type,
+                event.payload,
+            )
+        )
+        state = states.setdefault(
+            package_digest,
+            {"proposed": {}, "anchored": {}},
+        )
+        target = "proposed" if event.type.endswith(".proposed") else "anchored"
+        if import_id in state[target]:
+            raise RuntimeError(
+                "Trade Rule Package import audit contains a duplicate semantic event"
+            )
+        state[target][import_id] = binding
+    return states
+
+
+def _trade_rule_package_import_audit_index_from_records(
+    states: Dict[str, Dict[str, Dict[str, tuple[str, str, str, str]]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Derive bounded UI summaries from already-verified import bindings."""
+
+    output: Dict[str, Dict[str, Any]] = {}
+    for package_digest, state in states.items():
+        proposed = state["proposed"]
+        anchored = state["anchored"]
+        if anchored.keys() - proposed.keys():
+            raise RuntimeError(
+                "Trade Rule Package import audit is missing its write-ahead intent"
+            )
+        for import_id in anchored.keys() & proposed.keys():
+            if anchored[import_id] != proposed[import_id]:
+                raise RuntimeError(
+                    "Trade Rule Package import audit binding conflicts across stages"
+                )
+        incomplete = proposed.keys() - anchored.keys()
+        status = (
+            "mixed"
+            if anchored and incomplete
+            else "incomplete"
+            if incomplete
+            else "anchored"
+            if anchored
+            else "not-applicable"
+        )
+        output[package_digest] = {
+            "status": status,
+            "proposed_count": len(proposed),
+            "anchored_count": len(anchored),
+            "incomplete_count": len(incomplete),
+        }
+    return output
+
+
+def _trade_rule_package_import_audit_index(spine: Any) -> Dict[str, Dict[str, Any]]:
+    """Build a bounded semantic summary from one verified Spine snapshot."""
+
+    return _trade_rule_package_import_audit_index_from_records(
+        _trade_rule_package_import_audit_records(spine.verified_snapshot())
+    )
+
+
+def _no_trade_rule_package_import_audit() -> Dict[str, Any]:
+    return {
+        "status": "not-applicable",
+        "proposed_count": 0,
+        "anchored_count": 0,
+        "incomplete_count": 0,
+    }
+
+
+def _load_public_trade_rule_package(
+    request: Request,
+    *,
+    offer_digest: str,
+    package_digest: str,
+) -> Any:
+    """Resolve one package only through a currently public local Offer."""
+
+    from nth_dao.trade_rules import OfferStoreError, RulePackageError
+
+    _require_trade_offer_digest(offer_digest)
+    _require_trade_offer_digest(package_digest)
+    _require_trade_offer_public_read_budget(request)
+    offer_store = _state_trade_offer_store(request)
+    package_store = _state_trade_rule_package_store(request)
+    identity = _state_node_identity(request)
+    if offer_store is None or package_store is None or identity is None:
+        raise HTTPException(status_code=503, detail="trade package service unavailable")
+    try:
+        feed = _state_market_feed(request)
+        announcement = feed.find_live_trade_offer_announcement(offer_digest)
+        if announcement is None:
+            raise HTTPException(status_code=404, detail="announced Offer not found")
+        feed.require_listing_binding(announcement)
+        offer = offer_store.get(offer_digest)
+        if offer is None or offer.publisher_did != identity.as_did():
+            raise HTTPException(status_code=404, detail="announced Offer not found")
+        _verify_trade_offer_spine_anchors(request, offer_store)
+        roots = sorted({
+            item["digest"] for item in offer.to_dict()["rule_refs"]
+        })
+        pending = list(roots)
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            if len(visited) > 128:
+                raise HTTPException(
+                    status_code=503,
+                    detail="announced Rule Package dependency closure exceeds limit",
+                )
+            package = package_store.load(current)
+            if package is None:
+                if current == package_digest:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="announced Rule Package dependency is unavailable",
+                    )
+                # One unavailable sibling branch must not suppress an exact,
+                # intact package from the same signed Offer. Readiness still
+                # fails closed later when the complete rule set is resolved.
+                continue
+            if current == package_digest:
+                return package, offer
+            dependencies = package.manifest.to_dict()["dependencies"]
+            pending.extend(sorted(
+                item["digest"]
+                for item in dependencies
+                if item["digest"] not in visited
+            ))
+    except HTTPException:
+        raise
+    except (OfferStoreError, RulePackageError, OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="public Rule Package integrity verification failed",
+        ) from exc
+    raise HTTPException(
+        status_code=404,
+        detail="Rule Package is not referenced by the announced Offer",
+    )
+
+
+def _fetch_trade_rule_package_from_peer(
+    peer_url: str,
+    *,
+    offer_digest: str,
+    package_digest: str,
+    offer_publisher_did: str,
+    timeout_seconds: float = 15.0,
+) -> Any:
+    """Fetch one exact package bundle over a DNS-pinned bounded connection."""
+
+    from nth_dao.trade_rules import (
+        MAX_RULE_PACKAGE_BUNDLE_BYTES,
+        parse_rule_package_bundle,
+    )
+    from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
+
+    normalized = _normalize_configured_fed_peer(peer_url)
+    path = (
+        "/api/v2/trade/federation/offers/"
+        f"{quote(offer_digest, safe='')}/rule-packages/"
+        f"{quote(package_digest, safe='')}"
+    )
+    url = normalized + path
+    raw = _call_operator_trade_peer_with_fallback(
+        normalized,
+        lambda resolved_ip: _urllib_get_bytes_pinned(
+            url,
+            resolved_ip,
+            timeout_s=timeout_seconds,
+            max_bytes=MAX_RULE_PACKAGE_BUNDLE_BYTES,
+        ),
+    )
+    return parse_rule_package_bundle(
+        raw,
+        expected_offer_digest=offer_digest,
+        expected_package_digest=package_digest,
+        expected_offer_publisher_did=offer_publisher_did,
+    )
+
+
+class TradeRulePackageImportBusy(RuntimeError):
+    """Another process is currently importing the same content digest."""
+
+
+class TradeRulePackageImportAuditError(RuntimeError):
+    """The package cache is valid but its signed import audit is incomplete."""
+
+
+_TRADE_RULE_PACKAGE_IMPORT_MAX_CONCURRENCY = 2
+
+
+@contextmanager
+def _trade_rule_package_import_slot(workspace: Path) -> Iterator[None]:
+    """Reserve one crash-safe import slot shared by all local processes."""
+
+    slot_root = workspace / "trade" / "rule_package_import_slots"
+    for index in range(_TRADE_RULE_PACKAGE_IMPORT_MAX_CONCURRENCY):
+        lock = InterProcessLock(slot_root / str(index), timeout=0.0)
+        try:
+            lock.acquire()
+        except TimeoutError:
+            continue
+        try:
+            yield
+        finally:
+            lock.release()
+        return
+    raise TradeRulePackageImportBusy(
+        "Trade Rule Package import concurrency is full"
+    )
+
+
+def _trade_rule_package_import_id(
+    *,
+    order_digest: str,
+    package_digest: str,
+) -> str:
+    """Return the stable semantic key for one Order-bound package import."""
+
+    document = {
+        "order_digest": order_digest,
+        "package_digest": package_digest,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            document,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def _trade_rule_package_source_origin(peer_url: str) -> str:
+    """Retain bounded network provenance without persisting peer URL paths."""
+
+    parsed = urlsplit(peer_url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _trade_rule_package_import_audit_state(
+    spine: Any,
+    *,
+    order_digest: str,
+    package_digest: str,
+) -> str:
+    """Return anchored, incomplete, or not-imported from verified Spine data."""
+
+    return _trade_rule_package_import_audit_state_from_records(
+        _trade_rule_package_import_audit_records(spine.verified_snapshot()),
+        order_digest=order_digest,
+        package_digest=package_digest,
+    )
+
+
+def _trade_rule_package_import_audit_state_from_records(
+    records: Dict[str, Dict[str, Dict[str, tuple[str, str, str, str]]]],
+    *,
+    order_digest: str,
+    package_digest: str,
+) -> str:
+    """Resolve one Order/Package state without replaying the Spine again."""
+
+    expected_import_id = _trade_rule_package_import_id(
+        order_digest=order_digest,
+        package_digest=package_digest,
+    )
+    state = records.get(package_digest, {"proposed": {}, "anchored": {}})
+    proposed = state["proposed"]
+    anchored = state["anchored"]
+    if anchored.keys() - proposed.keys():
+        raise RuntimeError(
+            "Trade Rule Package import audit is missing its write-ahead intent"
+        )
+    for import_id in anchored.keys() & proposed.keys():
+        if anchored[import_id] != proposed[import_id]:
+            raise RuntimeError(
+                "Trade Rule Package import audit binding conflicts across stages"
+            )
+    if expected_import_id in anchored:
+        return "anchored"
+    if expected_import_id in proposed:
+        return "incomplete"
+    # A package cache is global. If its first import crashed after the
+    # write-ahead event, a different Order must not make that same cache
+    # executable before any import receives a final signed anchor.
+    if proposed and not anchored:
+        return "package-incomplete"
+    if anchored:
+        return "package-anchored"
+    return "not-imported"
+
+
+class _OrderAuditedRulePackageResolver:
+    """Block a Package whose signed import intent lacks its final anchor."""
+
+    def __init__(
+        self,
+        store: Any,
+        spine: Any,
+        order_digest: str,
+        workspace: Path,
+    ) -> None:
+        self._store = store
+        self._spine = spine
+        self._order_digest = order_digest
+        self._workspace = workspace
+        self._audit_token: tuple[int, int, int, int, int] | None = None
+        self._audit_records: Any = None
+
+    def load(self, package_digest: str) -> Any:
+        lock = InterProcessLock(
+            _trade_rule_package_import_lock_target(
+                self._workspace,
+                package_digest,
+            ),
+            timeout=5.0,
+        )
+        try:
+            lock.acquire()
+        except TimeoutError as exc:
+            raise RuntimeError("Trade Rule Package import is busy") from exc
+        try:
+            package = self._store.load(package_digest)
+            if package is None:
+                return None
+            sources = self._store.provenance_sources(package_digest)
+            current_token = self._spine.storage_token()
+            if self._audit_records is None or current_token != self._audit_token:
+                token, events = self._spine.verified_snapshot_with_token()
+                self._audit_records = _trade_rule_package_import_audit_records(events)
+                self._audit_token = token
+            state = _trade_rule_package_import_audit_state_from_records(
+                self._audit_records,
+                order_digest=self._order_digest,
+                package_digest=package_digest,
+            )
+            if state in {"incomplete", "package-incomplete"}:
+                raise RuntimeError("Trade Rule Package import audit is incomplete")
+            if not sources:
+                raise RuntimeError("Trade Rule Package provenance is unclassified")
+            if "local" not in sources and state not in {
+                "anchored",
+                "package-anchored",
+            }:
+                raise RuntimeError(
+                    "federated Trade Rule Package lacks a signed import anchor"
+                )
+            return package
+        finally:
+            lock.release()
+
+
+def _trade_rule_package_import_lock_target(
+    workspace: Path,
+    package_digest: str,
+) -> Path:
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", package_digest) is None:
+        raise RuntimeError("Trade Rule Package digest is invalid")
+    return (
+        workspace
+        / "trade"
+        / "rule_package_imports"
+        / package_digest.removeprefix("sha256:")
+    )
+
+
+def _import_trade_rule_package_singleflight(
+    workspace: Path,
+    package_store: Any,
+    spine: Any,
+    *,
+    order_digest: str,
+    peer_url: str,
+    offer_digest: str,
+    offer_publisher_did: str,
+    package_digest: str,
+    expected_rule_id: str,
+) -> tuple[Any, bool, Any, bool]:
+    """Fetch, install, and audit one package under one cross-process lease.
+
+    Package storage and the append-only Spine are separate durable stores, so
+    they cannot be committed atomically.  Holding the import lease across both
+    writes and using a stable Spine semantic key makes the only partial state
+    (cached package without audit) explicitly retryable and self-healing.
+    """
+
+    lock_target = _trade_rule_package_import_lock_target(workspace, package_digest)
+    lock = InterProcessLock(lock_target, timeout=35.0)
+    try:
+        lock.acquire()
+    except TimeoutError as exc:
+        raise TradeRulePackageImportBusy(
+            "another process is importing this Trade Rule Package"
+        ) from exc
+    try:
+        with _trade_rule_package_import_slot(workspace):
+            package = package_store.load(package_digest)
+            if package is None:
+                package = _fetch_trade_rule_package_from_peer(
+                    peer_url,
+                    offer_digest=offer_digest,
+                    package_digest=package_digest,
+                    offer_publisher_did=offer_publisher_did,
+                )
+            if package.manifest.rule_id != expected_rule_id:
+                from nth_dao.trade_rules import RulePackageBundleRejected
+
+                raise RulePackageBundleRejected(
+                    "Rule Package rule_id does not match the signed Order binding"
+                )
+            document = package.manifest.to_dict()
+            import_id = _trade_rule_package_import_id(
+                order_digest=order_digest,
+                package_digest=package.digest,
+            )
+            source_origin = _trade_rule_package_source_origin(peer_url)
+            try:
+                spine.append_unique(
+                    "trade.rule-package.import.proposed",
+                    {
+                        "import_id": import_id,
+                        "order_digest": order_digest,
+                        "offer_digest": offer_digest,
+                        "package_digest": package.digest,
+                        "rule_id": document["rule_id"],
+                        "package_publisher_did": document["publisher_did"],
+                        "source_origin": source_origin,
+                        "action": "verified-cache-import-proposed",
+                    },
+                    unique_payload_fields=("import_id",),
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise TradeRulePackageImportAuditError(
+                    "signed Trade Rule Package import intent could not be persisted"
+                ) from exc
+
+            result = package_store.install(
+                package.manifest,
+                package.resources,
+                source="federated",
+            )
+            package = result.package
+            installed = result.installed
+
+            try:
+                audit_event, audit_created = spine.append_unique(
+                    "trade.rule-package.imported",
+                    {
+                        "import_id": import_id,
+                        "order_digest": order_digest,
+                        "offer_digest": offer_digest,
+                        "package_digest": package.digest,
+                        "rule_id": document["rule_id"],
+                        "package_publisher_did": document["publisher_did"],
+                        "source_origin": source_origin,
+                        "action": "verified-cache-import",
+                    },
+                    unique_payload_fields=("import_id",),
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise TradeRulePackageImportAuditError(
+                    "signed Trade Rule Package import audit is incomplete"
+                ) from exc
+            return package, installed, audit_event, audit_created
+    finally:
+        lock.release()
 
 
 def _trade_offer_chain_to_wire(view: Any) -> Dict[str, Any]:
@@ -6446,6 +7091,12 @@ _FED_POLLER_LOCK = threading.Lock()
 _FED_CONFIG_LOCK = threading.RLock()
 _FED_IDENTITY_INIT_LOCK = threading.Lock()
 _FED_HELLO_LIMITER_LOCK = threading.Lock()
+_TRADE_PACKAGE_SERVE_BYTES_PER_SOURCE = 64 * 1024 * 1024
+_TRADE_PACKAGE_SERVE_BYTES_GLOBAL = 256 * 1024 * 1024
+_TRADE_PACKAGE_SERVE_WINDOW_SECONDS = 60.0
+_TRADE_PACKAGE_SERVE_MAX_CONCURRENCY = 2
+_TRADE_PACKAGE_SERVE_REQUESTS_PER_SOURCE = 12
+_TRADE_PACKAGE_SERVE_REQUESTS_GLOBAL = 48
 # 单个联邦 digest 的 ref 上限(serve 侧防无界响应;超出由拉方带 since 翻页)。
 _FED_DIGEST_PAGE = 500
 
@@ -6606,6 +7257,256 @@ def _require_trade_offer_public_read_budget(request: Request) -> None:
             detail="Trade Offer federation read rate exceeded",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+def _trade_rule_package_byte_limiter(request: Request):
+    state = request.app.state
+    limiter = getattr(state, "trade_rule_package_byte_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "trade_rule_package_byte_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import (
+                PersistentRateBudgetLimiter,
+                RateBudgetLimiter,
+            )
+
+            workspace = _state_workspace(request)
+            limiter = (
+                PersistentRateBudgetLimiter(
+                    workspace
+                    / "trade"
+                    / "rate_limits"
+                    / "rule_package_bytes.json",
+                    max_cost_per_window=_TRADE_PACKAGE_SERVE_BYTES_PER_SOURCE,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4096,
+                )
+                if workspace is not None
+                else RateBudgetLimiter(
+                    max_cost_per_window=_TRADE_PACKAGE_SERVE_BYTES_PER_SOURCE,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4096,
+                )
+            )
+            state.trade_rule_package_byte_limiter = limiter
+    return limiter
+
+
+def _trade_rule_package_request_limiter(request: Request):
+    state = request.app.state
+    limiter = getattr(state, "trade_rule_package_request_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "trade_rule_package_request_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            workspace = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    workspace
+                    / "trade"
+                    / "rate_limits"
+                    / "rule_package_requests.json",
+                    max_per_window=_TRADE_PACKAGE_SERVE_REQUESTS_PER_SOURCE,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4096,
+                )
+                if workspace is not None
+                else RateLimiter(
+                    max_per_window=_TRADE_PACKAGE_SERVE_REQUESTS_PER_SOURCE,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4096,
+                )
+            )
+            state.trade_rule_package_request_limiter = limiter
+    return limiter
+
+
+def _trade_rule_package_global_request_limiter(request: Request):
+    state = request.app.state
+    limiter = getattr(state, "trade_rule_package_global_request_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "trade_rule_package_global_request_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import PersistentRateLimiter, RateLimiter
+
+            workspace = _state_workspace(request)
+            limiter = (
+                PersistentRateLimiter(
+                    workspace
+                    / "trade"
+                    / "rate_limits"
+                    / "rule_package_requests_global.json",
+                    max_per_window=_TRADE_PACKAGE_SERVE_REQUESTS_GLOBAL,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4,
+                )
+                if workspace is not None
+                else RateLimiter(
+                    max_per_window=_TRADE_PACKAGE_SERVE_REQUESTS_GLOBAL,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4,
+                )
+            )
+            state.trade_rule_package_global_request_limiter = limiter
+    return limiter
+
+
+def _require_trade_rule_package_request_budget(request: Request) -> None:
+    try:
+        source = _trade_rule_package_request_limiter(request).check(
+            _federation_hello_client_key(request)
+        )
+        if not source.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Trade Rule Package request budget exceeded",
+                headers={
+                    "Retry-After": str(max(1, int(source.retry_after_seconds) + 1))
+                },
+            )
+        global_result = _trade_rule_package_global_request_limiter(request).check(
+            "global"
+        )
+    except HTTPException:
+        raise
+    except (OSError, TimeoutError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Trade Rule Package request budget is temporarily unavailable",
+        ) from exc
+    if not global_result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Trade Rule Package request budget exceeded",
+            headers={
+                "Retry-After": str(
+                    max(1, int(global_result.retry_after_seconds) + 1)
+                )
+            },
+        )
+
+
+def _trade_rule_package_global_byte_limiter(request: Request):
+    state = request.app.state
+    limiter = getattr(state, "trade_rule_package_global_byte_limiter", None)
+    if limiter is not None:
+        return limiter
+    with _FED_HELLO_LIMITER_LOCK:
+        limiter = getattr(state, "trade_rule_package_global_byte_limiter", None)
+        if limiter is None:
+            from nth_dao.web.rate_limit import (
+                PersistentRateBudgetLimiter,
+                RateBudgetLimiter,
+            )
+
+            workspace = _state_workspace(request)
+            limiter = (
+                PersistentRateBudgetLimiter(
+                    workspace
+                    / "trade"
+                    / "rate_limits"
+                    / "rule_package_bytes_global.json",
+                    max_cost_per_window=_TRADE_PACKAGE_SERVE_BYTES_GLOBAL,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4,
+                )
+                if workspace is not None
+                else RateBudgetLimiter(
+                    max_cost_per_window=_TRADE_PACKAGE_SERVE_BYTES_GLOBAL,
+                    window_seconds=_TRADE_PACKAGE_SERVE_WINDOW_SECONDS,
+                    max_tracked_keys=4,
+                )
+            )
+            state.trade_rule_package_global_byte_limiter = limiter
+    return limiter
+
+
+def _require_trade_rule_package_byte_budget(request: Request, byte_count: int) -> None:
+    try:
+        source = _trade_rule_package_byte_limiter(request).check(
+            _federation_hello_client_key(request),
+            byte_count,
+        )
+        if not source.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Trade Rule Package byte budget exceeded",
+                headers={
+                    "Retry-After": str(max(1, int(source.retry_after_seconds) + 1))
+                },
+            )
+        global_result = _trade_rule_package_global_byte_limiter(request).check(
+            "global",
+            byte_count,
+        )
+    except HTTPException:
+        raise
+    except (OSError, TimeoutError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Trade Rule Package byte budget is temporarily unavailable",
+        ) from exc
+    if not global_result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Trade Rule Package byte budget exceeded",
+            headers={
+                "Retry-After": str(
+                    max(1, int(global_result.retry_after_seconds) + 1)
+                )
+            },
+        )
+
+
+def _trade_rule_package_serve_semaphore(request: Request):
+    state = request.app.state
+    semaphore = getattr(state, "trade_rule_package_serve_semaphore", None)
+    if semaphore is not None:
+        return semaphore
+    with _FED_HELLO_LIMITER_LOCK:
+        semaphore = getattr(state, "trade_rule_package_serve_semaphore", None)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(
+                _TRADE_PACKAGE_SERVE_MAX_CONCURRENCY
+            )
+            state.trade_rule_package_serve_semaphore = semaphore
+    return semaphore
+
+
+def _trade_rule_package_etag(offer_digest: str, package_digest: str) -> str:
+    material = f"{offer_digest}\x00{package_digest}".encode("ascii")
+    return f'"sha256:{hashlib.sha256(material).hexdigest()}"'
+
+
+def _trade_rule_package_wire_cost_upper_bound(package: Any) -> int:
+    """Conservatively price Bundle bytes before signature and base64 work."""
+
+    manifest_bytes = len(package.manifest.canonical_bytes)
+    resource_bytes = sum(
+        (len(payload) * 4 + 2) // 3
+        for payload in package.resources.values()
+    )
+    # Each resource entry is under 256 bytes excluding its encoded payload.
+    # Four KiB covers the fixed Bundle fields and signed binding document.
+    return manifest_bytes + resource_bytes + (len(package.resources) * 256) + 4096
+
+
+def _if_none_match_matches(request: Request, etag: str) -> bool:
+    values = request.headers.get("if-none-match", "")
+    for item in values.split(","):
+        candidate = item.strip()
+        if candidate == "*" or candidate == etag:
+            return True
+        if candidate.startswith("W/") and candidate[2:].strip() == etag:
+            return True
+    return False
 
 
 def _federation_hello_global_limiter(request: Request):
@@ -6791,17 +7692,27 @@ def _normalize_configured_fed_peer(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
 
 
-def _resolve_operator_trade_peer_ip(url: str) -> str:
-    """Resolve an operator-selected trade peer once and reject unsafe targets."""
+def _resolve_operator_trade_peer_ips(url: str) -> tuple[str, ...]:
+    """Resolve every safe pinned address for an operator-selected peer.
+
+    DNS is validated as one set before any connection is attempted, so a host
+    cannot mix a public/LAN address with loopback or other unsafe answers.  The
+    explicit ``localhost`` name is the sole hostname allowed to resolve to
+    loopback; IPv4 is preferred there because NTH DAO binds to 127.0.0.1 by
+    default, while bounded connection fallback still supports IPv6-only peers.
+    """
 
     parsed = urlsplit(url)
     host = (parsed.hostname or "").strip().lower().rstrip(".")
     if not host:
         raise ValueError("trade peer URL must include a host")
 
-    def allowed(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    def allowed_non_loopback(
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    ) -> bool:
         return not (
-            address.is_unspecified
+            address.is_loopback
+            or address.is_unspecified
             or address.is_multicast
             or address.is_link_local
             or address.is_reserved
@@ -6812,34 +7723,65 @@ def _resolve_operator_trade_peer_ip(url: str) -> str:
     except ValueError:
         literal = None
     if literal is not None:
-        if not allowed(literal):
+        if not literal.is_loopback and not allowed_non_loopback(literal):
             raise ValueError("trade peer IP is not routable")
-        return str(literal)
+        return (str(literal),)
 
     try:
         infos = socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ValueError("trade peer host cannot be resolved") from exc
     addresses: list[str] = []
+    localhost = host == "localhost"
     for info in infos:
         try:
             address = ipaddress.ip_address(info[4][0])
         except (IndexError, TypeError, ValueError) as exc:
             raise ValueError("trade peer returned an invalid DNS address") from exc
-        if not allowed(address):
-            raise ValueError("trade peer DNS includes an unsafe address")
-        if address.is_loopback and host != "localhost":
+        if localhost:
+            if not address.is_loopback:
+                raise ValueError(
+                    "localhost trade peer must resolve only to loopback"
+                )
+        elif address.is_loopback:
             raise ValueError(
                 "trade peer DNS must not redirect a hostname to loopback"
             )
+        elif not allowed_non_loopback(address):
+            raise ValueError("trade peer DNS includes an unsafe address")
         addresses.append(str(address))
     if not addresses:
         raise ValueError("trade peer host has no usable address")
-    if host == "localhost" and any(
-        not ipaddress.ip_address(address).is_loopback for address in addresses
-    ):
-        raise ValueError("localhost trade peer must resolve only to loopback")
-    return addresses[0]
+    unique = list(dict.fromkeys(addresses))
+    if localhost:
+        unique.sort(key=lambda item: (ipaddress.ip_address(item).version != 4, item))
+    return tuple(unique)
+
+
+def _resolve_operator_trade_peer_ip(url: str) -> str:
+    """Compatibility projection of the first validated pinned address."""
+
+    return _resolve_operator_trade_peer_ips(url)[0]
+
+
+def _call_operator_trade_peer_with_fallback(
+    url: str,
+    operation: Callable[[str], Any],
+) -> Any:
+    """Try each prevalidated address, retrying only connection failures."""
+
+    last_error: OSError | None = None
+    for resolved_ip in _resolve_operator_trade_peer_ips(url):
+        try:
+            return operation(resolved_ip)
+        except urllib.error.HTTPError:
+            # A reached HTTP server gave a definitive protocol response.
+            raise
+        except OSError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ConnectionError("trade peer has no dialable address")
 
 
 def _post_trade_order_delivery_to_peer(
@@ -6853,13 +7795,16 @@ def _post_trade_order_delivery_to_peer(
     from .market_federation_poll import _urllib_post_json_pinned_raw
 
     normalized = _normalize_configured_fed_peer(peer_url)
-    resolved_ip = _resolve_operator_trade_peer_ip(normalized)
-    status, raw = _urllib_post_json_pinned_raw(
-        normalized + "/api/v2/trade/federation/orders",
-        resolved_ip,
-        document,
-        timeout_s=timeout_seconds,
-        max_bytes=256 * 1024,
+    url = normalized + "/api/v2/trade/federation/orders"
+    status, raw = _call_operator_trade_peer_with_fallback(
+        normalized,
+        lambda resolved_ip: _urllib_post_json_pinned_raw(
+            url,
+            resolved_ip,
+            document,
+            timeout_s=timeout_seconds,
+            max_bytes=256 * 1024,
+        ),
     )
     try:
         response = json.loads(raw.decode("utf-8"))
@@ -9198,19 +10143,124 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/rules")
     def v2_rules(request: Request) -> List[Dict[str, Any]]:
+        """Return local automation Rules, never Trade Rule Packages.
+
+        The automation-rule persistence API is not implemented yet.  Returning
+        Trade Package digests here violated the frontend ``Rule`` contract and
+        made installed Skills appear as malformed automation policies.
+        """
+
+        return []
+
+    @app.get("/api/v2/trade/rule-packages")
+    async def v2_trade_rule_package_catalog(
+        request: Request,
+        response: Response,
+        cursor: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """List locally cached, fully reverified Trade Rule Packages."""
+
+        from nth_dao.trade_rules import RulePackageError
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise HTTPException(status_code=400, detail="limit must be in 1..200")
+        if cursor and re.fullmatch(r"sha256:[0-9a-f]{64}", cursor) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="cursor must be a lowercase sha256 digest",
+            )
         store = _state_trade_rule_package_store(request)
-        if store is None:
-            return []
-        try:
-            return [
-                {"package_digest": digest}
-                for digest in store.list_digests()
-            ]
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        spine = _state_spine(request)
+        if store is None or spine is None:
             raise HTTPException(
                 status_code=503,
-                detail=f"trade rule package store unavailable: {exc}",
+                detail="trade rule package store or signed Spine unavailable",
+            )
+
+        def _catalog() -> tuple[list[Dict[str, Any]], str]:
+            import_audits = _trade_rule_package_import_audit_index(spine)
+            packages, next_cursor = store.list_page(
+                after=cursor or None,
+                limit=limit,
+            )
+            provenance = store.provenance_sources_many(
+                tuple(package.digest for package in packages)
+            )
+            return [
+                _trade_rule_package_catalog_item(
+                    package,
+                    include_manifest=False,
+                    import_audit=import_audits.get(
+                        package.digest,
+                        _no_trade_rule_package_import_audit(),
+                    ),
+                    provenance_sources=provenance[package.digest],
+                )
+                for package in packages
+            ], next_cursor or ""
+
+        try:
+            items, next_cursor = await run_in_threadpool(_catalog)
+        except (RulePackageError, OSError, RuntimeError) as exc:
+            logger.warning("Trade Rule Package catalog failed closed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="trade rule package catalog integrity failure",
             ) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "items": items,
+            "next_cursor": next_cursor,
+            "cache_only": True,
+            "execution_authorized": False,
+        }
+
+    @app.get("/api/v2/trade/rule-packages/{package_digest}")
+    async def v2_trade_rule_package_detail(
+        package_digest: str,
+        request: Request,
+        response: Response,
+    ) -> Dict[str, Any]:
+        """Inspect one exact Package manifest without returning resource bytes."""
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", package_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="package_digest must be a lowercase sha256 digest",
+            )
+        package = await run_in_threadpool(
+            _load_trade_rule_package,
+            request,
+            package_digest,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        spine = _state_spine(request)
+        store = _state_trade_rule_package_store(request)
+        if spine is None or store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade rule package store or signed Spine unavailable",
+            )
+        import_audits = await run_in_threadpool(
+            _trade_rule_package_import_audit_index,
+            spine,
+        )
+        provenance_sources = await run_in_threadpool(
+            store.provenance_sources,
+            package.digest,
+        )
+        return _trade_rule_package_catalog_item(
+            package,
+            include_manifest=True,
+            import_audit=import_audits.get(
+                package.digest,
+                _no_trade_rule_package_import_audit(),
+            ),
+            provenance_sources=provenance_sources,
+        )
 
     @app.post(
         "/api/v2/trade/rule-packages/{package_digest}/recognitions"
@@ -10839,9 +11889,26 @@ def register_v2_routes(app: FastAPI) -> None:
         health = _trade_execution_runtime_health(request)
         moment = datetime.now(timezone.utc)
         try:
+            package_store = _state_trade_rule_package_store(request)
+            spine = _state_spine(request)
+            workspace = _state_workspace(request)
+            package_resolver = (
+                _OrderAuditedRulePackageResolver(
+                    package_store,
+                    spine,
+                    order_digest,
+                    workspace,
+                )
+                if (
+                    package_store is not None
+                    and spine is not None
+                    and workspace is not None
+                )
+                else package_store
+            )
             projection = project_trade_order_execution(
                 order,
-                _state_trade_rule_package_store(request),
+                package_resolver,
                 local_did=local_did,
                 coordinator_health=health,
                 executor_policy=getattr(state, "trade_executor_policy", None),
@@ -11053,6 +12120,134 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=503,
                 detail="trade Order audit integrity failure",
             ) from exc
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/rule-packages/"
+        "{package_digest}/import"
+    )
+    async def v2_trade_order_rule_package_import(
+        order_digest: str,
+        package_digest: str,
+        body: ImportTradeRulePackageBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Fetch, verify, and cache one exact Order-bound Trade Skill."""
+
+        from nth_dao.trade_rules import (
+            OfferRejected,
+            RulePackageBusyError,
+            RulePackageCapacityError,
+            RulePackageError,
+            RulePackageBundleRejected,
+            TradeOffer,
+            TradeOrderAuditError,
+            offer_digest,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        _require_trade_offer_digest(order_digest)
+        _require_trade_offer_digest(package_digest)
+        coordinator = _state_trade_order_audit(request)
+        package_store = _state_trade_rule_package_store(request)
+        workspace = _state_workspace(request)
+        if coordinator is None or package_store is None or workspace is None:
+            raise HTTPException(status_code=503, detail="trade package import unavailable")
+        try:
+            record = coordinator.get_accepted(order_digest)
+            if record is None:
+                raise HTTPException(status_code=404, detail="Trade Order not found")
+            order_document = record.order.to_dict()
+            bindings = {
+                item["digest"]: item["rule_id"]
+                for item in order_document["rule_bindings"]
+            }
+            if package_digest not in bindings:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Rule Package is not bound by this Trade Order",
+                )
+            source_offer = TradeOffer.from_dict(
+                order_document["snapshot"]["offer"]
+            )
+            source_offer_digest = offer_digest(source_offer)
+            normalized_peer = _normalize_configured_fed_peer(body.peer_url)
+            spine = _state_spine(request)
+            if spine is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="signed Spine unavailable",
+                )
+            package, installed, audit_event, audit_created = await run_in_threadpool(
+                _import_trade_rule_package_singleflight,
+                workspace,
+                package_store,
+                spine,
+                order_digest=order_digest,
+                peer_url=normalized_peer,
+                offer_digest=source_offer_digest,
+                offer_publisher_did=source_offer.publisher_did,
+                package_digest=package_digest,
+                expected_rule_id=bindings[package_digest],
+            )
+        except HTTPException:
+            raise
+        except (RulePackageBundleRejected, OfferRejected, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RulePackageCapacityError as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except RulePackageBusyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade package store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeRulePackageImportBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeRulePackageImportAuditError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-rule-package-audit-incomplete",
+                    "message": str(exc),
+                    "package_digest": package_digest,
+                    "retryable": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Trade Rule Package peer fetch failed",
+            ) from exc
+        except (RulePackageError, TradeOrderAuditError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Rule Package import integrity check failed",
+            ) from exc
+        document = package.manifest.to_dict()
+        return {
+            "status": "installed" if installed else "already-installed",
+            "installed": installed,
+            "offer_digest": source_offer_digest,
+            "package_digest": package.digest,
+            "rule_id": document["rule_id"],
+            "version": document["version"],
+            "publisher_did": document["publisher_did"],
+            "audit_event_id": audit_event.event_id,
+            "audit_created": audit_created,
+            "resource_count": len(package.resources),
+            "resource_bytes": sum(len(item) for item in package.resources.values()),
+            "trust_granted": False,
+            "execution_authority_granted": False,
+            "warning": (
+                "Signature and content digests were verified. Installation is a local "
+                "cache action; it does not recognize, trust, or execute the Trade Skill."
+            ),
+        }
 
     @app.get(
         "/api/v2/trade/orders/{order_digest}/execution-receipts"
@@ -11366,6 +12561,77 @@ def register_v2_routes(app: FastAPI) -> None:
         except ValueError:
             raise HTTPException(status_code=404, detail="announced offer not found")
         return offer.to_dict()
+
+    @app.get(
+        "/api/v2/trade/federation/offers/{offer_digest}/rule-packages/"
+        "{package_digest}"
+    )
+    def v2_trade_rule_package_federation_get(
+        offer_digest: str,
+        package_digest: str,
+        request: Request,
+    ) -> Any:
+        """Serve one verified package bundle through a live local Offer."""
+
+        from fastapi.responses import Response
+        from nth_dao.trade_rules import (
+            RulePackageBundleRejected,
+            build_rule_package_bundle,
+            rule_package_bundle_bytes,
+            sign_offer_package_binding,
+        )
+
+        _require_trade_rule_package_request_budget(request)
+        semaphore = _trade_rule_package_serve_semaphore(request)
+        if not semaphore.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Rule Package encoder is busy",
+                headers={"Retry-After": "1"},
+            )
+        try:
+            package, offer = _load_public_trade_rule_package(
+                request,
+                offer_digest=offer_digest,
+                package_digest=package_digest,
+            )
+            etag = _trade_rule_package_etag(offer_digest, package_digest)
+            response_headers = {
+                "ETag": etag,
+                "X-NTH-Offer-Digest": offer_digest,
+                "X-NTH-Package-Digest": package_digest,
+                "Cache-Control": "public, max-age=300",
+            }
+            if _if_none_match_matches(request, etag):
+                return Response(status_code=304, headers=response_headers)
+            _require_trade_rule_package_byte_budget(
+                request,
+                _trade_rule_package_wire_cost_upper_bound(package),
+            )
+            try:
+                binding = sign_offer_package_binding(
+                    _state_node_identity(request),
+                    offer_digest=offer_digest,
+                    package_digest=package.digest,
+                    created=offer.to_dict()["published_at"],
+                )
+                raw = rule_package_bundle_bytes(build_rule_package_bundle(
+                    package,
+                    offer_package_binding=binding,
+                ))
+            except RulePackageBundleRejected as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="public Rule Package bundle verification failed",
+                ) from exc
+            response_headers["Content-Length"] = str(len(raw))
+            return Response(
+                content=raw,
+                media_type="application/vnd.nth-dao.trade-rule-package+json",
+                headers=response_headers,
+            )
+        finally:
+            semaphore.release()
 
     @app.get("/api/v2/trade/federation/offers/{digest}/head-proof")
     def v2_trade_offer_federation_head_proof_get(

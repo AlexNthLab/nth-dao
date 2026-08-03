@@ -83,8 +83,10 @@ from nth_dao.trade_rules.order_dispatch import (
     TradeOrderAcknowledgement,
     acknowledgement_audit_payload,
 )
-from nth_dao.trade_rules.offer import offer_body, sign_offer
+from nth_dao.trade_rules.offer import offer_body, offer_digest, sign_offer
 from nth_dao.trade_rules.package_store import RulePackageStore
+from nth_dao.trade_rules.package_transport import build_rule_package_bundle
+from nth_dao.trade_rules.package_binding import sign_offer_package_binding
 from nth_dao.trade_rules.store import OfferStore
 
 VECTORS_PATH = Path(__file__).with_name("vectors") / "agreement-v1.json"
@@ -147,6 +149,10 @@ RECEIPT_REVIEW_AUDIT_SCHEMA_PATH = (
 RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-receipt-review-conflict-audit-payload.schema.json"
+)
+RULE_PACKAGE_BUNDLE_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-rule-package-bundle.schema.json"
 )
 
 
@@ -256,14 +262,16 @@ def generate_vectors() -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as directory:
         package_store = RulePackageStore(directory)
         offer_store = OfferStore(directory)
-        package_digest = package_store.install(
+        package_install = package_store.install(
             manifest,
             {
                 resource_digest: resource,
                 input_schema_digest: input_schema,
                 output_schema_digest: output_schema,
             },
-        ).digest
+            source="local",
+        )
+        package_digest = package_install.digest
         offer = sign_offer(
             maker,
             offer_body(
@@ -292,6 +300,15 @@ def generate_vectors() -> dict[str, Any]:
             created="2026-07-01T00:00:00Z",
         )
         offer_store.publish(offer)
+        package_bundle = build_rule_package_bundle(
+            package_install.package,
+            offer_package_binding=sign_offer_package_binding(
+                maker,
+                offer_digest=offer_digest(offer),
+                package_digest=package_install.package.digest,
+                created="2026-07-01T00:00:00Z",
+            ),
+        )
         taker_resolution = resolve_canonical_offer_rules(
             maker.as_did(),
             offer.offer_id,
@@ -612,6 +629,29 @@ def generate_vectors() -> dict[str, Any]:
         receipt_review_audit_tamper["receipt_digest"] = (
             "sha256:" + ("0" * 64)
         )
+        package_bundle_offer_tamper = copy.deepcopy(package_bundle)
+        package_bundle_offer_tamper["offer_digest"] = (
+            "sha256:" + ("0" * 64)
+        )
+        package_bundle_binding_signature_tamper = copy.deepcopy(package_bundle)
+        binding_proof = package_bundle_binding_signature_tamper[
+            "offer_package_binding"
+        ]["proof"]
+        binding_proof["proof_value"] = (
+            ("A" if binding_proof["proof_value"][0] != "A" else "B")
+            + binding_proof["proof_value"][1:]
+        )
+        package_bundle_wrong_binding_signer = build_rule_package_bundle(
+            package_install.package,
+            offer_package_binding=sign_offer_package_binding(
+                taker,
+                offer_digest=offer_digest(offer),
+                package_digest=package_install.package.digest,
+                created="2026-07-01T00:00:00Z",
+            ),
+        )
+        package_bundle_unknown_field = copy.deepcopy(package_bundle)
+        package_bundle_unknown_field["unexpected"] = True
     return {
         "format": "nth-trade-agreement-conformance-v1",
         "schema_version": 1,
@@ -714,6 +754,7 @@ def generate_vectors() -> dict[str, Any]:
                 }.items())
             ],
         },
+        "rule_package_bundle": package_bundle,
         "verifier_policy": json.loads(verifier_policy.canonical_bytes),
         "adapter_policy": adapter_policy.to_dict(),
         "execution_content": [
@@ -869,6 +910,30 @@ def generate_vectors() -> dict[str, Any]:
                 "expected_valid": False,
                 "document": receipt_review_audit_tamper,
             },
+            {
+                "case": "rule-package-bundle-offer-binding-tamper",
+                "target": "rule_package_bundle",
+                "expected_valid": False,
+                "document": package_bundle_offer_tamper,
+            },
+            {
+                "case": "rule-package-bundle-binding-signature-tamper",
+                "target": "rule_package_bundle",
+                "expected_valid": False,
+                "document": package_bundle_binding_signature_tamper,
+            },
+            {
+                "case": "rule-package-bundle-binding-wrong-signer",
+                "target": "rule_package_bundle",
+                "expected_valid": False,
+                "document": package_bundle_wrong_binding_signer,
+            },
+            {
+                "case": "rule-package-bundle-unknown-field",
+                "target": "rule_package_bundle",
+                "expected_valid": False,
+                "document": package_bundle_unknown_field,
+            },
         ],
     }
 
@@ -912,6 +977,7 @@ __all__ = [
     "RECEIPT_REVIEW_AUDIT_SCHEMA_PATH",
     "RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH",
     "RECEIPT_REVIEW_SCHEMA_PATH",
+    "RULE_PACKAGE_BUNDLE_SCHEMA_PATH",
     "VECTORS_PATH",
     "generate_vectors",
     "write_vectors",

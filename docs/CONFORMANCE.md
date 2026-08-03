@@ -53,6 +53,15 @@ same checked-in vector. Negative audit vectors cover malformed Ed25519
 `did:key` values, impossible calendar dates, and reversed validity intervals;
 schema-only acceptance is not treated as semantic conformance.
 
+Agreement v1 also carries a deterministic Rule Package Bundle v1 fixture and
+negative outer-binding, binding-signature, valid-but-unauthorized binding
+signer, and unknown-field cases. Ports must
+verify the Offer publisher's domain-separated Offer-to-Package assertion,
+canonical base64url resource encoding, the signed Manifest, each resource
+digest and size, the Package digest, and all caller-known expected values.
+JSON Schema validation alone is insufficient, and a valid bundle grants no
+local trust or execution authority.
+
 Recognition Policy v1 has a separate deterministic vector in the same
 directory. It covers a node-signed genesis, a successor signed by a delegated
 controller, byte-exact canonical JSON and domain-separated signing input, and

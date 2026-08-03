@@ -1453,6 +1453,407 @@
       },
       "expected_valid": false,
       "target": "receipt_review_audit_binding"
+    },
+    {
+      "case": "rule-package-bundle-offer-binding-tamper",
+      "document": {
+        "kind": "nth.dao.trade.rule-package-bundle",
+        "manifest": {
+          "applies_to": [
+            "service"
+          ],
+          "conflicts": [],
+          "dependencies": [],
+          "execution": {
+            "mode": "declarative",
+            "permissions": []
+          },
+          "extensions": {},
+          "families": [
+            "fulfillment"
+          ],
+          "hook_contracts": [
+            {
+              "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "name": "fulfillment.deliver",
+              "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "permissions": [],
+              "side_effect": "none",
+              "version": "1"
+            }
+          ],
+          "kind": "org.nthdao.trade.rule-manifest",
+          "not_after": "2027-01-01T00:00:00Z",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "z7vVb8yowXaoDCHgnRvKLZvNsQtj1xAo0toiYv7FprlWuaY1x3u-Vso7_JpBTtIKkPtsUN6jgCJCOwc39kuACg",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N#z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          },
+          "protocol_version": "1.0",
+          "published_at": "2026-07-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N",
+          "required_capabilities": [],
+          "resources": [
+            {
+              "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "media_type": "application/schema+json",
+              "purpose": "execution-input-schema",
+              "size": 167
+            },
+            {
+              "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "media_type": "application/schema+json",
+              "purpose": "execution-output-schema",
+              "size": 171
+            },
+            {
+              "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7",
+              "media_type": "application/json",
+              "purpose": "terms",
+              "size": 19
+            }
+          ],
+          "rule_id": "org.nthdao.reference.delivery",
+          "summary": "Public bilateral agreement conformance rule.",
+          "version": "1.0.0"
+        },
+        "offer_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "offer_package_binding": {
+          "kind": "nth.dao.trade.offer-package-binding",
+          "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "BiOBJxOHhFXULyj-R5n26x6IaLYTjOLWngV45gLSyV4oUlpy8yDXTGKfUIsm1El5racP5x0Sco9xWF_6VJxeBA",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+          },
+          "protocol_version": "1",
+          "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+        "protocol_version": "1",
+        "resources": [
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsib3JkZXIiOnsiY29uc3QiOiJkZWxpdmVyIn19LCJyZXF1aXJlZCI6WyJvcmRlciJdLCJ0eXBlIjoib2JqZWN0In0",
+            "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59"
+          },
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsic3RhdHVzIjp7ImNvbnN0IjoiY29tcGxldGVkIn19LCJyZXF1aXJlZCI6WyJzdGF0dXMiXSwidHlwZSI6Im9iamVjdCJ9",
+            "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693"
+          },
+          {
+            "bytes_b64u": "eyJydWxlIjoiZGVsaXZlcnkifQ",
+            "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
+          }
+        ]
+      },
+      "expected_valid": false,
+      "target": "rule_package_bundle"
+    },
+    {
+      "case": "rule-package-bundle-binding-signature-tamper",
+      "document": {
+        "kind": "nth.dao.trade.rule-package-bundle",
+        "manifest": {
+          "applies_to": [
+            "service"
+          ],
+          "conflicts": [],
+          "dependencies": [],
+          "execution": {
+            "mode": "declarative",
+            "permissions": []
+          },
+          "extensions": {},
+          "families": [
+            "fulfillment"
+          ],
+          "hook_contracts": [
+            {
+              "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "name": "fulfillment.deliver",
+              "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "permissions": [],
+              "side_effect": "none",
+              "version": "1"
+            }
+          ],
+          "kind": "org.nthdao.trade.rule-manifest",
+          "not_after": "2027-01-01T00:00:00Z",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "z7vVb8yowXaoDCHgnRvKLZvNsQtj1xAo0toiYv7FprlWuaY1x3u-Vso7_JpBTtIKkPtsUN6jgCJCOwc39kuACg",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N#z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          },
+          "protocol_version": "1.0",
+          "published_at": "2026-07-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N",
+          "required_capabilities": [],
+          "resources": [
+            {
+              "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "media_type": "application/schema+json",
+              "purpose": "execution-input-schema",
+              "size": 167
+            },
+            {
+              "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "media_type": "application/schema+json",
+              "purpose": "execution-output-schema",
+              "size": 171
+            },
+            {
+              "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7",
+              "media_type": "application/json",
+              "purpose": "terms",
+              "size": 19
+            }
+          ],
+          "rule_id": "org.nthdao.reference.delivery",
+          "summary": "Public bilateral agreement conformance rule.",
+          "version": "1.0.0"
+        },
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "offer_package_binding": {
+          "kind": "nth.dao.trade.offer-package-binding",
+          "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "AiOBJxOHhFXULyj-R5n26x6IaLYTjOLWngV45gLSyV4oUlpy8yDXTGKfUIsm1El5racP5x0Sco9xWF_6VJxeBA",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+          },
+          "protocol_version": "1",
+          "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+        "protocol_version": "1",
+        "resources": [
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsib3JkZXIiOnsiY29uc3QiOiJkZWxpdmVyIn19LCJyZXF1aXJlZCI6WyJvcmRlciJdLCJ0eXBlIjoib2JqZWN0In0",
+            "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59"
+          },
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsic3RhdHVzIjp7ImNvbnN0IjoiY29tcGxldGVkIn19LCJyZXF1aXJlZCI6WyJzdGF0dXMiXSwidHlwZSI6Im9iamVjdCJ9",
+            "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693"
+          },
+          {
+            "bytes_b64u": "eyJydWxlIjoiZGVsaXZlcnkifQ",
+            "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
+          }
+        ]
+      },
+      "expected_valid": false,
+      "target": "rule_package_bundle"
+    },
+    {
+      "case": "rule-package-bundle-binding-wrong-signer",
+      "document": {
+        "kind": "nth.dao.trade.rule-package-bundle",
+        "manifest": {
+          "applies_to": [
+            "service"
+          ],
+          "conflicts": [],
+          "dependencies": [],
+          "execution": {
+            "mode": "declarative",
+            "permissions": []
+          },
+          "extensions": {},
+          "families": [
+            "fulfillment"
+          ],
+          "hook_contracts": [
+            {
+              "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "name": "fulfillment.deliver",
+              "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "permissions": [],
+              "side_effect": "none",
+              "version": "1"
+            }
+          ],
+          "kind": "org.nthdao.trade.rule-manifest",
+          "not_after": "2027-01-01T00:00:00Z",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "z7vVb8yowXaoDCHgnRvKLZvNsQtj1xAo0toiYv7FprlWuaY1x3u-Vso7_JpBTtIKkPtsUN6jgCJCOwc39kuACg",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N#z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          },
+          "protocol_version": "1.0",
+          "published_at": "2026-07-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N",
+          "required_capabilities": [],
+          "resources": [
+            {
+              "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "media_type": "application/schema+json",
+              "purpose": "execution-input-schema",
+              "size": 167
+            },
+            {
+              "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "media_type": "application/schema+json",
+              "purpose": "execution-output-schema",
+              "size": 171
+            },
+            {
+              "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7",
+              "media_type": "application/json",
+              "purpose": "terms",
+              "size": 19
+            }
+          ],
+          "rule_id": "org.nthdao.reference.delivery",
+          "summary": "Public bilateral agreement conformance rule.",
+          "version": "1.0.0"
+        },
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "offer_package_binding": {
+          "kind": "nth.dao.trade.offer-package-binding",
+          "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "uPp85dfKJVPVtqCGAWU_nkXgy_QNX98Pf1nS_W5k6lqeWzfmmf6WB-8NNcLlG_sLvgkwdg-NXRCPz3OXFkl4Bw",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+          },
+          "protocol_version": "1",
+          "publisher_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+        "protocol_version": "1",
+        "resources": [
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsib3JkZXIiOnsiY29uc3QiOiJkZWxpdmVyIn19LCJyZXF1aXJlZCI6WyJvcmRlciJdLCJ0eXBlIjoib2JqZWN0In0",
+            "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59"
+          },
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsic3RhdHVzIjp7ImNvbnN0IjoiY29tcGxldGVkIn19LCJyZXF1aXJlZCI6WyJzdGF0dXMiXSwidHlwZSI6Im9iamVjdCJ9",
+            "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693"
+          },
+          {
+            "bytes_b64u": "eyJydWxlIjoiZGVsaXZlcnkifQ",
+            "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
+          }
+        ]
+      },
+      "expected_valid": false,
+      "target": "rule_package_bundle"
+    },
+    {
+      "case": "rule-package-bundle-unknown-field",
+      "document": {
+        "kind": "nth.dao.trade.rule-package-bundle",
+        "manifest": {
+          "applies_to": [
+            "service"
+          ],
+          "conflicts": [],
+          "dependencies": [],
+          "execution": {
+            "mode": "declarative",
+            "permissions": []
+          },
+          "extensions": {},
+          "families": [
+            "fulfillment"
+          ],
+          "hook_contracts": [
+            {
+              "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "name": "fulfillment.deliver",
+              "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "permissions": [],
+              "side_effect": "none",
+              "version": "1"
+            }
+          ],
+          "kind": "org.nthdao.trade.rule-manifest",
+          "not_after": "2027-01-01T00:00:00Z",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "z7vVb8yowXaoDCHgnRvKLZvNsQtj1xAo0toiYv7FprlWuaY1x3u-Vso7_JpBTtIKkPtsUN6jgCJCOwc39kuACg",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N#z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          },
+          "protocol_version": "1.0",
+          "published_at": "2026-07-01T00:00:00Z",
+          "publisher_did": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N",
+          "required_capabilities": [],
+          "resources": [
+            {
+              "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+              "media_type": "application/schema+json",
+              "purpose": "execution-input-schema",
+              "size": 167
+            },
+            {
+              "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+              "media_type": "application/schema+json",
+              "purpose": "execution-output-schema",
+              "size": 171
+            },
+            {
+              "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7",
+              "media_type": "application/json",
+              "purpose": "terms",
+              "size": 19
+            }
+          ],
+          "rule_id": "org.nthdao.reference.delivery",
+          "summary": "Public bilateral agreement conformance rule.",
+          "version": "1.0.0"
+        },
+        "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+        "offer_package_binding": {
+          "kind": "nth.dao.trade.offer-package-binding",
+          "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+          "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "proof": {
+            "created": "2026-07-01T00:00:00Z",
+            "proof_purpose": "assertionMethod",
+            "proof_value": "BiOBJxOHhFXULyj-R5n26x6IaLYTjOLWngV45gLSyV4oUlpy8yDXTGKfUIsm1El5racP5x0Sco9xWF_6VJxeBA",
+            "type": "NthEd25519SignatureV1",
+            "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+          },
+          "protocol_version": "1",
+          "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+        "protocol_version": "1",
+        "resources": [
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsib3JkZXIiOnsiY29uc3QiOiJkZWxpdmVyIn19LCJyZXF1aXJlZCI6WyJvcmRlciJdLCJ0eXBlIjoib2JqZWN0In0",
+            "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59"
+          },
+          {
+            "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsic3RhdHVzIjp7ImNvbnN0IjoiY29tcGxldGVkIn19LCJyZXF1aXJlZCI6WyJzdGF0dXMiXSwidHlwZSI6Im9iamVjdCJ9",
+            "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693"
+          },
+          {
+            "bytes_b64u": "eyJydWxlIjoiZGVsaXZlcnkifQ",
+            "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
+          }
+        ],
+        "unexpected": true
+      },
+      "expected_valid": false,
+      "target": "rule_package_bundle"
     }
   ],
   "order": {
@@ -2196,6 +2597,101 @@
       },
       {
         "bytes_hex": "7b2272756c65223a2264656c6976657279227d",
+        "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
+      }
+    ]
+  },
+  "rule_package_bundle": {
+    "kind": "nth.dao.trade.rule-package-bundle",
+    "manifest": {
+      "applies_to": [
+        "service"
+      ],
+      "conflicts": [],
+      "dependencies": [],
+      "execution": {
+        "mode": "declarative",
+        "permissions": []
+      },
+      "extensions": {},
+      "families": [
+        "fulfillment"
+      ],
+      "hook_contracts": [
+        {
+          "input_schema_digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "name": "fulfillment.deliver",
+          "output_schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "permissions": [],
+          "side_effect": "none",
+          "version": "1"
+        }
+      ],
+      "kind": "org.nthdao.trade.rule-manifest",
+      "not_after": "2027-01-01T00:00:00Z",
+      "proof": {
+        "created": "2026-07-01T00:00:00Z",
+        "proof_purpose": "assertionMethod",
+        "proof_value": "z7vVb8yowXaoDCHgnRvKLZvNsQtj1xAo0toiYv7FprlWuaY1x3u-Vso7_JpBTtIKkPtsUN6jgCJCOwc39kuACg",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N#z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+      },
+      "protocol_version": "1.0",
+      "published_at": "2026-07-01T00:00:00Z",
+      "publisher_did": "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N",
+      "required_capabilities": [],
+      "resources": [
+        {
+          "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59",
+          "media_type": "application/schema+json",
+          "purpose": "execution-input-schema",
+          "size": 167
+        },
+        {
+          "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "media_type": "application/schema+json",
+          "purpose": "execution-output-schema",
+          "size": 171
+        },
+        {
+          "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7",
+          "media_type": "application/json",
+          "purpose": "terms",
+          "size": 19
+        }
+      ],
+      "rule_id": "org.nthdao.reference.delivery",
+      "summary": "Public bilateral agreement conformance rule.",
+      "version": "1.0.0"
+    },
+    "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+    "offer_package_binding": {
+      "kind": "nth.dao.trade.offer-package-binding",
+      "offer_digest": "sha256:6312177a9eaa8ce90f223cd46c86b143a48f3c8f1b75887ffbe59b018d651eae",
+      "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+      "proof": {
+        "created": "2026-07-01T00:00:00Z",
+        "proof_purpose": "assertionMethod",
+        "proof_value": "BiOBJxOHhFXULyj-R5n26x6IaLYTjOLWngV45gLSyV4oUlpy8yDXTGKfUIsm1El5racP5x0Sco9xWF_6VJxeBA",
+        "type": "NthEd25519SignatureV1",
+        "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+      },
+      "protocol_version": "1",
+      "publisher_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    "package_digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+    "protocol_version": "1",
+    "resources": [
+      {
+        "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsib3JkZXIiOnsiY29uc3QiOiJkZWxpdmVyIn19LCJyZXF1aXJlZCI6WyJvcmRlciJdLCJ0eXBlIjoib2JqZWN0In0",
+        "digest": "sha256:a9989a599764fda0817dc17497d3e83a5e7603f2b60716e6a39acbecd3393d59"
+      },
+      {
+        "bytes_b64u": "eyIkc2NoZW1hIjoiaHR0cHM6Ly9qc29uLXNjaGVtYS5vcmcvZHJhZnQvMjAyMC0xMi9zY2hlbWEiLCJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsic3RhdHVzIjp7ImNvbnN0IjoiY29tcGxldGVkIn19LCJyZXF1aXJlZCI6WyJzdGF0dXMiXSwidHlwZSI6Im9iamVjdCJ9",
+        "digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693"
+      },
+      {
+        "bytes_b64u": "eyJydWxlIjoiZGVsaXZlcnkifQ",
         "digest": "sha256:d78e56a00a07771e99ed7ed0b1a47c08b563f6abcffe3a46b66e32e31a78abb7"
       }
     ]

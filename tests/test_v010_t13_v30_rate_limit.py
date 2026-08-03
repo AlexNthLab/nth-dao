@@ -148,6 +148,32 @@ def test_persistent_rate_limiter_clock_rollback_does_not_reset_budget(
     assert limiter.check("203.0.113.10").allowed
 
 
+def test_persistent_rate_limiter_rebases_implausible_future_window(tmp_path) -> None:
+    now = [2_000.0]
+    path = tmp_path / "rate-limit.json"
+    first = PersistentRateLimiter(
+        path,
+        max_per_window=1,
+        window_seconds=10.0,
+        clock=lambda: now[0],
+    )
+    assert first.check("203.0.113.11").allowed
+
+    now[0] = 1_000.0
+    restarted = PersistentRateLimiter(
+        path,
+        max_per_window=1,
+        window_seconds=10.0,
+        clock=lambda: now[0],
+    )
+    denied = restarted.check("203.0.113.11")
+    assert not denied.allowed
+    assert denied.retry_after_seconds == pytest.approx(10.0)
+
+    now[0] = 1_010.1
+    assert restarted.check("203.0.113.11").allowed
+
+
 def test_persistent_limiter_denials_do_not_rewrite_or_reread_state(
     tmp_path, monkeypatch,
 ) -> None:

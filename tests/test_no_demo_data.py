@@ -212,7 +212,7 @@ def test_public_agent_listing_redacts_local_workspace_path(tmp_path: Path) -> No
                 "alive": True,
                 "kind": "codex",
                 "work_scope_id": "scope-a1",
-                "work_scope_root": r"C:\Users\private\secret-project",
+                "work_scope_root": r"X:\synthetic-fixture\secret-project",
                 "work_access": "read-only",
                 "work_revision": "abc123",
             }
@@ -235,4 +235,6 @@ def test_public_agent_listing_redacts_local_workspace_path(tmp_path: Path) -> No
         "/api/v2/agents",
         headers={"Authorization": f"Bearer {token}"},
     ).json()[0]
-    assert private_row["work_scope_root"] == r"C:\Users\private\secret-project"
+    assert private_row["work_scope_root"] == (
+        r"X:\synthetic-fixture\secret-project"
+    )

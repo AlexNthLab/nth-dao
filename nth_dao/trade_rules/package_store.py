@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -14,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from nth_dao.canonical_json import canonical_json
 from nth_dao.trade_rules.canonical import MAX_TRADE_JSON_BYTES
 from nth_dao.trade_rules.manifest import (
     MAX_PACKAGE_RESOURCE_BYTES,
@@ -31,6 +33,9 @@ DEFAULT_MAX_PACKAGE_STORE_FILES = 16_384
 _DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
 _MANIFEST_FILE = re.compile(r"^([0-9a-f]{64})\.json$")
 _RESOURCE_FILE = re.compile(r"^([0-9a-f]{64})\.blob$")
+_PROVENANCE_FILE = re.compile(r"^([0-9a-f]{64})\.json$")
+_PROVENANCE_SOURCES = frozenset({"federated", "local"})
+_MAX_PROVENANCE_BYTES = 512
 
 
 class RulePackageError(RuntimeError):
@@ -222,6 +227,7 @@ class RulePackageStore:
         self.root = Path(root) / "trade" / "rule_packages"
         self.manifest_root = self.root / "manifests"
         self.resource_root = self.root / "resources"
+        self.provenance_root = self.root / "provenance"
         self.lock_path = self.root / ".locks" / "packages"
         self.max_packages = max_packages
         self.max_bytes = max_bytes
@@ -242,6 +248,9 @@ class RulePackageStore:
 
     def _resource_path(self, digest: str) -> Path:
         return self.resource_root / f"{self._digest_suffix(digest)}.blob"
+
+    def _provenance_path(self, digest: str) -> Path:
+        return self.provenance_root / f"{self._digest_suffix(digest)}.json"
 
     @staticmethod
     def _is_linklike(path: Path) -> bool:
@@ -379,7 +388,11 @@ class RulePackageStore:
                 if relative.parts and relative.parts[0] == ".locks":
                     continue
                 if path.is_dir():
-                    if path not in {self.manifest_root, self.resource_root}:
+                    if path not in {
+                        self.manifest_root,
+                        self.resource_root,
+                        self.provenance_root,
+                    }:
                         raise RulePackageCorruptionError(
                             f"unexpected package-store directory {path.name!r}"
                         )
@@ -410,6 +423,23 @@ class RulePackageStore:
                         raise RulePackageCorruptionError(
                             f"unexpected resource-store file {path.name!r}"
                         )
+                elif path.parent == self.provenance_root:
+                    if (
+                        not path.name.endswith(".tmp")
+                        and _PROVENANCE_FILE.fullmatch(path.name) is None
+                    ):
+                        raise RulePackageCorruptionError(
+                            f"unexpected provenance-store file {path.name!r}"
+                        )
+                    if not path.name.endswith(".tmp"):
+                        match = _PROVENANCE_FILE.fullmatch(path.name)
+                        assert match is not None
+                        digest = "sha256:" + match.group(1)
+                        if not self._manifest_path(digest).exists():
+                            raise RulePackageCorruptionError(
+                                f"provenance {digest} has no stored manifest"
+                            )
+                        self._provenance_sources_locked(digest)
                 else:
                     raise RulePackageCorruptionError(
                         f"unexpected package-store file {path.name!r}"
@@ -438,17 +468,82 @@ class RulePackageStore:
             )
         return True
 
+    @staticmethod
+    def _validate_source(source: str | None) -> str | None:
+        if source is not None and source not in _PROVENANCE_SOURCES:
+            raise ValueError("source must be 'local', 'federated', or None")
+        return source
+
+    @staticmethod
+    def _provenance_bytes(digest: str, sources: tuple[str, ...]) -> bytes:
+        return canonical_json(
+            {
+                "package_digest": digest,
+                "sources": list(sources),
+                "version": 1,
+            }
+        )
+
+    def _provenance_sources_locked(self, digest: str) -> tuple[str, ...]:
+        path = self._provenance_path(digest)
+        if not path.exists():
+            return ()
+        raw = self._read_exact(
+            path,
+            maximum=_MAX_PROVENANCE_BYTES,
+            label=f"provenance {digest}",
+        )
+        try:
+            document = json.loads(raw.decode("ascii"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RulePackageCorruptionError(
+                f"stored provenance {digest} is invalid"
+            ) from exc
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"package_digest", "sources", "version"}
+            or document.get("package_digest") != digest
+            or document.get("version") != 1
+            or not isinstance(document.get("sources"), list)
+            or not document["sources"]
+            or any(source not in _PROVENANCE_SOURCES for source in document["sources"])
+            or document["sources"] != sorted(set(document["sources"]))
+            or raw != self._provenance_bytes(digest, tuple(document["sources"]))
+        ):
+            raise RulePackageCorruptionError(
+                f"stored provenance {digest} is invalid"
+            )
+        return tuple(document["sources"])
+
     def install(
         self,
         manifest: TradeRuleManifest | dict[str, Any],
         resources: Mapping[str, bytes],
+        *,
+        source: str | None = None,
     ) -> RulePackageInstallResult:
+        source = self._validate_source(source)
         package = build_rule_package(manifest, resources)
         manifest_path = self._manifest_path(package.digest)
         try:
             with self._package_lock():
                 package_count, total_files, total_bytes = self._usage_locked()
                 manifest_exists = manifest_path.exists()
+                existing_sources = self._provenance_sources_locked(package.digest)
+                desired_sources = tuple(
+                    sorted(set(existing_sources) | ({source} if source else set()))
+                )
+                provenance_path = self._provenance_path(package.digest)
+                existing_provenance_bytes = (
+                    self._provenance_bytes(package.digest, existing_sources)
+                    if existing_sources
+                    else b""
+                )
+                desired_provenance_bytes = (
+                    self._provenance_bytes(package.digest, desired_sources)
+                    if desired_sources
+                    else b""
+                )
                 additional_bytes = 0
                 additional_files = 0
                 for digest, payload in package.resources.items():
@@ -463,6 +558,13 @@ class RulePackageStore:
                         raise RulePackageCapacityError(
                             "package store has reached configured max_packages"
                         )
+                if desired_provenance_bytes != existing_provenance_bytes:
+                    additional_bytes += (
+                        len(desired_provenance_bytes)
+                        - len(existing_provenance_bytes)
+                    )
+                    if not provenance_path.exists():
+                        additional_files += 1
                 if total_files + additional_files > self.max_files:
                     raise RulePackageCapacityError(
                         "package store has reached configured max_files"
@@ -484,6 +586,11 @@ class RulePackageStore:
                     label=f"manifest {package.digest}",
                 ):
                     loaded = self._load_locked(package.digest)
+                    if desired_provenance_bytes != existing_provenance_bytes:
+                        self._atomic_write(
+                            provenance_path,
+                            desired_provenance_bytes,
+                        )
                     return RulePackageInstallResult(
                         digest=package.digest,
                         installed=False,
@@ -492,6 +599,11 @@ class RulePackageStore:
                 self._atomic_write(
                     manifest_path, package.manifest.canonical_bytes
                 )
+                if desired_provenance_bytes:
+                    self._atomic_write(
+                        provenance_path,
+                        desired_provenance_bytes,
+                    )
                 return RulePackageInstallResult(
                     digest=package.digest,
                     installed=True,
@@ -564,6 +676,58 @@ class RulePackageStore:
         except OSError as exc:
             raise RulePackageError(f"package store I/O failed: {exc}") from exc
 
+    def provenance_sources(self, digest: str) -> tuple[str, ...]:
+        """Return explicit acquisition sources; empty means unclassified."""
+
+        manifest_path = self._manifest_path(digest)
+        self._assert_store_path(manifest_path)
+        if not self.root.exists():
+            return ()
+        try:
+            with self._package_lock():
+                self._usage_locked()
+                sources = self._provenance_sources_locked(digest)
+                if sources and not manifest_path.exists():
+                    raise RulePackageCorruptionError(
+                        f"provenance {digest} has no stored manifest"
+                    )
+                return sources
+        except TimeoutError as exc:
+            raise RulePackageBusyError("Trade Rule package store is busy") from exc
+        except OSError as exc:
+            raise RulePackageError(f"package store I/O failed: {exc}") from exc
+
+    def provenance_sources_many(
+        self,
+        digests: tuple[str, ...],
+    ) -> dict[str, tuple[str, ...]]:
+        """Read bounded provenance for a verified catalog page under one lock."""
+
+        if len(digests) > 500:
+            raise ValueError("at most 500 package digests may be inspected")
+        for digest in digests:
+            self._digest_suffix(digest)
+        if len(set(digests)) != len(digests):
+            raise ValueError("package digests must be unique")
+        if not self.root.exists():
+            return {digest: () for digest in digests}
+        try:
+            with self._package_lock():
+                self._usage_locked()
+                result: dict[str, tuple[str, ...]] = {}
+                for digest in digests:
+                    sources = self._provenance_sources_locked(digest)
+                    if sources and not self._manifest_path(digest).exists():
+                        raise RulePackageCorruptionError(
+                            f"provenance {digest} has no stored manifest"
+                        )
+                    result[digest] = sources
+                return result
+        except TimeoutError as exc:
+            raise RulePackageBusyError("Trade Rule package store is busy") from exc
+        except OSError as exc:
+            raise RulePackageError(f"package store I/O failed: {exc}") from exc
+
     def list_digests(self) -> tuple[str, ...]:
         self._assert_store_path(self.manifest_root)
         if not self.manifest_root.exists():
@@ -584,6 +748,61 @@ class RulePackageStore:
                     self._load_manifest_locked(digest)
                     digests.append(digest)
                 return tuple(sorted(digests))
+        except TimeoutError as exc:
+            raise RulePackageBusyError("Trade Rule package store is busy") from exc
+        except OSError as exc:
+            raise RulePackageError(f"package store I/O failed: {exc}") from exc
+
+    def list_page(
+        self,
+        *,
+        after: str | None = None,
+        limit: int = 100,
+    ) -> tuple[tuple[RulePackage, ...], str | None]:
+        """Return one verified digest-ordered page without replaying all packages.
+
+        Directory shape and configured capacity bounds are checked for the
+        whole store. Publisher signatures and resource bytes are then replayed
+        only for the selected page while the same cross-process lock is held.
+        The cursor is intentionally not a snapshot token: concurrent installs
+        whose digests sort before ``after`` appear on a later fresh traversal.
+        """
+
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be in 1..500")
+        after_suffix = self._digest_suffix(after) if after is not None else None
+        self._assert_store_path(self.manifest_root)
+        if not self.manifest_root.exists():
+            return (), None
+        try:
+            with self._package_lock():
+                self._usage_locked()
+                suffixes: list[str] = []
+                for path in self.manifest_root.iterdir():
+                    if path.name.endswith(".tmp"):
+                        continue
+                    match = _MANIFEST_FILE.fullmatch(path.name)
+                    if match is None:
+                        raise RulePackageCorruptionError(
+                            f"unexpected manifest-store file {path.name!r}"
+                        )
+                    suffix = match.group(1)
+                    if after_suffix is None or suffix > after_suffix:
+                        suffixes.append(suffix)
+                selected = sorted(suffixes)[: limit + 1]
+                page_suffixes = selected[:limit]
+                packages = tuple(
+                    self._load_locked("sha256:" + suffix)
+                    for suffix in page_suffixes
+                )
+                next_cursor = (
+                    packages[-1].digest
+                    if len(selected) > limit and packages
+                    else None
+                )
+                return packages, next_cursor
         except TimeoutError as exc:
             raise RulePackageBusyError("Trade Rule package store is busy") from exc
         except OSError as exc:

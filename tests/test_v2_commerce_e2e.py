@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 import urllib.error
 import urllib.request
 
@@ -83,6 +85,39 @@ def test_acknowledged_action_is_not_dispatched_twice(tmp_path, monkeypatch):
     assert commerce_api._queue_committed_response(
         request, "order-1", "did:key:zPeer", "https://peer.example",
     ) == queued
+
+
+def test_queued_action_reports_pending_when_reconciler_owns_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    inflight = SimpleNamespace(status="inflight")
+    state = SimpleNamespace(
+        workspace=tmp_path,
+        commerce_outbox=SimpleNamespace(
+            claim=lambda _message_id: None,
+            get=lambda _message_id: inflight,
+        ),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(nth=state))
+    )
+    queued = {
+        "message_id": "sha256:message",
+        "status": "pending",
+        "target_url": "https://peer.example",
+    }
+    monkeypatch.setattr(commerce_api, "_queue_current", lambda *_args: queued)
+
+    assert commerce_api._queue_committed_response(
+        request,
+        "order-1",
+        "did:key:zPeer",
+        "https://peer.example",
+    ) == {
+        **queued,
+        "error": "delivery is already in progress",
+    }
 
 
 def _free_port():
@@ -242,6 +277,194 @@ def _http_json(url, *, payload=None):
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _await_process_delivery(
+    queued,
+    *,
+    source_url,
+    target_url,
+    order_id,
+    expected_state,
+):
+    """Require both remote state and the sender's durable ACK to converge."""
+
+    assert queued["status"] in {"acknowledged", "pending"}
+    deadline = time.monotonic() + 10.0
+    last_state = ""
+    pending_message_ids = set()
+    while time.monotonic() < deadline:
+        last_state = _http_json(
+            f"{target_url}/api/v2/commerce/orders/{order_id}",
+        )["state"]
+        pending_message_ids = {
+            item["envelope"]["message_id"]
+            for item in _http_json(f"{source_url}/api/v2/commerce/outbox")
+        }
+        if (
+            last_state == expected_state
+            and queued["message_id"] not in pending_message_ids
+        ):
+            return
+        _http_json(
+            f"{source_url}/api/v2/commerce/outbox/dispatch",
+            payload={},
+        )
+        time.sleep(0.05)
+    raise AssertionError(
+        f"commerce delivery did not durably converge to {expected_state}; "
+        f"last state was {last_state}, pending={sorted(pending_message_ids)}"
+    )
+
+
+def test_dispatch_result_retries_transient_persistence_failure():
+    acknowledged = SimpleNamespace(status="acknowledged", last_error="")
+
+    class FlakyOutbox:
+        def __init__(self):
+            self.calls = 0
+
+        def record_attempt(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("simulated transient atomic-write failure")
+            return acknowledged
+
+        def get(self, _message_id):
+            return SimpleNamespace(
+                status="inflight",
+                lease_id="active-lease",
+                last_error="",
+            )
+
+    outbox = FlakyOutbox()
+    stored, error = commerce_api._record_dispatch_attempt(
+        SimpleNamespace(commerce_outbox=outbox),
+        "sha256:" + "a" * 64,
+        "active-lease",
+        acknowledged_at_ms=1_900_000_000_000,
+    )
+
+    assert stored is True
+    assert error == ""
+    assert outbox.calls == 2
+
+
+def test_dispatch_result_does_not_repeat_commit_unknown_acknowledgement():
+    acknowledged = SimpleNamespace(
+        status="acknowledged",
+        lease_id="",
+        last_error="",
+    )
+
+    class CommitUnknownOutbox:
+        def __init__(self):
+            self.calls = 0
+
+        def record_attempt(self, *_args, **_kwargs):
+            self.calls += 1
+            raise OSError("response lost after durable commit")
+
+        def get(self, _message_id):
+            return acknowledged
+
+    outbox = CommitUnknownOutbox()
+    stored, error = commerce_api._record_dispatch_attempt(
+        SimpleNamespace(commerce_outbox=outbox),
+        "sha256:" + "b" * 64,
+        "active-lease",
+        acknowledged_at_ms=1_900_000_000_000,
+    )
+
+    assert stored is True
+    assert error == ""
+    assert outbox.calls == 1
+
+
+def test_dispatch_result_does_not_double_count_commit_unknown_failure():
+    pending = SimpleNamespace(
+        status="pending",
+        lease_id="",
+        last_error="peer-network-error",
+    )
+
+    class CommitUnknownOutbox:
+        def __init__(self):
+            self.calls = 0
+
+        def record_attempt(self, *_args, **_kwargs):
+            self.calls += 1
+            raise OSError("response lost after durable commit")
+
+        def get(self, _message_id):
+            return pending
+
+    outbox = CommitUnknownOutbox()
+    stored, error = commerce_api._record_dispatch_attempt(
+        SimpleNamespace(commerce_outbox=outbox),
+        "sha256:" + "c" * 64,
+        "active-lease",
+        error="peer-network-error",
+    )
+
+    assert stored is False
+    assert error == "peer-network-error"
+    assert outbox.calls == 1
+
+
+def test_dispatch_result_commit_unknown_keeps_real_attempt_count_one(
+    tmp_path,
+    monkeypatch,
+):
+    source = AgentIdentity.generate()
+    target = AgentIdentity.generate()
+    envelope = sign_envelope(
+        source,
+        target_did=target.as_did(),
+        payload={"order": {"id": "commit-unknown"}},
+        created_at_ms=1_900_000_000_000,
+    )
+    outbox = CommerceOutbox(tmp_path)
+    outbox.enqueue(envelope, target_url="https://seller.example")
+    claimed = outbox.claim(
+        envelope.message_id,
+        now_ms_override=1_900_000_001_000,
+    )
+    assert claimed is not None
+    real_record_attempt = outbox.record_attempt
+
+    def commit_then_lose_response(*args, **kwargs):
+        real_record_attempt(*args, **kwargs)
+        raise OSError("response lost after durable commit")
+
+    monkeypatch.setattr(outbox, "record_attempt", commit_then_lose_response)
+    stored, error = commerce_api._record_dispatch_attempt(
+        SimpleNamespace(commerce_outbox=outbox),
+        envelope.message_id,
+        claimed.lease_id,
+        error="peer-network-error",
+    )
+    current = outbox.get(envelope.message_id)
+
+    assert stored is False
+    assert error == "peer-network-error"
+    assert current is not None
+    assert current.status == "pending"
+    assert current.attempts == 1
+
+
+def test_dispatch_result_does_not_retry_programming_errors():
+    class BrokenOutbox:
+        def record_attempt(self, *_args, **_kwargs):
+            raise RuntimeError("programming contract broken")
+
+    with pytest.raises(RuntimeError, match="programming contract broken"):
+        commerce_api._record_dispatch_attempt(
+            SimpleNamespace(commerce_outbox=BrokenOutbox()),
+            "sha256:" + "d" * 64,
+            "active-lease",
+            acknowledged_at_ms=1_900_000_000_000,
+        )
 
 
 def _sync(source_app, target_client, order_id):
@@ -1113,7 +1336,13 @@ def test_two_process_nodes_complete_fifty_trades_across_restart(tmp_path):
                 payload=checkout_body,
             )
             order_id = checkout["order"]["order_id"]
-            assert checkout["delivery"]["status"] == "acknowledged"
+            _await_process_delivery(
+                checkout["delivery"],
+                source_url=buyer.url,
+                target_url=seller.url,
+                order_id=order_id,
+                expected_state="executing",
+            )
 
             if index == 24:
                 seller.restart()
@@ -1133,7 +1362,13 @@ def test_two_process_nodes_complete_fifty_trades_across_restart(tmp_path):
                     "target_url": buyer.url,
                 },
             )
-            assert delivery["queued"]["status"] == "acknowledged"
+            _await_process_delivery(
+                delivery["queued"],
+                source_url=seller.url,
+                target_url=buyer.url,
+                order_id=order_id,
+                expected_state="delivered",
+            )
             verification = _http_json(
                 f"{buyer.url}/api/v2/commerce/orders/{order_id}/verify",
                 payload={
@@ -1142,12 +1377,24 @@ def test_two_process_nodes_complete_fifty_trades_across_restart(tmp_path):
                     "target_url": seller.url,
                 },
             )
-            assert verification["queued"]["status"] == "acknowledged"
+            _await_process_delivery(
+                verification["queued"],
+                source_url=buyer.url,
+                target_url=seller.url,
+                order_id=order_id,
+                expected_state="verified",
+            )
             settlement = _http_json(
                 f"{buyer.url}/api/v2/commerce/orders/{order_id}/settle",
                 payload={"target_url": seller.url},
             )
-            assert settlement["queued"]["status"] == "acknowledged"
+            _await_process_delivery(
+                settlement["queued"],
+                source_url=buyer.url,
+                target_url=seller.url,
+                order_id=order_id,
+                expected_state="settled",
+            )
             assert _http_json(
                 f"{seller.url}/api/v2/commerce/orders/{order_id}",
             )["state"] == "settled"

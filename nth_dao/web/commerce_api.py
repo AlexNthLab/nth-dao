@@ -43,6 +43,7 @@ from nth_dao.commerce.outbox import (
     CommerceAck,
     CommerceEnvelope,
     CommerceEnvelopeRejected,
+    normalize_outbox_error,
     sign_envelope,
     trade_chain_head,
     verify_ack,
@@ -577,25 +578,63 @@ def _record_dispatch_attempt(
     retryable: bool = True,
 ) -> tuple[bool, str]:
     """Persist one leased delivery result without reviving a stale worker."""
-    try:
-        record = state.commerce_outbox.record_attempt(
-            message_id,
-            acknowledged_at_ms=acknowledged_at_ms,
-            error=error,
-            lease_id=lease_id,
-            retry_after_ms=retry_after_ms,
-            retryable=retryable,
-        )
-    except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError):
+
+    def _observed_result() -> tuple[bool, str] | None:
         try:
             current = state.commerce_outbox.get(message_id)
-        except (CommerceEnvelopeRejected, OSError, RuntimeError, TypeError, ValueError):
-            current = None
-        if current is not None and current.status == "acknowledged":
+        except (CommerceEnvelopeRejected, OSError, TypeError, ValueError):
+            return None
+        if current is None:
+            return None
+        if current.status == "acknowledged":
             return True, ""
-        logger.warning("commerce delivery result was not persisted for %s", message_id)
-        return False, OUTBOX_ERROR_PERSISTENCE
-    return record.status == "acknowledged", str(record.last_error or "")[:200]
+        expected_status = "blocked" if not retryable else "pending"
+        expected_error = normalize_outbox_error(error, retryable=retryable)
+        if (
+            current.status == expected_status
+            and current.last_error == expected_error
+        ):
+            return False, expected_error
+        if (
+            current.status != "inflight"
+            or getattr(current, "lease_id", "") != lease_id
+        ):
+            return False, str(
+                getattr(current, "last_error", "") or OUTBOX_ERROR_PERSISTENCE
+            )[:200]
+        return None
+
+    record = None
+    for attempt in range(3):
+        try:
+            record = state.commerce_outbox.record_attempt(
+                message_id,
+                acknowledged_at_ms=acknowledged_at_ms,
+                error=error,
+                lease_id=lease_id,
+                retry_after_ms=retry_after_ms,
+                retryable=retryable,
+            )
+            break
+        except CommerceEnvelopeRejected:
+            # A stale worker must never retry through a lease mismatch.
+            break
+        except OSError:
+            observed = _observed_result()
+            if observed is not None:
+                return observed
+            if attempt == 2:
+                break
+        except (TypeError, ValueError):
+            # Invalid arguments or decoded state are deterministic failures.
+            break
+    if record is not None:
+        return record.status == "acknowledged", str(record.last_error or "")[:200]
+    observed = _observed_result()
+    if observed is not None:
+        return observed
+    logger.warning("commerce delivery result was not persisted for %s", message_id)
+    return False, OUTBOX_ERROR_PERSISTENCE
 
 
 def _dispatch_record(

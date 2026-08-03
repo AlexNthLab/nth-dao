@@ -51,6 +51,10 @@ import type {
   TradeExecutionHistoryPage,
   TradeOrderDetail,
   TradeOrderPage,
+  TradeRulePackageImportResult,
+  TradeRulePackageCatalogItem,
+  TradeRulePackageCatalogPage,
+  TradeRulePackageDetail,
 } from "./types-v2";
 
 const BASE = "/api/v2";
@@ -1096,6 +1100,471 @@ export async function getTradeExecutionReceipts(
     `/trade/orders/${encodeURIComponent(digest)}/execution-receipts?${params.toString()}`,
     signal,
   );
+}
+
+export async function importTradeRulePackage(
+  orderDigest: string,
+  packageDigest: string,
+  peerUrl: string,
+  signal?: AbortSignal,
+): Promise<TradeRulePackageImportResult> {
+  const value = await postJson<unknown>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}/rule-packages/${encodeURIComponent(packageDigest)}/import`,
+    { peer_url: peerUrl },
+    signal,
+  );
+  return validateTradeRulePackageImportResult(value, packageDigest);
+}
+
+export function validateTradeRulePackageImportResult(
+  value: unknown,
+  expectedPackageDigest: string,
+): TradeRulePackageImportResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("server returned an invalid Trade Skill import result");
+  }
+  const result = value as Record<string, unknown>;
+  const expectedFields = [
+    "status",
+    "installed",
+    "offer_digest",
+    "package_digest",
+    "rule_id",
+    "version",
+    "publisher_did",
+    "audit_event_id",
+    "audit_created",
+    "resource_count",
+    "resource_bytes",
+    "trust_granted",
+    "execution_authority_granted",
+    "warning",
+  ].sort();
+  const fields = Object.keys(result).sort();
+  const statusValid = result.status === "installed"
+    || result.status === "already-installed";
+  if (
+    fields.length !== expectedFields.length
+    || fields.some((field, index) => field !== expectedFields[index])
+    || !TRADE_DIGEST.test(expectedPackageDigest)
+    || result.package_digest !== expectedPackageDigest
+    || typeof result.offer_digest !== "string"
+    || !TRADE_DIGEST.test(result.offer_digest)
+    || !statusValid
+    || typeof result.installed !== "boolean"
+    || result.installed !== (result.status === "installed")
+    || typeof result.rule_id !== "string"
+    || result.rule_id.length < 3
+    || result.rule_id.length > 160
+    || typeof result.version !== "string"
+    || result.version.length < 1
+    || result.version.length > 64
+    || typeof result.publisher_did !== "string"
+    || !TRADE_RULE_DID.test(result.publisher_did)
+    || typeof result.audit_event_id !== "string"
+    || !SPINE_EVENT_ID.test(result.audit_event_id)
+    || typeof result.audit_created !== "boolean"
+    || !Number.isInteger(result.resource_count)
+    || (result.resource_count as number) < 0
+    || (result.resource_count as number) > 128
+    || !Number.isInteger(result.resource_bytes)
+    || (result.resource_bytes as number) < 0
+    || (result.resource_bytes as number) > 16 * 1024 * 1024
+    || result.trust_granted !== false
+    || result.execution_authority_granted !== false
+    || typeof result.warning !== "string"
+    || result.warning.length < 1
+    || result.warning.length > 2_000
+  ) {
+    throw new Error("server returned an invalid Trade Skill import result");
+  }
+  return result as unknown as TradeRulePackageImportResult;
+}
+
+const TRADE_RULE_MODES = new Set([
+  "declarative",
+  "adapter",
+  "sandboxed_wasm",
+  "external_service",
+]);
+const TRADE_RULE_TIME = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z$/;
+const TRADE_RULE_ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:\/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?)?$/;
+const TRADE_RULE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+const TRADE_RULE_TOKEN = /^[a-z0-9][a-z0-9._:/-]*$/;
+const TRADE_RULE_MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+const TRADE_RULE_DID = /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/;
+const TRADE_RULE_PROOF = /^[A-Za-z0-9_-]{86}$/;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactFields(value: Record<string, unknown>, fields: string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return actual.length === expected.length
+    && actual.every((field, index) => field === expected[index]);
+}
+
+function isBoundedStringArray(
+  value: unknown,
+  maximumItems: number,
+  maximumLength = 160,
+): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maximumItems
+    && value.every((item) => typeof item === "string"
+      && item.length >= 1 && item.length <= maximumLength
+      && TRADE_RULE_TOKEN.test(item))
+    && new Set(value).size === value.length
+    && value.every((item, index) => index === 0 || value[index - 1] < item);
+}
+
+function isRealTradeTime(value: string): boolean {
+  if (!TRADE_RULE_TIME.test(value)) return false;
+  const base = `${value.slice(0, 19)}Z`;
+  return Number.isFinite(Date.parse(base));
+}
+
+function isValidTradeRuleImportAudit(value: unknown): boolean {
+  if (!isPlainRecord(value) || !hasExactFields(value, [
+    "status", "proposed_count", "anchored_count", "incomplete_count",
+  ])) {
+    return false;
+  }
+  const proposed = value.proposed_count;
+  const anchored = value.anchored_count;
+  const incomplete = value.incomplete_count;
+  if (
+    !Number.isSafeInteger(proposed)
+    || !Number.isSafeInteger(anchored)
+    || !Number.isSafeInteger(incomplete)
+    || (proposed as number) < 0
+    || (anchored as number) < 0
+    || (incomplete as number) < 0
+    || (anchored as number) + (incomplete as number) !== proposed
+  ) {
+    return false;
+  }
+  const expectedStatus = proposed === 0
+    ? "not-applicable"
+    : anchored === 0
+      ? "incomplete"
+      : incomplete === 0
+        ? "anchored"
+        : "mixed";
+  return value.status === expectedStatus;
+}
+
+function isValidTradeRulePackageProvenance(value: unknown): boolean {
+  if (!isPlainRecord(value) || !hasExactFields(value, ["status", "sources"])) {
+    return false;
+  }
+  const sources = value.sources;
+  if (!Array.isArray(sources)
+    || sources.length > 2
+    || sources.some((source) => source !== "federated" && source !== "local")
+    || sources.some((source, index) => index > 0 && sources[index - 1] >= source)) {
+    return false;
+  }
+  return value.status === (sources.length ? "explicit" : "unclassified");
+}
+
+export function validateTradeRulePackageCatalogItem(
+  value: unknown,
+): TradeRulePackageCatalogItem {
+  const fields = [
+    "package_digest", "rule_id", "version", "publisher_did", "summary",
+    "applies_to", "families", "published_at", "not_after", "execution",
+    "required_capabilities", "resource_count", "resource_bytes",
+    "dependency_count", "conflict_count", "verification", "import_audit",
+    "provenance", "trust",
+  ];
+  if (!isPlainRecord(value) || !hasExactFields(value, fields)) {
+    throw new Error("server returned an invalid Trade Skill catalog item");
+  }
+  const execution = value.execution;
+  const verification = value.verification;
+  const importAudit = value.import_audit;
+  const provenance = value.provenance;
+  const trust = value.trust;
+  const valid = TRADE_DIGEST.test(String(value.package_digest ?? ""))
+    && typeof value.rule_id === "string"
+    && value.rule_id.length >= 3 && value.rule_id.length <= 160
+    && TRADE_RULE_ID.test(value.rule_id)
+    && typeof value.version === "string"
+    && value.version.length >= 5 && value.version.length <= 64
+    && TRADE_RULE_VERSION.test(value.version)
+    && typeof value.publisher_did === "string"
+    && TRADE_RULE_DID.test(value.publisher_did)
+    && typeof value.summary === "string"
+    && value.summary.length >= 1 && value.summary.length <= 500
+    && new TextEncoder().encode(value.summary).length <= 2_000
+    && isBoundedStringArray(value.applies_to, 32)
+    && isBoundedStringArray(value.families, 32)
+    && typeof value.published_at === "string"
+    && isRealTradeTime(value.published_at)
+    && (value.not_after === null
+      || (typeof value.not_after === "string" && isRealTradeTime(value.not_after)))
+    && isPlainRecord(execution)
+    && hasExactFields(execution, ["mode", "permissions"])
+    && typeof execution.mode === "string"
+    && TRADE_RULE_MODES.has(execution.mode)
+    && isBoundedStringArray(execution.permissions, 64)
+    && isBoundedStringArray(value.required_capabilities, 64)
+    && Number.isInteger(value.resource_count)
+    && (value.resource_count as number) >= 1
+    && (value.resource_count as number) <= 128
+    && Number.isInteger(value.resource_bytes)
+    && (value.resource_bytes as number) >= 0
+    && (value.resource_bytes as number) <= 16 * 1024 * 1024
+    && Number.isInteger(value.dependency_count)
+    && (value.dependency_count as number) >= 0
+    && (value.dependency_count as number) <= 128
+    && Number.isInteger(value.conflict_count)
+    && (value.conflict_count as number) >= 0
+    && (value.conflict_count as number) <= 128
+    && isPlainRecord(verification)
+    && hasExactFields(verification, [
+      "status", "publisher_signature", "resource_digests",
+    ])
+    && verification.status === "verified-cache"
+    && verification.publisher_signature === true
+    && verification.resource_digests === true
+    && isValidTradeRuleImportAudit(importAudit)
+    && isValidTradeRulePackageProvenance(provenance)
+    && isPlainRecord(trust)
+    && hasExactFields(trust, ["status", "advisory", "execution_authorized"])
+    && trust.status === "not-evaluated"
+    && trust.advisory === true
+    && trust.execution_authorized === false;
+  if (!valid) {
+    throw new Error("server returned an invalid Trade Skill catalog item");
+  }
+  return value as unknown as TradeRulePackageCatalogItem;
+}
+
+export function validateTradeRulePackageCatalogPage(
+  value: unknown,
+): TradeRulePackageCatalogPage {
+  if (
+    !isPlainRecord(value)
+    || !hasExactFields(value, [
+      "items", "next_cursor", "cache_only", "execution_authorized",
+    ])
+    || !Array.isArray(value.items)
+    || value.items.length > 200
+    || typeof value.next_cursor !== "string"
+    || (value.next_cursor !== "" && !TRADE_DIGEST.test(value.next_cursor))
+    || value.cache_only !== true
+    || value.execution_authorized !== false
+  ) {
+    throw new Error("server returned an invalid Trade Skill catalog page");
+  }
+  const items = value.items.map(validateTradeRulePackageCatalogItem);
+  const digests = items.map((item) => item.package_digest);
+  if (
+    new Set(digests).size !== items.length
+    || digests.some((digest, index) => index > 0 && digests[index - 1] >= digest)
+    || (value.next_cursor !== ""
+      && (digests.length === 0 || value.next_cursor !== digests[digests.length - 1]))
+  ) {
+    throw new Error("server returned an invalid Trade Skill catalog page");
+  }
+  return { ...value, items } as TradeRulePackageCatalogPage;
+}
+
+function validateTradeRuleManifest(
+  value: unknown,
+  summary: TradeRulePackageCatalogItem,
+): Record<string, unknown> {
+  const fields = [
+    "kind", "protocol_version", "rule_id", "version", "publisher_did",
+    "summary", "applies_to", "families", "resources", "dependencies",
+    "conflicts", "required_capabilities", "hook_contracts", "execution",
+    "published_at", "not_after", "extensions", "proof",
+  ];
+  if (!isPlainRecord(value) || !hasExactFields(value, fields)) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  if (
+    value.kind !== "org.nthdao.trade.rule-manifest"
+    || value.protocol_version !== "1.0"
+    || value.rule_id !== summary.rule_id
+    || value.version !== summary.version
+    || value.publisher_did !== summary.publisher_did
+    || value.summary !== summary.summary
+    || JSON.stringify(value.applies_to) !== JSON.stringify(summary.applies_to)
+    || JSON.stringify(value.families) !== JSON.stringify(summary.families)
+    || JSON.stringify(value.execution) !== JSON.stringify(summary.execution)
+    || JSON.stringify(value.required_capabilities)
+      !== JSON.stringify(summary.required_capabilities)
+    || value.published_at !== summary.published_at
+    || value.not_after !== summary.not_after
+    || !Array.isArray(value.resources)
+    || value.resources.length !== summary.resource_count
+    || !Array.isArray(value.dependencies)
+    || value.dependencies.length !== summary.dependency_count
+    || !Array.isArray(value.conflicts)
+    || value.conflicts.length !== summary.conflict_count
+    || !Array.isArray(value.hook_contracts)
+    || value.hook_contracts.length > 64
+    || !isPlainRecord(value.extensions)
+    || !isPlainRecord(value.proof)
+  ) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  for (const resource of value.resources) {
+    if (!isPlainRecord(resource)
+      || !hasExactFields(resource, ["purpose", "media_type", "digest", "size"])
+      || typeof resource.purpose !== "string"
+      || resource.purpose.length < 1 || resource.purpose.length > 160
+      || !TRADE_RULE_TOKEN.test(resource.purpose)
+      || typeof resource.media_type !== "string"
+      || resource.media_type.length < 3 || resource.media_type.length > 128
+      || !TRADE_RULE_MEDIA_TYPE.test(resource.media_type)
+      || !TRADE_DIGEST.test(String(resource.digest ?? ""))
+      || !Number.isInteger(resource.size)
+      || (resource.size as number) < 0
+      || (resource.size as number) > 1024 * 1024) {
+      throw new Error("server returned an invalid Trade Skill detail");
+    }
+  }
+  const resourceKeys = value.resources.map((resource) => {
+    const item = resource as Record<string, unknown>;
+    return `${String(item.purpose)}\u0000${String(item.digest)}`;
+  });
+  const uniqueResourceBytes = new Map<string, number>();
+  for (const resource of value.resources as Array<Record<string, unknown>>) {
+    const digest = String(resource.digest);
+    const size = Number(resource.size);
+    const prior = uniqueResourceBytes.get(digest);
+    if (prior !== undefined && prior !== size) {
+      throw new Error("server returned an invalid Trade Skill detail");
+    }
+    uniqueResourceBytes.set(digest, size);
+  }
+  if (
+    new Set(resourceKeys).size !== resourceKeys.length
+    || resourceKeys.some((key, index) => index > 0 && resourceKeys[index - 1] >= key)
+    || [...uniqueResourceBytes.values()].reduce((total, size) => total + size, 0)
+      !== summary.resource_bytes
+  ) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  for (const relations of [value.dependencies, value.conflicts]) {
+    const relationKeys: string[] = [];
+    for (const relation of relations) {
+    if (!isPlainRecord(relation)
+      || !hasExactFields(relation, ["rule_id", "digest"])
+      || typeof relation.rule_id !== "string"
+      || relation.rule_id.length < 3 || relation.rule_id.length > 160
+      || !TRADE_RULE_ID.test(relation.rule_id)
+      || !TRADE_DIGEST.test(String(relation.digest ?? ""))) {
+      throw new Error("server returned an invalid Trade Skill detail");
+    }
+      relationKeys.push(`${relation.rule_id}\u0000${relation.digest}`);
+    }
+    if (new Set(relationKeys).size !== relationKeys.length
+      || relationKeys.some((key, index) => index > 0 && relationKeys[index - 1] >= key)) {
+      throw new Error("server returned an invalid Trade Skill detail");
+    }
+  }
+  if (value.hook_contracts.length > 32) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  const sideEffects = new Set(["none", "local", "external", "funds"]);
+  const hookKeys: string[] = [];
+  for (const hook of value.hook_contracts) {
+    if (!isPlainRecord(hook)
+      || !hasExactFields(hook, [
+        "name", "version", "input_schema_digest", "output_schema_digest",
+        "side_effect", "permissions",
+      ])
+      || typeof hook.name !== "string"
+      || hook.name.length < 1 || hook.name.length > 160
+      || !TRADE_RULE_TOKEN.test(hook.name)
+      || typeof hook.version !== "string"
+      || hook.version.length < 1 || hook.version.length > 32
+      || !TRADE_RULE_TOKEN.test(hook.version)
+      || !TRADE_DIGEST.test(String(hook.input_schema_digest ?? ""))
+      || !TRADE_DIGEST.test(String(hook.output_schema_digest ?? ""))
+      || typeof hook.side_effect !== "string" || !sideEffects.has(hook.side_effect)
+      || !isBoundedStringArray(hook.permissions, 64)) {
+      throw new Error("server returned an invalid Trade Skill detail");
+    }
+    hookKeys.push(`${hook.name}\u0000${hook.version}`);
+  }
+  if (new Set(hookKeys).size !== hookKeys.length
+    || hookKeys.some((key, index) => index > 0 && hookKeys[index - 1] >= key)) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  if (!hasExactFields(value.proof, [
+    "type", "created", "verification_method", "proof_purpose", "proof_value",
+  ])
+    || value.proof.type !== "NthEd25519SignatureV1"
+    || typeof value.proof.created !== "string"
+    || !isRealTradeTime(value.proof.created)
+    || typeof value.proof.verification_method !== "string"
+    || value.proof.verification_method
+      !== `${summary.publisher_did}#${summary.publisher_did.slice("did:key:".length)}`
+    || value.proof.proof_purpose !== "assertionMethod"
+    || typeof value.proof.proof_value !== "string"
+    || !TRADE_RULE_PROOF.test(value.proof.proof_value)) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  return value;
+}
+
+export function validateTradeRulePackageDetail(
+  value: unknown,
+  expectedDigest: string,
+): TradeRulePackageDetail {
+  if (!isPlainRecord(value) || !hasExactFields(value, [
+    "package_digest", "rule_id", "version", "publisher_did", "summary",
+    "applies_to", "families", "published_at", "not_after", "execution",
+    "required_capabilities", "resource_count", "resource_bytes",
+    "dependency_count", "conflict_count", "verification", "import_audit",
+    "provenance", "trust", "manifest",
+  ])) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  const { manifest, ...catalogFields } = value;
+  let summary: TradeRulePackageCatalogItem;
+  try {
+    summary = validateTradeRulePackageCatalogItem(catalogFields);
+  } catch {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  if (!TRADE_DIGEST.test(expectedDigest) || summary.package_digest !== expectedDigest) {
+    throw new Error("server returned an invalid Trade Skill detail");
+  }
+  const verifiedManifest = validateTradeRuleManifest(manifest, summary);
+  return { ...summary, manifest: verifiedManifest };
+}
+
+export async function fetchTradeRulePackages(
+  cursor = "",
+  signal?: AbortSignal,
+): Promise<TradeRulePackageCatalogPage> {
+  const params = new URLSearchParams({ limit: TRADE_INBOX_PAGE_SIZE });
+  if (cursor) params.set("cursor", cursor);
+  const value = await getJson<unknown>(
+    `/trade/rule-packages?${params.toString()}`,
+    signal,
+  );
+  return validateTradeRulePackageCatalogPage(value);
+}
+
+export async function getTradeRulePackage(
+  packageDigest: string,
+  signal?: AbortSignal,
+): Promise<TradeRulePackageDetail> {
+  const value = await getJson<unknown>(
+    `/trade/rule-packages/${encodeURIComponent(packageDigest)}`,
+    signal,
+  );
+  return validateTradeRulePackageDetail(value, packageDigest);
 }
 
 export async function getFederationStatus(
