@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TradeExecutionView } from "../types-v2";
 
@@ -222,6 +222,20 @@ vi.mock("../api", () => ({
   fetchTradeRulePackages: vi.fn().mockResolvedValue({
     items: [], next_cursor: "", cache_only: true, execution_authorized: false,
   }),
+  fetchTradeRuleRecognitionImports: vi.fn().mockResolvedValue({
+    order_digest: "sha256:" + "1".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    total: 0,
+    returned: 0,
+    items: [],
+  }),
+  fetchTradeRuleRecognitionImportBatch: vi.fn().mockResolvedValue([{
+    order_digest: "sha256:" + "1".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    total: 0,
+    returned: 0,
+    items: [],
+  }]),
   getTradeProposal: vi.fn().mockResolvedValue(null),
   acceptTradeProposal: vi.fn().mockResolvedValue({
     status: "accepted-and-delivered",
@@ -257,6 +271,27 @@ vi.mock("../api", () => ({
     execution_authority_granted: false,
     warning: "Cached only",
   }),
+  importTradeRuleRecognitions: vi.fn().mockResolvedValue({
+    status: "already-observed",
+    offer_digest: "sha256:" + "5".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    proof_digest: "sha256:" + "8".repeat(64),
+    observed_heads_digest: "sha256:" + "9".repeat(64),
+    import_id: "a".repeat(64),
+    source_origin: "http://peer.example:8080",
+    import_proposal_event_id: "b".repeat(64),
+    import_completion_event_id: "c".repeat(64),
+    observed_statement_count: 1,
+    imported_statement_count: 0,
+    reconciled_anchor_count: 0,
+    imported_recognition_digests: [],
+    audit_event_ids: [],
+    global_freshness_proven: false,
+    issuer_trust_granted: false,
+    local_policy_changed: false,
+    execution_authority_granted: false,
+    warning: "Observed evidence only",
+  }),
   listOpenTasks: vi.fn().mockResolvedValue([]),
   publishCommerceListing: vi.fn().mockResolvedValue({ digest: "sha256:x", warning: "" }),
   remoteCommerceCheckout: vi.fn().mockResolvedValue({ order, delivery: { status: "acknowledged" }, warning: "" }),
@@ -274,11 +309,13 @@ import {
   fetchTradeProposals,
   fetchTradeOrders,
   fetchTradeRulePackages,
+  fetchTradeRuleRecognitionImportBatch,
   getTradeOrder,
   getTradeExecutionReceipts,
   getTradeProposal,
   getTradeRulePackage,
   importTradeRulePackage,
+  importTradeRuleRecognitions,
   acceptTradeProposal,
   dispatchCommerceOutbox,
   listOpenTasks,
@@ -290,11 +327,100 @@ import {
 import { CommerceView } from "../components/CommerceView";
 import { ToastProvider } from "../components/Toast";
 
+beforeEach(() => {
+  vi.mocked(fetchCommerceOrders).mockReset().mockResolvedValue([order]);
+  vi.mocked(fetchTradeProposals).mockReset().mockResolvedValue({
+    items: [], next_cursor: "",
+  });
+  vi.mocked(fetchTradeOrders).mockReset().mockResolvedValue({
+    items: [], next_cursor: "",
+  });
+  vi.mocked(fetchTradeRulePackages).mockReset().mockResolvedValue({
+    items: [], next_cursor: "", cache_only: true, execution_authorized: false,
+  });
+  vi.mocked(fetchTradeRuleRecognitionImportBatch).mockReset().mockResolvedValue([{
+    order_digest: "sha256:" + "1".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    total: 0,
+    returned: 0,
+    items: [],
+  }]);
+  vi.mocked(getTradeOrder).mockReset().mockResolvedValue(null as never);
+  vi.mocked(getTradeExecutionReceipts).mockReset().mockResolvedValue({
+    status: "available",
+    items: [],
+    has_more: false,
+    next_cursor: null,
+    error_code: "",
+  });
+  vi.mocked(getTradeProposal).mockReset().mockResolvedValue(null as never);
+  vi.mocked(getTradeRulePackage).mockReset().mockResolvedValue(null as never);
+  vi.mocked(importTradeRulePackage).mockReset().mockResolvedValue({
+    status: "installed",
+    installed: true,
+    offer_digest: "sha256:" + "5".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    rule_id: "org.nthdao.rules/delivery",
+    version: "1.0.0",
+    publisher_did: "did:key:zPublisher",
+    audit_event_id: "b".repeat(64),
+    audit_created: true,
+    resource_count: 1,
+    resource_bytes: 10,
+    trust_granted: false,
+    execution_authority_granted: false,
+    warning: "Cached only",
+  });
+  vi.mocked(importTradeRuleRecognitions).mockReset().mockResolvedValue({
+    status: "already-observed",
+    offer_digest: "sha256:" + "5".repeat(64),
+    package_digest: "sha256:" + "7".repeat(64),
+    proof_digest: "sha256:" + "8".repeat(64),
+    observed_heads_digest: "sha256:" + "9".repeat(64),
+    import_id: "a".repeat(64),
+    source_origin: "http://peer.example:8080",
+    import_proposal_event_id: "b".repeat(64),
+    import_completion_event_id: "c".repeat(64),
+    observed_statement_count: 1,
+    imported_statement_count: 0,
+    reconciled_anchor_count: 0,
+    imported_recognition_digests: [],
+    audit_event_ids: [],
+    global_freshness_proven: false,
+    issuer_trust_granted: false,
+    local_policy_changed: false,
+    execution_authority_granted: false,
+    warning: "Observed evidence only",
+  });
+  vi.mocked(acceptTradeProposal).mockReset().mockResolvedValue({
+    status: "accepted-and-delivered",
+    order: { order_id: "nth-trade-order-sha256:" + "f".repeat(64) },
+    order_digest: "sha256:" + "f".repeat(64),
+    local_audit_event_id: "a".repeat(64),
+    delivery_digest: "sha256:" + "d".repeat(64),
+    remote_intake_receipt: {},
+    remote_intake_receipt_digest: "sha256:" + "e".repeat(64),
+    remote_audit_event_id: "f".repeat(64),
+    acknowledgement_persisted: true,
+  });
+  vi.mocked(dispatchCommerceOutbox).mockReset().mockResolvedValue([]);
+  vi.mocked(listOpenTasks).mockReset().mockResolvedValue([]);
+  vi.mocked(publishCommerceListing).mockReset().mockResolvedValue({
+    digest: "sha256:x", listing: {}, warning: "",
+  });
+  vi.mocked(remoteCommerceCheckout).mockReset().mockResolvedValue({
+    order, delivery: { status: "acknowledged" }, warning: "",
+  });
+  vi.mocked(resolveCommerceDispute).mockReset();
+  vi.mocked(verifyCommerceDelivery).mockReset().mockResolvedValue({
+    order: { ...order, state: "verified" }, warning: "",
+  });
+});
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
   vi.restoreAllMocks();
-  vi.clearAllMocks();
 });
 
 describe("CommerceView", () => {
@@ -703,7 +829,8 @@ describe("CommerceView", () => {
     expect(screen.getByText(/requested_quantity/)).toBeTruthy();
     expect(screen.getByText("Execution readiness")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Trade Skills" })).toBeTruthy();
-    expect(screen.getByText("org.nthdao.rules/delivery")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Recognition evidence" })).toBeTruthy();
+    expect(screen.getAllByText("org.nthdao.rules/delivery")).toHaveLength(2);
     expect(screen.getAllByText("deliver-service")).toHaveLength(2);
     expect(screen.getByText("Execution Receipts")).toBeTruthy();
     expect(screen.getByText("Succeeded")).toBeTruthy();
@@ -715,6 +842,285 @@ describe("CommerceView", () => {
     expect(screen.queryByRole("button", { name: "Execute" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
     expect(getTradeOrder).toHaveBeenCalledWith(digest, expect.any(AbortSignal));
+    await waitFor(() => expect(fetchTradeRuleRecognitionImportBatch).toHaveBeenCalledWith(
+      digest,
+      [executionProjection().skills[0].package_digest],
+      expect.any(AbortSignal),
+    ));
+  });
+
+  it("shows verified Recognition evidence as an observed claim, not trust", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    const packageDigest = projection.skills[0].package_digest;
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(fetchTradeRuleRecognitionImportBatch).mockResolvedValueOnce([{
+      order_digest: summary.order_digest,
+      package_digest: packageDigest,
+      total: 1,
+      returned: 1,
+      items: [{
+        import_id: "1".repeat(64),
+        status: "completed",
+        proof_digest: "sha256:" + "2".repeat(64),
+        observer_did: "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+        observed_heads_digest: "sha256:" + "3".repeat(64),
+        source_origin: "http://peer.example:8080",
+        statement_count: 1,
+        evidence_status: "verified",
+        proposal_event_id: "4".repeat(64),
+        completion_event_id: "5".repeat(64),
+      }],
+    }]);
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Evidence verified")).toBeTruthy();
+    expect(screen.getByText(/does not prove global freshness, fairness, local trust, or execution authority/i)).toBeTruthy();
+    expect(screen.getByText("Retained proof records shown: 1 of 1 / verified completions shown: 1")).toBeTruthy();
+    expect(screen.queryByText(/^Trusted$/)).toBeNull();
+  });
+
+  it("loads all Recognition statuses through one bounded batch", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    const baseSkill = projection.skills[0];
+    projection.skills = Array.from({ length: 6 }, (_, index) => ({
+      ...baseSkill,
+      package_digest: "sha256:" + index.toString(16).repeat(64),
+      rule_id: `org.nthdao.rules/delivery-${index}`,
+    }));
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    let resolveBatch!: (
+      value: Awaited<ReturnType<typeof fetchTradeRuleRecognitionImportBatch>>,
+    ) => void;
+    vi.mocked(fetchTradeRuleRecognitionImportBatch).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBatch = resolve; }),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    const packageDigests = projection.skills.map((skill) => skill.package_digest).sort();
+    await waitFor(() => expect(fetchTradeRuleRecognitionImportBatch).toHaveBeenCalledWith(
+      summary.order_digest,
+      packageDigests,
+      expect.any(AbortSignal),
+    ));
+    expect(fetchTradeRuleRecognitionImportBatch).toHaveBeenCalledTimes(1);
+    resolveBatch(packageDigests.map((packageDigest) => ({
+      order_digest: summary.order_digest,
+      package_digest: packageDigest,
+      total: 0,
+      returned: 0,
+      items: [],
+    })));
+    expect(await screen.findAllByText("Not imported")).toHaveLength(6);
+  });
+
+  it("does not call a bounded Recognition status page fully verified", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    const packageDigest = projection.skills[0].package_digest;
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(fetchTradeRuleRecognitionImportBatch).mockResolvedValueOnce([{
+      order_digest: summary.order_digest,
+      package_digest: packageDigest,
+      total: 101,
+      returned: 100,
+      items: Array.from({ length: 100 }, (_, index) => ({
+        import_id: index.toString(16).padStart(64, "0"),
+        status: "completed",
+        proof_digest: "sha256:" + (index + 100).toString(16).padStart(64, "0"),
+        observer_did: "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+        observed_heads_digest: "sha256:" + "3".repeat(64),
+        source_origin: "http://peer.example:8080",
+        statement_count: 1,
+        evidence_status: "verified",
+        proposal_event_id: (index + 200).toString(16).padStart(64, "0"),
+        completion_event_id: (index + 300).toString(16).padStart(64, "0"),
+      })),
+    }]);
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Partial evidence")).toBeTruthy();
+    expect(screen.getByText(/did not revalidate every retained proof record/)).toBeTruthy();
+    expect(screen.queryByText("Evidence verified")).toBeNull();
+  });
+
+  it("fails closed when Recognition status cannot be verified", async () => {
+    const summary = agreementSummary();
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: executionProjection(),
+    });
+    vi.mocked(fetchTradeRuleRecognitionImportBatch).mockRejectedValueOnce(
+      new Error("Spine integrity unavailable"),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Unavailable")).toBeTruthy();
+    expect(screen.getByText(/Status could not be verified: Spine integrity unavailable/)).toBeTruthy();
+    expect(screen.queryByText("Not imported")).toBeNull();
+  });
+
+  it("fetches Order-bound Recognition evidence and reloads its verified status", async () => {
+    const recognitionPeer = "http://recognition.example:8080";
+    const summary = {
+      ...agreementSummary(),
+      dispatch_target_url: "",
+    };
+    const projection = executionProjection();
+    const packageDigest = projection.skills[0].package_digest;
+    const detail = {
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder)
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce(detail);
+    vi.mocked(fetchTradeRuleRecognitionImportBatch)
+      .mockResolvedValueOnce([{
+        order_digest: summary.order_digest,
+        package_digest: packageDigest,
+        total: 0,
+        returned: 0,
+        items: [],
+      }])
+      .mockResolvedValueOnce([{
+        order_digest: summary.order_digest,
+        package_digest: packageDigest,
+        total: 1,
+        returned: 1,
+        items: [{
+          import_id: "1".repeat(64),
+          status: "completed",
+          proof_digest: "sha256:" + "2".repeat(64),
+          observer_did: "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+          observed_heads_digest: "sha256:" + "3".repeat(64),
+          source_origin: recognitionPeer,
+          statement_count: 1,
+          evidence_status: "verified",
+          proposal_event_id: "4".repeat(64),
+          completion_event_id: "5".repeat(64),
+        }],
+      }]);
+    vi.mocked(importTradeRuleRecognitions).mockResolvedValueOnce({
+      status: "already-observed",
+      offer_digest: summary.offer_digest,
+      package_digest: packageDigest,
+      proof_digest: "sha256:" + "2".repeat(64),
+      observed_heads_digest: "sha256:" + "3".repeat(64),
+      import_id: "1".repeat(64),
+      source_origin: recognitionPeer,
+      import_proposal_event_id: "4".repeat(64),
+      import_completion_event_id: "5".repeat(64),
+      observed_statement_count: 1,
+      imported_statement_count: 0,
+      reconciled_anchor_count: 0,
+      imported_recognition_digests: [],
+      audit_event_ids: [],
+      global_freshness_proven: false,
+      issuer_trust_granted: false,
+      local_policy_changed: false,
+      execution_authority_granted: false,
+      warning: "Observed evidence only",
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    await screen.findByText("Not imported");
+    const source = await screen.findByLabelText("NTH DAO source URL");
+    const fetchButton = await screen.findByRole("button", { name: "Fetch signed evidence" });
+    expect((source as HTMLInputElement).value).toBe("");
+    expect((fetchButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(source, { target: { value: `  ${recognitionPeer}  ` } });
+    fireEvent.blur(source);
+    expect((source as HTMLInputElement).value).toBe(recognitionPeer);
+    expect(window.localStorage.getItem(
+      `nth-trade-skill-peer:${summary.order_digest}`,
+    )).toBe(recognitionPeer);
+    fireEvent.click(fetchButton);
+
+    await waitFor(() => expect(importTradeRuleRecognitions).toHaveBeenCalledWith(
+      summary.order_digest,
+      packageDigest,
+      recognitionPeer,
+      expect.any(AbortSignal),
+    ));
+    expect(await screen.findByText(/no new Recognition statements were added/)).toBeTruthy();
+    expect(screen.getByText("Recognition proof verified; no new statements")).toBeTruthy();
+    await waitFor(() => expect(fetchTradeRuleRecognitionImportBatch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getTradeOrder).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Evidence verified")).toBeTruthy();
+  });
+
+  it("blocks automatic replacement of corrupt Recognition proof bytes", async () => {
+    const summary = {
+      ...agreementSummary(),
+      dispatch_target_url: "http://peer.example:8080",
+    };
+    const projection = executionProjection();
+    const packageDigest = projection.skills[0].package_digest;
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(fetchTradeRuleRecognitionImportBatch).mockResolvedValueOnce([{
+      order_digest: summary.order_digest,
+      package_digest: packageDigest,
+      total: 2,
+      returned: 1,
+      items: [{
+        import_id: "1".repeat(64),
+        status: "completed",
+        proof_digest: "sha256:" + "2".repeat(64),
+        observer_did: "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE",
+        observed_heads_digest: "sha256:" + "3".repeat(64),
+        source_origin: summary.dispatch_target_url,
+        statement_count: 1,
+        evidence_status: "missing-or-corrupt",
+        proposal_event_id: "4".repeat(64),
+        completion_event_id: "5".repeat(64),
+      }],
+    }]);
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText("Evidence damaged")).toBeTruthy();
+    expect(screen.queryByText("Partial evidence")).toBeNull();
+    expect((screen.getByRole("button", {
+      name: "Check for newer evidence",
+    }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/repair requires the exact signed proof document/i)).toBeTruthy();
+    expect(importTradeRuleRecognitions).not.toHaveBeenCalled();
   });
 
   it("lets the operator fetch and verify a missing Order-bound Trade Skill", async () => {
@@ -954,7 +1360,7 @@ describe("CommerceView", () => {
     fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Fetch and verify" }));
 
-    expect(await screen.findByText("Trade Skill verified and cached")).toBeTruthy();
+    expect(await screen.findByText(/cached locally and signed in Spine/)).toBeTruthy();
     expect(screen.queryByText(/storage disabled/i)).toBeNull();
   });
 

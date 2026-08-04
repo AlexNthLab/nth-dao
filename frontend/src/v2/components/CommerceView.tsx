@@ -9,12 +9,14 @@ import {
   fetchCommerceOrders,
   fetchTradeProposals,
   fetchTradeOrders,
+  fetchTradeRuleRecognitionImportBatch,
   fetchTradeRulePackages,
   getTradeExecutionReceipts,
   getTradeOrder,
   getTradeProposal,
   getTradeRulePackage,
   importTradeRulePackage,
+  importTradeRuleRecognitions,
   listOpenTasks,
   publishCommerceListing,
   remoteCommerceCheckout,
@@ -31,6 +33,8 @@ import type {
   TradeProposalSummary,
   TradeOrderDetail,
   TradeOrderSummary,
+  TradeRuleRecognitionImportStatusPage,
+  TradeExecutionSkillView,
   TradeRulePackageCatalogItem,
   TradeRulePackageDetail,
 } from "../types-v2";
@@ -990,7 +994,10 @@ function loadTradeSkillPeer(orderDigest: string, dispatchTarget?: string | null)
 
 function rememberTradeSkillPeer(orderDigest: string, peerUrl: string) {
   try {
-    window.localStorage.setItem(`nth-trade-skill-peer:${orderDigest}`, peerUrl);
+    const key = `nth-trade-skill-peer:${orderDigest}`;
+    const normalized = peerUrl.trim();
+    if (normalized) window.localStorage.setItem(key, normalized);
+    else window.localStorage.removeItem(key);
   } catch {
     // Preference persistence must not turn a verified import into a failure.
   }
@@ -1144,7 +1151,6 @@ function AgreementExecutionReadiness({
       }
     }
   }
-  const missingSkills = execution.skills.filter((skill) => skill.status === "missing");
   return <div className="commerce-action trade-execution-readiness">
     <div className="commerce-order-heading">
       <h3>Execution readiness</h3>
@@ -1164,16 +1170,21 @@ function AgreementExecutionReadiness({
     {execution.error_code && <p className="trade-proposal-warning" role="status">Execution projection unavailable ({execution.error_code}). The signed Agreement remains readable, but no operation is authorized.</p>}
     <div className="trade-execution-column">
       <h3>Trade Skills</h3>
-      {missingSkills.length > 0 && <div className="commerce-action">
+      {execution.skills.length > 0 && <div className="commerce-action">
         <label className="commerce-target">NTH DAO source URL
           <input
             type="url"
             value={skillPeerUrl}
             onChange={(event) => setSkillPeerUrl(event.target.value)}
+            onBlur={(event) => {
+              const normalized = event.currentTarget.value.trim();
+              setSkillPeerUrl(normalized);
+              rememberTradeSkillPeer(agreement.order_digest, normalized);
+            }}
             placeholder="http://peer-host:8080"
           />
         </label>
-        <p className="muted">Fetching is operator-directed. The node verifies the signed Manifest, every resource digest, the Offer binding, and the accepted Order binding before caching. Cache installation does not grant trust or execution authority.</p>
+        <p className="muted">Package and Recognition fetching is operator-directed. The node verifies signed content and its accepted Order binding before retention. Neither caching nor Recognition evidence grants trust or execution authority.</p>
       </div>}
       {execution.skills.length === 0 ? <p className="muted">No signed Rule Packages are bound to this Agreement.</p> : <ul className="trade-proposal-rules">
         {execution.skills.map((skill) => <li key={skill.package_digest}>
@@ -1197,6 +1208,12 @@ function AgreementExecutionReadiness({
         </li>)}
       </ul>}
     </div>
+    <AgreementRecognitionEvidence
+      orderDigest={agreement.order_digest}
+      skills={execution.skills}
+      peerUrl={skillPeerUrl}
+      onRefresh={onRefresh}
+    />
     <div className="trade-execution-column">
       <h3>Operation grants</h3>
       {execution.operation_grants.length === 0 ? <p className="muted">No signed operations were granted.</p> : <ul className="trade-proposal-rules">
@@ -1231,6 +1248,226 @@ function AgreementExecutionReadiness({
       {historyError && <p className="trade-proposal-warning" role="status">{historyError} Existing verified Receipts remain visible.</p>}
       {execution.history.status === "available" && historyHasMore && historyCursor !== null && <button className="btn btn-secondary" type="button" disabled={historyBusy} onClick={loadOlderReceipts}>{historyBusy ? "Loading..." : "Load earlier Receipts"}</button>}
     </div>
+  </div>;
+}
+
+type RecognitionEvidenceLoad =
+  | { status: "loading" }
+  | { status: "ready"; page: TradeRuleRecognitionImportStatusPage }
+  | { status: "error"; error: string };
+
+function recognitionEvidenceLabel(value: RecognitionEvidenceLoad): {
+  label: string;
+  tone: "ok" | "wait";
+} {
+  if (value.status === "loading") return { label: "Checking", tone: "wait" };
+  if (value.status === "error") return { label: "Unavailable", tone: "wait" };
+  const items = value.page?.items ?? [];
+  if (items.length === 0) return { label: "Not imported", tone: "wait" };
+  if (items.some((item) => item.status === "pending")) {
+    return { label: "Recovery pending", tone: "wait" };
+  }
+  if (items.some((item) => item.evidence_status !== "verified")) {
+    return { label: "Evidence damaged", tone: "wait" };
+  }
+  if (value.page && value.page.returned < value.page.total) {
+    return { label: "Partial evidence", tone: "wait" };
+  }
+  return { label: "Evidence verified", tone: "ok" };
+}
+
+function AgreementRecognitionEvidence({
+  orderDigest,
+  skills,
+  peerUrl,
+  onRefresh,
+}: {
+  orderDigest: string;
+  skills: TradeExecutionSkillView[];
+  peerUrl: string;
+  onRefresh: () => void;
+}) {
+  const toast = useToast();
+  const packageDigests = useMemo(
+    () => [...new Set(skills.map((skill) => skill.package_digest))].sort(),
+    [skills],
+  );
+  const packageKey = packageDigests.join(",");
+  const skillByDigest = useMemo(
+    () => new Map(skills.map((skill) => [skill.package_digest, skill])),
+    [skills],
+  );
+  const [loads, setLoads] = useState<Record<string, RecognitionEvidenceLoad>>({});
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [importing, setImporting] = useState("");
+  const [importMessages, setImportMessages] = useState<Record<string, string>>({});
+  const [importErrors, setImportErrors] = useState<Record<string, boolean>>({});
+  const importAbort = useRef<AbortController | null>(null);
+  const importGeneration = useRef(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (packageDigests.length === 0) {
+      setLoads({});
+      return () => controller.abort();
+    }
+    setLoads(Object.fromEntries(packageDigests.map((digest) => [
+      digest,
+      { status: "loading" as const },
+    ])));
+    void fetchTradeRuleRecognitionImportBatch(
+      orderDigest,
+      packageDigests,
+      controller.signal,
+    ).then((pages) => {
+      if (controller.signal.aborted) return;
+      setLoads(Object.fromEntries(pages.map((page) => [
+        page.package_digest,
+        { status: "ready" as const, page },
+      ])));
+    }).catch((error) => {
+      if (isAbort(error) || controller.signal.aborted) return;
+      const message = error instanceof Error
+        ? error.message
+        : "Recognition evidence status failed.";
+      setLoads(Object.fromEntries(packageDigests.map((digest) => [
+        digest,
+        { status: "error" as const, error: message },
+      ])));
+    });
+    return () => controller.abort();
+  }, [orderDigest, packageKey, refreshVersion]);
+
+  useEffect(() => {
+    importGeneration.current += 1;
+    importAbort.current?.abort();
+    importAbort.current = null;
+    setImporting("");
+    setImportMessages({});
+    setImportErrors({});
+    return () => {
+      importGeneration.current += 1;
+      importAbort.current?.abort();
+      importAbort.current = null;
+    };
+  }, [orderDigest, packageKey]);
+
+  async function fetchRecognitionEvidence(packageDigest: string) {
+    const source = peerUrl.trim();
+    const load = loads[packageDigest];
+    const skill = skillByDigest.get(packageDigest);
+    if (
+      !source
+      || importing
+      || load?.status !== "ready"
+      || skill?.status !== "available"
+    ) return;
+    const damaged = load.page?.items.some(
+      (item) => item.evidence_status !== "verified",
+    );
+    if (damaged) return;
+    const generation = importGeneration.current;
+    const controller = new AbortController();
+    importAbort.current?.abort();
+    importAbort.current = controller;
+    const isCurrent = () => (
+      !controller.signal.aborted
+      && importGeneration.current === generation
+    );
+    setImporting(packageDigest);
+    setImportMessages((current) => ({ ...current, [packageDigest]: "" }));
+    setImportErrors((current) => ({ ...current, [packageDigest]: false }));
+    try {
+      const result = await importTradeRuleRecognitions(
+        orderDigest,
+        packageDigest,
+        source,
+        controller.signal,
+      );
+      if (!isCurrent()) return;
+      const pageCount = "page_count" in result ? result.page_count : 1;
+      const message = result.status === "imported"
+        ? `Retained ${result.imported_statement_count} new signed statement(s) from ${pageCount} proof page(s). No trust or execution authority was granted.`
+        : `Verified the signed proof across ${pageCount} proof page(s); no new Recognition statements were added. No trust or execution authority was granted.`;
+      setImportMessages((current) => ({ ...current, [packageDigest]: message }));
+      toast.push(
+        result.status === "imported"
+          ? "Recognition evidence verified and retained"
+          : "Recognition proof verified; no new statements",
+        "success",
+      );
+      setRefreshVersion((value) => value + 1);
+      onRefresh();
+    } catch (error) {
+      if (isAbort(error) || !isCurrent()) return;
+      const message = error instanceof Error
+        ? error.message
+        : "Recognition evidence import failed.";
+      setImportMessages((current) => ({ ...current, [packageDigest]: message }));
+      setImportErrors((current) => ({ ...current, [packageDigest]: true }));
+      toast.push(message, "error");
+    } finally {
+      if (isCurrent()) {
+        importAbort.current = null;
+        setImporting("");
+      }
+    }
+  }
+
+  return <div className="trade-execution-column trade-recognition-evidence">
+    <h3>Recognition evidence</h3>
+    <p className="muted">A verified proof preserves who published an observed Recognition chain and its exact bytes. It does not prove global freshness, fairness, local trust, or execution authority.</p>
+    {packageDigests.length === 0 ? <p className="muted">No signed Rule Packages are bound to this Agreement.</p> : <ul className="trade-proposal-rules">
+      {packageDigests.map((packageDigest) => {
+        const load = loads[packageDigest] ?? { status: "loading" as const };
+        const label = recognitionEvidenceLabel(load);
+        const skill = skillByDigest.get(packageDigest);
+        const items = load.status === "ready" ? load.page.items : [];
+        const latest = items.length > 0 ? items[items.length - 1] : undefined;
+        const verified = items.filter((item) => (
+          item.status === "completed" && item.evidence_status === "verified"
+        )).length;
+        const pending = items.some((item) => item.status === "pending");
+        const damaged = items.some((item) => item.evidence_status !== "verified");
+        const canFetch = load.status === "ready"
+          && skill?.status === "available"
+          && !damaged
+          && Boolean(peerUrl.trim());
+        const actionLabel = importing === packageDigest
+          ? "Verifying..."
+          : pending
+            ? "Resume evidence import"
+            : items.length > 0
+              ? "Check for newer evidence"
+              : "Fetch signed evidence";
+        return <li key={packageDigest}>
+          <div className="trade-execution-row">
+            <strong>{skill?.rule_id ?? "Bound Trade Skill"}</strong>
+            <span className={`pill ${label.tone}`}>{label.label}</span>
+          </div>
+          <code title={packageDigest}>{short(packageDigest, 34)}</code>
+          {load.status === "ready" && <span className="muted">Retained proof records shown: {items.length} of {load.page.total} / verified completions shown: {verified}</span>}
+          {latest && <>
+            <code title={latest.observer_did}>Signer {short(latest.observer_did, 30)}</code>
+            <span className="muted">Source {latest.source_origin}</span>
+          </>}
+          {load.status === "error" && <span className="trade-proposal-warning" role="status">Status could not be verified: {load.error}</span>}
+          {load.status === "ready" && load.page.returned < load.page.total && <span className="trade-proposal-warning" role="status">This bounded status view did not revalidate every retained proof record. Hidden records may be pending or damaged.</span>}
+          {items.some((item) => item.status === "pending") && <span className="trade-proposal-warning" role="status">A write-ahead import exists without a completion event. Recovery must finish before this evidence can be used.</span>}
+          {items.some((item) => item.evidence_status !== "verified") && <span className="trade-proposal-warning" role="status">Retained proof bytes are missing, corrupt, or no longer match their signed import binding.</span>}
+          {damaged && <span className="muted">Automatic refetch is blocked because repair requires the exact signed proof document committed by the audit.</span>}
+          {load.status === "ready" && <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={!canFetch || Boolean(importing)}
+            onClick={() => fetchRecognitionEvidence(packageDigest)}
+          >{actionLabel}</button>}
+          {!peerUrl.trim() && <span className="muted">Enter the Agreement peer URL above before fetching evidence.</span>}
+          {skill?.status !== "available" && <span className="muted">Verify and cache the exact Trade Skill before importing its Recognition evidence.</span>}
+          {importMessages[packageDigest] && <span className={importErrors[packageDigest] ? "trade-proposal-warning" : "muted"} role="status">{importMessages[packageDigest]}</span>}
+        </li>;
+      })}
+    </ul>}
   </div>;
 }
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 from dataclasses import dataclass
@@ -111,6 +112,64 @@ def recognition_proof_import_id(
     return hashlib.sha256(trade_canonical_json(binding)).hexdigest()
 
 
+def canonical_recognition_source_origin(value: str) -> str:
+    """Return the semantic HTTP origin used for observation matching.
+
+    Historical signed import events retain their original spelling.  This
+    projection is deliberately separate from ``import_id`` so an upgrade can
+    match equivalent origins without invalidating those signed payloads.
+    """
+
+    if (
+        not isinstance(value, str)
+        or not 8 <= len(value) <= 2_048
+        or value != value.strip()
+        or re.fullmatch(
+            r"https?://[^/\\?#\x00-\x20\x7f]+",
+            value,
+            flags=re.IGNORECASE,
+        )
+        is None
+    ):
+        raise ValueError("Recognition source origin is invalid")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Recognition source origin is invalid") from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Recognition source origin must be an HTTP origin")
+    host = parsed.hostname.rstrip(".")
+    if not host:
+        raise ValueError("Recognition source host is invalid")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ValueError("Recognition source host is invalid") from exc
+    else:
+        host = str(address)
+        if isinstance(address, ipaddress.IPv6Address):
+            host = f"[{host}]"
+    if port is not None and not (
+        (scheme == "http" and port == 80)
+        or (scheme == "https" and port == 443)
+    ):
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}"
+
+
 def recognition_proof_observation_id(value: dict[str, Any]) -> str:
     """Identify one observed graph independently of envelope refresh time."""
 
@@ -145,6 +204,9 @@ def recognition_proof_observation_id(value: dict[str, Any]) -> str:
             )
         projection.update({field: value[field] for field in page_fields})
     try:
+        projection["source_origin"] = canonical_recognition_source_origin(
+            projection["source_origin"]
+        )
         return hashlib.sha256(trade_canonical_json(projection)).hexdigest()
     except (TradeCanonicalJSONError, TypeError, ValueError) as exc:
         raise RuleRecognitionProofImportError(
@@ -669,6 +731,7 @@ __all__ = [
     "RuleRecognitionProofDocument",
     "RuleRecognitionProofStore",
     "append_recognition_proof_import_event",
+    "canonical_recognition_source_origin",
     "recognition_proof_digest",
     "recognition_proof_import_payload",
     "recognition_proof_import_states",

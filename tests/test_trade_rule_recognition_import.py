@@ -24,6 +24,7 @@ from nth_dao.trade_rules import (
     append_recognition_proof_import_event,
     build_rule_package,
     build_rule_recognition_proof_pages,
+    canonical_recognition_source_origin,
     create_rule_recognition,
     parse_rule_recognition_proof_bundle,
     parse_rule_recognition_proof_pages,
@@ -50,6 +51,34 @@ pytestmark = pytest.mark.skipif(
 )
 
 _NOW = datetime(2026, 8, 3, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("http://Peer.Example:80", "http://peer.example"),
+        ("https://Peer.Example.:443", "https://peer.example"),
+        ("http://[2001:0db8::1]:8080", "http://[2001:db8::1]:8080"),
+    ],
+)
+def test_recognition_source_origin_canonicalization(value, expected):
+    assert canonical_recognition_source_origin(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://.",
+        "http://peer.example/foo/..",
+        "http://peer.example/%2e",
+        "http://peer.example\\foo",
+        " http://peer.example",
+        "http://peer.example\x00",
+    ],
+)
+def test_recognition_source_origin_rejects_ambiguous_or_empty_hosts(value):
+    with pytest.raises(ValueError, match="Recognition source"):
+        canonical_recognition_source_origin(value)
 
 
 def _artifacts():
@@ -194,7 +223,7 @@ def test_paged_proof_import_preflights_whole_store_capacity(
     assert RuleRecognitionProofStore(tmp_path)._files() == []
 
 
-def test_paged_proof_import_deduplicates_refreshed_observation(
+def test_paged_proof_import_deduplicates_refreshed_observation_across_origin_migration(
     tmp_path,
     monkeypatch,
 ):
@@ -245,11 +274,11 @@ def test_paged_proof_import_deduplicates_refreshed_observation(
         "package": package,
         "offer_digest": offer_digest,
         "offer_publisher_did": observer.as_did(),
-        "source_origin": "http://localhost:19090",
     }
 
     first = importer.import_pages_or_recover(
         **kwargs,
+        source_origin="http://Peer.Example:80",
         fetch_proof_set=lambda: first_set,
     )
     proof_files_before = tuple(
@@ -258,6 +287,7 @@ def test_paged_proof_import_deduplicates_refreshed_observation(
     spine_before = spine.verified_snapshot()
     second = importer.import_pages_or_recover(
         **kwargs,
+        source_origin="http://peer.example",
         fetch_proof_set=lambda: refreshed_set,
     )
 

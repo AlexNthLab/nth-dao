@@ -51,6 +51,10 @@ import type {
   TradeExecutionHistoryPage,
   TradeOrderDetail,
   TradeOrderPage,
+  TradeRuleRecognitionImportResult,
+  TradeRuleRecognitionImportStatusItem,
+  TradeRuleRecognitionImportStatusPage,
+  TradeRuleRecognitionImportStatusBatch,
   TradeRulePackageImportResult,
   TradeRulePackageCatalogItem,
   TradeRulePackageCatalogPage,
@@ -59,6 +63,9 @@ import type {
 
 const BASE = "/api/v2";
 const TRADE_INBOX_PAGE_SIZE = "100";
+const TRADE_INBOX_PAGE_LIMIT = Number(TRADE_INBOX_PAGE_SIZE);
+const TRADE_RECOGNITION_STATUS_BATCH_SIZE = 64;
+const TRADE_RECOGNITION_STATUS_MAX_PACKAGES = 256;
 
 export class ApiHttpError extends Error {
   readonly status: number;
@@ -1116,6 +1123,75 @@ export async function importTradeRulePackage(
   return validateTradeRulePackageImportResult(value, packageDigest);
 }
 
+export async function importTradeRuleRecognitions(
+  orderDigest: string,
+  packageDigest: string,
+  peerUrl: string,
+  signal?: AbortSignal,
+): Promise<TradeRuleRecognitionImportResult> {
+  const value = await postJson<unknown>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}/rule-packages/${encodeURIComponent(packageDigest)}/recognitions/import`,
+    { peer_url: peerUrl },
+    signal,
+  );
+  return validateTradeRuleRecognitionImportResult(value, packageDigest);
+}
+
+export async function fetchTradeRuleRecognitionImports(
+  orderDigest: string,
+  packageDigest: string,
+  signal?: AbortSignal,
+): Promise<TradeRuleRecognitionImportStatusPage> {
+  const value = await getJson<unknown>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}/rule-packages/${encodeURIComponent(packageDigest)}/recognitions/imports?limit=${TRADE_INBOX_PAGE_SIZE}`,
+    signal,
+  );
+  return validateTradeRuleRecognitionImportStatusPage(
+    value,
+    orderDigest,
+    packageDigest,
+  );
+}
+
+export async function fetchTradeRuleRecognitionImportBatch(
+  orderDigest: string,
+  packageDigests: string[],
+  signal?: AbortSignal,
+): Promise<TradeRuleRecognitionImportStatusPage[]> {
+  if (
+    !TRADE_DIGEST.test(orderDigest)
+    || packageDigests.length < 1
+    || packageDigests.length > TRADE_RECOGNITION_STATUS_MAX_PACKAGES
+    || packageDigests.some((digest) => !TRADE_DIGEST.test(digest))
+    || new Set(packageDigests).size !== packageDigests.length
+  ) {
+    throw new Error("Recognition status batch request is invalid");
+  }
+  const pages: TradeRuleRecognitionImportStatusPage[] = [];
+  for (
+    let offset = 0;
+    offset < packageDigests.length;
+    offset += TRADE_RECOGNITION_STATUS_BATCH_SIZE
+  ) {
+    const batchDigests = packageDigests.slice(
+      offset,
+      offset + TRADE_RECOGNITION_STATUS_BATCH_SIZE,
+    );
+    const params = new URLSearchParams({ limit: TRADE_INBOX_PAGE_SIZE });
+    for (const digest of batchDigests) params.append("package_digest", digest);
+    const value = await getJson<unknown>(
+      `/trade/orders/${encodeURIComponent(orderDigest)}/recognitions/imports?${params.toString()}`,
+      signal,
+    );
+    pages.push(...validateTradeRuleRecognitionImportStatusBatch(
+      value,
+      orderDigest,
+      batchDigests,
+    ).items);
+  }
+  return pages;
+}
+
 export function validateTradeRulePackageImportResult(
   value: unknown,
   expectedPackageDigest: string,
@@ -1179,6 +1255,422 @@ export function validateTradeRulePackageImportResult(
     throw new Error("server returned an invalid Trade Skill import result");
   }
   return result as unknown as TradeRulePackageImportResult;
+}
+
+const RECOGNITION_IMPORT_COMMON_FIELDS = [
+  "status",
+  "offer_digest",
+  "package_digest",
+  "observed_heads_digest",
+  "observed_statement_count",
+  "imported_statement_count",
+  "reconciled_anchor_count",
+  "imported_recognition_digests",
+  "audit_event_ids",
+  "global_freshness_proven",
+  "issuer_trust_granted",
+  "local_policy_changed",
+  "execution_authority_granted",
+  "warning",
+];
+
+function isBoundedCount(value: unknown, maximum: number): value is number {
+  return Number.isSafeInteger(value)
+    && (value as number) >= 0
+    && (value as number) <= maximum;
+}
+
+function isHttpOrigin(value: unknown): value is string {
+  if (
+    typeof value !== "string"
+    || value.length < 8
+    || value.length > 2_048
+    || value !== value.trim()
+    || !/^https?:\/\/[^/\\?#]+$/i.test(value)
+  ) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:")
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.pathname === "/"
+      && parsed.search === ""
+      && parsed.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function isUniqueStringList(
+  value: unknown,
+  predicate: (item: string) => boolean,
+  maximum: number,
+): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maximum
+    && value.every((item) => typeof item === "string" && predicate(item))
+    && new Set(value).size === value.length;
+}
+
+function validateRecognitionImportCommon(
+  result: Record<string, unknown>,
+  expectedPackageDigest: string,
+  maximumStatements: number,
+): void {
+  const imported = result.imported_statement_count;
+  const observed = result.observed_statement_count;
+  const reconciled = result.reconciled_anchor_count;
+  const importedDigests = result.imported_recognition_digests;
+  const auditEvents = result.audit_event_ids;
+  if (
+    !TRADE_DIGEST.test(expectedPackageDigest)
+    || result.package_digest !== expectedPackageDigest
+    || typeof result.offer_digest !== "string"
+    || !TRADE_DIGEST.test(result.offer_digest)
+    || typeof result.observed_heads_digest !== "string"
+    || !TRADE_DIGEST.test(result.observed_heads_digest)
+    || (result.status !== "imported" && result.status !== "already-observed")
+    || !isBoundedCount(observed, maximumStatements)
+    || !isBoundedCount(imported, maximumStatements)
+    || !isBoundedCount(reconciled, maximumStatements)
+    || (imported as number) > (observed as number)
+    || (reconciled as number) > (observed as number)
+    || (imported as number) + (reconciled as number) > (observed as number)
+    || result.status !== ((imported as number) > 0 ? "imported" : "already-observed")
+    || !isUniqueStringList(importedDigests, (item) => TRADE_DIGEST.test(item), maximumStatements)
+    || importedDigests.length !== imported
+    || !isUniqueStringList(auditEvents, (item) => SPINE_EVENT_ID.test(item), maximumStatements)
+    || auditEvents.length !== imported
+    || result.global_freshness_proven !== false
+    || result.issuer_trust_granted !== false
+    || result.local_policy_changed !== false
+    || result.execution_authority_granted !== false
+    || typeof result.warning !== "string"
+    || result.warning.length < 1
+    || result.warning.length > 2_000
+  ) {
+    throw new Error("server returned an invalid Recognition import result");
+  }
+}
+
+export function validateTradeRuleRecognitionImportResult(
+  value: unknown,
+  expectedPackageDigest: string,
+): TradeRuleRecognitionImportResult {
+  if (!isPlainRecord(value)) {
+    throw new Error("server returned an invalid Recognition import result");
+  }
+  const paged = Object.prototype.hasOwnProperty.call(
+    value,
+    "proof_protocol_version",
+  );
+  if (!paged) {
+    const legacyFields = [
+      ...RECOGNITION_IMPORT_COMMON_FIELDS,
+      "proof_digest",
+      "import_id",
+      "source_origin",
+      "import_proposal_event_id",
+      "import_completion_event_id",
+    ];
+    validateRecognitionImportCommon(value, expectedPackageDigest, 256);
+    if (
+      !hasExactFields(value, legacyFields)
+      || typeof value.proof_digest !== "string"
+      || !TRADE_DIGEST.test(value.proof_digest)
+      || typeof value.import_id !== "string"
+      || !SPINE_EVENT_ID.test(value.import_id)
+      || !isHttpOrigin(value.source_origin)
+      || typeof value.import_proposal_event_id !== "string"
+      || !SPINE_EVENT_ID.test(value.import_proposal_event_id)
+      || typeof value.import_completion_event_id !== "string"
+      || !SPINE_EVENT_ID.test(value.import_completion_event_id)
+      || new Set([
+        value.import_proposal_event_id,
+        value.import_completion_event_id,
+        ...(value.audit_event_ids as string[]),
+      ]).size !== 2 + (value.audit_event_ids as string[]).length
+    ) {
+      throw new Error("server returned an invalid Recognition import result");
+    }
+    return value as unknown as TradeRuleRecognitionImportResult;
+  }
+  const pageFields = [
+    ...RECOGNITION_IMPORT_COMMON_FIELDS,
+    "proof_protocol_version",
+    "proof_digests",
+    "observation_digest",
+    "page_count",
+    "page_imports",
+  ];
+  validateRecognitionImportCommon(value, expectedPackageDigest, 16_384);
+  const pageCount = value.page_count;
+  if (
+    !hasExactFields(value, pageFields)
+    || value.proof_protocol_version !== "2"
+    || typeof value.observation_digest !== "string"
+    || !TRADE_DIGEST.test(value.observation_digest)
+    || !isBoundedCount(pageCount, 1_024)
+    || pageCount === 0
+    || !isUniqueStringList(value.proof_digests, (item) => TRADE_DIGEST.test(item), 1_024)
+    || value.proof_digests.length !== pageCount
+    || !Array.isArray(value.page_imports)
+    || value.page_imports.length !== pageCount
+  ) {
+    throw new Error("server returned an invalid Recognition import result");
+  }
+  for (const audit of value.page_imports) {
+    if (
+      !isPlainRecord(audit)
+      || !hasExactFields(audit, [
+        "import_id",
+        "source_origin",
+        "proposal_event_id",
+        "completion_event_id",
+        "observed_heads_digest",
+      ])
+      || typeof audit.import_id !== "string"
+      || !SPINE_EVENT_ID.test(audit.import_id)
+      || !isHttpOrigin(audit.source_origin)
+      || typeof audit.proposal_event_id !== "string"
+      || !SPINE_EVENT_ID.test(audit.proposal_event_id)
+      || typeof audit.completion_event_id !== "string"
+      || !SPINE_EVENT_ID.test(audit.completion_event_id)
+      || audit.observed_heads_digest !== value.observed_heads_digest
+    ) {
+      throw new Error("server returned an invalid Recognition import result");
+    }
+  }
+  const pageImports = value.page_imports as Array<Record<string, unknown>>;
+  const pageEventIds = pageImports.flatMap((audit) => [
+    audit.proposal_event_id as string,
+    audit.completion_event_id as string,
+  ]);
+  const allEventIds = [
+    ...pageEventIds,
+    ...(value.audit_event_ids as string[]),
+  ];
+  if (
+    new Set(pageImports.map((audit) => audit.import_id)).size !== pageCount
+    || new Set(pageImports.map((audit) => audit.source_origin)).size !== 1
+    || new Set(allEventIds).size !== allEventIds.length
+  ) {
+    throw new Error("server returned an invalid Recognition import result");
+  }
+  return value as unknown as TradeRuleRecognitionImportResult;
+}
+
+const RECOGNITION_STATUS_COMMON_FIELDS = [
+  "import_id",
+  "status",
+  "proof_digest",
+  "observer_did",
+  "observed_heads_digest",
+  "source_origin",
+  "statement_count",
+  "evidence_status",
+  "proposal_event_id",
+  "completion_event_id",
+];
+
+function validateRecognitionImportStatusItem(
+  value: unknown,
+): TradeRuleRecognitionImportStatusItem {
+  if (!isPlainRecord(value)) {
+    throw new Error("server returned an invalid Recognition import status");
+  }
+  const paged = Object.prototype.hasOwnProperty.call(
+    value,
+    "proof_protocol_version",
+  );
+  const expectedFields = paged
+    ? [
+      ...RECOGNITION_STATUS_COMMON_FIELDS,
+      "proof_protocol_version",
+      "observation_digest",
+      "page_index",
+      "page_count",
+      "total_statement_count",
+      "statement_set_digest",
+    ]
+    : RECOGNITION_STATUS_COMMON_FIELDS;
+  if (
+    !hasExactFields(value, expectedFields)
+    || typeof value.import_id !== "string"
+    || !SPINE_EVENT_ID.test(value.import_id)
+    || (value.status !== "pending" && value.status !== "completed")
+    || typeof value.proof_digest !== "string"
+    || !TRADE_DIGEST.test(value.proof_digest)
+    || typeof value.observer_did !== "string"
+    || !TRADE_RULE_DID.test(value.observer_did)
+    || typeof value.observed_heads_digest !== "string"
+    || !TRADE_DIGEST.test(value.observed_heads_digest)
+    || !isHttpOrigin(value.source_origin)
+    || !isBoundedCount(value.statement_count, paged ? 128 : 256)
+    || !["verified", "binding-mismatch", "missing-or-corrupt"].includes(
+      String(value.evidence_status),
+    )
+    || typeof value.proposal_event_id !== "string"
+    || !SPINE_EVENT_ID.test(value.proposal_event_id)
+    || (value.status === "pending" && value.completion_event_id !== null)
+    || (value.status === "completed" && (
+      typeof value.completion_event_id !== "string"
+      || !SPINE_EVENT_ID.test(value.completion_event_id)
+    ))
+  ) {
+    throw new Error("server returned an invalid Recognition import status");
+  }
+  if (paged && (
+    value.proof_protocol_version !== "2"
+    || typeof value.observation_digest !== "string"
+    || !TRADE_DIGEST.test(value.observation_digest)
+    || !isBoundedCount(value.page_count, 1_024)
+    || value.page_count === 0
+    || !isBoundedCount(value.page_index, 1_023)
+    || (value.page_index as number) >= (value.page_count as number)
+    || !isBoundedCount(value.total_statement_count, 16_384)
+    || (value.statement_count as number) > (value.total_statement_count as number)
+    || typeof value.statement_set_digest !== "string"
+    || !TRADE_DIGEST.test(value.statement_set_digest)
+  )) {
+    throw new Error("server returned an invalid Recognition import status");
+  }
+  return value as unknown as TradeRuleRecognitionImportStatusItem;
+}
+
+export function validateTradeRuleRecognitionImportStatusPage(
+  value: unknown,
+  expectedOrderDigest: string,
+  expectedPackageDigest: string,
+): TradeRuleRecognitionImportStatusPage {
+  if (
+    !isPlainRecord(value)
+    || !hasExactFields(value, [
+      "order_digest",
+      "package_digest",
+      "total",
+      "returned",
+      "items",
+    ])
+    || !TRADE_DIGEST.test(expectedOrderDigest)
+    || value.order_digest !== expectedOrderDigest
+    || !TRADE_DIGEST.test(expectedPackageDigest)
+    || value.package_digest !== expectedPackageDigest
+    || !isBoundedCount(value.total, Number.MAX_SAFE_INTEGER)
+    || !isBoundedCount(value.returned, 100)
+    || !Array.isArray(value.items)
+    || value.items.length !== value.returned
+    || (value.returned as number) > (value.total as number)
+    || value.returned !== Math.min(value.total as number, TRADE_INBOX_PAGE_LIMIT)
+  ) {
+    throw new Error("server returned an invalid Recognition import status");
+  }
+  const items = value.items.map(validateRecognitionImportStatusItem);
+  const eventIds = items.flatMap((item) => item.completion_event_id === null
+    ? [item.proposal_event_id]
+    : [item.proposal_event_id, item.completion_event_id]);
+  const pageGroups = new Map<string, {
+    observerDid: string;
+    observedHeadsDigest: string;
+    pageCount: number;
+    totalStatementCount: number;
+    statementSetDigest: string;
+    pageIndexes: Set<number>;
+  }>();
+  for (const item of items) {
+    if (!("proof_protocol_version" in item)) continue;
+    const key = `${item.observation_digest}\u0000${item.source_origin}`;
+    const group = pageGroups.get(key);
+    if (!group) {
+      pageGroups.set(key, {
+        observerDid: item.observer_did,
+        observedHeadsDigest: item.observed_heads_digest,
+        pageCount: item.page_count,
+        totalStatementCount: item.total_statement_count,
+        statementSetDigest: item.statement_set_digest,
+        pageIndexes: new Set([item.page_index]),
+      });
+      continue;
+    }
+    if (
+      group.observerDid !== item.observer_did
+      || group.observedHeadsDigest !== item.observed_heads_digest
+      || group.pageCount !== item.page_count
+      || group.totalStatementCount !== item.total_statement_count
+      || group.statementSetDigest !== item.statement_set_digest
+      || group.pageIndexes.has(item.page_index)
+    ) {
+      throw new Error("server returned an invalid Recognition import status");
+    }
+    group.pageIndexes.add(item.page_index);
+  }
+  if (
+    new Set(items.map((item) => item.import_id)).size !== items.length
+    || new Set(eventIds).size !== eventIds.length
+  ) {
+    throw new Error("server returned an invalid Recognition import status");
+  }
+  return { ...value, items } as unknown as TradeRuleRecognitionImportStatusPage;
+}
+
+export function validateTradeRuleRecognitionImportStatusBatch(
+  value: unknown,
+  expectedOrderDigest: string,
+  expectedPackageDigests: string[],
+): TradeRuleRecognitionImportStatusBatch {
+  if (
+    !isPlainRecord(value)
+    || !hasExactFields(value, ["order_digest", "package_count", "items"])
+    || value.order_digest !== expectedOrderDigest
+    || !Array.isArray(value.items)
+    || !Number.isSafeInteger(value.package_count)
+    || value.package_count !== expectedPackageDigests.length
+    || value.items.length !== expectedPackageDigests.length
+  ) {
+    throw new Error("server returned an invalid Recognition status batch");
+  }
+  const expected = new Set(expectedPackageDigests);
+  const pagesByDigest = new Map<string, TradeRuleRecognitionImportStatusPage>();
+  const importIds = new Set<string>();
+  const eventIds = new Set<string>();
+  for (const rawPage of value.items) {
+    if (!isPlainRecord(rawPage) || typeof rawPage.package_digest !== "string") {
+      throw new Error("server returned an invalid Recognition status batch");
+    }
+    const packageDigest = rawPage.package_digest;
+    if (!expected.has(packageDigest) || pagesByDigest.has(packageDigest)) {
+      throw new Error("server returned an invalid Recognition status batch");
+    }
+    const page = validateTradeRuleRecognitionImportStatusPage(
+      rawPage,
+      expectedOrderDigest,
+      packageDigest,
+    );
+    for (const item of page.items) {
+      if (importIds.has(item.import_id) || eventIds.has(item.proposal_event_id)) {
+        throw new Error("server returned an invalid Recognition status batch");
+      }
+      importIds.add(item.import_id);
+      eventIds.add(item.proposal_event_id);
+      if (item.completion_event_id !== null) {
+        if (eventIds.has(item.completion_event_id)) {
+          throw new Error("server returned an invalid Recognition status batch");
+        }
+        eventIds.add(item.completion_event_id);
+      }
+    }
+    pagesByDigest.set(packageDigest, page);
+  }
+  if (pagesByDigest.size !== expectedPackageDigests.length) {
+    throw new Error("server returned an invalid Recognition status batch");
+  }
+  return {
+    order_digest: expectedOrderDigest,
+    package_count: expectedPackageDigests.length,
+    items: expectedPackageDigests.map((digest) => pagesByDigest.get(digest)!),
+  };
 }
 
 const TRADE_RULE_MODES = new Set([

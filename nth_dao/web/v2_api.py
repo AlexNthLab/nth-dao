@@ -28,13 +28,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from nth_dao.trade_rules.recognition_import_coordinator import (
     RuleRecognitionProofImportBusy as TradeRuleRecognitionImportBusy,
+)
+from nth_dao.trade_rules.recognition_import import (
+    canonical_recognition_source_origin,
 )
 from nth_dao.util import InterProcessLock, atomic_write_json, safe_id, safe_load_json
 
@@ -5067,18 +5070,21 @@ def _parse_rule_recognition_proof_document(
     )
 
 
-def _load_order_bound_recognition_import_context(
+def _load_order_bound_recognition_import_contexts(
     request: Request,
     *,
     order_digest: str,
-    package_digest: str,
-) -> tuple[Path, Any, Any, str, str]:
-    """Resolve the exact audited Order/Offer/Package import boundary."""
+    package_digests: tuple[str, ...],
+) -> tuple[Path, Any, tuple[Any, ...], str, str]:
+    """Resolve audited Recognition contexts with one shared Order lookup."""
 
     from nth_dao.trade_rules import TradeOffer, offer_digest
 
     _require_trade_offer_digest(order_digest)
-    _require_trade_offer_digest(package_digest)
+    if not package_digests:
+        raise HTTPException(status_code=400, detail="package digests are required")
+    for package_digest in package_digests:
+        _require_trade_offer_digest(package_digest)
     order_audit = _state_trade_order_audit(request)
     recognition_audit = _state_trade_rule_recognition_audit(request)
     package_store = _state_trade_rule_package_store(request)
@@ -5103,38 +5109,162 @@ def _load_order_bound_recognition_import_context(
         item["digest"]: item["rule_id"]
         for item in order_document["rule_bindings"]
     }
-    if package_digest not in bindings:
-        raise HTTPException(
-            status_code=409,
-            detail="Rule Package is not bound by this Trade Order",
-        )
-    package = _OrderAuditedRulePackageResolver(
+    resolver = _OrderAuditedRulePackageResolver(
         package_store,
         spine,
         order_digest,
         workspace,
-    ).load(package_digest)
-    if package is None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Rule Package must be imported and audit-verified before "
-                "its Recognition evidence"
-            ),
-        )
-    if package.manifest.rule_id != bindings[package_digest]:
-        raise HTTPException(
-            status_code=503,
-            detail="Order-bound Rule Package identity is inconsistent",
-        )
+    )
+    packages = []
+    for package_digest in package_digests:
+        if package_digest not in bindings:
+            raise HTTPException(
+                status_code=409,
+                detail="Rule Package is not bound by this Trade Order",
+            )
+        package = resolver.load(package_digest)
+        if package is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Rule Package must be imported and audit-verified before "
+                    "its Recognition evidence"
+                ),
+            )
+        if package.manifest.rule_id != bindings[package_digest]:
+            raise HTTPException(
+                status_code=503,
+                detail="Order-bound Rule Package identity is inconsistent",
+            )
+        packages.append(package)
     source_offer = TradeOffer.from_dict(order_document["snapshot"]["offer"])
     return (
         workspace,
         recognition_audit,
-        package,
+        tuple(packages),
         offer_digest(source_offer),
         source_offer.publisher_did,
     )
+
+
+def _load_order_bound_recognition_import_context(
+    request: Request,
+    *,
+    order_digest: str,
+    package_digest: str,
+) -> tuple[Path, Any, Any, str, str]:
+    """Resolve one exact audited Order/Offer/Package import boundary."""
+
+    workspace, recognition_audit, packages, source_offer_digest, publisher = (
+        _load_order_bound_recognition_import_contexts(
+            request,
+            order_digest=order_digest,
+            package_digests=(package_digest,),
+        )
+    )
+    return (
+        workspace,
+        recognition_audit,
+        packages[0],
+        source_offer_digest,
+        publisher,
+    )
+
+
+def _trade_rule_recognition_import_status_page(
+    *,
+    events: tuple[Any, ...],
+    proof_store: Any,
+    package: Any,
+    order_digest: str,
+    source_offer_digest: str,
+    offer_publisher_did: str,
+    limit: int,
+) -> dict[str, Any]:
+    """Project one bounded status page from a caller-verified Spine snapshot."""
+
+    from nth_dao.trade_rules import (
+        EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
+        RuleRecognitionProofBundleRejected,
+        RuleRecognitionProofImportError,
+        recognition_proof_import_payload,
+        recognition_proof_import_states,
+    )
+
+    states = recognition_proof_import_states(
+        events,
+        package_digest=package.digest,
+        order_digest=order_digest,
+    )
+    items = []
+    for state in states[-limit:]:
+        evidence_status = "verified"
+        try:
+            raw = proof_store.get(state.payload["proof_digest"])
+            proposed_at = datetime.fromtimestamp(
+                state.proposed_event.ts_ms / 1000,
+                tz=timezone.utc,
+            )
+            proof = _parse_rule_recognition_proof_document(
+                raw,
+                package=package,
+                offer_digest=source_offer_digest,
+                offer_publisher_did=offer_publisher_did,
+                now=proposed_at,
+            )
+            expected = recognition_proof_import_payload(
+                proof,
+                event_type=EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
+                order_digest=order_digest,
+                offer_digest=source_offer_digest,
+                source_origin=state.payload["source_origin"],
+            )
+            if expected != state.payload:
+                evidence_status = "binding-mismatch"
+        except (
+            RuleRecognitionProofBundleRejected,
+            RuleRecognitionProofImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            evidence_status = "missing-or-corrupt"
+        item = {
+            "import_id": state.payload["import_id"],
+            "status": (
+                "completed" if state.completed_event is not None else "pending"
+            ),
+            "proof_digest": state.payload["proof_digest"],
+            "observer_did": state.payload["observer_did"],
+            "observed_heads_digest": state.payload["observed_heads_digest"],
+            "source_origin": state.payload["source_origin"],
+            "statement_count": len(state.payload["statement_digests"]),
+            "evidence_status": evidence_status,
+            "proposal_event_id": state.proposed_event.event_id,
+            "completion_event_id": (
+                state.completed_event.event_id
+                if state.completed_event is not None
+                else None
+            ),
+        }
+        if state.payload["protocol_version"] == "2":
+            item.update({
+                "proof_protocol_version": "2",
+                "observation_digest": state.payload["observation_digest"],
+                "page_index": state.payload["page_index"],
+                "page_count": state.payload["page_count"],
+                "total_statement_count": state.payload["statement_count"],
+                "statement_set_digest": state.payload["statement_set_digest"],
+            })
+        items.append(item)
+    return {
+        "order_digest": order_digest,
+        "package_digest": package.digest,
+        "total": len(states),
+        "returned": len(items),
+        "items": items,
+    }
 
 
 def _import_trade_rule_recognition_proof_singleflight(
@@ -5338,10 +5468,12 @@ def _trade_rule_package_import_id(
 
 
 def _trade_rule_package_source_origin(peer_url: str) -> str:
-    """Retain bounded network provenance without persisting peer URL paths."""
+    """Return one canonical origin without retaining peer URL paths."""
 
     parsed = urlsplit(peer_url)
-    return f"{parsed.scheme}://{parsed.netloc}"
+    return canonical_recognition_source_origin(
+        f"{parsed.scheme}://{parsed.netloc}"
+    )
 
 
 def _trade_rule_package_import_audit_state(
@@ -12901,15 +13033,11 @@ def register_v2_routes(app: FastAPI) -> None:
         """Inspect bounded import recovery state and retained proof evidence."""
 
         from nth_dao.trade_rules import (
-            EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
             RulePackageError,
             RuleRecognitionAuditError,
-            RuleRecognitionProofBundleRejected,
             RuleRecognitionProofImportError,
             RuleRecognitionProofStore,
             TradeOrderAuditError,
-            recognition_proof_import_payload,
-            recognition_proof_import_states,
         )
 
         _require_console_bearer_for_sensitive_read(request)
@@ -12927,93 +13055,96 @@ def register_v2_routes(app: FastAPI) -> None:
                 order_digest=order_digest,
                 package_digest=package_digest,
             )
-            states = recognition_proof_import_states(
-                recognition_audit.spine.verified_snapshot(),
-                package_digest=package.digest,
-                order_digest=order_digest,
-            )
+            events = recognition_audit.spine.verified_snapshot()
             proof_store = RuleRecognitionProofStore(workspace)
-            items = []
-            for state in states[-limit:]:
-                evidence_status = "verified"
-                try:
-                    raw = proof_store.get(state.payload["proof_digest"])
-                    proposed_at = datetime.fromtimestamp(
-                        state.proposed_event.ts_ms / 1000,
-                        tz=timezone.utc,
-                    )
-                    proof = _parse_rule_recognition_proof_document(
-                        raw,
-                        package=package,
-                        offer_digest=source_offer_digest,
-                        offer_publisher_did=offer_publisher_did,
-                        now=proposed_at,
-                    )
-                    expected = recognition_proof_import_payload(
-                        proof,
-                        event_type=(
-                            EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED
-                        ),
-                        order_digest=order_digest,
-                        offer_digest=source_offer_digest,
-                        source_origin=state.payload["source_origin"],
-                    )
-                    if expected != state.payload:
-                        evidence_status = "binding-mismatch"
-                except (
-                    RuleRecognitionProofBundleRejected,
-                    RuleRecognitionProofImportError,
-                    OSError,
-                    RuntimeError,
-                    TypeError,
-                    ValueError,
-                ):
-                    evidence_status = "missing-or-corrupt"
-                item = {
-                    "import_id": state.payload["import_id"],
-                    "status": (
-                        "completed"
-                        if state.completed_event is not None
-                        else "pending"
-                    ),
-                    "proof_digest": state.payload["proof_digest"],
-                    "observer_did": state.payload["observer_did"],
-                    "observed_heads_digest": state.payload[
-                        "observed_heads_digest"
-                    ],
-                    "source_origin": state.payload["source_origin"],
-                    "statement_count": len(
-                        state.payload["statement_digests"]
-                    ),
-                    "evidence_status": evidence_status,
-                    "proposal_event_id": state.proposed_event.event_id,
-                    "completion_event_id": (
-                        state.completed_event.event_id
-                        if state.completed_event is not None
-                        else None
-                    ),
-                }
-                if state.payload["protocol_version"] == "2":
-                    item.update({
-                        "proof_protocol_version": "2",
-                        "observation_digest": state.payload[
-                            "observation_digest"
-                        ],
-                        "page_index": state.payload["page_index"],
-                        "page_count": state.payload["page_count"],
-                        "total_statement_count": state.payload[
-                            "statement_count"
-                        ],
-                        "statement_set_digest": state.payload[
-                            "statement_set_digest"
-                        ],
-                    })
-                items.append(item)
+            return _trade_rule_recognition_import_status_page(
+                events=events,
+                proof_store=proof_store,
+                package=package,
+                order_digest=order_digest,
+                source_offer_digest=source_offer_digest,
+                offer_publisher_did=offer_publisher_did,
+                limit=limit,
+            )
+        except HTTPException:
+            raise
+        except (
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofImportError,
+            TradeOrderAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Rule Recognition import status unavailable",
+            ) from exc
+
+    @app.get(
+        "/api/v2/trade/orders/{order_digest}/recognitions/imports"
+    )
+    def v2_trade_order_rule_recognition_import_status_batch(
+        order_digest: str,
+        request: Request,
+        package_digest: List[str] = Query(default=[]),
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Inspect multiple package statuses from one verified Spine snapshot."""
+
+        from nth_dao.trade_rules import (
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofImportError,
+            RuleRecognitionProofStore,
+            TradeOrderAuditError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="limit must be in 1..100")
+        digests = tuple(package_digest)
+        if not 1 <= len(digests) <= 64:
+            raise HTTPException(
+                status_code=400,
+                detail="package_digest must contain 1..64 entries",
+            )
+        if len(set(digests)) != len(digests):
+            raise HTTPException(
+                status_code=400,
+                detail="package_digest entries must be unique",
+            )
+        try:
+            (
+                workspace,
+                recognition_audit,
+                packages,
+                source_offer_digest,
+                offer_publisher_did,
+            ) = _load_order_bound_recognition_import_contexts(
+                request,
+                order_digest=order_digest,
+                package_digests=digests,
+            )
+            events = recognition_audit.spine.verified_snapshot()
+            proof_store = RuleRecognitionProofStore(workspace)
+            items = [
+                _trade_rule_recognition_import_status_page(
+                    events=events,
+                    proof_store=proof_store,
+                    package=package,
+                    order_digest=order_digest,
+                    source_offer_digest=source_offer_digest,
+                    offer_publisher_did=offer_publisher_did,
+                    limit=limit,
+                )
+                for package in packages
+            ]
             return {
                 "order_digest": order_digest,
-                "package_digest": package.digest,
-                "total": len(states),
-                "returned": len(items),
+                "package_count": len(items),
                 "items": items,
             }
         except HTTPException:
@@ -13030,7 +13161,7 @@ def register_v2_routes(app: FastAPI) -> None:
         ) as exc:
             raise HTTPException(
                 status_code=503,
-                detail="Rule Recognition import status unavailable",
+                detail="Rule Recognition batch status unavailable",
             ) from exc
 
     @app.post(

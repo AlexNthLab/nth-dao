@@ -719,6 +719,94 @@ export interface TradeRulePackageImportResult {
   warning: string;
 }
 
+export interface TradeRuleRecognitionPageAudit {
+  import_id: string;
+  source_origin: string;
+  proposal_event_id: string;
+  completion_event_id: string;
+  observed_heads_digest: string;
+}
+
+export interface TradeRuleRecognitionImportCommon {
+  status: "imported" | "already-observed";
+  offer_digest: string;
+  package_digest: string;
+  observed_heads_digest: string;
+  observed_statement_count: number;
+  imported_statement_count: number;
+  reconciled_anchor_count: number;
+  imported_recognition_digests: string[];
+  audit_event_ids: string[];
+  global_freshness_proven: false;
+  issuer_trust_granted: false;
+  local_policy_changed: false;
+  execution_authority_granted: false;
+  warning: string;
+}
+
+export interface TradeRuleRecognitionLegacyImportResult
+  extends TradeRuleRecognitionImportCommon {
+  proof_digest: string;
+  import_id: string;
+  source_origin: string;
+  import_proposal_event_id: string;
+  import_completion_event_id: string;
+}
+
+export interface TradeRuleRecognitionPageImportResult
+  extends TradeRuleRecognitionImportCommon {
+  proof_protocol_version: "2";
+  proof_digests: string[];
+  observation_digest: string;
+  page_count: number;
+  page_imports: TradeRuleRecognitionPageAudit[];
+}
+
+export type TradeRuleRecognitionImportResult =
+  | TradeRuleRecognitionLegacyImportResult
+  | TradeRuleRecognitionPageImportResult;
+
+export interface TradeRuleRecognitionImportStatusCommon {
+  import_id: string;
+  status: "pending" | "completed";
+  proof_digest: string;
+  observer_did: string;
+  observed_heads_digest: string;
+  source_origin: string;
+  statement_count: number;
+  evidence_status: "verified" | "binding-mismatch" | "missing-or-corrupt";
+  proposal_event_id: string;
+  completion_event_id: string | null;
+}
+
+export interface TradeRuleRecognitionPageImportStatus
+  extends TradeRuleRecognitionImportStatusCommon {
+  proof_protocol_version: "2";
+  observation_digest: string;
+  page_index: number;
+  page_count: number;
+  total_statement_count: number;
+  statement_set_digest: string;
+}
+
+export type TradeRuleRecognitionImportStatusItem =
+  | TradeRuleRecognitionImportStatusCommon
+  | TradeRuleRecognitionPageImportStatus;
+
+export interface TradeRuleRecognitionImportStatusPage {
+  order_digest: string;
+  package_digest: string;
+  total: number;
+  returned: number;
+  items: TradeRuleRecognitionImportStatusItem[];
+}
+
+export interface TradeRuleRecognitionImportStatusBatch {
+  order_digest: string;
+  package_count: number;
+  items: TradeRuleRecognitionImportStatusPage[];
+}
+
 export interface TradeRulePackageCatalogItem {
   package_digest: string;
   rule_id: string;

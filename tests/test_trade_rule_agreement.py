@@ -5493,6 +5493,41 @@ def test_operator_import_falls_back_to_signed_recognition_pages(
         item["total_statement_count"] for item in healthy.json()["items"]
     } == {2}
 
+    batch_path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/"
+        "recognitions/imports"
+    )
+    spine = app.state.nth.trade_rule_recognition_audit.spine
+    original_verified_snapshot = spine.verified_snapshot
+    snapshot_calls = []
+
+    def counted_verified_snapshot():
+        snapshot_calls.append(True)
+        return original_verified_snapshot()
+
+    monkeypatch.setattr(spine, "verified_snapshot", counted_verified_snapshot)
+    batch = client.get(
+        batch_path,
+        params=[("package_digest", package.digest)],
+        headers=auth,
+    )
+    assert batch.status_code == 200, batch.text
+    assert batch.json() == {
+        "order_digest": trade_order_digest(order),
+        "package_count": 1,
+        "items": [healthy.json()],
+    }
+    assert snapshot_calls == [True]
+    duplicate_batch = client.get(
+        batch_path,
+        params=[
+            ("package_digest", package.digest),
+            ("package_digest", package.digest),
+        ],
+        headers=auth,
+    )
+    assert duplicate_batch.status_code == 400
+
     proof_store = trade_rules_api.RuleRecognitionProofStore(tmp_path / "node")
     damaged_digest = proof_set.proof_digests[0]
     proof_store._path(damaged_digest).write_bytes(b"{}")
@@ -6856,6 +6891,20 @@ def test_operator_accept_rejects_malformed_proposal_digest(tmp_path):
     assert response.json()["detail"] == (
         "digest must be a lowercase sha256 digest"
     )
+
+
+@pytest.mark.parametrize(
+    ("peer_url", "expected"),
+    [
+        ("HTTP://Peer.Example:80/path", "http://peer.example"),
+        ("https://Peer.Example:443/api", "https://peer.example"),
+        ("https://Peer.Example:8443/api", "https://peer.example:8443"),
+        ("http://[2001:0db8::1]:8080/path", "http://[2001:db8::1]:8080"),
+        ("https://BÜCHER.Example/", "https://xn--bcher-kva.example"),
+    ],
+)
+def test_trade_rule_source_origin_is_canonical(peer_url, expected):
+    assert web_v2_api._trade_rule_package_source_origin(peer_url) == expected
 
 
 def test_trade_peer_resolution_rejects_dns_loopback_rebinding(monkeypatch):

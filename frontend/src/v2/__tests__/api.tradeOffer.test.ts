@@ -12,6 +12,9 @@ import {
   getTradeProposal,
   importCachedTradeOffer,
   importTradeRulePackage,
+  importTradeRuleRecognitions,
+  fetchTradeRuleRecognitionImports,
+  fetchTradeRuleRecognitionImportBatch,
 } from "../api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -527,6 +530,423 @@ describe("Trade Offer inspection API wiring", () => {
       packageDigest,
       "http://peer-host:8080",
     )).rejects.toThrow("invalid Trade Skill import result");
+  });
+
+  it("imports a paged signed Recognition observation without granting authority", async () => {
+    const importedDigest = `sha256:${"e".repeat(64)}`;
+    const headsDigest = `sha256:${"f".repeat(64)}`;
+    const result = {
+      status: "imported",
+      proof_protocol_version: "2",
+      offer_digest: `sha256:${"b".repeat(64)}`,
+      package_digest: packageDigest,
+      proof_digests: [
+        `sha256:${"1".repeat(64)}`,
+        `sha256:${"2".repeat(64)}`,
+      ],
+      observation_digest: `sha256:${"3".repeat(64)}`,
+      observed_heads_digest: headsDigest,
+      page_count: 2,
+      page_imports: ["4", "5"].map((value, index) => ({
+        import_id: value.repeat(64),
+        source_origin: "http://peer-host:8080",
+        proposal_event_id: String(6 + index * 2).repeat(64),
+        completion_event_id: String(7 + index * 2).repeat(64),
+        observed_heads_digest: headsDigest,
+      })),
+      observed_statement_count: 129,
+      imported_statement_count: 1,
+      reconciled_anchor_count: 0,
+      imported_recognition_digests: [importedDigest],
+      audit_event_ids: ["a".repeat(64)],
+      global_freshness_proven: false,
+      issuer_trust_granted: false,
+      local_policy_changed: false,
+      execution_authority_granted: false,
+      warning: "Observed evidence only",
+    } as const;
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(result));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await expect(importTradeRuleRecognitions(
+      digest,
+      packageDigest,
+      "http://peer-host:8080",
+      controller.signal,
+    )).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/trade/orders/${encodeURIComponent(digest)}/rule-packages/${encodeURIComponent(packageDigest)}/recognitions/import`,
+      expect.objectContaining({
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({ peer_url: "http://peer-host:8080" }),
+      }),
+    );
+  });
+
+  it.each([
+    ["unsafe authority", { execution_authority_granted: true }],
+    ["wrong package", { package_digest: `sha256:${"9".repeat(64)}` }],
+    ["page count mismatch", { page_count: 3 }],
+    ["overlapping imported and reconciled counts", {
+      status: "imported",
+      imported_statement_count: 1,
+      reconciled_anchor_count: 129,
+      imported_recognition_digests: [`sha256:${"e".repeat(64)}`],
+      audit_event_ids: ["8".repeat(64)],
+    }],
+    ["duplicate page audit", {
+      page_imports: ["4", "4"].map((value, index) => ({
+        import_id: value.repeat(64),
+        source_origin: "http://peer-host:8080",
+        proposal_event_id: String(6 + index * 2).repeat(64),
+        completion_event_id: String(7 + index * 2).repeat(64),
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+      })),
+    }],
+    ["mixed page sources", {
+      page_imports: ["4", "5"].map((value, index) => ({
+        import_id: value.repeat(64),
+        source_origin: index === 0
+          ? "http://peer-host:8080"
+          : "http://other-peer:8080",
+        proposal_event_id: String(6 + index * 2).repeat(64),
+        completion_event_id: String(7 + index * 2).repeat(64),
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+      })),
+    }],
+    ["reused page audit event", {
+      page_imports: ["4", "5"].map((value, index) => ({
+        import_id: value.repeat(64),
+        source_origin: "http://peer-host:8080",
+        proposal_event_id: "6".repeat(64),
+        completion_event_id: String(7 + index * 2).repeat(64),
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+      })),
+    }],
+    ["statement audit reuses page event", {
+      status: "imported",
+      imported_statement_count: 1,
+      imported_recognition_digests: [`sha256:${"e".repeat(64)}`],
+      audit_event_ids: ["8".repeat(64)],
+    }],
+    ["unknown field", { accepted: true }],
+  ])("rejects an invalid Recognition page import: %s", async (_label, mutation) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+      status: "already-observed",
+      proof_protocol_version: "2",
+      offer_digest: `sha256:${"b".repeat(64)}`,
+      package_digest: packageDigest,
+      proof_digests: [`sha256:${"1".repeat(64)}`, `sha256:${"2".repeat(64)}`],
+      observation_digest: `sha256:${"3".repeat(64)}`,
+      observed_heads_digest: `sha256:${"f".repeat(64)}`,
+      page_count: 2,
+      page_imports: ["4", "5"].map((value, index) => ({
+        import_id: value.repeat(64),
+        source_origin: "http://peer-host:8080",
+        proposal_event_id: String(6 + index * 2).repeat(64),
+        completion_event_id: String(7 + index * 2).repeat(64),
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+      })),
+      observed_statement_count: 129,
+      imported_statement_count: 0,
+      reconciled_anchor_count: 0,
+      imported_recognition_digests: [],
+      audit_event_ids: [],
+      global_freshness_proven: false,
+      issuer_trust_granted: false,
+      local_policy_changed: false,
+      execution_authority_granted: false,
+      warning: "Observed evidence only",
+      ...mutation,
+    })));
+
+    await expect(importTradeRuleRecognitions(
+      digest,
+      packageDigest,
+      "http://peer-host:8080",
+    )).rejects.toThrow("invalid Recognition import result");
+  });
+
+  it("rejects a legacy Recognition response that reuses a Spine event", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+      status: "imported",
+      offer_digest: `sha256:${"b".repeat(64)}`,
+      package_digest: packageDigest,
+      proof_digest: `sha256:${"1".repeat(64)}`,
+      observed_heads_digest: `sha256:${"2".repeat(64)}`,
+      import_id: "3".repeat(64),
+      source_origin: "http://peer-host:8080",
+      import_proposal_event_id: "4".repeat(64),
+      import_completion_event_id: "5".repeat(64),
+      observed_statement_count: 1,
+      imported_statement_count: 1,
+      reconciled_anchor_count: 0,
+      imported_recognition_digests: [`sha256:${"6".repeat(64)}`],
+      audit_event_ids: ["4".repeat(64)],
+      global_freshness_proven: false,
+      issuer_trust_granted: false,
+      local_policy_changed: false,
+      execution_authority_granted: false,
+      warning: "Observed evidence only",
+    })));
+
+    await expect(importTradeRuleRecognitions(
+      digest,
+      packageDigest,
+      "http://peer-host:8080",
+    )).rejects.toThrow("invalid Recognition import result");
+  });
+
+  it("loads strict per-page Recognition evidence status", async () => {
+    const headsDigest = `sha256:${"f".repeat(64)}`;
+    const status = {
+      order_digest: digest,
+      package_digest: packageDigest,
+      total: 2,
+      returned: 2,
+      items: [0, 1].map((pageIndex) => ({
+        import_id: String(pageIndex + 1).repeat(64),
+        status: "completed",
+        proof_digest: `sha256:${String(pageIndex + 3).repeat(64)}`,
+        observer_did: publisherDid,
+        observed_heads_digest: headsDigest,
+        source_origin: "http://peer-host:8080",
+        statement_count: pageIndex === 0 ? 128 : 1,
+        evidence_status: "verified",
+        proposal_event_id: String(6 + pageIndex * 2).repeat(64),
+        completion_event_id: String(7 + pageIndex * 2).repeat(64),
+        proof_protocol_version: "2",
+        observation_digest: `sha256:${"8".repeat(64)}`,
+        page_index: pageIndex,
+        page_count: 2,
+        total_statement_count: 129,
+        statement_set_digest: `sha256:${"9".repeat(64)}`,
+      })),
+    } as const;
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(status));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchTradeRuleRecognitionImports(
+      digest,
+      packageDigest,
+    )).resolves.toEqual(status);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/trade/orders/${encodeURIComponent(digest)}/rule-packages/${encodeURIComponent(packageDigest)}/recognitions/imports?limit=100`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("accepts a valid historical origin spelling after server-side retention", async () => {
+    const status = {
+      order_digest: digest,
+      package_digest: packageDigest,
+      total: 1,
+      returned: 1,
+      items: [{
+        import_id: "1".repeat(64),
+        status: "completed",
+        proof_digest: `sha256:${"3".repeat(64)}`,
+        observer_did: publisherDid,
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+        source_origin: "http://Peer.Example:80",
+        statement_count: 1,
+        evidence_status: "verified",
+        proposal_event_id: "6".repeat(64),
+        completion_event_id: "7".repeat(64),
+      }],
+    } as const;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse(status)));
+
+    await expect(fetchTradeRuleRecognitionImports(
+      digest,
+      packageDigest,
+    )).resolves.toEqual(status);
+  });
+
+  it("loads multiple Recognition statuses through one authenticated batch", async () => {
+    const secondPackage = `sha256:${"d".repeat(64)}`;
+    const page = (packageDigestValue: string) => ({
+      order_digest: digest,
+      package_digest: packageDigestValue,
+      total: 0,
+      returned: 0,
+      items: [],
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      order_digest: digest,
+      package_count: 2,
+      items: [page(secondPackage), page(packageDigest)],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchTradeRuleRecognitionImportBatch(
+      digest,
+      [packageDigest, secondPackage],
+    )).resolves.toEqual([page(packageDigest), page(secondPackage)]);
+    const path = fetchMock.mock.calls[0][0] as string;
+    expect(path).toContain(`/trade/orders/${encodeURIComponent(digest)}/recognitions/imports?`);
+    expect(path).toContain(`package_digest=${encodeURIComponent(packageDigest)}`);
+    expect(path).toContain(`package_digest=${encodeURIComponent(secondPackage)}`);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an incomplete Recognition status batch", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+      order_digest: digest,
+      package_count: 1,
+      items: [],
+    })));
+
+    await expect(fetchTradeRuleRecognitionImportBatch(
+      digest,
+      [packageDigest],
+    )).rejects.toThrow("invalid Recognition status batch");
+  });
+
+  it.each(["import_id", "proposal_event_id", "completion_event_id"])(
+    "rejects Recognition status batches that reuse %s across packages",
+    async (field) => {
+      const secondPackage = `sha256:${"d".repeat(64)}`;
+      const hex = (value: number) => value.toString(16).repeat(64);
+      const item = (seed: number) => ({
+        import_id: hex(seed),
+        status: "completed",
+        proof_digest: `sha256:${hex(seed + 1)}`,
+        observer_did: publisherDid,
+        observed_heads_digest: `sha256:${hex(seed + 2)}`,
+        source_origin: "http://peer-host:8080",
+        statement_count: 1,
+        evidence_status: "verified",
+        proposal_event_id: hex(seed + 3),
+        completion_event_id: hex(seed + 4),
+      });
+      const first = item(1);
+      const second = {
+        ...item(6),
+        [field]: first[field as keyof typeof first],
+      };
+      const page = (packageDigestValue: string, statusItem: typeof first) => ({
+        order_digest: digest,
+        package_digest: packageDigestValue,
+        total: 1,
+        returned: 1,
+        items: [statusItem],
+      });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+        order_digest: digest,
+        package_count: 2,
+        items: [page(packageDigest, first), page(secondPackage, second)],
+      })));
+
+      await expect(fetchTradeRuleRecognitionImportBatch(
+        digest,
+        [packageDigest, secondPackage],
+      )).rejects.toThrow("invalid Recognition status batch");
+    },
+  );
+
+  it.each([
+    ["reused Spine event", { proposal_event_id: "6".repeat(64) }],
+    ["inconsistent statement set", {
+      statement_set_digest: `sha256:${"a".repeat(64)}`,
+    }],
+    ["duplicate page index", { page_index: 0 }],
+  ])("rejects incoherent Recognition status pages: %s", async (_label, mutation) => {
+    const items = [0, 1].map((pageIndex) => ({
+      import_id: String(pageIndex + 1).repeat(64),
+      status: "completed",
+      proof_digest: `sha256:${String(pageIndex + 3).repeat(64)}`,
+      observer_did: publisherDid,
+      observed_heads_digest: `sha256:${"f".repeat(64)}`,
+      source_origin: "http://peer-host:8080",
+      statement_count: pageIndex === 0 ? 128 : 1,
+      evidence_status: "verified",
+      proposal_event_id: String(6 + pageIndex * 2).repeat(64),
+      completion_event_id: String(7 + pageIndex * 2).repeat(64),
+      proof_protocol_version: "2",
+      observation_digest: `sha256:${"8".repeat(64)}`,
+      page_index: pageIndex,
+      page_count: 2,
+      total_statement_count: 129,
+      statement_set_digest: `sha256:${"9".repeat(64)}`,
+    }));
+    items[1] = { ...items[1], ...mutation };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+      order_digest: digest,
+      package_digest: packageDigest,
+      total: 2,
+      returned: 2,
+      items,
+    })));
+
+    await expect(fetchTradeRuleRecognitionImports(
+      digest,
+      packageDigest,
+    )).rejects.toThrow("invalid Recognition import status");
+  });
+
+  it.each([
+    ["pending completion", { status: "pending", completion_event_id: "7".repeat(64) }],
+    ["page out of bounds", { page_index: 2 }],
+    ["unsafe source", { source_origin: "http://user:pass@peer-host:8080" }],
+    ["normalized dot path", { source_origin: "http://peer-host:8080/foo/.." }],
+    ["encoded dot path", { source_origin: "http://peer-host:8080/%2e" }],
+    ["backslash path", { source_origin: "http://peer-host:8080\\foo\\.." }],
+    ["unknown evidence", { evidence_status: "trusted" }],
+    ["unknown field", { trusted: true }],
+  ])("rejects invalid Recognition import status: %s", async (_label, mutation) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+      order_digest: digest,
+      package_digest: packageDigest,
+      total: 1,
+      returned: 1,
+      items: [{
+        import_id: "1".repeat(64),
+        status: "completed",
+        proof_digest: `sha256:${"3".repeat(64)}`,
+        observer_did: publisherDid,
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+        source_origin: "http://peer-host:8080",
+        statement_count: 1,
+        evidence_status: "verified",
+        proposal_event_id: "6".repeat(64),
+        completion_event_id: "7".repeat(64),
+        ...mutation,
+      }],
+    })));
+
+    await expect(fetchTradeRuleRecognitionImports(
+      digest,
+      packageDigest,
+    )).rejects.toThrow("invalid Recognition import status");
+  });
+
+  it("rejects a Recognition status page that omits records within its fixed limit", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({
+      order_digest: digest,
+      package_digest: packageDigest,
+      total: 2,
+      returned: 1,
+      items: [{
+        import_id: "1".repeat(64),
+        status: "completed",
+        proof_digest: `sha256:${"3".repeat(64)}`,
+        observer_did: publisherDid,
+        observed_heads_digest: `sha256:${"f".repeat(64)}`,
+        source_origin: "http://peer-host:8080",
+        statement_count: 1,
+        evidence_status: "verified",
+        proposal_event_id: "6".repeat(64),
+        completion_event_id: "7".repeat(64),
+      }],
+    })));
+
+    await expect(fetchTradeRuleRecognitionImports(
+      digest,
+      packageDigest,
+    )).rejects.toThrow("invalid Recognition import status");
   });
 
   it("lists and inspects verified-cache Trade Skills through bounded endpoints", async () => {
