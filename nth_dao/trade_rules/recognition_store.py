@@ -11,6 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 from nth_dao.trade_rules.canonical import MAX_TRADE_JSON_BYTES
 from nth_dao.trade_rules.package_store import (
@@ -19,6 +20,7 @@ from nth_dao.trade_rules.package_store import (
     build_rule_package,
 )
 from nth_dao.trade_rules.recognition import (
+    MAX_RULE_RECOGNITION_STATEMENTS,
     TradeRuleRecognition,
     TradeRuleRecognitionRejected,
 )
@@ -27,6 +29,7 @@ from nth_dao.util.io import InterProcessLock
 DEFAULT_MAX_RULE_RECOGNITIONS = 10_000
 DEFAULT_MAX_RULE_RECOGNITION_STORE_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_RULE_RECOGNITION_QUARANTINE = 2_048
+MAX_RULE_RECOGNITION_IMPORT_BATCH = 1_000
 QUARANTINE_KIND = "nth.dao.trade.rule-recognition-quarantine"
 QUARANTINE_PROTOCOL_VERSION = "1"
 
@@ -446,6 +449,160 @@ class RuleRecognitionStore:
             quarantine_persisted=False,
             rejection_code=None,
         )
+
+    def import_many(
+        self,
+        statements: Iterable[TradeRuleRecognition | dict],
+        *,
+        package: RulePackage,
+    ) -> tuple[RuleRecognitionImportResult, ...]:
+        """Verify and persist one bounded statement batch under one store lock."""
+
+        if isinstance(statements, (str, bytes, dict)):
+            raise TypeError("statements must be an iterable of Recognition objects")
+        verified_package = self._verified_package(package)
+        verified: list[TradeRuleRecognition] = []
+        try:
+            for index, value in enumerate(statements):
+                if index >= MAX_RULE_RECOGNITION_IMPORT_BATCH:
+                    raise RuleRecognitionStoreCapacity(
+                        "recognition import batch exceeds its limit"
+                    )
+                statement = (
+                    TradeRuleRecognition.from_json(value.canonical_bytes)
+                    if isinstance(value, TradeRuleRecognition)
+                    else TradeRuleRecognition.from_dict(value)
+                )
+                self._assert_binding(statement, verified_package)
+                verified.append(statement)
+        except TypeError as exc:
+            raise TypeError(
+                "statements must be an iterable of Recognition objects"
+            ) from exc
+        digests = [statement.digest for statement in verified]
+        if len(digests) != len(set(digests)):
+            raise RuleRecognitionStoreError(
+                "recognition import batch repeats a statement"
+            )
+        if not verified:
+            return ()
+
+        try:
+            with self._acquire():
+                files = self._statement_files()
+                paths = {path: path.stat().st_size for path in files}
+                duplicates: dict[str, bool] = {}
+                new_statements: list[TradeRuleRecognition] = []
+                for statement in verified:
+                    path = self._statement_path(statement.digest)
+                    self._assert_path(path)
+                    if path in paths:
+                        if self._read_bounded(
+                            path,
+                            label="recognition",
+                        ) != statement.canonical_bytes:
+                            raise RuleRecognitionStoreCorruption(
+                                "content-addressed recognition bytes changed"
+                            )
+                        duplicates[statement.digest] = True
+                    else:
+                        duplicates[statement.digest] = False
+                        new_statements.append(statement)
+                if len(files) + len(new_statements) > self.max_statements:
+                    raise RuleRecognitionStoreCapacity(
+                        "recognition statement count limit reached"
+                    )
+                added_bytes = sum(
+                    len(statement.canonical_bytes)
+                    for statement in new_statements
+                )
+                if sum(paths.values()) + added_bytes > self.max_bytes:
+                    raise RuleRecognitionStoreCapacity(
+                        "recognition byte limit reached"
+                    )
+                for statement in new_statements:
+                    self._atomic_write(
+                        self._statement_path(statement.digest),
+                        statement.canonical_bytes,
+                    )
+        except TimeoutError as exc:
+            raise RuleRecognitionStoreBusy(
+                "recognition store is busy"
+            ) from exc
+        return tuple(
+            RuleRecognitionImportResult(
+                accepted=True,
+                duplicate=duplicates[statement.digest],
+                statement=statement,
+                input_digest=self._input_digest(statement.canonical_bytes),
+                quarantine_persisted=False,
+                rejection_code=None,
+            )
+            for statement in verified
+        )
+
+    def require_import_capacity(
+        self,
+        statements: Iterable[TradeRuleRecognition | dict],
+        *,
+        package: RulePackage,
+    ) -> tuple[int, int]:
+        """Preflight one complete graph without mutating Store state."""
+
+        if isinstance(statements, (str, bytes, dict)):
+            raise TypeError("statements must be an iterable of Recognition objects")
+        verified_package = self._verified_package(package)
+        verified: list[TradeRuleRecognition] = []
+        for index, value in enumerate(statements):
+            if index >= MAX_RULE_RECOGNITION_STATEMENTS:
+                raise RuleRecognitionStoreCapacity(
+                    "recognition graph exceeds its protocol limit"
+                )
+            statement = (
+                TradeRuleRecognition.from_json(value.canonical_bytes)
+                if isinstance(value, TradeRuleRecognition)
+                else TradeRuleRecognition.from_dict(value)
+            )
+            self._assert_binding(statement, verified_package)
+            verified.append(statement)
+        digests = [statement.digest for statement in verified]
+        if len(digests) != len(set(digests)):
+            raise RuleRecognitionStoreError(
+                "recognition graph repeats a statement"
+            )
+        try:
+            with self._acquire():
+                files = self._statement_files()
+                paths = {path: path.stat().st_size for path in files}
+                added_count = 0
+                added_bytes = 0
+                for statement in verified:
+                    path = self._statement_path(statement.digest)
+                    self._assert_path(path)
+                    if path in paths:
+                        if self._read_bounded(
+                            path,
+                            label="recognition",
+                        ) != statement.canonical_bytes:
+                            raise RuleRecognitionStoreCorruption(
+                                "content-addressed recognition bytes changed"
+                            )
+                        continue
+                    added_count += 1
+                    added_bytes += len(statement.canonical_bytes)
+                if len(files) + added_count > self.max_statements:
+                    raise RuleRecognitionStoreCapacity(
+                        "recognition statement count limit reached"
+                    )
+                if sum(paths.values()) + added_bytes > self.max_bytes:
+                    raise RuleRecognitionStoreCapacity(
+                        "recognition byte limit reached"
+                    )
+                return added_count, added_bytes
+        except TimeoutError as exc:
+            raise RuleRecognitionStoreBusy(
+                "recognition store is busy"
+            ) from exc
 
     def list_for_package(
         self,

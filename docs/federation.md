@@ -170,6 +170,8 @@ complete view.
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 | `GET /api/v2/trade/federation/offers/{digest}/head-proof` | Bounded complete disclosed revision chain for a live publisher head claim | Public read |
+| `GET /api/v2/trade/federation/offers/{offer_digest}/rule-packages/{package_digest}/recognition-proof` | Legacy bounded Recognition proof bundle (v1) | Public read; operator disclosure required |
+| `GET /api/v2/trade/federation/offers/{offer_digest}/rule-packages/{package_digest}/recognition-proof-pages/{page_index}` | One signed page from a byte-stable Recognition observation (v2) | Public read; operator disclosure required |
 | `GET /api/v2/trade/federation/cached-offers/{digest}` | Reverify and inspect a volatile remote Offer cached with a discovery announcement | Console read |
 | `POST /api/v2/trade/federation/cached-offers/{digest}/import` | Reverify and durably retain the complete disclosed signed revision chain as a non-authoritative claim | Console write; Bearer always required |
 

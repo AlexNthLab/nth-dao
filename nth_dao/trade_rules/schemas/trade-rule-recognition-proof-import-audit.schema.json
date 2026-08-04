@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-rule-recognition-proof-import-audit-v2.json",
+  "title": "NTH DAO Rule Recognition Proof Import Audit Payloads",
+  "$comment": "The enclosing Spine event type determines proposed versus imported action. v1 represents one legacy bundle. v2 represents one page and requires consumers to group by order_digest, source_origin, and observation_digest; require exactly page indexes 0..page_count-1; verify shared set metadata; and verify the union of statement_digests against statement_count and statement_set_digest before projection.",
+  "oneOf": [
+    {"$ref": "#/$defs/v1Bundle"},
+    {"$ref": "#/$defs/v2Page"}
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "didKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "base": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "import_id",
+        "order_digest",
+        "offer_digest",
+        "package_digest",
+        "proof_digest",
+        "observer_did",
+        "observed_heads_digest",
+        "source_origin",
+        "statement_digests",
+        "action"
+      ],
+      "properties": {
+        "protocol_version": {"type": "string"},
+        "import_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "order_digest": {"$ref": "#/$defs/digest"},
+        "offer_digest": {"$ref": "#/$defs/digest"},
+        "package_digest": {"$ref": "#/$defs/digest"},
+        "proof_digest": {"$ref": "#/$defs/digest"},
+        "observer_did": {"$ref": "#/$defs/didKey"},
+        "observed_heads_digest": {"$ref": "#/$defs/digest"},
+        "source_origin": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 2048,
+          "pattern": "^https?://[^/?#]+$"
+        },
+        "statement_digests": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        },
+        "action": {
+          "enum": [
+            "recognition-proof-import-proposed",
+            "recognition-proof-imported"
+          ]
+        }
+      }
+    },
+    "v1Bundle": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "properties": {
+            "protocol_version": {"const": "1"},
+            "statement_digests": {
+              "type": "array",
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/digest"}
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "v2Page": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "required": [
+            "proof_kind",
+            "observation_digest",
+            "page_index",
+            "page_count",
+            "statement_count",
+            "statement_set_digest"
+          ],
+          "properties": {
+            "protocol_version": {"const": "2"},
+            "proof_kind": {
+              "const": "nth.dao.trade.rule-recognition-proof-page"
+            },
+            "observation_digest": {"$ref": "#/$defs/digest"},
+            "page_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1023
+            },
+            "page_count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "statement_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16384
+            },
+            "statement_set_digest": {"$ref": "#/$defs/digest"},
+            "statement_digests": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/digest"}
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

@@ -53,6 +53,17 @@ same checked-in vector. Negative audit vectors cover malformed Ed25519
 `did:key` values, impossible calendar dates, and reversed validity intervals;
 schema-only acceptance is not treated as semantic conformance.
 
+Recognition federation also ships a deterministic multi-page v2 graph in
+`rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
+covers 129 sequence-linked statements, byte-exact page canonicalization,
+per-page digests and signatures, complete page-set reconstruction, and missing,
+mixed-observation, and signature-tampered negative sets. The separate
+`rule-recognition-proof-import-pages-v2.json` fixture binds every page to its
+write-ahead proposal/completion audit payload. Ports must reject projection
+unless page indexes are exactly `0..page_count-1`, all shared commitments agree,
+and the union of page statement digests matches both `statement_count` and
+`statement_set_digest`.
+
 Agreement v1 also carries a deterministic Rule Package Bundle v1 fixture and
 negative outer-binding, binding-signature, valid-but-unauthorized binding
 signer, and unknown-field cases. Ports must

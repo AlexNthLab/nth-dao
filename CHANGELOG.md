@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Signed Rule Recognition Proof Page v2 federation for graphs beyond the v1
+  256-statement ceiling, with independently signed 256 KiB pages, a 64 MiB
+  page-set bound, shared observation/statement/head commitments, DNS-pinned
+  deadline-bounded retrieval, legacy-first import fallback, crash-safe batched
+  CAS/Spine completion, semantic refresh deduplication, exact evidence repair,
+  authenticated import status, and deterministic positive/negative conformance
+  vectors. Page import audit v2 fails closed on missing, duplicate, mixed, or
+  commitment-inconsistent page sets and grants no trust or execution authority.
 - Verified Trade Offer v2 federation discovery through a short-lived signed
   exchange hint, a bounded content-addressed head-proof bundle, complete
   disclosed revision-chain verification, canonical active-head publication,

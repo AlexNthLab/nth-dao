@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from typing import Any
 from nth_dao.did_key import is_did_key
 from nth_dao.execution_receipt import now_ms as current_time_ms
 from nth_dao.spine import SignedEventLog, SpineEvent
+from nth_dao.spine.log import MAX_SPINE_APPEND_BATCH
 from nth_dao.trade_rules.package_store import RulePackage
 from nth_dao.trade_rules.recognition import (
     MAX_RULE_RECOGNITION_SEQUENCE,
@@ -250,13 +252,218 @@ class RuleRecognitionAuditCoordinator:
         self.store = store
         self.spine = spine
 
-    def _anchor_index(self) -> dict[str, SpineEvent]:
+    def _verified_spine_events(self) -> tuple[SpineEvent, ...]:
         try:
-            events = self.spine.verified_snapshot()
+            return self.spine.verified_snapshot()
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise RuleRecognitionAuditError(
                 f"Spine integrity check failed: {exc}"
             ) from exc
+
+    def _assert_proof_imports_complete_and_present(
+        self,
+        events: tuple[SpineEvent, ...],
+        *,
+        package: RulePackage,
+        statement_digests: set[str],
+        verify_source_evidence: bool = False,
+    ) -> int:
+        from nth_dao.trade_rules.recognition_import import (
+            EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
+            RULE_RECOGNITION_PROOF_PAGE_IMPORT_PROTOCOL_VERSION,
+            RuleRecognitionProofImportError,
+            RuleRecognitionProofImportState,
+            RuleRecognitionProofStore,
+            recognition_proof_import_payload,
+            recognition_proof_import_states,
+        )
+        from nth_dao.trade_rules.recognition_transport import (
+            RuleRecognitionProofBundleRejected,
+            parse_rule_recognition_proof_bundle,
+        )
+        from nth_dao.trade_rules.recognition_transport_pages import (
+            RULE_RECOGNITION_PROOF_PAGE_KIND,
+            VerifiedRuleRecognitionProofPage,
+        )
+        from nth_dao.trade_rules.canonical import (
+            parse_trade_json,
+            trade_canonical_json,
+        )
+
+        try:
+            states = recognition_proof_import_states(
+                events,
+                package_digest=package.digest,
+            )
+        except RuleRecognitionProofImportError as exc:
+            raise RuleRecognitionAuditIntegrityError(str(exc)) from exc
+        pending = [state for state in states if state.completed_event is None]
+        if pending:
+            raise RuleRecognitionAuditIntegrityError(
+                "Recognition proof import is incomplete "
+                f"{pending[0].payload['import_id']}"
+            )
+        page_groups: dict[
+            tuple[str, str, str],
+            list[RuleRecognitionProofImportState],
+        ] = {}
+        for state in states:
+            payload = state.payload
+            if payload["protocol_version"] != (
+                RULE_RECOGNITION_PROOF_PAGE_IMPORT_PROTOCOL_VERSION
+            ):
+                continue
+            key = (
+                payload["order_digest"],
+                payload["source_origin"],
+                payload["observation_digest"],
+            )
+            page_groups.setdefault(key, []).append(state)
+        for group in page_groups.values():
+            first = group[0].payload
+            shared_fields = (
+                "offer_digest",
+                "package_digest",
+                "observer_did",
+                "observed_heads_digest",
+                "page_count",
+                "statement_count",
+                "statement_set_digest",
+            )
+            if any(
+                any(
+                    state.payload[field] != first[field]
+                    for field in shared_fields
+                )
+                for state in group[1:]
+            ):
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition proof page import has conflicting set metadata"
+                )
+            indexes = sorted(state.payload["page_index"] for state in group)
+            if indexes != list(range(first["page_count"])):
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition proof page import set is incomplete or duplicated"
+                )
+            page_statement_digests = [
+                digest
+                for state in group
+                for digest in state.payload["statement_digests"]
+            ]
+            if (
+                len(page_statement_digests) != first["statement_count"]
+                or len(set(page_statement_digests))
+                != len(page_statement_digests)
+            ):
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition proof page import statement set is incomplete"
+                )
+            statement_set_digest = "sha256:" + hashlib.sha256(
+                trade_canonical_json({
+                    "statement_digests": sorted(page_statement_digests)
+                })
+            ).hexdigest()
+            if statement_set_digest != first["statement_set_digest"]:
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition proof page import statement commitment is invalid"
+                )
+        for state in states:
+            missing = sorted(
+                set(state.payload["statement_digests"])
+                - statement_digests
+            )
+            if missing:
+                raise RuleRecognitionAuditIntegrityError(
+                    "completed Recognition proof import is missing local "
+                    f"statement {missing[0]}"
+                )
+        if not verify_source_evidence:
+            return len(states)
+        for state in states:
+            try:
+                raw = RuleRecognitionProofStore(
+                    self.store.workspace_root
+                ).get(state.payload["proof_digest"])
+                proposed_at = datetime.fromtimestamp(
+                    state.proposed_event.ts_ms / 1000,
+                    tz=timezone.utc,
+                )
+                inspected = parse_trade_json(raw)
+                if inspected.get("kind") == RULE_RECOGNITION_PROOF_PAGE_KIND:
+                    proof = VerifiedRuleRecognitionProofPage.from_dict(
+                        inspected,
+                        package=package,
+                        expected_offer_digest=state.payload["offer_digest"],
+                        expected_offer_publisher_did=state.payload[
+                            "observer_did"
+                        ],
+                        now=proposed_at,
+                    )
+                else:
+                    proof = parse_rule_recognition_proof_bundle(
+                        inspected,
+                        package=package,
+                        expected_offer_digest=state.payload["offer_digest"],
+                        expected_offer_publisher_did=state.payload[
+                            "observer_did"
+                        ],
+                        now=proposed_at,
+                    )
+                expected_payload = recognition_proof_import_payload(
+                    proof,
+                    event_type=(
+                        EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED
+                    ),
+                    order_digest=state.payload["order_digest"],
+                    offer_digest=state.payload["offer_digest"],
+                    source_origin=state.payload["source_origin"],
+                )
+            except (
+                RuleRecognitionProofBundleRejected,
+                RuleRecognitionProofImportError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition proof import source evidence is invalid"
+                ) from exc
+            if expected_payload != state.payload:
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition proof import source evidence binding mismatch"
+                )
+        return len(states)
+
+    def verify_proof_import_evidence(
+        self,
+        *,
+        package: RulePackage,
+    ) -> int:
+        """Deep-audit every retained source envelope for one Package.
+
+        Normal projections verify signed Recognition statements, their local
+        CAS files, Spine anchors, and import completion markers. Source proof
+        envelopes are immutable provenance evidence, so re-reading every
+        historical envelope belongs in an explicit integrity audit rather than
+        the public request path.
+        """
+
+        statements = self.store.list_for_package(package)
+        events = self._verified_spine_events()
+        return self._assert_proof_imports_complete_and_present(
+            events,
+            package=package,
+            statement_digests={statement.digest for statement in statements},
+            verify_source_evidence=True,
+        )
+
+    def _anchor_index(
+        self,
+        events: tuple[SpineEvent, ...] | None = None,
+    ) -> dict[str, SpineEvent]:
+        if events is None:
+            events = self._verified_spine_events()
         anchors: dict[str, SpineEvent] = {}
         for event in events:
             if event.type != EVENT_TRADE_RULE_RECOGNITION_RECORDED:
@@ -414,6 +621,114 @@ class RuleRecognitionAuditCoordinator:
             anchor_created=anchor_created,
         )
 
+    def record_batch(
+        self,
+        statements: tuple[TradeRuleRecognition, ...]
+        | list[TradeRuleRecognition],
+        *,
+        package: RulePackage,
+        observed_at_ms: int | None = None,
+    ) -> tuple[RuleRecognitionAuditResult, ...]:
+        """Persist and anchor one batch with bounded, constant-count scans."""
+
+        if not isinstance(statements, (tuple, list)):
+            raise TypeError("statements must be a tuple or list")
+        if not statements:
+            return ()
+        verified = tuple(
+            verify_rule_recognition_binding(statement, package)
+            for statement in statements
+        )
+        if len({statement.digest for statement in verified}) != len(verified):
+            raise RuleRecognitionAuditError(
+                "Recognition audit batch repeats a statement"
+            )
+        moment = _observed_at_ms(
+            current_time_ms()
+            if observed_at_ms is None
+            else observed_at_ms
+        )
+        imported = self.store.import_many(verified, package=package)
+        all_statements = self.store.list_for_package(package)
+        expected = self._expected_payloads(
+            all_statements,
+            package=package,
+        )
+        try:
+            spine_before = self.spine.verified_snapshot()
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RuleRecognitionAuditError(
+                f"Spine integrity check failed: {exc}"
+            ) from exc
+        anchors = self._anchor_index(spine_before)
+        self._assert_no_orphan_or_mismatched_anchors(
+            package=package,
+            expected=expected,
+            anchors=anchors,
+        )
+        anchored_by_digest = {
+            digest: (event, False) for digest, event in anchors.items()
+            if digest in expected
+        }
+        missing_payloads = tuple(
+            expected[digest]
+            for digest in sorted(set(expected) - set(anchors))
+        )
+        try:
+            for offset in range(
+                0,
+                len(missing_payloads),
+                MAX_SPINE_APPEND_BATCH,
+            ):
+                anchored = self.spine.append_unique_many(
+                    EVENT_TRADE_RULE_RECOGNITION_RECORDED,
+                    missing_payloads[
+                        offset:offset + MAX_SPINE_APPEND_BATCH
+                    ],
+                    unique_payload_fields=("recognition_digest",),
+                    ts_ms=moment,
+                )
+                for event, created in anchored:
+                    anchored_by_digest[
+                        event.payload["recognition_digest"]
+                    ] = (event, created)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RuleRecognitionAuditError(
+                f"unable to project Recognition batch into Spine: {exc}"
+            ) from exc
+        if set(anchored_by_digest) != set(expected):
+            raise RuleRecognitionAuditError(
+                "Spine returned an incomplete Recognition anchor batch"
+            )
+        statements_after = self.store.list_for_package(package)
+        if tuple(item.digest for item in all_statements) != tuple(
+            item.digest for item in statements_after
+        ):
+            raise RuleRecognitionAuditIntegrityError(
+                "Recognition statements changed during batch projection"
+            )
+        results = []
+        for store_result in imported:
+            statement = store_result.statement
+            if statement is None:
+                raise RuleRecognitionAuditError(
+                    "Recognition batch store returned an empty statement"
+                )
+            event, anchor_created = anchored_by_digest[statement.digest]
+            if event.payload != expected[statement.digest]:
+                raise RuleRecognitionAuditIntegrityError(
+                    "Recognition batch anchor payload mismatch"
+                )
+            results.append(
+                RuleRecognitionAuditResult(
+                    statement=statement,
+                    event=event,
+                    store_created=not store_result.duplicate,
+                    anchor_created=anchor_created,
+                )
+            )
+        return tuple(results)
+
     def reconcile(
         self,
         *,
@@ -439,7 +754,13 @@ class RuleRecognitionAuditCoordinator:
             self.store.list_for_package(package),
             key=lambda item: item.digest,
         )
-        anchors = self._anchor_index()
+        spine_events = self._verified_spine_events()
+        self._assert_proof_imports_complete_and_present(
+            spine_events,
+            package=package,
+            statement_digests={item.digest for item in statements},
+        )
+        anchors = self._anchor_index(spine_events)
         expected = self._expected_payloads(
             statements,
             package=package,
@@ -510,11 +831,17 @@ class RuleRecognitionAuditCoordinator:
 
         try:
             statements = self.store.list_for_package(package)
-            anchors = self._anchor_index()
             expected = self._expected_payloads(
                 statements,
                 package=package,
             )
+            spine_events = self._verified_spine_events()
+            self._assert_proof_imports_complete_and_present(
+                spine_events,
+                package=package,
+                statement_digests=set(expected),
+            )
+            anchors = self._anchor_index(spine_events)
         except (
             OSError,
             RuntimeError,
@@ -547,7 +874,13 @@ class RuleRecognitionAuditCoordinator:
 
         statements = self.store.list_for_package(package)
         expected = self._expected_payloads(statements, package=package)
-        anchors = self._anchor_index()
+        spine_events = self._verified_spine_events()
+        self._assert_proof_imports_complete_and_present(
+            spine_events,
+            package=package,
+            statement_digests=set(expected),
+        )
+        anchors = self._anchor_index(spine_events)
         self._assert_no_orphan_or_mismatched_anchors(
             package=package,
             expected=expected,

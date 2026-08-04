@@ -6,6 +6,7 @@
 
 from .io import (
     safe_id,
+    atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,
     safe_load_json,
@@ -23,6 +24,7 @@ from .time_utils import now_iso, monotonic_ms
 
 __all__ = [
     "safe_id",
+    "atomic_write_bytes",
     "atomic_write_json",
     "atomic_write_text",
     "safe_load_json",

@@ -96,6 +96,17 @@ matching legacy filenames, while mismatched records at a colliding legacy path
 are ignored. Stop all older NTH DAO processes before upgrading so one workspace
 is not written concurrently by old and new claim-path implementations.
 
+### Rule Recognition proof import v1 to paged v2
+
+No rewrite is required. Existing protocol-version `"1"` bundle import events
+and their content-addressed proof files remain valid and recoverable. New page
+imports use protocol-version `"2"` events with page-set metadata; both versions
+may coexist in one signed Spine and the same proof CAS directory. A pending v1
+bundle is recovered as v1, while any pending v2 page causes recovery of its
+complete observation from retained local pages before another network fetch.
+Older binaries do not understand v2 import events and must not write the same
+workspace after it has imported paged Recognition evidence.
+
 ## Migration runner
 
 To verify a workspace from an older version loads cleanly:

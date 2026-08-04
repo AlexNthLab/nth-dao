@@ -327,10 +327,66 @@ stable error codes without filesystem paths. An observed quorum still returns
 `execution_authorized: false`; a separate signed `RuleResolutionPolicy` and
 Adapter approval remain mandatory for execution.
 
-Signed issuer-head exchange and federation transport remain separate future
-slices, so this release does not claim globally fresh revocation. Deleting both
-the local CAS and Spine can still erase local history until another node
-presents a signed conflicting head.
+Observed issuer-chain federation is available through bounded signed proof
+documents. The legacy v1 bundle carries at most 256 statements. Proof Page v2
+splits graphs of up to 16,384 statements into independently signed pages while
+committing every page to the same observation digest, complete statement-set
+digest, graph-head digest, page count, and validity window. Both formats bind a
+live public Offer to the exact Package using the Offer
+publisher's signature, then disclose the locally audited Recognition graphs
+selected by the node's explicit issuer allowlist. Each graph carries complete
+predecessor closure and the exact set of observed terminal heads, including
+forks. The Offer publisher signs the complete wrapper, its observation and
+expiry times, and an explicit head-set digest. This prevents a relay from
+stripping a revocation or branch and recomputing the wrapper. The observer
+signature attests only to what that node disclosed at that time; authority over
+each opinion remains in its issuer-signed Recognition statement.
+
+The public endpoint is:
+
+- `GET /api/v2/trade/federation/offers/{offer_digest}/rule-packages/{digest}/recognition-proof`
+  for a short-cache legacy v1 proof;
+- `GET /api/v2/trade/federation/offers/{offer_digest}/rule-packages/{digest}/recognition-proof-pages/{page_index}`
+  for one page from a byte-stable, short-cache v2 observation;
+- `POST /api/v2/trade/orders/{order_digest}/rule-packages/{digest}/recognitions/import`
+  for an operator-directed, Order-bound pull from an explicit peer; and
+- `GET .../recognitions/imports` plus `POST .../recognitions/imports/repair`
+  for authenticated status and exact content-addressed evidence repair.
+
+The import boundary reuses DNS-pinned federation transport and requires the
+Package to be locally available with acceptable provenance and import-audit
+state. The signed proof is first retained in content-addressed local storage.
+A signed `trade.rule-recognition-proof.import.proposed` Spine event binds the
+source origin, Order, Offer, Package, proof digest, observer, observed head-set,
+and exact statement digests. The v2 payload additionally binds page index/count,
+observation digest, total statement count, and statement-set digest. Statements
+are capacity-checked and written under bounded Store/Spine batches. A matching signed
+`trade.rule-recognition-proof.imported` event makes the batch visible. Reads
+fail closed while a proposal is incomplete, a v2 page set is incomplete or
+inconsistent, or its completed statements are missing from local CAS. Retry
+recovers staged pages locally before making another network request. Normal
+projection does not reparse every historical source envelope; authenticated
+status and explicit deep-audit paths reverify retained proof CAS, and exact
+repair bytes must hash to the proof digest already committed by the Spine.
+This covers common-root forks and multiple-genesis
+conflicts without exposing a valid partial chain. Retries remain
+content-addressed and idempotent.
+
+This exchange still does **not** prove global freshness: a peer can withhold a
+newer signed revocation. A successful import does not add trusted issuers,
+change the local Recognition Policy, approve an Adapter, or grant execution or
+funds authority. It may affect advisory evaluation only when the importing
+node already trusts that issuer for the exact Rule scope. Deleting both the
+local CAS and Spine can still erase local history until another node presents
+a signed conflicting head.
+
+Recognition v1 has no signed audience field, so local records are not publicly
+redistributed by default. Serving the endpoint requires both
+`NTH_FEDERATE_RULE_RECOGNITIONS=1` and an explicit comma-separated issuer list
+in `NTH_FEDERATE_RULE_RECOGNITION_ISSUERS`; `*` is the explicit opt-in to relay
+all issuers. Existing records therefore remain local after upgrade. Operators
+must still avoid placing confidential assessments in this v1 statement kind;
+future audience-restricted claims require a different signed wire contract.
 
 ## Bilateral Agreement and Order
 

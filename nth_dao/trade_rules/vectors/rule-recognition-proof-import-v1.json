@@ -1,0 +1,41 @@
+{
+  "completed": {
+    "action": "recognition-proof-imported",
+    "import_id": "f6f0156fac7ea45eae9dbf9860c9075c4e9ceb83c141e3216f948a0f61fce01a",
+    "observed_heads_digest": "sha256:b6b4d556b8a8520e7baf5e5a251d9de0f6759f56ddf4ab83d2a5c814c27a48e8",
+    "observer_did": "did:key:z6Mkq9y3iNfVzt7jZxxEXG3PMgW1zYayWVs6TUDv9AaCtFdp",
+    "offer_digest": "sha256:7ea3405c3b6222e5ce996be41b3937eb45b27bfac871cd86ec9d3a4739b78948",
+    "order_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+    "proof_digest": "sha256:cecffa4bcc785e9f562aac528384b32274a4cdb42142ab72810f708790adc90f",
+    "protocol_version": "1",
+    "source_origin": "https://peer.example",
+    "statement_digests": [
+      "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+      "sha256:e51f7ce29c0f83831fa6a858f159aa0cf745257b4c0c1e90287335862fbac5b8"
+    ]
+  },
+  "event_types": {
+    "completed": "trade.rule-recognition-proof.imported",
+    "proposed": "trade.rule-recognition-proof.import.proposed"
+  },
+  "format": "nth-trade-rule-recognition-proof-import-conformance-v1",
+  "proposed": {
+    "action": "recognition-proof-import-proposed",
+    "import_id": "f6f0156fac7ea45eae9dbf9860c9075c4e9ceb83c141e3216f948a0f61fce01a",
+    "observed_heads_digest": "sha256:b6b4d556b8a8520e7baf5e5a251d9de0f6759f56ddf4ab83d2a5c814c27a48e8",
+    "observer_did": "did:key:z6Mkq9y3iNfVzt7jZxxEXG3PMgW1zYayWVs6TUDv9AaCtFdp",
+    "offer_digest": "sha256:7ea3405c3b6222e5ce996be41b3937eb45b27bfac871cd86ec9d3a4739b78948",
+    "order_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "package_digest": "sha256:c527f22a8af891b529e7149342f361d68ac6d8e8394bc53912104076c034162e",
+    "proof_digest": "sha256:cecffa4bcc785e9f562aac528384b32274a4cdb42142ab72810f708790adc90f",
+    "protocol_version": "1",
+    "source_origin": "https://peer.example",
+    "statement_digests": [
+      "sha256:c212864a1bb88d42cd905cf2e051ae1401542d07d1fa21b2b37a9d2ca225f5a3",
+      "sha256:e51f7ce29c0f83831fa6a858f159aa0cf745257b4c0c1e90287335862fbac5b8"
+    ]
+  },
+  "schema_version": 1,
+  "warning": "Deterministic public vectors; never treat them as authority."
+}

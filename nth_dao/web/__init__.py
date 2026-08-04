@@ -161,6 +161,12 @@ class _FederationBodyLimitMiddleware:
                 or path.endswith("/recognitions/reconcile")
             )
         )
+        is_trade_recognition_import_repair = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/v2/trade/orders/")
+            and path.endswith("/recognitions/imports/repair")
+        )
         is_trade_recognition_policy_write = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
@@ -191,6 +197,7 @@ class _FederationBodyLimitMiddleware:
             or is_commerce_write
             or is_trade_offer_write
             or is_trade_recognition_write
+            or is_trade_recognition_import_repair
             or is_trade_recognition_policy_write
             or is_trade_proposal_delivery
             or is_trade_order_delivery
@@ -214,7 +221,7 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_offer_write:
             max_body_bytes = _TRADE_OFFER_MAX_BODY_BYTES
             body_label = "trade offer"
-        elif is_trade_recognition_write:
+        elif is_trade_recognition_write or is_trade_recognition_import_repair:
             max_body_bytes = _TRADE_RECOGNITION_MAX_BODY_BYTES
             body_label = "trade rule recognition"
         elif is_trade_recognition_policy_write:

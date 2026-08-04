@@ -7,7 +7,6 @@ green on the zero-dep core install.
 
 from __future__ import annotations
 
-import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -204,9 +203,17 @@ def test_build_credential_rejects_corrupt_ledger(tmp_path: Path, signing_identit
 # ─── mDNS backend (skipped when [lan] not installed) ─────────────────────
 
 
-_zeroconf_spec = importlib.util.find_spec("zeroconf")
+def _can_import_zeroconf() -> bool:
+    try:
+        import zeroconf  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+_zeroconf_importable = _can_import_zeroconf()
 mdns_skip = pytest.mark.skipif(
-    _zeroconf_spec is None,
+    not _zeroconf_importable,
     reason="zeroconf not installed — `pip install nth-dao[lan]` to enable",
 )
 
@@ -266,7 +273,7 @@ def test_mdns_module_clean_failure_without_zeroconf():
     from nth_dao import discovery
 
     assert hasattr(discovery, "mdns_available")
-    if _zeroconf_spec is None:
+    if not _zeroconf_importable:
         assert discovery.mdns_available() is False
         # MDNSDiscovery is a lazy class — instantiating without start() works,
         # but start()/discover() must raise ImportError pointing at `[lan]`.

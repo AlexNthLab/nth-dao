@@ -14,6 +14,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import urllib.error
 import urllib.request
 
 import pytest
@@ -33,6 +34,7 @@ from nth_dao.trade_rules import (
     RulePackageStore,
     RulePackageCorruptionError,
     RuleResolutionPolicy,
+    RuleRecognitionTrustPolicy,
     TradeAcceptance,
     TradeAgreementRejected,
     TradeExecutionAdapterPolicy,
@@ -81,6 +83,7 @@ from nth_dao.trade_rules import (
     acceptance_digest,
     build_execution_adapter,
     create_trade_order,
+    create_rule_recognition,
     create_trade_acceptance,
     create_trade_proposal,
     create_trade_proposal_delivery,
@@ -91,6 +94,7 @@ from nth_dao.trade_rules import (
     manifest_body,
     offer_body,
     offer_digest,
+    evaluate_rule_recognition,
     proposal_digest,
     trade_proposal_delivery_digest,
     trade_proposal_intake_receipt_digest,
@@ -99,6 +103,9 @@ from nth_dao.trade_rules import (
     resolve_canonical_offer_rules,
     sign_manifest,
     sign_offer,
+    sign_offer_package_binding,
+    build_rule_recognition_proof_bundle,
+    parse_rule_recognition_proof_bundle,
     trade_order_digest,
     create_trade_order_delivery,
     create_trade_order_intake_receipt,
@@ -5129,6 +5136,831 @@ def test_operator_imports_exact_order_bound_rule_package(tmp_path, monkeypatch):
         path,
         json={"peer_url": "http://localhost:19090"},
     ).status_code == 401
+
+
+def _observed_recognition_proof(context, package):
+    issuer = AgentIdentity.generate()
+    first = create_rule_recognition(
+        issuer,
+        package=package,
+        decision="recognized",
+        issued_at="2026-08-01T00:00:00Z",
+        not_after="2026-08-20T00:00:00Z",
+        now=_AT,
+    )
+    revoked = create_rule_recognition(
+        issuer,
+        package=package,
+        decision="revoked",
+        reason_codes=["security.withdrawn"],
+        issued_at="2026-08-02T00:00:00Z",
+        not_after="2026-08-20T00:00:00Z",
+        previous=first,
+        now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+    binding = sign_offer_package_binding(
+        context["maker"],
+        offer_digest=offer_digest(context["offer"]),
+        package_digest=package.digest,
+        created="2026-07-01T00:00:00Z",
+    )
+    proof_now = datetime.now(timezone.utc).replace(microsecond=0)
+    wire = build_rule_recognition_proof_bundle(
+        package,
+        [first, revoked],
+        offer_package_binding=binding,
+        observer_identity=context["maker"],
+        observed_at=proof_now.isoformat().replace("+00:00", "Z"),
+        not_after=(proof_now + timedelta(minutes=5)).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        now=proof_now,
+    )
+    proof = parse_rule_recognition_proof_bundle(
+        wire,
+        package=package,
+        expected_offer_digest=offer_digest(context["offer"]),
+        expected_offer_publisher_did=context["maker"].as_did(),
+        now=proof_now,
+    )
+    return issuer, first, revoked, proof
+
+
+def _observed_multi_genesis_recognition_proof(context, package):
+    issuer = AgentIdentity.generate()
+    recognized = create_rule_recognition(
+        issuer,
+        package=package,
+        decision="recognized",
+        issued_at="2026-08-01T00:00:00Z",
+        not_after="2026-08-20T00:00:00Z",
+        now=datetime(2026, 8, 1, tzinfo=timezone.utc),
+    )
+    revoked = create_rule_recognition(
+        issuer,
+        package=package,
+        decision="revoked",
+        reason_codes=["security.withdrawn"],
+        issued_at="2026-08-02T00:00:00Z",
+        not_after="2026-08-20T00:00:00Z",
+        now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+    binding = sign_offer_package_binding(
+        context["maker"],
+        offer_digest=offer_digest(context["offer"]),
+        package_digest=package.digest,
+        created="2026-07-01T00:00:00Z",
+    )
+    proof_now = datetime.now(timezone.utc).replace(microsecond=0)
+    wire = build_rule_recognition_proof_bundle(
+        package,
+        [recognized, revoked],
+        offer_package_binding=binding,
+        observer_identity=context["maker"],
+        observed_at=proof_now.isoformat().replace("+00:00", "Z"),
+        not_after=(proof_now + timedelta(minutes=5)).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        now=proof_now,
+    )
+    proof = parse_rule_recognition_proof_bundle(
+        wire,
+        package=package,
+        expected_offer_digest=offer_digest(context["offer"]),
+        expected_offer_publisher_did=context["maker"].as_did(),
+        now=proof_now,
+    )
+    return issuer, recognized, revoked, proof
+
+
+def _refresh_observed_recognition_proof(context, package, proof):
+    previous_observed_at = datetime.fromisoformat(
+        proof.to_dict()["observed_at"].replace("Z", "+00:00")
+    )
+    observed_at = previous_observed_at + timedelta(seconds=31)
+    binding = sign_offer_package_binding(
+        context["maker"],
+        offer_digest=offer_digest(context["offer"]),
+        package_digest=package.digest,
+        created="2026-07-01T00:00:00Z",
+    )
+    wire = build_rule_recognition_proof_bundle(
+        package,
+        proof.statements,
+        offer_package_binding=binding,
+        observer_identity=context["maker"],
+        observed_at=observed_at.isoformat().replace("+00:00", "Z"),
+        not_after=(observed_at + timedelta(minutes=5)).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        now=observed_at,
+    )
+    return parse_rule_recognition_proof_bundle(
+        wire,
+        package=package,
+        expected_offer_digest=offer_digest(context["offer"]),
+        expected_offer_publisher_did=context["maker"].as_did(),
+        now=observed_at,
+    )
+
+
+def test_operator_imports_order_bound_recognition_proof_idempotently(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    app.state.nth.trade_rule_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    _issuer, first, revoked, proof = _observed_recognition_proof(
+        context,
+        package,
+    )
+    calls = []
+
+    def fetch(peer_url, **kwargs):
+        calls.append((peer_url, kwargs))
+        return proof
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        fetch,
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/import"
+    )
+
+    first_response = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+    duplicate = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+
+    assert first_response.status_code == 200, first_response.text
+    assert first_response.json()["status"] == "imported"
+    assert first_response.json()["imported_statement_count"] == 2
+    assert first_response.json()["reconciled_anchor_count"] == 0
+    assert first_response.json()["global_freshness_proven"] is False
+    assert first_response.json()["issuer_trust_granted"] is False
+    assert first_response.json()["local_policy_changed"] is False
+    assert first_response.json()["execution_authority_granted"] is False
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["status"] == "already-observed"
+    assert duplicate.json()["imported_statement_count"] == 0
+    assert duplicate.json()["reconciled_anchor_count"] == 0
+    assert duplicate.json()["import_id"] == first_response.json()["import_id"]
+    assert duplicate.json()["import_proposal_event_id"] == first_response.json()[
+        "import_proposal_event_id"
+    ]
+    assert duplicate.json()["import_completion_event_id"] == first_response.json()[
+        "import_completion_event_id"
+    ]
+    assert len(calls) == 2
+    stored = app.state.nth.trade_rule_recognition_audit.verified_statements(
+        package=package,
+    )
+    assert {item.digest for item in stored} == {first.digest, revoked.digest}
+    assert len(first_response.json()["audit_event_ids"]) == 2
+    states = trade_rules_api.recognition_proof_import_states(
+        app.state.nth.spine.verified_snapshot(),
+        package_digest=package.digest,
+        order_digest=trade_order_digest(order),
+    )
+    assert len(states) == 1
+    assert states[0].completed_event is not None
+    assert states[0].payload["source_origin"] == "http://localhost:19090"
+    assert states[0].payload["proof_digest"] == first_response.json()[
+        "proof_digest"
+    ]
+    proof_store = trade_rules_api.RuleRecognitionProofStore(tmp_path / "node")
+    assert proof_store.get(states[0].payload["proof_digest"]) == proof.canonical_bytes
+    restarted = create_app(tmp_path / "node", require_console_auth=True)
+    restarted_states = trade_rules_api.recognition_proof_import_states(
+        restarted.state.nth.spine.verified_snapshot(),
+        package_digest=package.digest,
+        order_digest=trade_order_digest(order),
+    )
+    assert len(restarted_states) == 1
+    assert restarted_states[0].completed_event is not None
+    assert trade_rules_api.RuleRecognitionProofStore(
+        tmp_path / "node"
+    ).get(states[0].payload["proof_digest"]) == proof.canonical_bytes
+    assert client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+    ).status_code == 401
+
+
+def test_operator_import_falls_back_to_signed_recognition_pages(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    app.state.nth.trade_rule_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    _issuer, first, revoked, legacy_proof = _observed_recognition_proof(
+        context,
+        package,
+    )
+    observed_at = datetime.fromisoformat(
+        legacy_proof.to_dict()["observed_at"].replace("Z", "+00:00")
+    )
+    binding = sign_offer_package_binding(
+        context["maker"],
+        offer_digest=offer_digest(context["offer"]),
+        package_digest=package.digest,
+        created="2026-07-01T00:00:00Z",
+    )
+    monkeypatch.setattr(
+        "nth_dao.trade_rules.recognition_transport_pages."
+        "MAX_RULE_RECOGNITION_PROOF_PAGE_STATEMENTS",
+        1,
+    )
+    wires = trade_rules_api.build_rule_recognition_proof_pages(
+        package,
+        legacy_proof.statements,
+        offer_package_binding=binding,
+        observer_identity=context["maker"],
+        observed_at=legacy_proof.to_dict()["observed_at"],
+        not_after=legacy_proof.to_dict()["not_after"],
+        now=observed_at,
+    )
+    proof_set = trade_rules_api.parse_rule_recognition_proof_pages(
+        wires,
+        package=package,
+        expected_offer_digest=offer_digest(context["offer"]),
+        expected_offer_publisher_did=context["maker"].as_did(),
+        now=observed_at,
+    )
+    page_calls = []
+
+    def legacy_unavailable(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "http://localhost:19090/recognition-proof",
+            503,
+            "legacy proof limit exceeded",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        legacy_unavailable,
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_pages_from_peer",
+        lambda *_args, **_kwargs: page_calls.append(True) or proof_set,
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/import"
+    )
+
+    response = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["proof_protocol_version"] == "2"
+    assert payload["page_count"] == 2
+    assert len(payload["proof_digests"]) == 2
+    assert len(payload["page_imports"]) == 2
+    assert payload["imported_statement_count"] == 2
+    assert page_calls == [True]
+    assert {
+        statement.digest
+        for statement in app.state.nth.trade_rule_recognition_audit.verified_statements(
+            package=package
+        )
+    } == {first.digest, revoked.digest}
+    imports_path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/imports"
+    )
+    healthy = client.get(imports_path, headers=auth)
+    assert healthy.status_code == 200, healthy.text
+    assert healthy.json()["total"] == 2
+    assert {
+        item["evidence_status"] for item in healthy.json()["items"]
+    } == {"verified"}
+    assert sorted(
+        item["page_index"] for item in healthy.json()["items"]
+    ) == [0, 1]
+    assert {
+        item["page_count"] for item in healthy.json()["items"]
+    } == {2}
+    assert {
+        item["total_statement_count"] for item in healthy.json()["items"]
+    } == {2}
+
+    proof_store = trade_rules_api.RuleRecognitionProofStore(tmp_path / "node")
+    damaged_digest = proof_set.proof_digests[0]
+    proof_store._path(damaged_digest).write_bytes(b"{}")
+    degraded = client.get(imports_path, headers=auth)
+    assert degraded.status_code == 200, degraded.text
+    damaged = [
+        item
+        for item in degraded.json()["items"]
+        if item["proof_digest"] == damaged_digest
+    ]
+    assert damaged[0]["evidence_status"] == "missing-or-corrupt"
+
+    repaired = client.post(
+        imports_path + "/repair",
+        content=proof_set.pages[0].canonical_bytes,
+        headers={**auth, "Content-Type": "application/json"},
+    )
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["proof_repaired"] is True
+    assert repaired.json()["proof_digest"] == damaged_digest
+    restored = client.get(imports_path, headers=auth)
+    assert {
+        item["evidence_status"] for item in restored.json()["items"]
+    } == {"verified"}
+
+
+def test_recognition_import_deduplicates_refreshed_identical_observation(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    app.state.nth.trade_rule_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    _issuer, _first, _revoked, proof = _observed_recognition_proof(
+        context,
+        package,
+    )
+    refreshed = _refresh_observed_recognition_proof(
+        context,
+        package,
+        proof,
+    )
+    assert refreshed.canonical_bytes != proof.canonical_bytes
+    responses = iter((proof, refreshed))
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/import"
+    )
+
+    initial = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+    repeated = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+
+    assert initial.status_code == 200, initial.text
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["status"] == "already-observed"
+    assert repeated.json()["proof_digest"] == initial.json()["proof_digest"]
+    assert repeated.json()["import_id"] == initial.json()["import_id"]
+    states = trade_rules_api.recognition_proof_import_states(
+        app.state.nth.spine.verified_snapshot(),
+        package_digest=package.digest,
+        order_digest=trade_order_digest(order),
+    )
+    assert len(states) == 1
+    proof_files = list(
+        (tmp_path / "node" / "trade" / "rule_recognition_proofs_v1").glob(
+            "*.json"
+        )
+    )
+    assert len(proof_files) == 1
+
+
+def test_recognition_import_crash_prefix_is_incomplete_until_retry(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    app.state.nth.trade_rule_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    issuer, first, revoked, proof = _observed_multi_genesis_recognition_proof(
+        context,
+        package,
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: proof,
+    )
+    coordinator = app.state.nth.trade_rule_recognition_audit
+    original_write = coordinator.store._atomic_write
+    calls = 0
+
+    def crash_during_batch(path, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise trade_rules_api.RuleRecognitionStoreError(
+                "simulated crash during Recognition batch"
+            )
+        return original_write(path, payload)
+
+    monkeypatch.setattr(coordinator.store, "_atomic_write", crash_during_batch)
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/import"
+    )
+    failed = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+
+    assert failed.status_code == 503
+    residue = coordinator.store.list_for_package(package)
+    assert len(residue) == 1
+    with pytest.raises(
+        trade_rules_api.RuleRecognitionAuditIntegrityError,
+        match="proof import is incomplete",
+    ):
+        coordinator.verified_statements(package=package)
+
+    monkeypatch.setattr(coordinator.store, "_atomic_write", original_write)
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: pytest.fail(
+            "recovery must use the durable local proof CAS"
+        ),
+    )
+    recovered = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["imported_statement_count"] == 1
+    complete = evaluate_rule_recognition(
+        package,
+        coordinator.verified_statements(package=package),
+        policy=RuleRecognitionTrustPolicy(
+            trusted_issuers=frozenset({issuer.as_did()}),
+            issuer_rule_scopes={
+                issuer.as_did(): (package.manifest.rule_id,)
+            },
+        ),
+        at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+    )
+    assert complete.observed_quorum_met is False
+    assert complete.conflicted_issuers == (issuer.as_did(),)
+    assert first.digest in {
+        item.digest
+        for item in coordinator.verified_statements(package=package)
+    }
+
+
+def test_recognition_import_status_and_exact_proof_repair(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    app.state.nth.trade_rule_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    _issuer, first, revoked, proof = _observed_recognition_proof(
+        context,
+        package,
+    )
+    proof_store = trade_rules_api.RuleRecognitionProofStore(tmp_path / "node")
+    proof_digest, _created = proof_store.put(proof)
+    proposed = trade_rules_api.recognition_proof_import_payload(
+        proof,
+        event_type=(
+            trade_rules_api.EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED
+        ),
+        order_digest=trade_order_digest(order),
+        offer_digest=offer_digest(context["offer"]),
+        source_origin="http://localhost:19090",
+    )
+    trade_rules_api.append_recognition_proof_import_event(
+        app.state.nth.spine,
+        event_type=(
+            trade_rules_api.EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED
+        ),
+        payload=proposed,
+    )
+    proof_store._path(proof_digest).write_bytes(b"{}")
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: pytest.fail(
+            "exact repair must recover from supplied CAS bytes"
+        ),
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    base = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/imports"
+    )
+
+    assert client.get(base).status_code == 401
+    degraded = client.get(base, headers=auth)
+    assert degraded.status_code == 200, degraded.text
+    assert degraded.json()["items"] == [
+        {
+            "import_id": proposed["import_id"],
+            "status": "pending",
+            "proof_digest": proof_digest,
+            "observer_did": proposed["observer_did"],
+            "observed_heads_digest": proposed["observed_heads_digest"],
+            "source_origin": "http://localhost:19090",
+            "statement_count": 2,
+            "evidence_status": "missing-or-corrupt",
+            "proposal_event_id": degraded.json()["items"][0][
+                "proposal_event_id"
+            ],
+            "completion_event_id": None,
+        }
+    ]
+    refreshed = _refresh_observed_recognition_proof(
+        context,
+        package,
+        proof,
+    )
+    wrong = client.post(
+        base + "/repair",
+        content=refreshed.canonical_bytes,
+        headers={**auth, "Content-Type": "application/json"},
+    )
+    assert wrong.status_code == 409
+    repaired = client.post(
+        base + "/repair",
+        content=proof.canonical_bytes,
+        headers={**auth, "Content-Type": "application/json"},
+    )
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["proof_repaired"] is True
+    assert repaired.json()["import_id"] == proposed["import_id"]
+    assert {
+        item.digest
+        for item in app.state.nth.trade_rule_recognition_audit.verified_statements(
+            package=package
+        )
+    } == {first.digest, revoked.digest}
+    healthy = client.get(base, headers=auth)
+    assert healthy.status_code == 200, healthy.text
+    assert healthy.json()["items"][0]["status"] == "completed"
+    assert healthy.json()["items"][0]["evidence_status"] == "verified"
+
+
+def test_recognition_import_repair_rejects_oversized_authenticated_body(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    client = TestClient(app)
+    digest = "sha256:" + ("1" * 64)
+    path = (
+        f"/api/v2/trade/orders/{digest}/rule-packages/{digest}/"
+        "recognitions/imports/repair"
+    )
+
+    response = client.post(
+        path,
+        content=b"x" * ((256 * 1024) + 1),
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 413
+    assert "256 KiB" in response.json()["detail"]
+
+
+def test_recognition_import_rejects_unbound_or_missing_package_before_fetch(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    calls = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    base = f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages"
+
+    missing = client.post(
+        f"{base}/{context['package_digest']}/recognitions/import",
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+    unbound = client.post(
+        f"{base}/sha256:{'0' * 64}/recognitions/import",
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+
+    assert missing.status_code == 409
+    assert "must be imported" in missing.json()["detail"]
+    assert unbound.status_code == 409
+    assert "not bound" in unbound.json()["detail"]
+    assert calls == []
+
+
+def test_recognition_import_has_cross_package_global_concurrency_bound(
+    tmp_path,
+):
+    with trade_rules_api.rule_recognition_import_slot(tmp_path):
+        with trade_rules_api.rule_recognition_import_slot(tmp_path):
+            with pytest.raises(
+                trade_rules_api.RuleRecognitionProofImportBusy,
+                match="concurrency is full",
+            ):
+                with trade_rules_api.rule_recognition_import_slot(tmp_path):
+                    pytest.fail("a third import slot must not be granted")
+
+
+def test_recognition_import_retry_repairs_store_first_anchor_failure(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    app.state.nth.trade_rule_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    _issuer, first, revoked, proof = _observed_recognition_proof(
+        context,
+        package,
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: proof,
+    )
+    coordinator = app.state.nth.trade_rule_recognition_audit
+    original_append_many = coordinator.spine.append_unique_many
+    failed_once = False
+
+    def fail_recognition_anchor_batch(event_type, *args, **kwargs):
+        nonlocal failed_once
+        if (
+            event_type
+            == trade_rules_api.EVENT_TRADE_RULE_RECOGNITION_RECORDED
+            and not failed_once
+        ):
+            failed_once = True
+            raise trade_rules_api.RuleRecognitionAuditError(
+                "simulated Spine failure"
+            )
+        return original_append_many(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator.spine,
+        "append_unique_many",
+        fail_recognition_anchor_batch,
+    )
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/rule-packages/"
+        f"{package.digest}/recognitions/import"
+    )
+    failed = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+    assert failed.status_code == 503
+    assert [
+        item.digest
+        for item in app.state.nth.trade_rule_recognitions.list_for_package(
+            package
+        )
+    ] == [first.digest, revoked.digest]
+    assert coordinator.verify_anchors(package=package)[0] is False
+
+    monkeypatch.setattr(
+        coordinator.spine,
+        "append_unique_many",
+        original_append_many,
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_fetch_trade_rule_recognition_proof_from_peer",
+        lambda *_args, **_kwargs: pytest.fail(
+            "recovery must not refetch an already staged proof"
+        ),
+    )
+    recovered = client.post(
+        path,
+        json={"peer_url": "http://localhost:19090"},
+        headers=auth,
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["reconciled_anchor_count"] == 2
+    assert recovered.json()["imported_statement_count"] == 0
+    assert coordinator.verify_anchors(package=package) == (True, "ok")
+    assert {
+        item.digest
+        for item in coordinator.verified_statements(package=package)
+    } == {first.digest, revoked.digest}
 
 
 def test_two_nodes_serve_import_restart_and_catalog_rule_package(tmp_path):

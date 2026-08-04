@@ -80,6 +80,38 @@ def atomic_write_text(path: PathLike, content: str, *, encoding: str = "utf-8") 
         raise
 
 
+def atomic_write_bytes(path: PathLike, content: bytes) -> None:
+    """Atomically replace one file with exact bytes and fsync before rename."""
+
+    if not isinstance(content, bytes):
+        raise TypeError("content must be bytes")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, str(path))
+        if os.name != "nt":
+            parent_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def atomic_write_json(
     path: PathLike,
     data: Any,

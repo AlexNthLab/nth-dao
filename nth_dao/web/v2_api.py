@@ -33,6 +33,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
+from nth_dao.trade_rules.recognition_import_coordinator import (
+    RuleRecognitionProofImportBusy as TradeRuleRecognitionImportBusy,
+)
 from nth_dao.util import InterProcessLock, atomic_write_json, safe_id, safe_load_json
 
 logger = logging.getLogger(__name__)
@@ -4926,6 +4929,361 @@ def _fetch_trade_rule_package_from_peer(
     )
 
 
+def _fetch_trade_rule_recognition_proof_from_peer(
+    peer_url: str,
+    *,
+    offer_digest: str,
+    package: Any,
+    offer_publisher_did: str,
+    timeout_seconds: float = 15.0,
+) -> Any:
+    """Fetch one bounded observed Recognition graph over a pinned connection."""
+
+    from nth_dao.trade_rules import (
+        MAX_TRADE_JSON_BYTES,
+        parse_rule_recognition_proof_bundle,
+    )
+    from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
+
+    normalized = _normalize_configured_fed_peer(peer_url)
+    path = (
+        "/api/v2/trade/federation/offers/"
+        f"{quote(offer_digest, safe='')}/rule-packages/"
+        f"{quote(package.digest, safe='')}/recognition-proof"
+    )
+    raw = _call_operator_trade_peer_with_fallback(
+        normalized,
+        lambda resolved_ip: _urllib_get_bytes_pinned(
+            normalized + path,
+            resolved_ip,
+            timeout_s=timeout_seconds,
+            max_bytes=MAX_TRADE_JSON_BYTES,
+        ),
+    )
+    return parse_rule_recognition_proof_bundle(
+        raw,
+        package=package,
+        expected_offer_digest=offer_digest,
+        expected_offer_publisher_did=offer_publisher_did,
+    )
+
+
+def _fetch_trade_rule_recognition_proof_pages_from_peer(
+    peer_url: str,
+    *,
+    offer_digest: str,
+    package: Any,
+    offer_publisher_did: str,
+    timeout_seconds: float = 15.0,
+) -> Any:
+    """Fetch one complete proof page set from one DNS-pinned peer address."""
+
+    from nth_dao.trade_rules import (
+        MAX_RULE_RECOGNITION_PROOF_PAGE_BYTES,
+        VerifiedRuleRecognitionProofPage,
+        parse_rule_recognition_proof_pages,
+    )
+    from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
+
+    normalized = _normalize_configured_fed_peer(peer_url)
+    path = (
+        "/api/v2/trade/federation/offers/"
+        f"{quote(offer_digest, safe='')}/rule-packages/"
+        f"{quote(package.digest, safe='')}/recognition-proof-pages/"
+    )
+
+    def fetch_all(resolved_ip: str) -> tuple[bytes, ...]:
+        deadline = time.monotonic() + timeout_seconds
+
+        def fetch_page(page_index: int) -> bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Rule Recognition proof page fetch deadline exceeded"
+                )
+            return _urllib_get_bytes_pinned(
+                normalized + path + str(page_index),
+                resolved_ip,
+                timeout_s=remaining,
+                max_bytes=MAX_RULE_RECOGNITION_PROOF_PAGE_BYTES,
+            )
+
+        first_raw = fetch_page(0)
+        first_page = VerifiedRuleRecognitionProofPage.from_json(
+            first_raw,
+            package=package,
+            expected_offer_digest=offer_digest,
+            expected_offer_publisher_did=offer_publisher_did,
+        )
+        return (first_raw,) + tuple(
+            fetch_page(page_index)
+            for page_index in range(1, first_page.page_count)
+        )
+
+    raw_pages = _call_operator_trade_peer_with_fallback(
+        normalized,
+        fetch_all,
+    )
+    return parse_rule_recognition_proof_pages(
+        raw_pages,
+        package=package,
+        expected_offer_digest=offer_digest,
+        expected_offer_publisher_did=offer_publisher_did,
+    )
+
+
+def _parse_rule_recognition_proof_document(
+    raw: bytes,
+    *,
+    package: Any,
+    offer_digest: str,
+    offer_publisher_did: str,
+    now: datetime,
+) -> Any:
+    """Verify either a legacy bundle or one v2 page under one binding."""
+
+    from nth_dao.trade_rules import (
+        RULE_RECOGNITION_PROOF_PAGE_KIND,
+        VerifiedRuleRecognitionProofPage,
+        parse_rule_recognition_proof_bundle,
+        parse_trade_json,
+    )
+
+    document = parse_trade_json(raw)
+    if document.get("kind") == RULE_RECOGNITION_PROOF_PAGE_KIND:
+        return VerifiedRuleRecognitionProofPage.from_dict(
+            document,
+            package=package,
+            expected_offer_digest=offer_digest,
+            expected_offer_publisher_did=offer_publisher_did,
+            now=now,
+        )
+    return parse_rule_recognition_proof_bundle(
+        document,
+        package=package,
+        expected_offer_digest=offer_digest,
+        expected_offer_publisher_did=offer_publisher_did,
+        now=now,
+    )
+
+
+def _load_order_bound_recognition_import_context(
+    request: Request,
+    *,
+    order_digest: str,
+    package_digest: str,
+) -> tuple[Path, Any, Any, str, str]:
+    """Resolve the exact audited Order/Offer/Package import boundary."""
+
+    from nth_dao.trade_rules import TradeOffer, offer_digest
+
+    _require_trade_offer_digest(order_digest)
+    _require_trade_offer_digest(package_digest)
+    order_audit = _state_trade_order_audit(request)
+    recognition_audit = _state_trade_rule_recognition_audit(request)
+    package_store = _state_trade_rule_package_store(request)
+    workspace = _state_workspace(request)
+    spine = _state_spine(request)
+    if (
+        order_audit is None
+        or recognition_audit is None
+        or package_store is None
+        or workspace is None
+        or spine is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Rule Recognition import unavailable",
+        )
+    record = order_audit.get_accepted(order_digest)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Trade Order not found")
+    order_document = record.order.to_dict()
+    bindings = {
+        item["digest"]: item["rule_id"]
+        for item in order_document["rule_bindings"]
+    }
+    if package_digest not in bindings:
+        raise HTTPException(
+            status_code=409,
+            detail="Rule Package is not bound by this Trade Order",
+        )
+    package = _OrderAuditedRulePackageResolver(
+        package_store,
+        spine,
+        order_digest,
+        workspace,
+    ).load(package_digest)
+    if package is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Rule Package must be imported and audit-verified before "
+                "its Recognition evidence"
+            ),
+        )
+    if package.manifest.rule_id != bindings[package_digest]:
+        raise HTTPException(
+            status_code=503,
+            detail="Order-bound Rule Package identity is inconsistent",
+        )
+    source_offer = TradeOffer.from_dict(order_document["snapshot"]["offer"])
+    return (
+        workspace,
+        recognition_audit,
+        package,
+        offer_digest(source_offer),
+        source_offer.publisher_did,
+    )
+
+
+def _import_trade_rule_recognition_proof_singleflight(
+    workspace: Path,
+    coordinator: Any,
+    *,
+    order_digest: str,
+    package: Any,
+    peer_url: str,
+    offer_digest: str,
+    offer_publisher_did: str,
+) -> tuple[Any, tuple[Any, ...], int, Any, bool]:
+    """Thin HTTP adapter around the protocol-layer import transaction."""
+
+    from nth_dao.trade_rules import (
+        RuleRecognitionProofImportCoordinator,
+        RuleRecognitionProofSetImportCommit,
+    )
+
+    source_origin = _trade_rule_package_source_origin(peer_url)
+    service = RuleRecognitionProofImportCoordinator(workspace, coordinator)
+    try:
+        committed = service.import_or_recover(
+            order_digest=order_digest,
+            package=package,
+            offer_digest=offer_digest,
+            offer_publisher_did=offer_publisher_did,
+            source_origin=source_origin,
+            fetch_proof=lambda: _fetch_trade_rule_recognition_proof_from_peer(
+                peer_url,
+                offer_digest=offer_digest,
+                package=package,
+                offer_publisher_did=offer_publisher_did,
+            ),
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {404, 409, 413, 422, 503}:
+            raise
+        committed = service.import_pages_or_recover(
+            order_digest=order_digest,
+            package=package,
+            offer_digest=offer_digest,
+            offer_publisher_did=offer_publisher_did,
+            source_origin=source_origin,
+            fetch_proof_set=lambda: (
+                _fetch_trade_rule_recognition_proof_pages_from_peer(
+                    peer_url,
+                    offer_digest=offer_digest,
+                    package=package,
+                    offer_publisher_did=offer_publisher_did,
+                )
+            ),
+        )
+    if isinstance(committed, RuleRecognitionProofSetImportCommit):
+        return (
+            committed.proof_set,
+            committed.imported,
+            committed.reconciled_anchor_count,
+            committed.page_audits,
+            True,
+        )
+    return (
+        committed.proof,
+        committed.imported,
+        committed.reconciled_anchor_count,
+        committed.audit,
+        False,
+    )
+
+
+def _trade_rule_recognition_import_response(
+    *,
+    proof: Any,
+    imported: tuple[Any, ...],
+    reconciled_anchor_count: int,
+    import_audit: dict[str, Any],
+    offer_digest: str,
+    package: Any,
+) -> dict[str, Any]:
+    proof_digest = "sha256:" + hashlib.sha256(
+        proof.canonical_bytes
+    ).hexdigest()
+    return {
+        "status": "imported" if imported else "already-observed",
+        "offer_digest": offer_digest,
+        "package_digest": package.digest,
+        "proof_digest": proof_digest,
+        "observed_heads_digest": proof.observed_heads_digest,
+        "import_id": import_audit["import_id"],
+        "source_origin": import_audit["source_origin"],
+        "import_proposal_event_id": import_audit["proposal_event_id"],
+        "import_completion_event_id": import_audit["completion_event_id"],
+        "observed_statement_count": proof.statement_count,
+        "imported_statement_count": len(imported),
+        "reconciled_anchor_count": reconciled_anchor_count,
+        "imported_recognition_digests": [
+            result.statement.digest for result in imported
+        ],
+        "audit_event_ids": [result.event.event_id for result in imported],
+        "global_freshness_proven": False,
+        "issuer_trust_granted": False,
+        "local_policy_changed": False,
+        "execution_authority_granted": False,
+        "warning": (
+            "The signed chains are observed evidence, not proof that a newer "
+            "revocation does not exist. Import may affect advisory evaluation "
+            "only for issuers already trusted by local policy."
+        ),
+    }
+
+
+def _trade_rule_recognition_page_import_response(
+    *,
+    proof_set: Any,
+    imported: tuple[Any, ...],
+    reconciled_anchor_count: int,
+    page_audits: tuple[dict[str, str], ...],
+    offer_digest: str,
+    package: Any,
+) -> dict[str, Any]:
+    return {
+        "status": "imported" if imported else "already-observed",
+        "proof_protocol_version": "2",
+        "offer_digest": offer_digest,
+        "package_digest": package.digest,
+        "proof_digests": list(proof_set.proof_digests),
+        "observation_digest": proof_set.observation_digest,
+        "observed_heads_digest": proof_set.graph_heads_digest,
+        "page_count": len(proof_set.pages),
+        "page_imports": list(page_audits),
+        "observed_statement_count": len(proof_set.statements),
+        "imported_statement_count": len(imported),
+        "reconciled_anchor_count": reconciled_anchor_count,
+        "imported_recognition_digests": [
+            result.statement.digest for result in imported
+        ],
+        "audit_event_ids": [result.event.event_id for result in imported],
+        "global_freshness_proven": False,
+        "issuer_trust_granted": False,
+        "local_policy_changed": False,
+        "execution_authority_granted": False,
+        "warning": (
+            "The signed chains are observed evidence, not proof that a newer "
+            "revocation does not exist. Import may affect advisory evaluation "
+            "only for issuers already trusted by local policy."
+        ),
+    }
+
+
 class TradeRulePackageImportBusy(RuntimeError):
     """Another process is currently importing the same content digest."""
 
@@ -7478,6 +7836,184 @@ def _trade_rule_package_serve_semaphore(request: Request):
             )
             state.trade_rule_package_serve_semaphore = semaphore
     return semaphore
+
+
+def _cached_rule_recognition_proof_bytes(
+    request: Request,
+    *,
+    cache_key: tuple[str, str, tuple[str, ...]],
+    build: Callable[[], bytes],
+) -> bytes:
+    """Keep a signed observation byte-stable for one short HTTP cache window."""
+
+    state = request.app.state
+    guard = getattr(state, "trade_rule_recognition_proof_cache_lock", None)
+    if guard is None:
+        guard = threading.Lock()
+        state.trade_rule_recognition_proof_cache_lock = guard
+    with guard:
+        now_mono = time.monotonic()
+        cache = getattr(state, "trade_rule_recognition_proof_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            state.trade_rule_recognition_proof_cache = cache
+        for key, entry in tuple(cache.items()):
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or not isinstance(entry[0], (int, float))
+                or entry[0] <= now_mono
+            ):
+                cache.pop(key, None)
+        cached = cache.get(cache_key)
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 2
+            and isinstance(cached[1], bytes)
+        ):
+            return cached[1]
+        raw = build()
+        if not isinstance(raw, bytes):
+            raise TypeError("Recognition proof builder must return bytes")
+        if len(cache) >= 128:
+            oldest = min(cache, key=lambda item: cache[item][0])
+            cache.pop(oldest, None)
+        cache[cache_key] = (now_mono + 30.0, raw)
+        return raw
+
+
+def _cached_rule_recognition_proof_pages(
+    request: Request,
+    *,
+    cache_key: tuple[str, str, tuple[str, ...]],
+    build: Callable[[], tuple[bytes, ...]],
+) -> tuple[bytes, ...]:
+    """Cache one complete signed page set as a byte-stable observation."""
+
+    from nth_dao.trade_rules import (
+        MAX_RULE_RECOGNITION_PROOF_PAGE_BYTES,
+        MAX_RULE_RECOGNITION_PROOF_PAGE_SET_BYTES,
+        MAX_RULE_RECOGNITION_PROOF_PAGES,
+    )
+
+    state = request.app.state
+    guard = getattr(
+        state,
+        "trade_rule_recognition_proof_page_cache_lock",
+        None,
+    )
+    if guard is None:
+        with _FED_HELLO_LIMITER_LOCK:
+            guard = getattr(
+                state,
+                "trade_rule_recognition_proof_page_cache_lock",
+                None,
+            )
+            if guard is None:
+                guard = threading.Lock()
+                state.trade_rule_recognition_proof_page_cache_lock = guard
+    with guard:
+        now_mono = time.monotonic()
+        cache = getattr(
+            state,
+            "trade_rule_recognition_proof_page_cache",
+            None,
+        )
+        if not isinstance(cache, dict):
+            cache = {}
+            state.trade_rule_recognition_proof_page_cache = cache
+        for key, entry in tuple(cache.items()):
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 3
+                or not isinstance(entry[0], (int, float))
+                or entry[0] <= now_mono
+                or not isinstance(entry[1], tuple)
+                or not entry[1]
+                or any(not isinstance(raw, bytes) for raw in entry[1])
+                or not isinstance(entry[2], int)
+                or entry[2] < 0
+                or entry[2] != sum(len(raw) for raw in entry[1])
+            ):
+                cache.pop(key, None)
+        cached = cache.get(cache_key)
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 3
+            and isinstance(cached[1], tuple)
+            and all(isinstance(raw, bytes) for raw in cached[1])
+        ):
+            return cached[1]
+        raw_pages = build()
+        if (
+            not isinstance(raw_pages, tuple)
+            or not 1 <= len(raw_pages) <= MAX_RULE_RECOGNITION_PROOF_PAGES
+            or any(
+                not isinstance(raw, bytes)
+                or len(raw) > MAX_RULE_RECOGNITION_PROOF_PAGE_BYTES
+                for raw in raw_pages
+            )
+        ):
+            raise TypeError("Recognition proof page builder returned invalid pages")
+        total_bytes = sum(len(raw) for raw in raw_pages)
+        if total_bytes > MAX_RULE_RECOGNITION_PROOF_PAGE_SET_BYTES:
+            raise ValueError("Recognition proof page set exceeds its byte limit")
+        while cache and (
+            len(cache) >= 32
+            or sum(
+                entry[2] for entry in cache.values()
+            )
+            + total_bytes
+            > MAX_RULE_RECOGNITION_PROOF_PAGE_SET_BYTES
+        ):
+            oldest = min(cache, key=lambda item: cache[item][0])
+            cache.pop(oldest, None)
+        cache[cache_key] = (now_mono + 30.0, raw_pages, total_bytes)
+        return raw_pages
+
+
+def _rule_recognition_federation_disclosure_enabled(
+    request: Request,
+) -> bool:
+    """Require explicit operator consent before relaying Recognition claims."""
+
+    override = getattr(
+        request.app.state,
+        "nth_rule_recognition_federation_enabled",
+        None,
+    )
+    if override is not None:
+        return override is True
+    return os.environ.get(
+        "NTH_FEDERATE_RULE_RECOGNITIONS",
+        "",
+    ).strip() == "1"
+
+
+def _rule_recognition_federation_issuer_allowlist(
+    request: Request,
+) -> frozenset[str]:
+    override = getattr(
+        request.app.state,
+        "nth_rule_recognition_federation_issuers",
+        None,
+    )
+    if override is not None:
+        if isinstance(override, (set, frozenset, tuple, list)):
+            return frozenset(
+                value.strip()
+                for value in override
+                if isinstance(value, str) and value.strip()
+            )
+        return frozenset()
+    return frozenset(
+        value.strip()
+        for value in os.environ.get(
+            "NTH_FEDERATE_RULE_RECOGNITION_ISSUERS",
+            "",
+        ).split(",")
+        if value.strip()
+    )
 
 
 def _trade_rule_package_etag(offer_digest: str, package_digest: str) -> str:
@@ -12249,6 +12785,414 @@ def register_v2_routes(app: FastAPI) -> None:
             ),
         }
 
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/rule-packages/"
+        "{package_digest}/recognitions/import"
+    )
+    async def v2_trade_order_rule_recognition_import(
+        order_digest: str,
+        package_digest: str,
+        body: ImportTradeRulePackageBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Import observed Recognition evidence for one Order-bound Package."""
+
+        from nth_dao.trade_rules import (
+            OfferRejected,
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofBundleRejected,
+            RuleRecognitionStoreCapacity,
+            RuleRecognitionStoreError,
+            TradeOrderAuditError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        try:
+            (
+                workspace,
+                recognition_audit,
+                package,
+                source_offer_digest,
+                offer_publisher_did,
+            ) = _load_order_bound_recognition_import_context(
+                request,
+                order_digest=order_digest,
+                package_digest=package_digest,
+            )
+            normalized_peer = _normalize_configured_fed_peer(body.peer_url)
+            (
+                proof,
+                imported,
+                reconciled_anchor_count,
+                import_audit,
+                paged,
+            ) = await run_in_threadpool(
+                _import_trade_rule_recognition_proof_singleflight,
+                workspace,
+                recognition_audit,
+                order_digest=order_digest,
+                package=package,
+                peer_url=normalized_peer,
+                offer_digest=source_offer_digest,
+                offer_publisher_did=offer_publisher_did,
+            )
+        except HTTPException:
+            raise
+        except (
+            RuleRecognitionProofBundleRejected,
+            OfferRejected,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuleRecognitionStoreCapacity as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except TradeRuleRecognitionImportBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Rule Recognition peer fetch failed",
+            ) from exc
+        except (
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionStoreError,
+            TradeOrderAuditError,
+            RuntimeError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Rule Recognition import integrity check failed",
+            ) from exc
+        if paged:
+            return _trade_rule_recognition_page_import_response(
+                proof_set=proof,
+                imported=imported,
+                reconciled_anchor_count=reconciled_anchor_count,
+                page_audits=import_audit,
+                offer_digest=source_offer_digest,
+                package=package,
+            )
+        return _trade_rule_recognition_import_response(
+            proof=proof,
+            imported=imported,
+            reconciled_anchor_count=reconciled_anchor_count,
+            import_audit=import_audit,
+            offer_digest=source_offer_digest,
+            package=package,
+        )
+
+    @app.get(
+        "/api/v2/trade/orders/{order_digest}/rule-packages/"
+        "{package_digest}/recognitions/imports"
+    )
+    def v2_trade_order_rule_recognition_import_status(
+        order_digest: str,
+        package_digest: str,
+        request: Request,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Inspect bounded import recovery state and retained proof evidence."""
+
+        from nth_dao.trade_rules import (
+            EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofBundleRejected,
+            RuleRecognitionProofImportError,
+            RuleRecognitionProofStore,
+            TradeOrderAuditError,
+            recognition_proof_import_payload,
+            recognition_proof_import_states,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise HTTPException(status_code=400, detail="limit must be in 1..100")
+        try:
+            (
+                workspace,
+                recognition_audit,
+                package,
+                source_offer_digest,
+                offer_publisher_did,
+            ) = _load_order_bound_recognition_import_context(
+                request,
+                order_digest=order_digest,
+                package_digest=package_digest,
+            )
+            states = recognition_proof_import_states(
+                recognition_audit.spine.verified_snapshot(),
+                package_digest=package.digest,
+                order_digest=order_digest,
+            )
+            proof_store = RuleRecognitionProofStore(workspace)
+            items = []
+            for state in states[-limit:]:
+                evidence_status = "verified"
+                try:
+                    raw = proof_store.get(state.payload["proof_digest"])
+                    proposed_at = datetime.fromtimestamp(
+                        state.proposed_event.ts_ms / 1000,
+                        tz=timezone.utc,
+                    )
+                    proof = _parse_rule_recognition_proof_document(
+                        raw,
+                        package=package,
+                        offer_digest=source_offer_digest,
+                        offer_publisher_did=offer_publisher_did,
+                        now=proposed_at,
+                    )
+                    expected = recognition_proof_import_payload(
+                        proof,
+                        event_type=(
+                            EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED
+                        ),
+                        order_digest=order_digest,
+                        offer_digest=source_offer_digest,
+                        source_origin=state.payload["source_origin"],
+                    )
+                    if expected != state.payload:
+                        evidence_status = "binding-mismatch"
+                except (
+                    RuleRecognitionProofBundleRejected,
+                    RuleRecognitionProofImportError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ):
+                    evidence_status = "missing-or-corrupt"
+                item = {
+                    "import_id": state.payload["import_id"],
+                    "status": (
+                        "completed"
+                        if state.completed_event is not None
+                        else "pending"
+                    ),
+                    "proof_digest": state.payload["proof_digest"],
+                    "observer_did": state.payload["observer_did"],
+                    "observed_heads_digest": state.payload[
+                        "observed_heads_digest"
+                    ],
+                    "source_origin": state.payload["source_origin"],
+                    "statement_count": len(
+                        state.payload["statement_digests"]
+                    ),
+                    "evidence_status": evidence_status,
+                    "proposal_event_id": state.proposed_event.event_id,
+                    "completion_event_id": (
+                        state.completed_event.event_id
+                        if state.completed_event is not None
+                        else None
+                    ),
+                }
+                if state.payload["protocol_version"] == "2":
+                    item.update({
+                        "proof_protocol_version": "2",
+                        "observation_digest": state.payload[
+                            "observation_digest"
+                        ],
+                        "page_index": state.payload["page_index"],
+                        "page_count": state.payload["page_count"],
+                        "total_statement_count": state.payload[
+                            "statement_count"
+                        ],
+                        "statement_set_digest": state.payload[
+                            "statement_set_digest"
+                        ],
+                    })
+                items.append(item)
+            return {
+                "order_digest": order_digest,
+                "package_digest": package.digest,
+                "total": len(states),
+                "returned": len(items),
+                "items": items,
+            }
+        except HTTPException:
+            raise
+        except (
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofImportError,
+            TradeOrderAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Rule Recognition import status unavailable",
+            ) from exc
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/rule-packages/"
+        "{package_digest}/recognitions/imports/repair"
+    )
+    async def v2_trade_order_rule_recognition_import_repair(
+        order_digest: str,
+        package_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Restore exact signed proof bytes committed by an import event."""
+
+        from nth_dao.trade_rules import (
+            EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofBundleRejected,
+            RuleRecognitionProofImportError,
+            RuleRecognitionProofStore,
+            RuleRecognitionStoreError,
+            TradeCanonicalJSONError,
+            TradeOrderAuditError,
+            parse_trade_json,
+            recognition_proof_import_payload,
+            recognition_proof_import_states,
+            trade_canonical_json,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        media_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if media_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail="Recognition proof repair requires Content-Type application/json",
+            )
+        try:
+            (
+                workspace,
+                recognition_audit,
+                package,
+                source_offer_digest,
+                offer_publisher_did,
+            ) = _load_order_bound_recognition_import_context(
+                request,
+                order_digest=order_digest,
+                package_digest=package_digest,
+            )
+            raw_body = await request.body()
+            canonical = trade_canonical_json(parse_trade_json(raw_body))
+            proof_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
+            states = recognition_proof_import_states(
+                recognition_audit.spine.verified_snapshot(),
+                package_digest=package.digest,
+                order_digest=order_digest,
+            )
+            matching = [
+                state
+                for state in states
+                if state.payload["proof_digest"] == proof_digest
+            ]
+            if len(matching) != 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Proof is not committed by exactly one matching import",
+                )
+            state = matching[0]
+            proposed_at = datetime.fromtimestamp(
+                state.proposed_event.ts_ms / 1000,
+                tz=timezone.utc,
+            )
+            proof = _parse_rule_recognition_proof_document(
+                canonical,
+                package=package,
+                offer_digest=source_offer_digest,
+                offer_publisher_did=offer_publisher_did,
+                now=proposed_at,
+            )
+            expected = recognition_proof_import_payload(
+                proof,
+                event_type=EVENT_TRADE_RULE_RECOGNITION_PROOF_IMPORT_PROPOSED,
+                order_digest=order_digest,
+                offer_digest=source_offer_digest,
+                source_origin=state.payload["source_origin"],
+            )
+            if expected != state.payload:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Proof does not match its audited import binding",
+                )
+            repaired = RuleRecognitionProofStore(workspace).repair_exact(
+                proof,
+                expected_digest=state.payload["proof_digest"],
+            )
+            if state.completed_event is not None:
+                recognition_audit.verify_proof_import_evidence(package=package)
+                return {
+                    "status": "repaired" if repaired else "already-intact",
+                    "proof_repaired": repaired,
+                    "import_id": state.payload["import_id"],
+                    "proof_digest": state.payload["proof_digest"],
+                    "completion_event_id": state.completed_event.event_id,
+                }
+            (
+                proof,
+                imported,
+                reconciled,
+                import_audit,
+                paged,
+            ) = await run_in_threadpool(
+                _import_trade_rule_recognition_proof_singleflight,
+                workspace,
+                recognition_audit,
+                order_digest=order_digest,
+                package=package,
+                peer_url=state.payload["source_origin"],
+                offer_digest=source_offer_digest,
+                offer_publisher_did=offer_publisher_did,
+            )
+            if paged:
+                response = _trade_rule_recognition_page_import_response(
+                    proof_set=proof,
+                    imported=imported,
+                    reconciled_anchor_count=reconciled,
+                    page_audits=import_audit,
+                    offer_digest=source_offer_digest,
+                    package=package,
+                )
+            else:
+                response = _trade_rule_recognition_import_response(
+                    proof=proof,
+                    imported=imported,
+                    reconciled_anchor_count=reconciled,
+                    import_audit=import_audit,
+                    offer_digest=source_offer_digest,
+                    package=package,
+                )
+            response["proof_repaired"] = repaired
+            return response
+        except HTTPException:
+            raise
+        except (
+            RuleRecognitionProofBundleRejected,
+            TradeCanonicalJSONError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (
+            RulePackageError,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofImportError,
+            RuleRecognitionStoreError,
+            TradeOrderAuditError,
+            OSError,
+            RuntimeError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Rule Recognition proof repair failed",
+            ) from exc
+
     @app.get(
         "/api/v2/trade/orders/{order_digest}/execution-receipts"
     )
@@ -12628,6 +13572,282 @@ def register_v2_routes(app: FastAPI) -> None:
             return Response(
                 content=raw,
                 media_type="application/vnd.nth-dao.trade-rule-package+json",
+                headers=response_headers,
+            )
+        finally:
+            semaphore.release()
+
+    @app.get(
+        "/api/v2/trade/federation/offers/{offer_digest}/rule-packages/"
+        "{package_digest}/recognition-proof"
+    )
+    def v2_trade_rule_recognition_federation_get(
+        offer_digest: str,
+        package_digest: str,
+        request: Request,
+    ) -> Any:
+        """Serve audited observed Recognition chains for one public Package."""
+
+        from fastapi.responses import Response
+        from nth_dao.trade_rules import (
+            RuleRecognitionAuditError,
+            RuleRecognitionProofBundleRejected,
+            RuleRecognitionStoreError,
+            build_rule_recognition_proof_bundle,
+            sign_offer_package_binding,
+            trade_canonical_json,
+        )
+
+        if not _rule_recognition_federation_disclosure_enabled(request):
+            raise HTTPException(
+                status_code=404,
+                detail="Rule Recognition federation disclosure is disabled",
+            )
+        issuer_allowlist = _rule_recognition_federation_issuer_allowlist(
+            request
+        )
+        if not issuer_allowlist:
+            raise HTTPException(
+                status_code=404,
+                detail="Rule Recognition federation issuer allowlist is empty",
+            )
+        _require_trade_rule_package_request_budget(request)
+        semaphore = _trade_rule_package_serve_semaphore(request)
+        if not semaphore.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Rule Recognition proof encoder is busy",
+                headers={"Retry-After": "1"},
+            )
+        try:
+            package, offer = _load_public_trade_rule_package(
+                request,
+                offer_digest=offer_digest,
+                package_digest=package_digest,
+            )
+            coordinator = _state_trade_rule_recognition_audit(request)
+            if coordinator is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="signed Recognition audit unavailable",
+                )
+            try:
+                statements = coordinator.verified_statements(
+                    package=package,
+                )
+                if "*" not in issuer_allowlist:
+                    statements = tuple(
+                        statement
+                        for statement in statements
+                        if statement.to_dict()["issuer_did"]
+                        in issuer_allowlist
+                    )
+                binding = sign_offer_package_binding(
+                    _state_node_identity(request),
+                    offer_digest=offer_digest,
+                    package_digest=package.digest,
+                    created=offer.to_dict()["published_at"],
+                )
+                identity = _state_node_identity(request)
+                raw = _cached_rule_recognition_proof_bytes(
+                    request,
+                    cache_key=(
+                        offer_digest,
+                        package_digest,
+                        tuple(statement.digest for statement in statements),
+                    ),
+                    build=lambda: trade_canonical_json(
+                        build_rule_recognition_proof_bundle(
+                            package,
+                            statements,
+                            offer_package_binding=binding,
+                            observer_identity=identity,
+                        )
+                    ),
+                )
+            except (
+                RuleRecognitionAuditError,
+                RuleRecognitionProofBundleRejected,
+                RuleRecognitionStoreError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "public Rule Recognition proof integrity "
+                        "verification failed"
+                    ),
+                ) from exc
+            etag = f'"sha256:{hashlib.sha256(raw).hexdigest()}"'
+            response_headers = {
+                "ETag": etag,
+                "X-NTH-Offer-Digest": offer_digest,
+                "X-NTH-Package-Digest": package_digest,
+                "X-NTH-Recognition-Semantics": "observed-not-globally-fresh",
+                "X-NTH-Recognition-Disclosure": "operator-enabled",
+                "X-NTH-Trust-Granted": "false",
+                "X-NTH-Execution-Authorized": "false",
+                "Cache-Control": "public, max-age=30",
+            }
+            if _if_none_match_matches(request, etag):
+                return Response(status_code=304, headers=response_headers)
+            _require_trade_rule_package_byte_budget(request, len(raw))
+            response_headers["Content-Length"] = str(len(raw))
+            return Response(
+                content=raw,
+                media_type=(
+                    "application/vnd.nth-dao.trade-rule-recognition-proof+json"
+                ),
+                headers=response_headers,
+            )
+        finally:
+            semaphore.release()
+
+    @app.get(
+        "/api/v2/trade/federation/offers/{offer_digest}/rule-packages/"
+        "{package_digest}/recognition-proof-pages/{page_index}"
+    )
+    def v2_trade_rule_recognition_federation_page_get(
+        offer_digest: str,
+        package_digest: str,
+        page_index: int,
+        request: Request,
+    ) -> Any:
+        """Serve one page from a cached, signed Recognition observation."""
+
+        from fastapi.responses import Response
+        from nth_dao.trade_rules import (
+            MAX_RULE_RECOGNITION_PROOF_PAGES,
+            RuleRecognitionAuditError,
+            RuleRecognitionProofBundleRejected,
+            RuleRecognitionStoreError,
+            build_rule_recognition_proof_pages,
+            parse_trade_json,
+            sign_offer_package_binding,
+            trade_canonical_json,
+        )
+
+        if not 0 <= page_index < MAX_RULE_RECOGNITION_PROOF_PAGES:
+            raise HTTPException(
+                status_code=404,
+                detail="Rule Recognition proof page not found",
+            )
+        if not _rule_recognition_federation_disclosure_enabled(request):
+            raise HTTPException(
+                status_code=404,
+                detail="Rule Recognition federation disclosure is disabled",
+            )
+        issuer_allowlist = _rule_recognition_federation_issuer_allowlist(
+            request
+        )
+        if not issuer_allowlist:
+            raise HTTPException(
+                status_code=404,
+                detail="Rule Recognition federation issuer allowlist is empty",
+            )
+        _require_trade_rule_package_request_budget(request)
+        semaphore = _trade_rule_package_serve_semaphore(request)
+        if not semaphore.acquire(blocking=False):
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Rule Recognition proof encoder is busy",
+                headers={"Retry-After": "1"},
+            )
+        try:
+            package, offer = _load_public_trade_rule_package(
+                request,
+                offer_digest=offer_digest,
+                package_digest=package_digest,
+            )
+            coordinator = _state_trade_rule_recognition_audit(request)
+            if coordinator is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="signed Recognition audit unavailable",
+                )
+            try:
+                statements = coordinator.verified_statements(package=package)
+                if "*" not in issuer_allowlist:
+                    statements = tuple(
+                        statement
+                        for statement in statements
+                        if statement.to_dict()["issuer_did"]
+                        in issuer_allowlist
+                    )
+                identity = _state_node_identity(request)
+                binding = sign_offer_package_binding(
+                    identity,
+                    offer_digest=offer_digest,
+                    package_digest=package.digest,
+                    created=offer.to_dict()["published_at"],
+                )
+                raw_pages = _cached_rule_recognition_proof_pages(
+                    request,
+                    cache_key=(
+                        offer_digest,
+                        package_digest,
+                        tuple(statement.digest for statement in statements),
+                    ),
+                    build=lambda: tuple(
+                        trade_canonical_json(page)
+                        for page in build_rule_recognition_proof_pages(
+                            package,
+                            statements,
+                            offer_package_binding=binding,
+                            observer_identity=identity,
+                        )
+                    ),
+                )
+            except (
+                RuleRecognitionAuditError,
+                RuleRecognitionProofBundleRejected,
+                RuleRecognitionStoreError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "public Rule Recognition proof integrity "
+                        "verification failed"
+                    ),
+                ) from exc
+            if page_index >= len(raw_pages):
+                raise HTTPException(
+                    status_code=404,
+                    detail="Rule Recognition proof page not found",
+                )
+            raw = raw_pages[page_index]
+            page = parse_trade_json(raw)
+            etag = f'"sha256:{hashlib.sha256(raw).hexdigest()}"'
+            response_headers = {
+                "ETag": etag,
+                "X-NTH-Offer-Digest": offer_digest,
+                "X-NTH-Package-Digest": package_digest,
+                "X-NTH-Recognition-Observation-Digest": page[
+                    "observation_digest"
+                ],
+                "X-NTH-Recognition-Page-Index": str(page_index),
+                "X-NTH-Recognition-Page-Count": str(len(raw_pages)),
+                "X-NTH-Recognition-Semantics": "observed-not-globally-fresh",
+                "X-NTH-Recognition-Disclosure": "operator-enabled",
+                "X-NTH-Trust-Granted": "false",
+                "X-NTH-Execution-Authorized": "false",
+                "Cache-Control": "public, max-age=30",
+            }
+            if _if_none_match_matches(request, etag):
+                return Response(status_code=304, headers=response_headers)
+            _require_trade_rule_package_byte_budget(request, len(raw))
+            response_headers["Content-Length"] = str(len(raw))
+            return Response(
+                content=raw,
+                media_type=(
+                    "application/vnd.nth-dao."
+                    "trade-rule-recognition-proof-page+json"
+                ),
                 headers=response_headers,
             )
         finally:

@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-rule-recognition-proof-bundle-v1.json",
+  "title": "NTH DAO Observed Trade Rule Recognition Proof Bundle v1",
+  "$comment": "Structural schema only. Implementations must verify the observer signature and validity window, every Recognition signature and exact Package binding, the Offer publisher's Offer-to-Package binding, statement ordering, complete predecessor closure, and the signed head-set commitment. A valid bundle proves what the Offer publisher observed at one bounded time, not global freshness, issuer trust, or execution authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "offer_digest",
+    "offer_package_binding",
+    "package_digest",
+    "observer_did",
+    "observed_at",
+    "not_after",
+    "observed_heads_digest",
+    "issuer_chains",
+    "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.rule-recognition-proof-bundle"},
+    "protocol_version": {"const": "1"},
+    "offer_digest": {"$ref": "#/$defs/digest"},
+    "offer_package_binding": {"$ref": "#/$defs/offerPackageBinding"},
+    "package_digest": {"$ref": "#/$defs/digest"},
+    "observer_did": {"$ref": "#/$defs/didKey"},
+    "observed_at": {"type": "string", "maxLength": 35},
+    "not_after": {"type": "string", "maxLength": 35},
+    "observed_heads_digest": {"$ref": "#/$defs/digest"},
+    "issuer_chains": {
+      "type": "array",
+      "$comment": "The protocol validator additionally requires ascending unique issuer_did order and at most 256 statements across all chains.",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issuer_did", "head_digests", "statements"],
+        "properties": {
+          "issuer_did": {"$ref": "#/$defs/didKey"},
+          "head_digests": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/digest"}
+          },
+          "statements": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "items": {"$ref": "urn:nth-dao:schema:trade-rule-recognition:1"}
+          }
+        }
+      }
+    },
+    "proof": {"$ref": "#/$defs/observerProof"}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "didKey": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "observerProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "NthEd25519SignatureV1"},
+        "created": {"type": "string", "maxLength": 35},
+        "verification_method": {"type": "string", "maxLength": 512},
+        "proof_purpose": {"const": "tradeRuleRecognitionObservation"},
+        "proof_value": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
+    },
+    "offerPackageBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "protocol_version",
+        "offer_digest",
+        "package_digest",
+        "publisher_did",
+        "proof"
+      ],
+      "properties": {
+        "kind": {"const": "nth.dao.trade.offer-package-binding"},
+        "protocol_version": {"const": "1"},
+        "offer_digest": {"$ref": "#/$defs/digest"},
+        "package_digest": {"$ref": "#/$defs/digest"},
+        "publisher_did": {"$ref": "#/$defs/didKey"},
+        "proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "created",
+            "verification_method",
+            "proof_purpose",
+            "proof_value"
+          ],
+          "properties": {
+            "type": {"const": "NthEd25519SignatureV1"},
+            "created": {"type": "string", "maxLength": 35},
+            "verification_method": {"type": "string", "maxLength": 512},
+            "proof_purpose": {"const": "assertionMethod"},
+            "proof_value": {
+              "type": "string",
+              "minLength": 86,
+              "maxLength": 86,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

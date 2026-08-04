@@ -385,13 +385,13 @@ def test_evaluate_rejects_recognition_change_during_projection(
 
     original_anchor_index = coordinator.recognition_audit._anchor_index
 
-    def _race_recognition():
+    def _race_recognition(events=None):
         imported = coordinator.recognition_audit.store.import_json(
             statement.canonical_bytes,
             package=package,
         )
         assert imported.accepted
-        return original_anchor_index()
+        return original_anchor_index(events)
 
     monkeypatch.setattr(
         coordinator.recognition_audit,
