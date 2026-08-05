@@ -5,6 +5,7 @@ team_layer.backends  Agent
  Agent
 
     HermesBackend         hermes-agent (NousResearch)
+    ClaudeCodeBackend     Anthropic Claude Code CLI
     OpenClawBackend       OpenClaw (ACP protocol)
     CodexBackend          OpenAI Codex CLI
     OpenHandsBackend      All-Hands-AI/OpenHands (REST API)
@@ -37,6 +38,12 @@ def _register_builtins():
     try:
         from .hermes import HermesBackend
         default_registry.register("hermes", HermesBackend)
+    except ImportError:
+        pass
+
+    try:
+        from .claude_code import ClaudeCodeBackend
+        default_registry.register("claude_code", ClaudeCodeBackend)
     except ImportError:
         pass
 

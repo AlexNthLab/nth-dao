@@ -193,7 +193,7 @@ class TeamAgent:
          AgentBackend  mock
 
         Args:
-            backend:  AgentBackend mock / hermes / ...
+            backend:  AgentBackend mock / hermes / claude_code / ...
             goal:  SessionConfig +  prompt
             max_turns:
             per_turn_prompt:  prompt  fn(turn_idx, agent) -> str

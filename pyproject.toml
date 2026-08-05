@@ -12,7 +12,7 @@ authors = [{ name = "AlexNthLab" }]
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = [
-    "agent", "multi-agent", "dao", "web3", "ai", "hermes",
+    "agent", "multi-agent", "dao", "web3", "ai", "claude", "hermes",
     "blackboard", "mission", "evolution", "identity", "a2a",
 ]
 classifiers = [
@@ -50,6 +50,11 @@ ux = ["qrcode[pil]>=7.4"]        # optional QR code rendering for invitations
 
 # Backend-specific (only install what you use):
 anthropic = ["anthropic>=0.40.0"]
+claude = [
+    "anthropic>=0.40.0",
+    "pywinpty>=3.0.5; platform_system == 'Windows'",
+]
+claude-cli = ["pywinpty>=3.0.5; platform_system == 'Windows'"]
 openai = ["openai>=1.0.0"]
 google = ["google-generativeai>=0.3.0"]
 hermes = []  # via subprocess; install hermes-agent separately
