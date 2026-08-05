@@ -6,11 +6,11 @@ BackendRegistry   +
 
     #  backend
     default_registry.list_all()
-    #  ['mock', 'hermes', 'claude_code', 'openclaw', 'codex', 'openhands']
+    #  ['mock', 'hermes', 'openclaw', 'codex', 'openhands']
 
     # is_available()=True
     default_registry.list_available()
-    #  ['mock', 'claude_code']  ()
+    #  ['mock', 'codex']  ()
 
     #
     backend = default_registry.create("mock", model="mock-fast")

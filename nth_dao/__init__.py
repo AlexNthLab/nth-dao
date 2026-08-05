@@ -1,7 +1,7 @@
 """
 NTH DAO — pluggable team-collaboration layer for AI agents.
 
-Any agent framework (Hermes / Claude Code / OpenClaw / Codex / OpenHands /
+Any agent framework (Hermes / OpenClaw / Codex / OpenHands /
 custom) can join the team with a single call:
 
     >>> import nth_dao as nth
