@@ -55,7 +55,6 @@ import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
@@ -302,6 +301,10 @@ class EventBus:
         return self.events_dir / DEFAULT_CORRECTIONS_INDEX_FILE
 
     @property
+    def events_lock_path(self) -> Path:
+        return self.events_path.with_suffix(".jsonl.lock")
+
+    @property
     def can_sign(self) -> bool:
         return bool(self.identity and self.identity.can_sign)
 
@@ -325,7 +328,7 @@ class EventBus:
 
         self.events_dir.mkdir(parents=True, exist_ok=True)
 
-        with InterProcessLock(self.events_path.with_suffix(".jsonl.lock")):
+        with InterProcessLock(self.events_lock_path):
             previous_seq, previous_hash = self._tail_unlocked()
             event = BusEvent(
                 event_type=event_type,
@@ -656,31 +659,32 @@ class EventBus:
     def get(self, event_id: str) -> Optional[BusEvent]:
         """O(1) point lookup via the offset index. Self-validates to
         catch stale indices (returns None rather than the wrong event)."""
-        index = self._load_index()
-        offset = index.get(event_id)
-        if offset is None:
-            self.rebuild_index()
-            offset = self._load_index().get(event_id)
+        with InterProcessLock(self.events_lock_path):
+            index = self._load_index()
+            offset = index.get(event_id)
             if offset is None:
+                self._rebuild_index_unlocked()
+                offset = self._load_index().get(event_id)
+                if offset is None:
+                    return None
+            try:
+                with self.events_path.open("rb") as fh:
+                    fh.seek(offset)
+                    line = fh.readline().decode("utf-8").strip()
+                    if not line:
+                        return None
+                    event = BusEvent.from_dict(json.loads(line))
+                    if event.event_id != event_id:
+                        logger.warning(
+                            "index offset %d for %s returned event %s; index stale",
+                            offset, event_id, event.event_id,
+                        )
+                        return None
+                    return event
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                logger.warning("failed to read event %s at offset %d: %s",
+                               event_id, offset, exc)
                 return None
-        try:
-            with self.events_path.open("rb") as fh:
-                fh.seek(offset)
-                line = fh.readline().decode("utf-8").strip()
-                if not line:
-                    return None
-                event = BusEvent.from_dict(json.loads(line))
-                if event.event_id != event_id:
-                    logger.warning(
-                        "index offset %d for %s returned event %s; index stale",
-                        offset, event_id, event.event_id,
-                    )
-                    return None
-                return event
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            logger.warning("failed to read event %s at offset %d: %s",
-                           event_id, offset, exc)
-            return None
 
     # verify
 
@@ -873,6 +877,11 @@ class EventBus:
 
     def rebuild_index(self) -> Dict[str, int]:
         """Rebuild the event_id -> byte offset index from events.jsonl."""
+        with InterProcessLock(self.events_lock_path):
+            return self._rebuild_index_unlocked()
+
+    def _rebuild_index_unlocked(self) -> Dict[str, int]:
+        """Rebuild the index while the caller holds ``events_lock_path``."""
         self.events_dir.mkdir(parents=True, exist_ok=True)
         index: Dict[str, int] = {}
         offset = 0

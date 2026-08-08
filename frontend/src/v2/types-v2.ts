@@ -439,6 +439,64 @@ export interface TaskAnnouncement {
   claimable?: boolean;
 }
 
+export type MarketSearchCategory =
+  | "tasks"
+  | "products"
+  | "services"
+  | "digital-assets"
+  | "exchanges"
+  | "other";
+
+export type MarketSearchIntent = "request" | "provide" | "exchange";
+
+/** Read-only UI projection. Resolve its signed target before any action. */
+export interface MarketSearchEntry {
+  entry_id: string;
+  entry_kind: "task" | "offer";
+  protocol_kind:
+    | "task-announcement"
+    | "commerce-listing-announcement"
+    | "trade-offer-announcement";
+  market_intent: MarketSearchIntent;
+  category: MarketSearchCategory;
+  title: string;
+  summary: string;
+  publisher_did: string;
+  published_at_ms: number;
+  not_after_ms: number;
+  context: string;
+  capability_set: string[];
+  claimable: boolean;
+  legacy: boolean;
+  source: "local" | "federated";
+  source_peer: string;
+  stale: boolean;
+  last_verified_at_ms: number;
+  value: {
+    kind: "none" | "reward" | "price";
+    amount_minor: number;
+    asset: string;
+  };
+  target: {
+    announcement_id: string;
+    federation_key: string;
+    offer_digest: string;
+    offer_uri: string;
+  };
+  projection_only: true;
+  warning: string;
+}
+
+export interface MarketSearchPage {
+  items: MarketSearchEntry[];
+  count: number;
+  offset?: number;
+  truncated: boolean;
+  facets: Array<{ category: MarketSearchCategory; count: number }>;
+  projection_only: true;
+  warning: string;
+}
+
 export interface TradeOfferLeg {
   leg_id: string;
   resource_type: string;
@@ -467,9 +525,73 @@ export interface TradeOfferDocument {
   proof: Record<string, unknown>;
 }
 
+export interface MarketResourceInput {
+  leg_id: string;
+  category: "products" | "services" | "digital-assets" | "other";
+  resource_type: string;
+  resource_id: string;
+  quantity: string;
+  unit: string;
+  profile_rule_id?: string;
+  profile_digest?: string;
+  attributes?: Record<string, unknown>;
+}
+
+export interface PublishMarketOfferInput {
+  idempotency_key: string;
+  intent: "provide" | "exchange";
+  category: "products" | "services" | "digital-assets" | "other";
+  title: string;
+  summary?: string;
+  provides: MarketResourceInput[];
+  requests?: MarketResourceInput[];
+  rule_refs?: Array<{ rule_id: string; digest: string }>;
+  capability_set?: string[];
+  offer_validity_seconds?: number;
+  discovery_ttl_seconds?: number;
+}
+
+export interface PublishMarketOfferResult {
+  digest: string;
+  offer: TradeOfferDocument;
+  appended: boolean;
+  classification: string;
+  audit_event_id: string;
+  announcement: TaskAnnouncement;
+  announcement_published: boolean;
+  warning: string;
+}
+
+export interface MarketResourceDescriptorInspection {
+  digest: string;
+  computed_digest: string;
+  content_hash_valid: boolean;
+  leg_ids: string[];
+  descriptor: {
+    kind?: string;
+    version?: string;
+    category?: string;
+    resource_type?: string;
+    resource_id?: string;
+    attributes?: Record<string, unknown>;
+  };
+  profile_ref: { rule_id?: string; digest?: string };
+  profile_resolution: "unresolved" | "not-declared";
+  execution_ready: false;
+}
+
 export interface TradeOfferInspection {
   digest: string;
   offer: TradeOfferDocument;
+  resource_descriptors: {
+    status: "verified-inline" | "incomplete" | "absent";
+    referenced_count: number;
+    verified_inline_count: number;
+    items: MarketResourceDescriptorInspection[];
+    profile_packages_resolved: false;
+    execution_ready: false;
+    warning: string;
+  };
   discoveries: Array<{
     announcement_id: string;
     federation_key: string;
@@ -950,7 +1072,7 @@ export interface FederationVerifiedPeer {
 /** 发布任务的请求体(POST /api/v2/market/announce)。 */
 export interface AnnounceTaskInput {
   title: string;
-  listing_type?: "task" | "service" | "product";
+  listing_type?: "task";
   description?: string;
   capability_set?: string[];
   reward_minor?: number;

@@ -53,6 +53,15 @@ same checked-in vector. Negative audit vectors cover malformed Ed25519
 `did:key` values, impossible calendar dates, and reversed validity intervals;
 schema-only acceptance is not treated as semantic conformance.
 
+Market extensions ship a separate deterministic vector at
+`nth_dao/market/vectors/market-extensions-v1.json`. It fixes the canonical
+inline Resource Descriptor and publication metadata bytes, descriptor content
+digest, and negative field/profile/TTL cases. The same extension is embedded
+inside the signed Trade Offer v2 vector, so ports must reproduce both the
+extension semantics and the enclosing Offer signature/digest. Discovery TTL is
+deliberately absent from signed Offer publication metadata because discovery
+refresh and Offer validity are separate lifecycles.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

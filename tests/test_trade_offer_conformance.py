@@ -82,3 +82,17 @@ def test_proof_and_rule_binding_are_covered_by_signature():
             target = target[key]
         target[path[-2]] = path[-1]
         assert verify_offer(tampered)[0] is False
+
+
+@requires_crypto
+def test_market_extensions_are_covered_by_offer_signature():
+    vectors = load_vectors()
+    original = vectors["offer"]
+    assert vectors["market_extensions_vector"] == "market-extensions-v1.json"
+    assert "org.nthdao.market/resource-descriptors-v1" in original["extensions"]
+    assert "org.nthdao.market/publication-v1" in original["extensions"]
+    tampered = copy.deepcopy(original)
+    tampered["extensions"]["org.nthdao.market/publication-v1"][
+        "offer_validity_seconds"
+    ] = 86_400
+    assert verify_offer(tampered)[0] is False

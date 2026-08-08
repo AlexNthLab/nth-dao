@@ -203,15 +203,15 @@ def test_market_open_merges_federated_product_listing_from_peer(
     tmp_path: Path,
 ) -> None:
     b = TestClient(create_app(tmp_path / "b", require_console_auth=False))
-    aid = b.post(
-        "/api/v2/market/announce",
-        json={
-            "title": "remote DAO service pack",
-            "listing_type": "service",
-            "capability_set": ["debug"],
-            "reward_minor": 500,
-        },
-    ).json()["announcement_id"]
+    legacy = sign_announcement(
+        publisher=b.app.state.nth.node_identity,
+        title="remote DAO service pack",
+        input_schema={"__nth_listing_type": "service"},
+        capability_set=["debug"],
+        reward_minor=500,
+    )
+    MarketFeed(tmp_path / "b", spine=b.app.state.nth.spine).publish(legacy)
+    aid = legacy.announcement_id
 
     a_app = create_app(tmp_path / "a", require_console_auth=False)
     a = TestClient(a_app)

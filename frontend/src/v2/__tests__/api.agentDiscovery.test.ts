@@ -8,6 +8,8 @@ import {
   announceTask,
   claimFederatedTask,
   listOpenTasks,
+  publishMarketOffer,
+  searchMarket,
   refreshFederation,
   updateFederationPeer,
 } from "../api";
@@ -275,32 +277,82 @@ describe("v2 federation API wiring", () => {
 });
 
 describe("v2 market listing type API wiring", () => {
-  it("passes listing_type filters and publish bodies", async () => {
+  it("keeps legacy read filters while publishing Tasks and Offers separately", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse({
-        announcement_id: "ann-product",
+        announcement_id: "ann-task",
         publisher_did: "did:key:zPublisher",
-        title: "hardware key",
-        listing_type: "product",
+        title: "inspect hardware key",
+        listing_type: "task",
         capability_set: [],
         context: "hardware",
         reward_minor: 9900,
         reward_asset: "credit",
         claimed: false,
-      }));
+      }))
+      .mockResolvedValueOnce(jsonResponse({ digest: "sha256:x" }));
     vi.stubGlobal("fetch", fetchMock);
 
     await listOpenTasks({ listingType: "product" });
-    await announceTask({ title: "hardware key", listing_type: "product" });
+    await announceTask({ title: "inspect hardware key", listing_type: "task" });
+    await publishMarketOffer({
+      idempotency_key: "0123456789abcdef",
+      intent: "provide",
+      category: "products",
+      title: "hardware key",
+      provides: [{
+        leg_id: "provide-1",
+        category: "products",
+        resource_type: "product",
+        resource_id: "urn:nthdao:product:hardware-key",
+        quantity: "1",
+        unit: "item",
+      }],
+    });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
       "/api/v2/market/open?listing_type=product",
     );
     const publishInit = fetchMock.mock.calls[1][1] as RequestInit;
     expect(JSON.parse(String(publishInit.body))).toEqual({
-      title: "hardware key",
-      listing_type: "product",
+      title: "inspect hardware key",
+      listing_type: "task",
     });
+    expect(fetchMock.mock.calls[2][0]).toBe("/api/v2/market/offers");
+    const offerInit = fetchMock.mock.calls[2][1] as RequestInit;
+    expect(JSON.parse(String(offerInit.body))).toEqual(expect.objectContaining({
+      intent: "provide",
+      category: "products",
+      title: "hardware key",
+    }));
+  });
+
+  it("passes unified market projection filters without changing source facts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      items: [],
+      count: 0,
+      truncated: false,
+      facets: [],
+      projection_only: true,
+      warning: "projection",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchMarket({
+      q: "design",
+      category: "services",
+      intent: "provide",
+      context: "commerce",
+      capability: "code_review",
+      minValue: 25,
+      valueAsset: "USDC",
+      limit: 50,
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v2/market/search?q=design&category=services&intent=provide&context=commerce&capability=code_review&min_value=25&value_asset=USDC&limit=50",
+    );
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBeUndefined();
   });
 });

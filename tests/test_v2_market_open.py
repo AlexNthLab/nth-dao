@@ -97,7 +97,7 @@ def test_market_announce_then_open_shows_it(tmp_path: Path) -> None:
     assert hit["claimed"] is False
 
 
-def test_market_announce_product_listing_is_signed_and_filterable(
+def test_market_announce_is_task_only_but_reads_legacy_product_records(
     tmp_path: Path,
 ) -> None:
     client = TestClient(create_app(tmp_path, require_console_auth=False))
@@ -107,7 +107,7 @@ def test_market_announce_product_listing_is_signed_and_filterable(
         json={"title": "debug a Python crash", "listing_type": "task"},
     )
     assert task.status_code == 200, task.text
-    product = client.post(
+    rejected = client.post(
         "/api/v2/market/announce",
         json={
             "title": "NTH hardware key",
@@ -118,9 +118,18 @@ def test_market_announce_product_listing_is_signed_and_filterable(
             "context": "hardware",
         },
     )
-    assert product.status_code == 200, product.text
-    product_body = product.json()
-    assert product_body["input_schema"]["__nth_listing_type"] == "product"
+    assert rejected.status_code == 400
+    assert "accepts Tasks only" in rejected.text
+
+    _publish(
+        tmp_path,
+        title="NTH hardware key",
+        description="offline signing token",
+        input_schema={"__nth_listing_type": "product"},
+        reward_minor=9900,
+        reward_asset="usd-cent",
+        context="hardware",
+    )
 
     all_rows = client.get("/api/v2/market/open").json()
     by_title = {r["title"]: r for r in all_rows}

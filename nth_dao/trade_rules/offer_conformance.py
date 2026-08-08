@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from nth_dao.identity import AgentID, AgentIdentity
+from nth_dao.market.conformance import generate_vectors as generate_market_vectors
+from nth_dao.market.resource_descriptor import (
+    MARKET_PUBLICATION_EXTENSION,
+    RESOURCE_DESCRIPTOR_EXTENSION,
+)
 from nth_dao.trade_rules.offer import (
     OFFER_SIGNING_DOMAIN,
     offer_body,
@@ -59,6 +64,9 @@ def _sign_semantically_invalid(
 
 def generate_vectors() -> dict[str, Any]:
     identity = _test_identity()
+    market_vectors = generate_market_vectors()
+    descriptor = market_vectors["descriptor"]
+    descriptor_digest = market_vectors["expected_descriptor_digest"]
     body = offer_body(
         offer_id="org.nthdao.reference/btc-for-solana-token",
         publisher_did=identity.as_did(),
@@ -71,7 +79,7 @@ def generate_vectors() -> dict[str, Any]:
                 "resource_id": "bitcoin:btc",
                 "quantity": "0.01",
                 "unit": "btc",
-                "descriptor_digest": _digest(b"bitcoin-descriptor"),
+                "descriptor_digest": descriptor_digest,
             }
         ],
         requests=[
@@ -92,6 +100,17 @@ def generate_vectors() -> dict[str, Any]:
         ],
         published_at="2026-07-29T00:00:00Z",
         not_after="2027-07-29T00:00:00Z",
+        extensions={
+            RESOURCE_DESCRIPTOR_EXTENSION: {
+                "descriptors": {descriptor_digest: descriptor},
+            },
+            MARKET_PUBLICATION_EXTENSION: {
+                "category": "other",
+                "intent": "exchange",
+                "capability_set": ["atomic-swap"],
+                "offer_validity_seconds": 31_536_000,
+            },
+        },
     )
     offer = sign_offer(identity, body, created="2026-07-29T00:00:01Z")
     document = offer.to_dict()
@@ -150,6 +169,7 @@ def generate_vectors() -> dict[str, Any]:
         "expected_signing_input_hex": offer_signing_input(document).hex(),
         "expected_offer_digest": offer_digest(offer),
         "expected_withdrawal_digest": offer_digest(withdrawal),
+        "market_extensions_vector": "market-extensions-v1.json",
         "negative_offers": [
             {
                 "id": "tampered-summary",

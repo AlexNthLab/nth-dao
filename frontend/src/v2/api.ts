@@ -36,9 +36,14 @@ import type {
   HandoffDetail,
   IdentityHeader,
   FederationStatus,
+  MarketSearchCategory,
+  MarketSearchIntent,
+  MarketSearchPage,
   MissionSummary,
   ReceiptDetail,
   ProcessCard,
+  PublishMarketOfferInput,
+  PublishMarketOfferResult,
   ReceiptSummary,
   Rule,
   TaskAnnouncement,
@@ -948,10 +953,55 @@ export async function listOpenTasks(
 }
 
 /** 任务类别分面(context + 计数),给"按类别筛选"的 chips 用。 */
+export async function searchMarket(
+  filters: {
+    q?: string;
+    category?: MarketSearchCategory | "";
+    intent?: MarketSearchIntent | "";
+    context?: string;
+    capability?: string;
+    minValue?: number;
+    valueAsset?: string;
+    source?: "local" | "federated" | "";
+    offset?: number;
+    limit?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<MarketSearchPage> {
+  const p = new URLSearchParams();
+  if (filters.q) p.set("q", filters.q);
+  if (filters.category) p.set("category", filters.category);
+  if (filters.intent) p.set("intent", filters.intent);
+  if (filters.context) p.set("context", filters.context);
+  if (filters.capability) p.set("capability", filters.capability);
+  if (typeof filters.minValue === "number") {
+    p.set("min_value", String(filters.minValue));
+  }
+  if (filters.valueAsset) p.set("value_asset", filters.valueAsset);
+  if (filters.source) p.set("source", filters.source);
+  if (typeof filters.offset === "number") p.set("offset", String(filters.offset));
+  if (typeof filters.limit === "number") p.set("limit", String(filters.limit));
+  const qs = p.toString();
+  return getJson<MarketSearchPage>(
+    `/market/search${qs ? `?${qs}` : ""}`,
+    signal,
+  );
+}
+
+export async function publishMarketOffer(
+  body: PublishMarketOfferInput,
+): Promise<PublishMarketOfferResult> {
+  return postJson<PublishMarketOfferResult>("/market/offers", body);
+}
+
 export async function listTaskCategories(
+  listingType: "task" | "service" | "product" | "exchange" | "" = "",
   signal?: AbortSignal,
 ): Promise<TaskCategory[]> {
-  return getJson<TaskCategory[]>("/market/categories", signal);
+  const suffix = listingType
+    ? `?listing_type=${encodeURIComponent(listingType)}`
+    : "";
+  return getJson<TaskCategory[]>(`/market/categories${suffix}`, signal);
 }
 
 export async function getTradeOfferInspection(

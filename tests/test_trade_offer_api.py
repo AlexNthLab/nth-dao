@@ -122,6 +122,19 @@ def test_trade_offer_publish_list_get_and_duplicate(tmp_path):
     assert fetched.json() == {
         "digest": digest,
         "offer": offer.to_dict(),
+        "resource_descriptors": {
+            "status": "incomplete",
+            "referenced_count": 1,
+            "verified_inline_count": 0,
+            "items": [],
+            "profile_packages_resolved": False,
+            "execution_ready": False,
+            "warning": (
+                "Inline descriptor hashes may be verified, but Resource Profile "
+                "Skill references are not resolved, recognized, or authorized for "
+                "execution by this implementation."
+            ),
+        },
         "discoveries": [],
         "verification": {
             "offer_signature_valid": True,

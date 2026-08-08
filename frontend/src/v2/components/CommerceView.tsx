@@ -2,45 +2,49 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   acceptTradeProposal,
+  announceTask,
   ApiHttpError,
   dispatchCommerceOutbox,
   disputeCommerceOrder,
-  fetchCommerceListings,
   fetchCommerceOrders,
   fetchTradeProposals,
   fetchTradeOrders,
   fetchTradeRuleRecognitionImportBatch,
   fetchTradeRulePackages,
+  getTradeOfferInspection,
   getTradeExecutionReceipts,
   getTradeOrder,
   getTradeProposal,
   getTradeRulePackage,
+  importCachedTradeOffer,
   importTradeRulePackage,
   importTradeRuleRecognitions,
-  listOpenTasks,
-  publishCommerceListing,
+  publishMarketOffer,
   remoteCommerceCheckout,
   resolveCommerceDispute,
   settleCommerceOrder,
   submitCommerceDelivery,
+  searchMarket,
   verifyCommerceDelivery,
 } from "../api";
 import type {
-  CommerceListingRow,
   CommerceOrderView,
-  TaskAnnouncement,
+  MarketSearchCategory,
+  MarketSearchEntry,
   TradeProposalDetail,
   TradeProposalSummary,
   TradeOrderDetail,
   TradeOrderSummary,
   TradeRuleRecognitionImportStatusPage,
   TradeExecutionSkillView,
+  TradeOfferInspection,
   TradeRulePackageCatalogItem,
   TradeRulePackageDetail,
 } from "../types-v2";
 import { useToast } from "./Toast";
+import { MarketPublishForm, type MarketPublication } from "./MarketPublishForm";
 
-type Scope = "purchases" | "sales" | "offers" | "proposals" | "agreements" | "skills";
+type Scope = "discover" | "purchases" | "offers" | "proposals" | "agreements" | "skills";
 
 function short(value: string, size = 18) {
   return value.length <= size ? value : `${value.slice(0, size - 5)}...${value.slice(-4)}`;
@@ -64,6 +68,27 @@ function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function canOrderMarketEntry(entry: MarketSearchEntry): boolean {
+  return (
+    entry.protocol_kind === "commerce-listing-announcement"
+    && entry.source === "federated"
+    && !entry.stale
+    && Boolean(entry.source_peer)
+    && Boolean(entry.target.offer_digest)
+    && entry.value.asset === "NTH-TEST"
+  );
+}
+
+function marketOfferSelectionKey(entry: MarketSearchEntry): string {
+  return `${entry.entry_id}:${entry.target.offer_digest}`;
+}
+
+function tradeOfferSourceCount(inspection: TradeOfferInspection): number {
+  return new Set(inspection.discoveries.map(
+    (item) => `${item.source_did}\u0000${item.source_peer}`,
+  )).size;
+}
+
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -72,10 +97,31 @@ async function sha256Text(value: string): Promise<string> {
 
 export function CommerceView() {
   const toast = useToast();
-  const [scope, setScope] = useState<Scope>("purchases");
-  const [listings, setListings] = useState<CommerceListingRow[]>([]);
+  const [scope, setScope] = useState<Scope>("discover");
+  const [marketEntries, setMarketEntries] = useState<MarketSearchEntry[]>([]);
+  const [marketQuery, setMarketQuery] = useState("");
+  const [marketCategory, setMarketCategory] = useState<MarketSearchCategory | "">("");
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketPageBusy, setMarketPageBusy] = useState(false);
+  const [marketError, setMarketError] = useState("");
+  const [marketCount, setMarketCount] = useState(0);
+  const [marketTruncated, setMarketTruncated] = useState(false);
+  const [marketVersion, setMarketVersion] = useState(0);
+  const [myMarketEntries, setMyMarketEntries] = useState<MarketSearchEntry[]>([]);
+  const [myMarketCount, setMyMarketCount] = useState(0);
+  const [myMarketTruncated, setMyMarketTruncated] = useState(false);
+  const [myMarketLoading, setMyMarketLoading] = useState(false);
+  const [myMarketError, setMyMarketError] = useState("");
+  const [offerInspection, setOfferInspection] = useState<TradeOfferInspection | null>(null);
+  const [offerInspectionKey, setOfferInspectionKey] = useState("");
+  const [offerInspectionError, setOfferInspectionError] = useState("");
+  const [offerImportBusyDigest, setOfferImportBusyDigest] = useState("");
+  const [offerImportError, setOfferImportError] = useState("");
+  const marketSearchSequence = useRef(0);
+  const myMarketSearchSequence = useRef(0);
+  const offerInspectionSequence = useRef(0);
+  const offerInspectionAbort = useRef<AbortController | null>(null);
   const [orders, setOrders] = useState<CommerceOrderView[]>([]);
-  const [discovered, setDiscovered] = useState<TaskAnnouncement[]>([]);
   const [proposals, setProposals] = useState<TradeProposalSummary[]>([]);
   const [proposalNextCursor, setProposalNextCursor] = useState("");
   const [proposalPageBusy, setProposalPageBusy] = useState(false);
@@ -108,26 +154,22 @@ export function CommerceView() {
   const [peerUrl, setPeerUrl] = useState("");
   const [listingDigest, setListingDigest] = useState("");
   const [purpose, setPurpose] = useState("Purchase one digital service");
-  const [title, setTitle] = useState("");
-  const [listingId, setListingId] = useState("");
-  const [description, setDescription] = useState("");
-  const [price, setPrice] = useState("");
   const [delivery, setDelivery] = useState("");
   const [targetUrl, setTargetUrl] = useState("");
   const [disputeReason, setDisputeReason] = useState("");
   const [checkoutAttemptKey, setCheckoutAttemptKey] = useState("");
 
+  useEffect(() => () => offerInspectionAbort.current?.abort(), []);
+
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++refreshSequence.current;
-    const [listingResult, orderResult, marketResult, proposalResult, agreementResult, skillResult] = await Promise.allSettled([
-      fetchCommerceListings(signal), fetchCommerceOrders(undefined, signal),
-      listOpenTasks({ context: "commerce", listingType: "service" }, signal),
+    const [orderResult, proposalResult, agreementResult, skillResult] = await Promise.allSettled([
+      fetchCommerceOrders(undefined, signal),
       fetchTradeProposals("", signal),
       fetchTradeOrders("", signal),
       fetchTradeRulePackages("", signal),
     ]);
     if (signal?.aborted || sequence !== refreshSequence.current) return;
-    if (listingResult.status === "fulfilled") setListings(listingResult.value);
     if (orderResult.status === "fulfilled") {
       const nextOrders = orderResult.value;
       setOrders(nextOrders);
@@ -137,13 +179,7 @@ export function CommerceView() {
           : nextOrders[0]?.order_id ?? "",
       );
     }
-    if (marketResult.status === "fulfilled") {
-      setDiscovered(marketResult.value.filter((row) => Boolean(
-        row.federated && !row.federation_stale && row.source_peer
-        && row.offer_digest && row.price_asset === "NTH-TEST",
-      )));
-    }
-    for (const result of [listingResult, orderResult, marketResult]) {
+    for (const result of [orderResult]) {
       if (result.status === "rejected" && !isAbort(result.reason)) {
         toast.push(
           result.reason instanceof Error ? result.reason.message : String(result.reason),
@@ -334,6 +370,125 @@ export function CommerceView() {
   }, [refresh, toast]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const sequence = ++marketSearchSequence.current;
+    const timer = window.setTimeout(() => {
+      setMarketPageBusy(false);
+      setMarketLoading(true);
+      searchMarket(
+        { q: marketQuery.trim(), category: marketCategory, limit: 200 },
+        controller.signal,
+      )
+        .then((page) => {
+          if (
+            controller.signal.aborted
+            || sequence !== marketSearchSequence.current
+          ) return;
+          setMarketEntries(page.items);
+          setMarketCount(page.count);
+          setMarketTruncated(page.truncated);
+          setMarketError("");
+        })
+        .catch((error) => {
+          if (
+            sequence === marketSearchSequence.current
+            && !isAbort(error)
+          ) {
+            setMarketError(error instanceof Error ? error.message : String(error));
+          }
+        })
+        .finally(() => {
+          if (
+            !controller.signal.aborted
+            && sequence === marketSearchSequence.current
+          ) setMarketLoading(false);
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [marketCategory, marketQuery, marketVersion]);
+
+  useEffect(() => {
+    if (scope !== "offers") return;
+    const controller = new AbortController();
+    const sequence = ++myMarketSearchSequence.current;
+    setMyMarketLoading(true);
+    searchMarket(
+      { source: "local", offset: 0, limit: 100 },
+      controller.signal,
+    )
+      .then((page) => {
+        if (controller.signal.aborted || sequence !== myMarketSearchSequence.current) return;
+        setMyMarketEntries(page.items);
+        setMyMarketCount(page.count);
+        setMyMarketTruncated(page.truncated);
+        setMyMarketError("");
+      })
+      .catch((error) => {
+        if (sequence === myMarketSearchSequence.current && !isAbort(error)) {
+          setMyMarketError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && sequence === myMarketSearchSequence.current) {
+          setMyMarketLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [marketVersion, scope]);
+
+  async function loadMoreMarket() {
+    if (marketPageBusy || !marketTruncated) return;
+    const sequence = ++marketSearchSequence.current;
+    setMarketPageBusy(true);
+    try {
+      const page = await searchMarket({
+        q: marketQuery.trim(),
+        category: marketCategory,
+        offset: marketEntries.length,
+        limit: 200,
+      });
+      if (sequence !== marketSearchSequence.current) return;
+      setMarketEntries((current) => [...current, ...page.items]);
+      setMarketCount(page.count);
+      setMarketTruncated(page.truncated);
+      setMarketError("");
+    } catch (error) {
+      if (sequence === marketSearchSequence.current) {
+        setMarketError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (sequence === marketSearchSequence.current) setMarketPageBusy(false);
+    }
+  }
+
+  async function loadMoreMyMarket() {
+    if (myMarketLoading || !myMarketTruncated) return;
+    const sequence = ++myMarketSearchSequence.current;
+    setMyMarketLoading(true);
+    try {
+      const page = await searchMarket({
+        source: "local",
+        offset: myMarketEntries.length,
+        limit: 100,
+      });
+      if (sequence !== myMarketSearchSequence.current) return;
+      setMyMarketEntries((current) => [...current, ...page.items]);
+      setMyMarketCount(page.count);
+      setMyMarketTruncated(page.truncated);
+      setMyMarketError("");
+    } catch (error) {
+      if (sequence === myMarketSearchSequence.current) {
+        setMyMarketError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (sequence === myMarketSearchSequence.current) setMyMarketLoading(false);
+    }
+  }
+
+  useEffect(() => {
     if (scope !== "proposals" || !selectedProposalDigest) {
       if (!selectedProposalDigest) setSelectedProposal(null);
       return;
@@ -451,9 +606,10 @@ export function CommerceView() {
     };
   }, [scope, selectedSkillDigest, toast]);
 
-  const visibleOrders = useMemo(() => orders.filter((order) =>
-    scope === "purchases" ? order.role === "buyer" : scope === "sales" ? order.role === "seller" : false,
-  ), [orders, scope]);
+  const visibleOrders = useMemo(
+    () => (scope === "purchases" ? orders : []),
+    [orders, scope],
+  );
   const selected = orders.find((order) => order.order_id === selectedId) ?? null;
   const isProtocolInbox = scope === "proposals" || scope === "agreements" || scope === "skills";
 
@@ -493,16 +649,19 @@ export function CommerceView() {
     }
   }
 
-  async function publish(event: React.FormEvent) {
-    event.preventDefault();
+  async function publish(publication: MarketPublication) {
     await run(async () => {
-      await publishCommerceListing({
-        listingId: listingId.trim(), title: title.trim(),
-        description: description.trim(), priceValue: price.trim(),
-      });
-      setListingId(""); setTitle(""); setDescription(""); setPrice("");
-      setShowPublish(false); setScope("offers");
-    }, "Signed NTH-TEST service published");
+      const result = publication.kind === "task"
+        ? await announceTask(publication.body)
+        : await publishMarketOffer(publication.body);
+      setShowPublish(false);
+      setShowBuy(false);
+      setMarketQuery("");
+      setMarketCategory("");
+      setMarketVersion((value) => value + 1);
+      setScope(publication.kind === "task" ? "discover" : "offers");
+      return result;
+    }, publication.kind === "task" ? "Signed Task published" : "Signed Offer published");
   }
 
   async function buy(event: React.FormEvent) {
@@ -528,13 +687,74 @@ export function CommerceView() {
     setTargetUrl(window.localStorage.getItem(`nth-commerce-peer:${selectedId}`) ?? "");
   }, [selectedId]);
 
-  function selectDiscovered(row: TaskAnnouncement) {
-    setPeerUrl(row.source_peer ?? "");
-    setListingDigest(row.offer_digest ?? "");
-    setPurpose(`Purchase ${row.title}`);
+  function selectMarketEntry(entry: MarketSearchEntry) {
+    if (!canOrderMarketEntry(entry)) return;
+    setPeerUrl(entry.source_peer);
+    setListingDigest(entry.target.offer_digest);
+    setPurpose(`Purchase ${entry.title}`);
     setCheckoutAttemptKey(crypto.randomUUID());
     setShowPublish(false);
     setShowBuy(true);
+  }
+
+  async function inspectMarketOffer(entry: MarketSearchEntry) {
+    const digest = entry.target.offer_digest;
+    if (!digest || entry.protocol_kind !== "trade-offer-announcement") return;
+    const selectionKey = marketOfferSelectionKey(entry);
+    if (selectionKey === offerInspectionKey && offerInspection) {
+      offerInspectionAbort.current?.abort();
+      offerInspectionSequence.current += 1;
+      setOfferInspection(null);
+      setOfferInspectionKey("");
+      setOfferInspectionError("");
+      setOfferImportError("");
+      return;
+    }
+    offerInspectionAbort.current?.abort();
+    const controller = new AbortController();
+    offerInspectionAbort.current = controller;
+    const sequence = ++offerInspectionSequence.current;
+    setOfferInspectionKey(selectionKey);
+    setOfferInspection(null);
+    setOfferInspectionError("");
+    setOfferImportError("");
+    try {
+      const detail = await getTradeOfferInspection(
+        digest,
+        entry.source === "federated",
+        controller.signal,
+      );
+      if (sequence === offerInspectionSequence.current) setOfferInspection(detail);
+    } catch (error) {
+      if (sequence !== offerInspectionSequence.current || isAbort(error)) return;
+      setOfferInspectionError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveRemoteMarketOffer(digest: string) {
+    if (!digest || offerImportBusyDigest) return;
+    setOfferImportBusyDigest(digest);
+    setOfferImportError("");
+    try {
+      const result = await importCachedTradeOffer(digest);
+      setOfferInspection((current) => current?.digest === digest ? {
+        ...current,
+        storage_provenance: {
+          source_kind: result.source_kind,
+          source_id: result.source_id,
+        },
+      } : current);
+      toast.push(
+        result.appended_revisions > 0
+          ? `Saved ${result.imported_revisions} signed Offer revision(s) locally`
+          : "Signed Offer was already saved locally",
+        "success",
+      );
+    } catch (error) {
+      setOfferImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOfferImportBusyDigest("");
+    }
   }
 
   async function submitDelivery() {
@@ -587,37 +807,43 @@ export function CommerceView() {
           <span className="sidebar-title">Market</span>
         </div>
         <div className="commerce-scope" role="tablist" aria-label="Commerce views">
-          {(["purchases", "sales", "offers", "proposals", "agreements", "skills"] as Scope[]).map((item) => (
+          {(["discover", "purchases", "offers", "skills"] as Scope[]).map((item) => (
             <button key={item} type="button" role="tab" aria-selected={scope === item}
               className={scope === item ? "active" : ""} onClick={() => setScope(item)}>
-              {item === "purchases" ? "Purchases" : item === "sales" ? "Seller orders" : item === "offers" ? "My services" : item === "proposals" ? "Proposals" : item === "agreements" ? "Agreements" : "Trade Skills"}
-              <span>{item === "offers" ? listings.length + discovered.length : item === "proposals" ? proposals.length : item === "agreements" ? agreements.length : item === "skills" ? skills.length : orders.filter((o) => o.role === (item === "purchases" ? "buyer" : "seller")).length}</span>
+              {item === "discover" ? "Discover" : item === "purchases" ? "Orders" : item === "offers" ? "My listings" : "Trade Skills"}
+              <span>{item === "discover" ? marketCount : item === "offers" ? myMarketCount : item === "skills" ? skills.length : orders.length}</span>
+            </button>
+          ))}
+          <div className="commerce-scope-label">Advanced protocol</div>
+          {(["proposals", "agreements"] as Scope[]).map((item) => (
+            <button key={item} type="button" role="tab" aria-selected={scope === item}
+              className={scope === item ? "active" : ""} onClick={() => setScope(item)}>
+              {item === "proposals" ? "Proposals" : "Agreements"}
+              <span>{item === "proposals" ? proposals.length : agreements.length}</span>
             </button>
           ))}
         </div>
         <div className="sidebar-list">
-          {(scope === "purchases" || scope === "sales") && visibleOrders.map((order) => (
+          {scope === "purchases" && visibleOrders.map((order) => (
             <button key={order.order_id} className={`sidebar-item ${selectedId === order.order_id ? "active" : ""}`}
               onClick={() => setSelectedId(order.order_id)}>
               <div className="sidebar-item-title"><span className="truncate">{order.title}</span></div>
               <div className="sidebar-item-meta"><span>{order.state}</span><span>{order.amount_minor / 1_000_000} NTH-TEST</span></div>
             </button>
           ))}
-          {scope === "offers" && listings.map((row) => (
-            <div key={row.digest} className="commerce-offer-row">
-              <strong>{row.listing.title}</strong>
-              <span>{row.listing.price_value} NTH-TEST</span>
-              <code title={row.digest}>{short(row.digest, 24)}</code>
+          {scope === "offers" && myMarketEntries.map((entry) => (
+            <div key={entry.entry_id} className="commerce-offer-row">
+              <strong>{entry.title}</strong>
+              <span>{entry.category} / {entry.market_intent}</span>
+              <code title={entry.target.offer_digest || entry.target.announcement_id}>{short(entry.target.offer_digest || entry.target.announcement_id, 24)}</code>
             </div>
           ))}
-          {scope === "offers" && discovered.map((row) => (
-            <div key={`${row.source_peer}:${row.offer_digest}`} className="commerce-offer-row commerce-federated-offer">
-              <strong>{row.title}</strong>
-              <span>{(row.price_minor ?? 0) / 1_000_000} NTH-TEST</span>
-              <small title={row.source_peer}>Federated from {short(row.source_peer ?? "", 24)}</small>
-              <button className="btn btn-secondary" type="button" onClick={() => selectDiscovered(row)}>Buy</button>
-            </div>
-          ))}
+          {scope === "offers" && myMarketTruncated && (
+            <button className="btn btn-secondary commerce-load-more" type="button"
+              disabled={myMarketLoading} onClick={() => void loadMoreMyMarket()}>
+              {myMarketLoading ? "Loading..." : "Load more"}
+            </button>
+          )}
           {scope === "proposals" && proposals.map((proposal) => (
             <button key={proposal.proposal_digest} className={`sidebar-item ${selectedProposalDigest === proposal.proposal_digest ? "active" : ""}`}
               onClick={() => { setSelectedProposal(null); setSelectedProposalDigest(proposal.proposal_digest); }}>
@@ -659,7 +885,7 @@ export function CommerceView() {
               {skillPageBusy ? "Loading..." : "Load more"}
             </button>
           )}
-          {((scope === "offers" && listings.length + discovered.length === 0) || (scope === "proposals" && proposals.length === 0) || (scope === "agreements" && agreements.length === 0) || (scope === "skills" && skills.length === 0) || (!(["offers", "proposals", "agreements", "skills"] as Scope[]).includes(scope) && visibleOrders.length === 0)) &&
+          {((scope === "discover" && marketEntries.length === 0) || (scope === "offers" && myMarketEntries.length === 0) || (scope === "proposals" && proposals.length === 0) || (scope === "agreements" && agreements.length === 0) || (scope === "skills" && skills.length === 0) || (scope === "purchases" && visibleOrders.length === 0)) &&
             <p className="muted" style={{ padding: "12px 14px" }}>Nothing here yet.</p>}
         </div>
       </aside>
@@ -668,8 +894,8 @@ export function CommerceView() {
         <div className="main-head commerce-head">
           <div>
             <p className="main-eyebrow">A2A Commerce</p>
-            <h1 className="main-title">{scope === "proposals" ? "Trade proposals" : scope === "agreements" ? "Accepted agreements" : scope === "skills" ? "Trade Skills" : "Digital services"}</h1>
-            <p className="main-subtitle">{scope === "proposals" ? "Signed inbound negotiation claims awaiting independent review." : scope === "agreements" ? "Bilateral signed terms retained by this DAO. Delivery and payment remain separate." : scope === "skills" ? "Verified local Rule Packages that define optional transaction behavior." : "Signed orders, verifiable delivery, and manual NTH-TEST settlement. No real funds."}</p>
+            <h1 className="main-title">{scope === "discover" ? "Market" : scope === "purchases" ? "Orders" : scope === "offers" ? "My listings" : scope === "proposals" ? "Trade proposals" : scope === "agreements" ? "Accepted agreements" : "Trade Skills"}</h1>
+            <p className="main-subtitle">{scope === "discover" ? "Search signed task and offer discovery claims from this DAO and verified peers." : scope === "purchases" ? "Purchases and sales with signed delivery, acknowledgement, and audit history." : scope === "offers" ? "Resources published by this DAO. Product and service are broad facets, not fixed protocol types." : scope === "proposals" ? "Signed inbound negotiation claims awaiting independent review." : scope === "agreements" ? "Bilateral signed terms retained by this DAO. Delivery and payment remain separate." : "Verified local Rule Packages that define optional transaction behavior."}</p>
           </div>
           {!isProtocolInbox && <div className="commerce-head-actions">
             <button className="btn btn-secondary" onClick={() => {
@@ -678,7 +904,10 @@ export function CommerceView() {
                 return !value;
               });
             }}>Buy from peer</button>
-            <button className="btn btn-primary" onClick={() => setShowPublish((value) => !value)}>Publish service</button>
+            <button className="btn btn-primary" onClick={() => {
+              setShowPublish((value) => !value);
+              setShowBuy(false);
+            }}>Publish</button>
           </div>}
           {isProtocolInbox && <div className="commerce-head-actions">
             <button className="btn btn-secondary" type="button" onClick={() => {
@@ -694,16 +923,11 @@ export function CommerceView() {
           </div>}
         </div>
         <div className="main-body commerce-main">
-          {!isProtocolInbox && showPublish && <form className="commerce-form" onSubmit={publish}>
-            <h2>Publish a signed service</h2>
-            <div className="commerce-form-grid">
-              <label>Service ID<input value={listingId} onChange={(e) => setListingId(e.target.value)} required maxLength={128} /></label>
-              <label>Title<input value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={200} /></label>
-              <label>Price in NTH-TEST<input value={price} onChange={(e) => setPrice(e.target.value)} required inputMode="decimal" /></label>
-              <label className="wide">Description<textarea value={description} onChange={(e) => setDescription(e.target.value)} maxLength={4000} /></label>
-            </div>
-            <div className="commerce-form-actions"><button type="button" className="btn btn-secondary" onClick={() => setShowPublish(false)}>Cancel</button><button className="btn btn-primary" disabled={busy}>Publish</button></div>
-          </form>}
+          {!isProtocolInbox && showPublish && <MarketPublishForm
+            busy={busy}
+            onCancel={() => setShowPublish(false)}
+            onPublish={publish}
+          />}
 
           {!isProtocolInbox && showBuy && <form className="commerce-form" onSubmit={buy}>
             <h2>Buy from a configured DAO peer</h2>
@@ -716,9 +940,105 @@ export function CommerceView() {
             <div className="commerce-form-actions"><button type="button" className="btn btn-secondary" onClick={() => { setShowBuy(false); setCheckoutAttemptKey(""); }}>Cancel</button><button className="btn btn-primary" disabled={busy || !checkoutAttemptKey}>Verify and order</button></div>
           </form>}
 
+          {!showPublish && !showBuy && scope === "discover" && <section className="commerce-discover">
+            <div className="commerce-discover-tools">
+              <input
+                aria-label="Search market"
+                value={marketQuery}
+                onChange={(event) => setMarketQuery(event.target.value)}
+                placeholder="Search tasks, products, services, or exchanges"
+                maxLength={200}
+              />
+              <div className="commerce-market-facets" aria-label="Market categories">
+                {([
+                  ["", "All"],
+                  ["tasks", "Tasks"],
+                  ["products", "Products"],
+                  ["services", "Services"],
+                  ["digital-assets", "Digital assets"],
+                  ["exchanges", "Exchanges"],
+                  ["other", "Other"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value || "all"}
+                    type="button"
+                    className={`btn ${marketCategory === value ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => setMarketCategory(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="trade-proposal-warning">
+              Search results are signed discovery claims, not proof of availability,
+              ownership, fairness, or execution authority.
+            </p>
+            {marketError && <p role="alert" className="trade-proposal-warning">Market search unavailable: {marketError}</p>}
+            {marketLoading && <p className="muted">Searching verified local projections...</p>}
+            {!marketLoading && marketEntries.length === 0 && <div className="main-empty">
+              <p>No matching market entries.</p>
+              <p className="muted">Add a verified federation peer or publish a Task or Offer.</p>
+            </div>}
+            <div className="commerce-market-grid">
+              {marketEntries.map((entry) => {
+                const offerSelected = (
+                  offerInspectionKey === marketOfferSelectionKey(entry)
+                );
+                return <article key={entry.entry_id} className="commerce-market-card">
+                  <div className="commerce-market-entry-head">
+                    <span className="pill dim">{entry.category}</span>
+                    <span className="pill dim">{entry.market_intent}</span>
+                    {entry.source === "federated" && <span className="pill">federated</span>}
+                    {entry.stale && <span className="pill wait">stale</span>}
+                  </div>
+                  <h2>{entry.title}</h2>
+                  {entry.summary && <p>{entry.summary}</p>}
+                  <div className="commerce-market-card-meta">
+                    <span>{entry.value.amount_minor > 0
+                      ? `${entry.value.amount_minor} ${entry.value.asset} minor units`
+                      : "Terms in signed source"}</span>
+                    <code title={entry.publisher_did}>{short(entry.publisher_did, 28)}</code>
+                  </div>
+                  {entry.legacy && <p className="trade-proposal-warning">Legacy claimable Task label; this is not a signed Trade Offer.</p>}
+                  <div className="commerce-market-card-action">
+                    {canOrderMarketEntry(entry)
+                      ? <button className="btn btn-primary" type="button" onClick={() => selectMarketEntry(entry)}>Review order</button>
+                      : entry.protocol_kind === "trade-offer-announcement" && entry.target.offer_digest
+                        ? <button className="btn btn-secondary" type="button" onClick={() => void inspectMarketOffer(entry)}>
+                          {offerSelected && !offerInspection && !offerInspectionError
+                            ? "Inspecting..."
+                            : offerSelected && offerInspection
+                              ? "Close terms"
+                              : "Inspect offer"}
+                        </button>
+                      : <span className="muted">{entry.entry_kind === "task"
+                        ? "Open Tasks to claim this work request."
+                        : "Resolve and inspect the exact signed Offer before agreement."}</span>}
+                  </div>
+                  {offerSelected && offerInspectionError && <p role="alert" className="trade-proposal-warning">
+                    Could not inspect this signed Offer. {offerInspectionError}
+                  </p>}
+                  {offerSelected && offerInspection && <MarketOfferInspection
+                    inspection={offerInspection}
+                    importBusy={offerImportBusyDigest === offerInspection.digest}
+                    importError={offerImportError}
+                    onSave={() => void saveRemoteMarketOffer(offerInspection.digest)}
+                  />}
+                </article>
+              })}
+            </div>
+            {marketTruncated && <button
+              className="btn btn-secondary commerce-load-more"
+              type="button"
+              disabled={marketPageBusy}
+              onClick={() => void loadMoreMarket()}
+            >{marketPageBusy ? "Loading..." : `Load more (${marketEntries.length} of ${marketCount})`}</button>}
+          </section>}
+
           {!showPublish && !showBuy && scope === "offers" && <div className="main-empty">
-            <p>Your signed service catalog is shown on the left.</p>
-            <p className="muted">Its discovery summaries federate through the existing Tasks network.</p>
+            <p>Your local Task and Offer discovery claims are shown on the left.</p>
+            <p className="muted">Each row retains an exact source pointer. Discovery is not proof of availability or execution authority.</p>
           </div>}
           {scope === "proposals" && !selectedProposal && <div className="main-empty"><p>Select a signed Proposal to inspect its claims.</p></div>}
           {scope === "proposals" && proposalError && <p className="trade-proposal-warning" role="status">{proposalDataPreserved ? "Proposal inbox unavailable; showing last known data" : "Proposal authorization failed; cached data cleared"}: {proposalError}</p>}
@@ -740,8 +1060,8 @@ export function CommerceView() {
           {scope === "skills" && skillError && <p className="trade-proposal-warning" role="status">{skillDataPreserved ? "Trade Skill catalog unavailable; showing last known data" : "Trade Skill authorization failed; cached UI data cleared"}: {skillError}</p>}
           {scope === "skills" && !selectedSkill && <div className="main-empty"><p>{skills.length > 0 ? "Select a Trade Skill to inspect its signed manifest." : "No verified Trade Skills are cached locally."}</p></div>}
           {scope === "skills" && selectedSkill && <TradeSkillWorkbench skill={selectedSkill} />}
-          {!showPublish && !showBuy && !(["offers", "proposals", "agreements", "skills"] as Scope[]).includes(scope) && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
-          {!showPublish && !showBuy && !(["offers", "proposals", "agreements", "skills"] as Scope[]).includes(scope) && selected && <OrderWorkbench order={selected} busy={busy}
+          {!showPublish && !showBuy && scope === "purchases" && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
+          {!showPublish && !showBuy && scope === "purchases" && selected && <OrderWorkbench order={selected} busy={busy}
             targetUrl={targetUrl} setTargetUrl={(value) => {
               setTargetUrl(value);
               window.localStorage.setItem(`nth-commerce-peer:${selected.order_id}`, value);
@@ -758,9 +1078,15 @@ export function CommerceView() {
       </section>
 
       <aside className="detail">
-        <div className="detail-head"><span className="detail-title">{scope === "proposals" ? "Proposal audit" : scope === "agreements" ? "Agreement audit" : scope === "skills" ? "Skill verification" : "Order audit"}</span></div>
+        <div className="detail-head"><span className="detail-title">{scope === "discover" ? "Discovery safety" : scope === "proposals" ? "Proposal audit" : scope === "agreements" ? "Agreement audit" : scope === "skills" ? "Skill verification" : scope === "offers" ? "Listing integrity" : "Order audit"}</span></div>
         <div className="detail-body">
-          {scope === "proposals" ? (selectedProposal ? <>
+          {scope === "discover" ? <div className="detail-section">
+            <div className="detail-section-label">Projection boundary</div>
+            <div className="detail-row"><span className="key">Entries</span><span className="value">{marketEntries.length}</span></div>
+            <div className="detail-row"><span className="key">Source</span><span className="value">Signed discovery</span></div>
+            <div className="detail-row"><span className="key">Truth</span><span className="value">Not proven</span></div>
+            <div className="detail-row"><span className="key">Real funds</span><span className="value">Disabled</span></div>
+          </div> : scope === "proposals" ? (selectedProposal ? <>
             <div className="detail-section">
               <div className="detail-section-label">Signed claim</div>
               <div className="detail-row"><span className="key">Signer</span><code className="value" title={selectedProposal.taker_did}>{short(selectedProposal.taker_did, 24)}</code></div>
@@ -791,7 +1117,13 @@ export function CommerceView() {
               <div className="detail-section-label">Content address</div>
               <code title={selectedSkill.package_digest}>{short(selectedSkill.package_digest, 30)}</code>
             </div>
-          </> : <p className="muted">Select a Trade Skill to inspect verification status.</p>) : selected ? <>
+          </> : <p className="muted">Select a Trade Skill to inspect verification status.</p>) : scope === "offers" ? <div className="detail-section">
+            <div className="detail-section-label">Publication boundary</div>
+            <div className="detail-row"><span className="key">Listings</span><span className="value">{myMarketCount}</span></div>
+            <div className="detail-row"><span className="key">Discovery</span><span className="value">Signed summary</span></div>
+            <div className="detail-row"><span className="key">Execution</span><span className="value">Separate agreement</span></div>
+            {myMarketError && <p role="alert" className="trade-proposal-warning">My listings unavailable: {myMarketError}</p>}
+          </div> : selected ? <>
             <div className="detail-section">
               <div className="detail-section-label">Identity</div>
               <div className="detail-row"><span className="key">Order</span><code className="value" title={selected.order_id}>{short(selected.order_id, 22)}</code></div>
@@ -807,6 +1139,109 @@ export function CommerceView() {
       </aside>
     </>
   );
+}
+
+function MarketOfferInspection({
+  inspection,
+  importBusy,
+  importError,
+  onSave,
+}: {
+  inspection: TradeOfferInspection;
+  importBusy: boolean;
+  importError: string;
+  onSave: () => void;
+}) {
+  const verification = inspection.verification;
+  return <section className="market-offer-inspection" aria-label="Signed Offer terms">
+    <div className="market-offer-inspection-head">
+      <strong>Signed Offer terms</strong>
+      <span className={`pill ${verification.offer_signature_valid ? "ok" : "wait"}`}>
+        {verification.offer_signature_valid ? "Signature verified" : "Signature rejected"}
+      </span>
+    </div>
+    <p className="trade-proposal-warning">{inspection.warning}</p>
+    <div className="market-offer-verification">
+      <span>{verification.announcement_binding_valid === true ? "Announcement bound" : "Announcement binding unavailable"}</span>
+      <span>{verification.source_did_bound === true ? "Source DID bound" : "Source DID binding unavailable"}</span>
+      {inspection.authority === "remote-publisher" && <span>
+        {verification.recent_source_verified ? "Remote source recently verified" : "Remote source is not recently verified"}
+        {` / ${tradeOfferSourceCount(inspection)} source(s)`}
+      </span>}
+      {inspection.head_claim && <span>
+        {`Disclosed ${inspection.head_claim.chain_length}-revision chain verified; global latest revision is not proven`}
+      </span>}
+    </div>
+    <p className="muted">
+      Revision {inspection.offer.revision} / {inspection.offer.state}
+      {inspection.offer.not_after ? ` / expires ${inspection.offer.not_after}` : " / no declared expiry"}
+    </p>
+    <div className="market-offer-legs">
+      {([
+        ["Provides", inspection.offer.provides],
+        ["Requests", inspection.offer.requests],
+      ] as const).map(([label, legs]) => <div key={label}>
+        <strong>{label}</strong>
+        {legs.length === 0
+          ? <p className="muted">None declared</p>
+          : legs.map((leg) => <div className="market-offer-leg" key={`${label}-${leg.leg_id}`}>
+            <span>{leg.quantity} {leg.unit} / {leg.resource_type}</span>
+            <code title={leg.resource_id}>{leg.resource_id}</code>
+            <code title={leg.descriptor_digest}>descriptor {short(leg.descriptor_digest, 30)}</code>
+          </div>)}
+      </div>)}
+    </div>
+    <div className="market-offer-descriptors">
+      <strong>Resource descriptors</strong>
+      <p className="trade-proposal-warning">{inspection.resource_descriptors.warning}</p>
+      <p className="muted">
+        {inspection.resource_descriptors.verified_inline_count} of {inspection.resource_descriptors.referenced_count} referenced inline descriptors have matching content hashes.
+      </p>
+      {inspection.resource_descriptors.items.map((item) => <details key={item.digest}>
+        <summary>
+          <span>{item.leg_ids.length > 0 ? item.leg_ids.join(", ") : "Unreferenced descriptor"}</span>
+          <span className={`pill ${item.content_hash_valid ? "ok" : "wait"}`}>
+            {item.content_hash_valid ? "Hash verified" : "Hash mismatch"}
+          </span>
+        </summary>
+        <code title={item.digest}>{item.digest}</code>
+        <div className="market-offer-profile-status">
+          {item.profile_resolution === "unresolved" ? <>
+            <span className="pill wait">Profile reference unresolved</span>
+            <code title={item.profile_ref.digest}>{item.profile_ref.rule_id} / {item.profile_ref.digest}</code>
+          </> : <span className="muted">No Resource Profile Skill reference declared.</span>}
+        </div>
+        <pre>{JSON.stringify(item.descriptor.attributes ?? {}, null, 2)}</pre>
+      </details>)}
+      {inspection.resource_descriptors.items.length === 0
+        && <p className="muted">No inline resource descriptors are present.</p>}
+    </div>
+    <div className="market-offer-signer">
+      <span>Signer</span><code title={inspection.offer.publisher_did}>{inspection.offer.publisher_did}</code>
+    </div>
+    {inspection.offer.rule_refs.length > 0 ? <div className="market-offer-rules">
+      <strong>Trade Skill references</strong>
+      {inspection.offer.rule_refs.map((rule) => <code key={`${rule.rule_id}-${rule.digest}`} title={rule.digest}>
+        {rule.rule_id} / {rule.digest}
+      </code>)}
+    </div> : <p className="muted">No Trade Skill references declared.</p>}
+    {inspection.authority === "remote-publisher" && <div className="market-offer-save">
+      <button
+        type="button"
+        className="btn btn-secondary"
+        disabled={importBusy || inspection.storage_provenance !== null}
+        onClick={onSave}
+      >
+        {inspection.storage_provenance !== null
+          ? "Saved locally"
+          : importBusy
+            ? "Saving..."
+            : "Save locally"}
+      </button>
+      <p className="muted">Saving retains exact signed bytes. It does not accept the Offer, trust the publisher, or authorize execution.</p>
+      {importError && <p role="alert" className="trade-proposal-warning">Could not save this signed Offer. {importError}</p>}
+    </div>}
+  </section>;
 }
 
 function TradeSkillWorkbench({ skill }: { skill: TradeRulePackageDetail }) {
@@ -954,7 +1389,11 @@ function AgreementWorkbench({
       <div><dt>Accepted</dt><dd>{new Date(agreement.created_at).toLocaleString()}</dd></div>
       <div><dt>Remote acknowledgement</dt><dd>{agreement.remote_acknowledged ? "Persisted" : "Not observed"}</dd></div>
     </dl>
-    <AgreementExecutionReadiness agreement={agreement} onRefresh={onRefresh} />
+    <AgreementExecutionReadiness
+      key={`${agreement.order_digest}:${agreement.dispatch_target_url ?? ""}`}
+      agreement={agreement}
+      onRefresh={onRefresh}
+    />
     {agreement.remote_acknowledged && <div className="commerce-action">
       <h3>Receiver-signed acknowledgement</h3>
       <p className="muted">This proves the receiver signed a retention claim. It does not independently prove the receiver's filesystem or Spine contents.</p>
@@ -1043,23 +1482,13 @@ function AgreementExecutionReadiness({
     setHistoryError("");
   }, [initialHistoryKey, execution?.history.has_more, execution?.history.next_cursor]);
 
-  useEffect(() => {
-    skillImportGeneration.current += 1;
-    skillImportAbort.current?.abort();
-    skillImportAbort.current = null;
-    setSkillPeerUrl(loadTradeSkillPeer(
-      agreement.order_digest,
-      agreement.dispatch_target_url,
-    ));
-    setSkillImportMessages({});
-    setSkillImportErrors({});
-    setImportingSkill("");
-    return () => {
+  useEffect(() => (
+    () => {
       skillImportGeneration.current += 1;
       skillImportAbort.current?.abort();
       skillImportAbort.current = null;
-    };
-  }, [agreement.order_digest, agreement.dispatch_target_url]);
+    }
+  ), []);
 
   if (!execution) {
     return <div className="commerce-action">

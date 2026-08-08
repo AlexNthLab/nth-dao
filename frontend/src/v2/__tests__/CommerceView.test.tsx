@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { TradeExecutionView } from "../types-v2";
+import type { MarketSearchPage, TradeExecutionView, TradeOfferInspection } from "../types-v2";
 
 const { order } = vi.hoisted(() => ({ order: {
   order_id: "nth-order-sha256:" + "a".repeat(64),
@@ -205,6 +205,142 @@ function tradeSkillDetail(suffix = "7") {
   };
 }
 
+function tradeOfferMarketPage(digest: string): MarketSearchPage {
+  return {
+    items: [{
+      entry_id: "nth-ann-sha256:trade-offer",
+      entry_kind: "offer",
+      protocol_kind: "trade-offer-announcement",
+      market_intent: "exchange",
+      category: "digital-assets",
+      title: "Swap compute for credits",
+      summary: "Publisher-claimed exchange.",
+      publisher_did: "did:key:zPublisher",
+      published_at_ms: 1_900_000_000_000,
+      not_after_ms: 1_900_086_400_000,
+      context: "trade",
+      capability_set: ["compute"],
+      claimable: false,
+      legacy: false,
+      source: "federated",
+      source_peer: "https://publisher.example",
+      stale: false,
+      last_verified_at_ms: 1_900_000_001_000,
+      value: { kind: "none", amount_minor: 0, asset: "" },
+      target: {
+        announcement_id: "ann-trade-offer",
+        federation_key: "nth-ann-sha256:trade-offer",
+        offer_digest: digest,
+        offer_uri: `/api/v2/trade/federation/offers/${digest}`,
+      },
+      projection_only: true,
+      warning: "Discovery claim only",
+    }],
+    count: 1,
+    truncated: false,
+    facets: [{ category: "digital-assets", count: 1 }],
+    projection_only: true,
+    warning: "Discovery claims only",
+  };
+}
+
+function inspectedTradeOffer(digest: string): TradeOfferInspection {
+  return {
+    digest,
+    offer: {
+      kind: "org.nthdao.trade.offer",
+      protocol_version: "2.0",
+      offer_id: "org.nthdao.market/swap",
+      revision: 1,
+      previous_offer_digest: null,
+      state: "active",
+      publisher_did: "did:key:zPublisher",
+      title: "Swap compute for credits",
+      summary: "Publisher-claimed exchange.",
+      provides: [{
+        leg_id: "compute",
+        resource_type: "service",
+        resource_id: "urn:nthdao:service:compute",
+        quantity: "1",
+        unit: "job",
+        descriptor_digest: "sha256:" + "b".repeat(64),
+      }],
+      requests: [{
+        leg_id: "credits",
+        resource_type: "digital-asset",
+        resource_id: "urn:nthdao:asset:test-credit",
+        quantity: "25",
+        unit: "credit",
+        descriptor_digest: "sha256:" + "c".repeat(64),
+      }],
+      rule_refs: [{
+        rule_id: "org.nthdao.rules/manual-delivery",
+        digest: "sha256:" + "d".repeat(64),
+      }],
+      published_at: "2026-08-04T00:00:00Z",
+      not_after: "2026-08-05T00:00:00Z",
+      extensions: {},
+      proof: {},
+    },
+    resource_descriptors: {
+      status: "incomplete",
+      referenced_count: 2,
+      verified_inline_count: 1,
+      profile_packages_resolved: false,
+      execution_ready: false,
+      warning: "Profile references are not resolved or recognized.",
+      items: [{
+        digest: "sha256:" + "b".repeat(64),
+        computed_digest: "sha256:" + "b".repeat(64),
+        content_hash_valid: true,
+        leg_ids: ["compute"],
+        descriptor: {
+          category: "services",
+          resource_type: "service",
+          resource_id: "urn:nthdao:service:compute",
+          attributes: { display_reference: "Compute review" },
+        },
+        profile_ref: {
+          rule_id: "org.nthdao.profiles/compute",
+          digest: "sha256:" + "e".repeat(64),
+        },
+        profile_resolution: "unresolved",
+        execution_ready: false,
+      }],
+    },
+    discoveries: [{
+      announcement_id: "ann-trade-offer",
+      federation_key: "nth-ann-sha256:trade-offer",
+      source_peer: "https://publisher.example",
+      source_did: "did:key:zPublisher",
+      stale: false,
+      last_verified_ms: 1_900_000_001_000,
+    }],
+    verification: {
+      offer_signature_valid: true,
+      announcement_binding_valid: true,
+      source_did_bound: true,
+      recent_source_verified: true,
+      head_chain_valid: true,
+      publisher_head_claim_valid: true,
+    },
+    authority: "remote-publisher",
+    storage_provenance: null,
+    head_claim: {
+      publisher_claim_verified: true,
+      disclosed_chain_complete: true,
+      globally_latest_proven: false,
+      head_revision: 1,
+      chain_length: 1,
+      chain_digests: [digest],
+      claimed_at_ms: 1_900_000_001_000,
+      expires_at_ms: 1_900_086_400_000,
+    },
+    actionable: false,
+    warning: "A valid signature proves authorship, not availability or truth.",
+  };
+}
+
 vi.mock("../api", () => ({
   ApiHttpError: class ApiHttpError extends Error {
     status: number;
@@ -215,7 +351,6 @@ vi.mock("../api", () => ({
       this.path = path;
     }
   },
-  fetchCommerceListings: vi.fn().mockResolvedValue([]),
   fetchCommerceOrders: vi.fn().mockResolvedValue([order]),
   fetchTradeProposals: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
   fetchTradeOrders: vi.fn().mockResolvedValue({ items: [], next_cursor: "" }),
@@ -292,8 +427,20 @@ vi.mock("../api", () => ({
     execution_authority_granted: false,
     warning: "Observed evidence only",
   }),
-  listOpenTasks: vi.fn().mockResolvedValue([]),
-  publishCommerceListing: vi.fn().mockResolvedValue({ digest: "sha256:x", warning: "" }),
+  announceTask: vi.fn().mockResolvedValue({ announcement_id: "ann-task" }),
+  searchMarket: vi.fn().mockResolvedValue({
+    items: [],
+    count: 0,
+    truncated: false,
+    facets: [],
+    projection_only: true,
+    warning: "Discovery claims only",
+  }),
+  publishMarketOffer: vi.fn().mockResolvedValue({
+    digest: "sha256:x", announcement_published: true, warning: "Discovery claim",
+  }),
+  getTradeOfferInspection: vi.fn(),
+  importCachedTradeOffer: vi.fn(),
   remoteCommerceCheckout: vi.fn().mockResolvedValue({ order, delivery: { status: "acknowledged" }, warning: "" }),
   submitCommerceDelivery: vi.fn(),
   verifyCommerceDelivery: vi.fn().mockResolvedValue({ order: { ...order, state: "verified" }, warning: "" }),
@@ -311,15 +458,18 @@ import {
   fetchTradeRulePackages,
   fetchTradeRuleRecognitionImportBatch,
   getTradeOrder,
+  getTradeOfferInspection,
   getTradeExecutionReceipts,
   getTradeProposal,
   getTradeRulePackage,
   importTradeRulePackage,
   importTradeRuleRecognitions,
+  importCachedTradeOffer,
   acceptTradeProposal,
+  announceTask,
   dispatchCommerceOutbox,
-  listOpenTasks,
-  publishCommerceListing,
+  publishMarketOffer,
+  searchMarket,
   remoteCommerceCheckout,
   resolveCommerceDispute,
   verifyCommerceDelivery,
@@ -404,10 +554,22 @@ beforeEach(() => {
     acknowledgement_persisted: true,
   });
   vi.mocked(dispatchCommerceOutbox).mockReset().mockResolvedValue([]);
-  vi.mocked(listOpenTasks).mockReset().mockResolvedValue([]);
-  vi.mocked(publishCommerceListing).mockReset().mockResolvedValue({
-    digest: "sha256:x", listing: {}, warning: "",
+  vi.mocked(announceTask).mockReset().mockResolvedValue({
+    announcement_id: "ann-task",
+  } as never);
+  vi.mocked(searchMarket).mockReset().mockResolvedValue({
+    items: [],
+    count: 0,
+    truncated: false,
+    facets: [],
+    projection_only: true,
+    warning: "Discovery claims only",
   });
+  vi.mocked(publishMarketOffer).mockReset().mockResolvedValue({
+    digest: "sha256:x", announcement_published: true, warning: "Discovery claim",
+  } as never);
+  vi.mocked(getTradeOfferInspection).mockReset();
+  vi.mocked(importCachedTradeOffer).mockReset();
   vi.mocked(remoteCommerceCheckout).mockReset().mockResolvedValue({
     order, delivery: { status: "acknowledged" }, warning: "",
   });
@@ -426,6 +588,7 @@ afterEach(() => {
 describe("CommerceView", () => {
   it("shows purchases, signed timeline, and buyer verification actions", async () => {
     render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /^Orders/ }));
     expect(await screen.findAllByText("Adversarial review")).not.toHaveLength(0);
     expect(screen.getByText("manual / NTH-TEST")).toBeTruthy();
     expect(screen.getByText("order_created")).toBeTruthy();
@@ -443,44 +606,409 @@ describe("CommerceView", () => {
       queued: { message_id: "sha256:pending", status: "pending", error: "peer unavailable" },
     });
     render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /^Orders/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Accept" }));
     expect(await screen.findByText(/still awaiting peer acknowledgement/)).toBeTruthy();
   });
 
   it("turns a federated signed service summary into a prefilled checkout", async () => {
-    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
-      announcement_id: "ann-1", publisher_did: "did:key:zSeller", title: "Remote review",
-      listing_type: "service", capability_set: [], context: "commerce",
-      reward_minor: 2_000_000, reward_asset: "NTH-TEST", federated: true,
-      source_peer: "https://seller.example", offer_digest: "sha256:" + "f".repeat(64),
-      price_minor: 2_000_000, price_asset: "NTH-TEST",
-    }]);
+    vi.mocked(searchMarket).mockResolvedValueOnce({
+      items: [{
+        entry_id: "nth-ann-sha256:ann-1",
+        entry_kind: "offer",
+        protocol_kind: "commerce-listing-announcement",
+        market_intent: "provide",
+        category: "services",
+        title: "Remote review",
+        summary: "",
+        publisher_did: "did:key:zSeller",
+        published_at_ms: 1,
+        not_after_ms: 9_999_999_999_999,
+        context: "commerce",
+        capability_set: [],
+        claimable: false,
+        legacy: false,
+        source: "federated",
+        source_peer: "https://seller.example",
+        stale: false,
+        last_verified_at_ms: 1,
+        value: { kind: "price", amount_minor: 2_000_000, asset: "NTH-TEST" },
+        target: {
+          announcement_id: "ann-1",
+          federation_key: "nth-ann-sha256:ann-1",
+          offer_digest: "sha256:" + "f".repeat(64),
+          offer_uri: "/api/v2/commerce/federation/listings/sha256:" + "f".repeat(64),
+        },
+        projection_only: true,
+        warning: "Discovery claim",
+      }],
+      count: 1,
+      truncated: false,
+      facets: [{ category: "services", count: 1 }],
+      projection_only: true,
+      warning: "Discovery claims only",
+    });
     render(<ToastProvider><CommerceView /></ToastProvider>);
-    fireEvent.click(await screen.findByRole("tab", { name: /My services/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "Buy" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review order" }));
     expect((screen.getByLabelText("Peer URL") as HTMLInputElement).value).toBe("https://seller.example");
     expect((screen.getByLabelText("Listing digest") as HTMLInputElement).value).toBe("sha256:" + "f".repeat(64));
+  });
+
+  it("keeps Task and stale Offer discovery claims visibly non-actionable", async () => {
+    vi.mocked(searchMarket).mockResolvedValue({
+      items: [{
+        entry_id: "nth-ann-sha256:task",
+        entry_kind: "task",
+        protocol_kind: "task-announcement",
+        market_intent: "request",
+        category: "tasks",
+        title: "Debug worker",
+        summary: "",
+        publisher_did: "did:key:zTask",
+        published_at_ms: 1,
+        not_after_ms: 0,
+        context: "general",
+        capability_set: [],
+        claimable: true,
+        legacy: false,
+        source: "local",
+        source_peer: "",
+        stale: false,
+        last_verified_at_ms: 0,
+        value: { kind: "reward", amount_minor: 10, asset: "credit" },
+        target: { announcement_id: "task", federation_key: "task-key", offer_digest: "", offer_uri: "" },
+        projection_only: true,
+        warning: "Task claim",
+      }, {
+        entry_id: "nth-ann-sha256:asset",
+        entry_kind: "offer",
+        protocol_kind: "trade-offer-announcement",
+        market_intent: "exchange",
+        category: "digital-assets",
+        title: "Stale token swap",
+        summary: "",
+        publisher_did: "did:key:zOffer",
+        published_at_ms: 1,
+        not_after_ms: 2,
+        context: "trade",
+        capability_set: [],
+        claimable: false,
+        legacy: false,
+        source: "federated",
+        source_peer: "https://peer.example",
+        stale: true,
+        last_verified_at_ms: 1,
+        value: { kind: "none", amount_minor: 0, asset: "" },
+        target: {
+          announcement_id: "asset",
+          federation_key: "asset-key",
+          offer_digest: "sha256:" + "a".repeat(64),
+          offer_uri: "/api/v2/trade/federation/offers/sha256:" + "a".repeat(64),
+        },
+        projection_only: true,
+        warning: "Offer claim",
+      }],
+      count: 2,
+      truncated: false,
+      facets: [{ category: "tasks", count: 1 }, { category: "digital-assets", count: 1 }],
+      projection_only: true,
+      warning: "Discovery claims only",
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+
+    expect(await screen.findByText("Debug worker")).toBeTruthy();
+    expect(screen.getByText("Stale token swap")).toBeTruthy();
+    expect(screen.getByText(/Search results are signed discovery claims/)).toBeTruthy();
+    expect(screen.getByText("Open Tasks to claim this work request.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Review order" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Digital assets" }));
+    await waitFor(() => expect(searchMarket).toHaveBeenLastCalledWith(
+      expect.objectContaining({ category: "digital-assets" }),
+      expect.any(AbortSignal),
+    ));
+  });
+
+  it("does not let an older Market search overwrite a newer query", async () => {
+    let resolveInitial!: (page: MarketSearchPage) => void;
+    let resolveLatest!: (page: MarketSearchPage) => void;
+    vi.mocked(searchMarket).mockImplementation((filters) => new Promise((resolve) => {
+      if (filters?.q === "latest") resolveLatest = resolve;
+      else resolveInitial = resolve;
+    }));
+    const initial = tradeOfferMarketPage("sha256:" + "1".repeat(64));
+    initial.items[0] = { ...initial.items[0], title: "Old result" };
+    const latest = tradeOfferMarketPage("sha256:" + "2".repeat(64));
+    latest.items[0] = { ...latest.items[0], title: "Latest result" };
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    await waitFor(() => expect(searchMarket).toHaveBeenCalledWith(
+      expect.objectContaining({ q: "" }),
+      expect.any(AbortSignal),
+    ));
+    fireEvent.change(screen.getByLabelText("Search market"), {
+      target: { value: "latest" },
+    });
+    await waitFor(() => expect(searchMarket).toHaveBeenCalledWith(
+      expect.objectContaining({ q: "latest" }),
+      expect.any(AbortSignal),
+    ));
+    await act(async () => resolveLatest(latest));
+    expect(await screen.findByText("Latest result")).toBeTruthy();
+    await act(async () => resolveInitial(initial));
+    expect(screen.queryByText("Old result")).toBeNull();
+    expect(screen.getByText("Latest result")).toBeTruthy();
+  });
+
+  it("loads My listings from a source-scoped paginated query", async () => {
+    const discover = tradeOfferMarketPage("sha256:" + "0".repeat(64));
+    discover.items = [];
+    discover.count = 0;
+    discover.truncated = false;
+    const first = tradeOfferMarketPage("sha256:" + "1".repeat(64));
+    first.items[0] = { ...first.items[0], title: "Local first", source: "local" };
+    first.count = 2;
+    first.truncated = true;
+    const second = tradeOfferMarketPage("sha256:" + "2".repeat(64));
+    second.items[0] = { ...second.items[0], title: "Local second", source: "local" };
+    second.count = 2;
+    second.offset = 1;
+    second.truncated = false;
+    vi.mocked(searchMarket).mockImplementation((filters) => {
+      if (filters?.source === "local") {
+        return Promise.resolve(filters.offset === 1 ? second : first);
+      }
+      return Promise.resolve(discover);
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("tab", { name: /My listings/ }));
+
+    expect(await screen.findByText("Local first")).toBeTruthy();
+    expect(searchMarket).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "local", offset: 0, limit: 100 }),
+      expect.any(AbortSignal),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Local second")).toBeTruthy();
+    expect(searchMarket).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "local", offset: 1, limit: 100 }),
+    );
+  });
+
+  it("inspects and retains an exact federated Trade Offer from Market", async () => {
+    const digest = "sha256:" + "a".repeat(64);
+    vi.mocked(searchMarket).mockResolvedValueOnce(tradeOfferMarketPage(digest));
+    vi.mocked(getTradeOfferInspection).mockResolvedValueOnce(
+      inspectedTradeOffer(digest),
+    );
+    vi.mocked(importCachedTradeOffer).mockResolvedValueOnce({
+      digest,
+      appended: true,
+      persisted: true,
+      classification: "canonical",
+      entry_hash: "sha256:" + "e".repeat(64),
+      source_kind: "federation-cache",
+      source_id: "did:key:zPublisher",
+      audit_event_id: "f".repeat(64),
+      audit_event_ids: ["f".repeat(64)],
+      imported_revisions: 1,
+      appended_revisions: 1,
+      discovery_sources: 1,
+      trusted: false,
+      actionable: false,
+      warning: "Saved as a claim only.",
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    await screen.findByText("Swap compute for credits");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect offer" }));
+
+    expect(await screen.findByLabelText("Signed Offer terms")).toBeTruthy();
+    expect(screen.getByText("Signature verified")).toBeTruthy();
+    expect(screen.getByText("1 job / service")).toBeTruthy();
+    expect(screen.getByText("25 credit / digital-asset")).toBeTruthy();
+    expect(screen.getByText(/global latest revision is not proven/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save locally" }));
+    expect(await screen.findByRole("button", { name: "Saved locally" })).toBeTruthy();
+    expect(getTradeOfferInspection).toHaveBeenCalledWith(
+      digest,
+      true,
+      expect.any(AbortSignal),
+    );
+    expect(importCachedTradeOffer).toHaveBeenCalledWith(digest);
+  });
+
+  it("keeps a Trade Offer inspectable after an inspection failure", async () => {
+    const digest = "sha256:" + "9".repeat(64);
+    vi.mocked(searchMarket).mockResolvedValueOnce(tradeOfferMarketPage(digest));
+    vi.mocked(getTradeOfferInspection).mockRejectedValueOnce(
+      new Error("verified Offer cache unavailable"),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    await screen.findByText("Swap compute for credits");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect offer" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "verified Offer cache unavailable",
+    );
+    expect(screen.getByRole("button", { name: "Inspect offer" })).toBeTruthy();
+  });
+
+  it("keeps a verified Trade Offer save retryable after persistence fails", async () => {
+    const digest = "sha256:" + "8".repeat(64);
+    vi.mocked(searchMarket).mockResolvedValueOnce(tradeOfferMarketPage(digest));
+    vi.mocked(getTradeOfferInspection).mockResolvedValueOnce(
+      inspectedTradeOffer(digest),
+    );
+    vi.mocked(importCachedTradeOffer).mockRejectedValueOnce(
+      new Error("signed Spine unavailable"),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    await screen.findByText("Swap compute for credits");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect offer" }));
+    await screen.findByLabelText("Signed Offer terms");
+    expect(screen.getByText("Profile reference unresolved")).toBeTruthy();
+    expect(screen.getByText(/Compute review/)).toBeTruthy();
+    expect(screen.getByText(/1 of 2 referenced inline descriptors/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save locally" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "signed Spine unavailable",
+    );
+    expect(screen.getByRole("button", { name: "Save locally" })).toHaveProperty(
+      "disabled",
+      false,
+    );
   });
 
   it("lets the bound buyer resolve a disputed no-money order", async () => {
     vi.mocked(fetchCommerceOrders).mockResolvedValueOnce([{ ...order, state: "disputed" }]);
     render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /^Orders/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Refund buyer" }));
     await waitFor(() => expect(resolveCommerceDispute).toHaveBeenCalledWith(
       order.order_id, "refund", "",
     ));
   });
 
-  it("publishes only the fixed no-money service shape", async () => {
+  it("publishes a work request through the Task protocol", async () => {
     render(<ToastProvider><CommerceView /></ToastProvider>);
-    fireEvent.click(screen.getByRole("button", { name: "Publish service" }));
-    fireEvent.change(screen.getByLabelText("Service ID"), { target: { value: "svc-1" } });
-    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Review" } });
-    fireEvent.change(screen.getByLabelText("Price in NTH-TEST"), { target: { value: "2" } });
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
-    await waitFor(() => expect(publishCommerceListing).toHaveBeenCalledWith({
-      listingId: "svc-1", title: "Review", description: "", priceValue: "2",
-    }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "Review code" } });
+    fireEvent.change(within(form).getByLabelText("Bounty amount (minor units)"), { target: { value: "250" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    await waitFor(() => expect(announceTask).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Review code",
+      listing_type: "task",
+      reward_minor: 250,
+    })));
+    expect(publishMarketOffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects overlong capability names before either publish API", async () => {
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "Review code" } });
+    fireEvent.change(within(form).getByLabelText("Capabilities"), { target: { value: "x".repeat(101) } });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    expect((await within(form).findByRole("alert")).textContent).toContain(
+      "Capability names must not exceed 100 characters.",
+    );
+    expect(announceTask).not.toHaveBeenCalled();
+    expect(publishMarketOffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects more than 32 capabilities before either publish API", async () => {
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "Review code" } });
+    fireEvent.change(within(form).getByLabelText("Capabilities"), {
+      target: { value: Array.from({ length: 33 }, (_, index) => `cap-${index}`).join(",") },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    expect((await within(form).findByRole("alert")).textContent).toContain(
+      "No more than 32 capabilities may be published.",
+    );
+    expect(announceTask).not.toHaveBeenCalled();
+    expect(publishMarketOffer).not.toHaveBeenCalled();
+  });
+
+  it("publishes a free service as a signed provide-only Trade Offer", async () => {
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.click(within(form).getByRole("tab", { name: /^Service/ }));
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "Code review" } });
+    fireEvent.change(within(form).getByLabelText("Offered resource"), { target: { value: "Review package" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    await waitFor(() => expect(publishMarketOffer).toHaveBeenCalledWith(expect.objectContaining({
+      idempotency_key: expect.any(String),
+      intent: "provide",
+      category: "services",
+      title: "Code review",
+      requests: [],
+      provides: [expect.objectContaining({
+        category: "services",
+        resource_type: "service",
+        quantity: "1",
+        unit: "job",
+      })],
+    })));
+    expect(announceTask).not.toHaveBeenCalled();
+  });
+
+  it("blocks local paths before publishing a public Market offer", async () => {
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.click(within(form).getByRole("tab", { name: /^Service/ }));
+    fireEvent.change(within(form).getByLabelText("Title"), {
+      target: { value: "Private draft" },
+    });
+    fireEvent.change(within(form).getByLabelText("Offered resource"), {
+      target: { value: "C:\\Users\\Operator\\Desktop\\private.txt" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    expect((await within(form).findByRole("alert")).textContent).toContain(
+      "Remove local file paths",
+    );
+    expect(publishMarketOffer).not.toHaveBeenCalled();
+  });
+
+  it("publishes an exchange with explicit provides and requests legs", async () => {
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.click(within(form).getByRole("tab", { name: /^Exchange/ }));
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "Swap game assets" } });
+    fireEvent.change(within(form).getByLabelText("Offered resource"), { target: { value: "game:item:sword" } });
+    fireEvent.change(within(form).getByLabelText("Requested resource"), { target: { value: "game:coin:gold" } });
+    fireEvent.click(within(form).getByText("Optional Skills and exact digests"));
+    fireEvent.change(within(form).getByLabelText("Requested Resource Profile Skill ID"), { target: { value: "org.example.profile/game-coin" } });
+    fireEvent.change(within(form).getByLabelText("Requested Resource Profile digest"), { target: { value: "sha256:" + "a".repeat(64) } });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    await waitFor(() => expect(publishMarketOffer).toHaveBeenCalledWith(expect.objectContaining({
+      intent: "exchange",
+      title: "Swap game assets",
+      provides: [expect.objectContaining({ resource_id: "game:item:sword" })],
+      requests: [expect.objectContaining({
+        resource_id: "game:coin:gold",
+        profile_rule_id: "org.example.profile/game-coin",
+        profile_digest: "sha256:" + "a".repeat(64),
+      })],
+    })));
   });
 
   it("shows verified-cache Trade Skills without claiming trust or execution", async () => {
@@ -671,6 +1199,7 @@ describe("CommerceView", () => {
       error: "peer unavailable",
     }]);
     render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /^Orders/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Retry pending Outbox" }));
     expect(await screen.findByText(/still pending/)).toBeTruthy();
     expect(screen.queryByText("Outbox retry completed")).toBeNull();
@@ -1726,6 +2255,7 @@ describe("CommerceView", () => {
     );
 
     render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /^Orders/ }));
     expect(await screen.findAllByText("Adversarial review")).not.toHaveLength(0);
     fireEvent.click(screen.getByRole("tab", { name: /Proposals/ }));
 
@@ -1777,8 +2307,7 @@ describe("CommerceView", () => {
       audit_verified: true,
       audit_event_id: "a".repeat(64),
     };
-    const api = await import("../api");
-    vi.mocked(api.fetchCommerceListings).mockRejectedValueOnce(
+    vi.mocked(fetchCommerceOrders).mockRejectedValueOnce(
       new Error("listing store unavailable"),
     );
     vi.mocked(fetchTradeProposals).mockResolvedValueOnce({

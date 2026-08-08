@@ -10,10 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   announceTask, claimFederatedTask, claimTask, discoverFederationPeers, fetchAgents, getFederationStatus,
-  getTradeOfferInspection,
-  importCachedTradeOffer,
   listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
-  validateTradeOfferImportResult,
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
@@ -24,7 +21,6 @@ import type {
   FederationStatus,
   TaskAnnouncement,
   TaskCategory,
-  TradeOfferInspection,
 } from "../types-v2";
 
 function visibilityWarningLabel(
@@ -42,16 +38,6 @@ function visibilityWarningLabel(
       }
       return t("执行视图写入异常", "Execution view persistence warning");
   }
-}
-
-function tradeOfferSelectionKey(task: TaskAnnouncement): string {
-  return `${task.federation_key || task.announcement_id}:${task.offer_digest || ""}`;
-}
-
-function tradeOfferSourceCount(inspection: TradeOfferInspection): number {
-  return new Set(inspection.discoveries.map(
-    (item) => `${item.source_did}\u0000${item.source_peer}`,
-  )).size;
 }
 
 function formatFederationRefresh(ms: number): string {
@@ -79,13 +65,9 @@ export function TasksView() {
   // 市场化分区 + 排序。market=可承接的活(本节点+联邦);mine=我发布的。
   const [tab, setTab] = useState<"market" | "mine">("market");
   const [sort, setSort] = useState<"recent" | "reward">("recent");
-  const [listingFilter, setListingFilter] = useState<
-    "" | "task" | "service" | "product" | "exchange"
-  >("");
 
   // 发布表单
   const [showForm, setShowForm] = useState(false);
-  const [fListingType, setFListingType] = useState<"task" | "service" | "product">("task");
   const [fTitle, setFTitle] = useState("");
   const [fCaps, setFCaps] = useState("");
   const [fReward, setFReward] = useState("");
@@ -103,16 +85,7 @@ export function TasksView() {
   const [fedStatus, setFedStatus] = useState<FederationStatus | null>(null);
   const [fedPeerUrl, setFedPeerUrl] = useState("");
   const [fedBusy, setFedBusy] = useState(false);
-  const [offerInspection, setOfferInspection] = useState<TradeOfferInspection | null>(null);
-  const [offerInspectionKey, setOfferInspectionKey] = useState("");
-  const [offerInspectionError, setOfferInspectionError] = useState("");
-  const [offerImportBusyDigest, setOfferImportBusyDigest] = useState("");
-  const [offerImportErrors, setOfferImportErrors] = useState<Record<string, string>>({});
   const fedRequestSequence = useRef(0);
-  const offerInspectionRequestSequence = useRef(0);
-  const offerInspectionAbort = useRef<AbortController | null>(null);
-
-  useEffect(() => () => offerInspectionAbort.current?.abort(), []);
 
   function beginFederationRequest(): number {
     fedRequestSequence.current += 1;
@@ -143,7 +116,7 @@ export function TasksView() {
         {
           context: ctx,
           capability: cap,
-          listingType: listingFilter,
+          listingType: "task",
           minReward: minReward ? Number(minReward) : 0,
           q,
         },
@@ -164,7 +137,7 @@ export function TasksView() {
 
   async function loadCategories(signal?: AbortSignal) {
     try {
-      setCats(await listTaskCategories(signal));
+      setCats(await listTaskCategories("task", signal));
     } catch {
       // 分面是锦上添花,失败静默(不打断浏览)。
     }
@@ -191,7 +164,7 @@ export function TasksView() {
       ac.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx, cap, listingFilter, minReward, q, reloadKey]);
+  }, [ctx, cap, minReward, q, reloadKey]);
 
   // 类别分面是全局 facet(不随筛选变),只在挂载 + 发布后刷新。
   useEffect(() => {
@@ -258,9 +231,9 @@ export function TasksView() {
   }, [reloadKey]);
 
   async function handleClaim(task: TaskAnnouncement) {
-    if (task.listing_type === "exchange" || task.claimable === false) {
+    if ((task.listing_type || "task") !== "task" || task.claimable === false) {
       toast.push(
-        "Signed exchange offers continue through the Agreement flow.",
+        "This entry is not a claimable Task. Open it from Market instead.",
         "info",
       );
       return;
@@ -332,7 +305,7 @@ export function TasksView() {
     try {
       await announceTask({
         title: fTitle.trim(),
-        listing_type: fListingType,
+        listing_type: "task",
         capability_set: fCaps
           .split(",")
           .map((s) => s.trim())
@@ -343,7 +316,6 @@ export function TasksView() {
       });
       toast.push(t("任务已发布", "Task published"), "success");
       setFTitle("");
-      setFListingType("task");
       setFCaps("");
       setFReward("");
       setFContext("");
@@ -357,79 +329,6 @@ export function TasksView() {
       );
     } finally {
       setPublishing(false);
-    }
-  }
-
-  async function handleInspectOffer(task: TaskAnnouncement) {
-    const digest = task.offer_digest || "";
-    if (!digest) return;
-    const selectionKey = tradeOfferSelectionKey(task);
-    if (offerInspectionKey === selectionKey && offerInspection) {
-      offerInspectionAbort.current?.abort();
-      offerInspectionRequestSequence.current += 1;
-      setOfferInspection(null);
-      setOfferInspectionKey("");
-      setOfferInspectionError("");
-      return;
-    }
-    offerInspectionAbort.current?.abort();
-    const controller = new AbortController();
-    offerInspectionAbort.current = controller;
-    setOfferInspectionKey(selectionKey);
-    setOfferInspection(null);
-    setOfferInspectionError("");
-    const requestSequence = ++offerInspectionRequestSequence.current;
-    try {
-      const detail = await getTradeOfferInspection(
-        digest,
-        task.federated === true,
-        controller.signal,
-      );
-      if (requestSequence !== offerInspectionRequestSequence.current) return;
-      setOfferInspection(detail);
-    } catch (error) {
-      if (requestSequence !== offerInspectionRequestSequence.current) return;
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setOfferInspectionError(
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  }
-
-  async function handleSaveRemoteOffer(task: TaskAnnouncement) {
-    const digest = task.offer_digest || "";
-    if (!digest || offerImportBusyDigest) return;
-    setOfferImportBusyDigest(digest);
-    setOfferImportErrors((current) => ({ ...current, [digest]: "" }));
-    try {
-      const result = validateTradeOfferImportResult(
-        await importCachedTradeOffer(digest),
-        digest,
-      );
-      setOfferInspection((current) => (
-        current?.digest === digest
-          ? {
-            ...current,
-            storage_provenance: {
-              source_kind: result.source_kind,
-              source_id: result.source_id,
-            },
-          }
-          : current
-      ));
-      toast.push(
-        result.appended_revisions > 0
-          ? `Saved ${result.imported_revisions} signed offer revision(s) locally`
-          : `${result.imported_revisions} signed offer revision(s) were already saved locally`,
-        "success",
-      );
-    } catch (error) {
-      setOfferImportErrors((current) => ({
-        ...current,
-        [digest]: error instanceof Error ? error.message : String(error),
-      }));
-    } finally {
-      setOfferImportBusyDigest("");
     }
   }
 
@@ -830,13 +729,13 @@ export function TasksView() {
         >
           <div>
             <p className="main-eyebrow">
-              {t("任务市场 · 发现并承接各 DAO 的活", "Task marketplace · discover & take on work across DAOs")}
+              Task work queue
             </p>
             <h1 className="main-title">Tasks {loading ? "…" : `(${shown.length})`}</h1>
             <p className="main-subtitle">
               {t(
                 "发布或承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
-                "Discover tasks, services, products, and signed exchange offers across DAOs.",
+                "Publish or claim work requests. A claim creates or links a Mission and exposes execution on the Blackboard.",
               )}
             </p>
           </div>
@@ -859,7 +758,7 @@ export function TasksView() {
               onClick={() => setTab("market")}
               title={t("各 DAO 发布的、可承接的活(含联邦)", "Claimable work from across DAOs (incl. federated)")}
             >
-              {t("市场", "Market")} ({tasks.length})
+              Available ({tasks.length})
             </button>
             <button
               className={`btn ${tab === "mine" ? "btn-primary" : "btn-ghost"}`}
@@ -869,25 +768,6 @@ export function TasksView() {
             >
               {t("我发布的", "My published")} ({myTasks.length})
             </button>
-            {(["", "task", "service", "product", "exchange"] as const).map((kind) => (
-              <button
-                key={kind || "all"}
-                className={`btn ${listingFilter === kind ? "btn-primary" : "btn-ghost"}`}
-                style={{ fontSize: 12 }}
-                onClick={() => setListingFilter(kind)}
-                title={t("按发布类型筛选", "Filter by listing type")}
-              >
-                {kind === ""
-                  ? t("All", "All")
-                  : kind === "task"
-                    ? t("Tasks", "Tasks")
-                    : kind === "service"
-                      ? t("Services", "Services")
-                      : kind === "product"
-                        ? t("Products", "Products")
-                        : t("Exchange", "Exchange")}
-              </button>
-            ))}
             <span style={{ flex: 1 }} />
             <label
               className="muted"
@@ -917,22 +797,6 @@ export function TasksView() {
                 gap: 8,
               }}
             >
-              <label
-                className="muted"
-                style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 8 }}
-              >
-                {t("发布类型", "Listing type")}
-                <select
-                  value={fListingType}
-                  onChange={(e) =>
-                    setFListingType(e.target.value as "task" | "service" | "product")
-                  }
-                >
-                  <option value="task">{t("Task", "Task")}</option>
-                  <option value="service">{t("Service", "Service")}</option>
-                  <option value="product">{t("Product", "Product")}</option>
-                </select>
-              </label>
               <input
                 placeholder={t("任务标题 *", "Task title *")}
                 value={fTitle}
@@ -995,11 +859,7 @@ export function TasksView() {
             </div>
           ) : (
             <div className="stack" style={{ gap: 10 }}>
-              {shown.map((task) => {
-                const offerSelected = (
-                  offerInspectionKey === tradeOfferSelectionKey(task)
-                );
-                return (
+              {shown.map((task) => (
                 <article
                   key={task.announcement_id}
                   style={{
@@ -1017,13 +877,7 @@ export function TasksView() {
                       </span>
                     )}
                     <span className="pill dim" style={{ fontSize: 10 }}>
-                      {task.listing_type === "exchange"
-                        ? t("Exchange", "Exchange")
-                        : task.listing_type === "product"
-                          ? t("Product", "Product")
-                          : task.listing_type === "service"
-                            ? t("Service", "Service")
-                            : t("Task", "Task")}
+                      Task
                     </span>
                     {task.federated && (
                       <span
@@ -1094,179 +948,6 @@ export function TasksView() {
                       ))}
                     </div>
                   )}
-                  {task.listing_type === "exchange" && task.offer_digest && (
-                    <>
-                      <div
-                        className="muted"
-                        style={{
-                          marginTop: 8,
-                          fontSize: 11,
-                          fontFamily: "var(--t-mono)",
-                          overflowWrap: "anywhere",
-                        }}
-                      >
-                        {String(task.availability_summary?.offer_id || "Trade Offer")}
-                        {` - ${task.offer_digest.slice(0, 22)}...`}
-                        <button
-                          className="btn btn-ghost"
-                          style={{ marginLeft: 8 }}
-                          aria-expanded={
-                            offerSelected && offerInspection !== null
-                          }
-                          onClick={() => void handleInspectOffer(task)}
-                        >
-                          {offerSelected && !offerInspection && !offerInspectionError
-                            ? "Inspecting..."
-                            : offerSelected && offerInspection
-                              ? "Close terms"
-                              : "Inspect terms"}
-                        </button>
-                      </div>
-                      {offerSelected && offerInspectionError && (
-                        <p role="alert" style={{ color: "var(--danger)", marginTop: 8 }}>
-                          Could not inspect this signed offer. {offerInspectionError}
-                        </p>
-                      )}
-                      {offerSelected && offerInspection && (
-                        <section
-                          aria-label="Signed exchange terms"
-                          style={{
-                            borderTop: "1px solid var(--border)",
-                            marginTop: 10,
-                            paddingTop: 10,
-                          }}
-                        >
-                          <p style={{ margin: 0, fontWeight: 600 }}>
-                            Signed exchange terms
-                          </p>
-                          <p className="muted" style={{ margin: "4px 0" }}>
-                            Revision {offerInspection.offer.revision}
-                            {` · ${offerInspection.offer.state}`}
-                            {offerInspection.offer.not_after
-                              ? ` · expires ${offerInspection.offer.not_after}`
-                              : " · no declared expiry"}
-                          </p>
-                          <p className="muted" style={{ margin: "4px 0 10px" }}>
-                            {offerInspection.warning}
-                          </p>
-                          <div style={{ margin: "8px 0 10px" }}>
-                            <strong>Verification</strong>
-                            <div className="muted">
-                              Publisher signature verified
-                              {offerInspection.verification.announcement_binding_valid === true
-                                ? " · announcement bound"
-                                : ""}
-                              {offerInspection.verification.source_did_bound === true
-                                ? " · source DID bound"
-                                : ""}
-                            </div>
-                            {offerInspection.authority === "remote-publisher" && (
-                              <div
-                                style={{
-                                  color: offerInspection.verification.recent_source_verified
-                                    ? "var(--success)"
-                                    : "var(--warning)",
-                                }}
-                              >
-                                {offerInspection.verification.recent_source_verified
-                                  ? "Remote source recently verified"
-                                  : "No recently verified remote source"}
-                                {` · ${tradeOfferSourceCount(offerInspection)} discovery source(s)`}
-                              </div>
-                            )}
-                            {offerInspection.head_claim && (
-                              <>
-                                <div style={{ color: "var(--success)" }}>
-                                  Publisher head claim verified
-                                  {` · disclosed ${offerInspection.head_claim.chain_length}-revision chain is continuous`}
-                                </div>
-                                <div className="muted">
-                                  This verifies the disclosed signed chain, not that no newer
-                                  revision exists elsewhere.
-                                </div>
-                              </>
-                            )}
-                            {offerInspection.discoveries.length > 0 && (
-                              <div className="muted">
-                                Last verified: {new Date(Math.max(
-                                  ...offerInspection.discoveries.map(
-                                    (item) => item.last_verified_ms,
-                                  ),
-                                )).toISOString()}
-                              </div>
-                            )}
-                          </div>
-                          {([
-                            ["Provides", offerInspection.offer.provides],
-                            ["Requests", offerInspection.offer.requests],
-                          ] as const).map(([label, legs]) => (
-                            <div key={label} style={{ marginTop: 8 }}>
-                              <strong>{label}</strong>
-                              {legs.length === 0 ? (
-                                <p className="muted">None declared</p>
-                              ) : legs.map((leg) => (
-                                <div
-                                  key={`${label}-${leg.leg_id}`}
-                                  style={{ marginTop: 4, overflowWrap: "anywhere" }}
-                                >
-                                  {leg.quantity} {leg.unit} · {leg.resource_type}
-                                  <div className="muted" style={{ fontFamily: "var(--t-mono)" }}>
-                                    {leg.resource_id}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          ))}
-                          <div className="muted" style={{ marginTop: 10, overflowWrap: "anywhere" }}>
-                            Signer: {offerInspection.offer.publisher_did}
-                          </div>
-                          {offerInspection.offer.rule_refs.length > 0 ? (
-                            <div style={{ marginTop: 8 }}>
-                              <strong>Applicable rule references</strong>
-                              {offerInspection.offer.rule_refs.map((rule) => (
-                                <div
-                                  key={`${rule.rule_id}-${rule.digest}`}
-                                  className="muted"
-                                  style={{ fontFamily: "var(--t-mono)", overflowWrap: "anywhere" }}
-                                >
-                                  {rule.rule_id} · {rule.digest}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="muted">No rule references declared.</p>
-                          )}
-                          {offerInspection.authority === "remote-publisher" && (
-                            <div style={{ marginTop: 12 }}>
-                              <button
-                                className="btn btn-secondary"
-                                disabled={
-                                  offerImportBusyDigest === offerInspection.digest
-                                  || offerInspection.storage_provenance !== null
-                                }
-                                onClick={() => void handleSaveRemoteOffer(task)}
-                              >
-                                {offerInspection.storage_provenance !== null
-                                  ? "Saved locally"
-                                  : offerImportBusyDigest === offerInspection.digest
-                                    ? "Saving..."
-                                    : "Save locally"}
-                              </button>
-                              <p className="muted" style={{ margin: "6px 0 0" }}>
-                                Saving retains the exact signed claim for later review. It does not
-                                accept the offer, trust the publisher, or authorize execution.
-                              </p>
-                              {offerImportErrors[offerInspection.digest] && (
-                                <p role="alert" style={{ color: "var(--danger)", marginTop: 6 }}>
-                                  Could not save this signed offer. {offerImportErrors[offerInspection.digest]}
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </section>
-                      )}
-                    </>
-                  )}
                   <div
                     style={{
                       marginTop: 8,
@@ -1321,8 +1002,7 @@ export function TasksView() {
                     )}
                   </div>
                 </article>
-                );
-              })}
+              ))}
             </div>
           )}
         </div>

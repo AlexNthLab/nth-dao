@@ -1,13 +1,42 @@
 {
-  "expected_offer_canonical_hex": "7b22657874656e73696f6e73223a7b7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032372d30372d32395430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e7265666572656e63652f6274632d666f722d736f6c616e612d746f6b656e222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30372d32395430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2270726f6f665f76616c7565223a226b6772784d5644585a6f59504675767632675576422d59514734614f387a30674c4e6571506c53634d4e64666f5067345963453944567076426d6f7a54396e664f4743774b4d502d4b4e5534502d4f4d755876644267222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764237a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a63646466363335366132333131306361396232333239356631383135633966393833653564616338333161373631633565663333313038306166636435356531222c226c65675f6964223a22626974636f696e222c227175616e74697479223a22302e3031222c227265736f757263655f6964223a22626974636f696e3a627463222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22627463227d5d2c227075626c69736865645f6174223a22323032362d30372d32395430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a37663363356631653666613737373734386138303034343338653030623334633330366138666565316233383437303832386661656666336433306563386235222c226c65675f6964223a22736f6c616e612d746f6b656e222c227175616e74697479223a2231303030222c227265736f757263655f6964223a22736f6c616e613a73706c3a4578616d706c654d696e74222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22746f6b656e227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b7b22646967657374223a227368613235363a30633636643662663230633631393564366135663634346134353632383438303965613336386466643534633734333061363462373562363461383836376136222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f61746f6d69632d73776170227d5d2c227374617465223a22616374697665222c2273756d6d617279223a225075626c696320636f6e666f726d616e6365206f666665723b206e65766572207573652074686973206b657920666f72207265616c2074727573742e222c227469746c65223a2242544320666f72206120536f6c616e6120746f6b656e227d",
-  "expected_offer_digest": "sha256:752fe89bfbb6fd8f6991acf57e136d6dea5c12d6d1c343ca1eb778550622ec3f",
-  "expected_signing_input_hex": "4e54482d54524144452d4f464645522d5632007b22657874656e73696f6e73223a7b7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032372d30372d32395430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e7265666572656e63652f6274632d666f722d736f6c616e612d746f6b656e222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30372d32395430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764237a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a63646466363335366132333131306361396232333239356631383135633966393833653564616338333161373631633565663333313038306166636435356531222c226c65675f6964223a22626974636f696e222c227175616e74697479223a22302e3031222c227265736f757263655f6964223a22626974636f696e3a627463222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22627463227d5d2c227075626c69736865645f6174223a22323032362d30372d32395430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a37663363356631653666613737373734386138303034343338653030623334633330366138666565316233383437303832386661656666336433306563386235222c226c65675f6964223a22736f6c616e612d746f6b656e222c227175616e74697479223a2231303030222c227265736f757263655f6964223a22736f6c616e613a73706c3a4578616d706c654d696e74222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22746f6b656e227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b7b22646967657374223a227368613235363a30633636643662663230633631393564366135663634346134353632383438303965613336386466643534633734333061363462373562363461383836376136222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f61746f6d69632d73776170227d5d2c227374617465223a22616374697665222c2273756d6d617279223a225075626c696320636f6e666f726d616e6365206f666665723b206e65766572207573652074686973206b657920666f72207265616c2074727573742e222c227469746c65223a2242544320666f72206120536f6c616e6120746f6b656e227d",
-  "expected_withdrawal_digest": "sha256:37f6dc28d049c2baab938860421aeb505093706f1c8e1fe2a7c2b39a8d98e7bd",
+  "expected_offer_canonical_hex": "7b22657874656e73696f6e73223a7b226f72672e6e746864616f2e6d61726b65742f7075626c69636174696f6e2d7631223a7b226361706162696c6974795f736574223a5b2261746f6d69632d73776170225d2c2263617465676f7279223a226f74686572222c22696e74656e74223a2265786368616e6765222c226f666665725f76616c69646974795f7365636f6e6473223a33313533363030307d2c226f72672e6e746864616f2e6d61726b65742f7265736f757263652d64657363726970746f72732d7631223a7b2264657363726970746f7273223a7b227368613235363a64303336353239363831656365636237373162386231383265373236666137336534366430643865663864383630386233383438666530646635356234616330223a7b2261747472696275746573223a7b2264656c6976657279223a227369676e65642d7265706f7274222c22646973706c61795f7265666572656e6365223a22436f646520726576696577207061636b616765227d2c2263617465676f7279223a227365727669636573222c226b696e64223a226f72672e6e746864616f2e7265736f757263652d70726f66696c652e696e6c696e65222c2270726f66696c655f726566223a7b22646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c2272756c655f6964223a226f72672e6e746864616f2e70726f66696c65732f62617369632d73657276696365227d2c227265736f757263655f6964223a2275726e3a6e746864616f3a736572766963653a726576696577222c227265736f757263655f74797065223a2273657276696365222c2276657273696f6e223a2231227d7d7d7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032372d30372d32395430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e7265666572656e63652f6274632d666f722d736f6c616e612d746f6b656e222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30372d32395430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2270726f6f665f76616c7565223a22597773756a545673765f33444a4768374a325a4c4b734b6875414c7159525f4b644e6a434a504430733854716b4c7a4c6174524c6e6c583251706a39744e687a4f4c7a4932626e64356154427331595730422d744251222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764237a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a64303336353239363831656365636237373162386231383265373236666137336534366430643865663864383630386233383438666530646635356234616330222c226c65675f6964223a22626974636f696e222c227175616e74697479223a22302e3031222c227265736f757263655f6964223a22626974636f696e3a627463222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22627463227d5d2c227075626c69736865645f6174223a22323032362d30372d32395430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a37663363356631653666613737373734386138303034343338653030623334633330366138666565316233383437303832386661656666336433306563386235222c226c65675f6964223a22736f6c616e612d746f6b656e222c227175616e74697479223a2231303030222c227265736f757263655f6964223a22736f6c616e613a73706c3a4578616d706c654d696e74222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22746f6b656e227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b7b22646967657374223a227368613235363a30633636643662663230633631393564366135663634346134353632383438303965613336386466643534633734333061363462373562363461383836376136222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f61746f6d69632d73776170227d5d2c227374617465223a22616374697665222c2273756d6d617279223a225075626c696320636f6e666f726d616e6365206f666665723b206e65766572207573652074686973206b657920666f72207265616c2074727573742e222c227469746c65223a2242544320666f72206120536f6c616e6120746f6b656e227d",
+  "expected_offer_digest": "sha256:f5d578c363aa402f2d07b4221c5b1c1952207958e806bb7de8b30c1ea4365666",
+  "expected_signing_input_hex": "4e54482d54524144452d4f464645522d5632007b22657874656e73696f6e73223a7b226f72672e6e746864616f2e6d61726b65742f7075626c69636174696f6e2d7631223a7b226361706162696c6974795f736574223a5b2261746f6d69632d73776170225d2c2263617465676f7279223a226f74686572222c22696e74656e74223a2265786368616e6765222c226f666665725f76616c69646974795f7365636f6e6473223a33313533363030307d2c226f72672e6e746864616f2e6d61726b65742f7265736f757263652d64657363726970746f72732d7631223a7b2264657363726970746f7273223a7b227368613235363a64303336353239363831656365636237373162386231383265373236666137336534366430643865663864383630386233383438666530646635356234616330223a7b2261747472696275746573223a7b2264656c6976657279223a227369676e65642d7265706f7274222c22646973706c61795f7265666572656e6365223a22436f646520726576696577207061636b616765227d2c2263617465676f7279223a227365727669636573222c226b696e64223a226f72672e6e746864616f2e7265736f757263652d70726f66696c652e696e6c696e65222c2270726f66696c655f726566223a7b22646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c2272756c655f6964223a226f72672e6e746864616f2e70726f66696c65732f62617369632d73657276696365227d2c227265736f757263655f6964223a2275726e3a6e746864616f3a736572766963653a726576696577222c227265736f757263655f74797065223a2273657276696365222c2276657273696f6e223a2231227d7d7d7d2c226b696e64223a226f72672e6e746864616f2e74726164652e6f66666572222c226e6f745f6166746572223a22323032372d30372d32395430303a30303a30305a222c226f666665725f6964223a226f72672e6e746864616f2e7265666572656e63652f6274632d666f722d736f6c616e612d746f6b656e222c2270726576696f75735f6f666665725f646967657374223a6e756c6c2c2270726f6f66223a7b2263726561746564223a22323032362d30372d32395430303a30303a30315a222c2270726f6f665f707572706f7365223a22617373657274696f6e4d6574686f64222c2274797065223a224e7468456432353531395369676e61747572655631222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764237a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764227d2c2270726f746f636f6c5f76657273696f6e223a22322e30222c2270726f7669646573223a5b7b2264657363726970746f725f646967657374223a227368613235363a64303336353239363831656365636237373162386231383265373236666137336534366430643865663864383630386233383438666530646635356234616330222c226c65675f6964223a22626974636f696e222c227175616e74697479223a22302e3031222c227265736f757263655f6964223a22626974636f696e3a627463222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22627463227d5d2c227075626c69736865645f6174223a22323032362d30372d32395430303a30303a30305a222c227075626c69736865725f646964223a226469643a6b65793a7a364d6b746a57797736657542366e7466673669713364724d417148577335327375677943646f4c7834366d31575764222c227265717565737473223a5b7b2264657363726970746f725f646967657374223a227368613235363a37663363356631653666613737373734386138303034343338653030623334633330366138666565316233383437303832386661656666336433306563386235222c226c65675f6964223a22736f6c616e612d746f6b656e222c227175616e74697479223a2231303030222c227265736f757263655f6964223a22736f6c616e613a73706c3a4578616d706c654d696e74222c227265736f757263655f74797065223a2261737365743a66756e6769626c65222c22756e6974223a22746f6b656e227d5d2c227265766973696f6e223a312c2272756c655f72656673223a5b7b22646967657374223a227368613235363a30633636643662663230633631393564366135663634346134353632383438303965613336386466643534633734333061363462373562363461383836376136222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652f61746f6d69632d73776170227d5d2c227374617465223a22616374697665222c2273756d6d617279223a225075626c696320636f6e666f726d616e6365206f666665723b206e65766572207573652074686973206b657920666f72207265616c2074727573742e222c227469746c65223a2242544320666f72206120536f6c616e6120746f6b656e227d",
+  "expected_withdrawal_digest": "sha256:5671770fa4d3c127f37e64ec3d1e9cb483afc27bab7c633cdfedc5c4dfd2faf7",
   "format": "nth-trade-offer-conformance-v2",
+  "market_extensions_vector": "market-extensions-v1.json",
   "negative_offers": [
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -15,14 +44,14 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "kgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+          "proof_value": "YwsujTVsv_3DJGh7J2ZLKsKhuALqYR_KdNjCJPD0s8TqkLzLatRLnlX2Qpj9tNhzOLzI2bnd5aTBs1YW0B-tBQ",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "bitcoin:btc",
@@ -59,7 +88,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -67,14 +124,14 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "kgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+          "proof_value": "YwsujTVsv_3DJGh7J2ZLKsKhuALqYR_KdNjCJPD0s8TqkLzLatRLnlX2Qpj9tNhzOLzI2bnd5aTBs1YW0B-tBQ",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "bitcoin:btc",
@@ -111,7 +168,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -119,14 +204,14 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "AgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+          "proof_value": "AwsujTVsv_3DJGh7J2ZLKsKhuALqYR_KdNjCJPD0s8TqkLzLatRLnlX2Qpj9tNhzOLzI2bnd5aTBs1YW0B-tBQ",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "bitcoin:btc",
@@ -163,7 +248,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -171,7 +284,7 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "0AMGyphr-dkN3ZkeIsBGhA_r7SvakAH0zMfprAE9y1yfgc52oolK6J0BdUhCv8c-4AOfQBQq7_tLkqTop8T6Cw",
+          "proof_value": "azR-dmCnoeEAgSvkeFsm0ifl77wSwYJ7Vb4vDEJ9q8Z3mEbJ1ALojrOqd8cHJHTvYtkdrJTzHlMRMKyI0LQKDw",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
@@ -206,7 +319,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -214,14 +355,14 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "xWuRR9RmYLcQ-HPX7MNAoOeq24Dbf3Apj0npj846_0t0zCLpIVBTTRY0OEBEhkKlqGVyTdg1X0hpMY19XwbLAQ",
+          "proof_value": "Ze9ScPsAng8jhgSS_QInSJCJwtTltQyVprqt6SXdU9-h5fB-m9y2m1PH8H2Xr1V9bHVy2nw57ndETfeZRQl6Cw",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "bitcoin:btc",
@@ -258,7 +399,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -266,14 +435,14 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "5kfPsQCkYFEi2g7HAjuy-0ZHkUQVqqaxUN95LQ6Got_DYzuUyv2S2h9KvFVQ56IY2h5Mpgl0n5iQyfgkejUYBw",
+          "proof_value": "17wJie8mDtiPvKVBUP5jBwvWgtqQT2_qmJoMZi5-YlSJzF8o6ZhyKXUXPbj6KpRCvXiF-dpJjOHI3QekURphDw",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "../wallet.key",
@@ -310,7 +479,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -318,14 +515,14 @@
         "proof": {
           "created": "2026-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "OJJV2zQDlvAmt58vJckEakotgru5VdoOc3_PG4kYtsLHbaoRKQ2-AvUYx3GM6XfJZcWMxN647a14qKILnsR5CA",
+          "proof_value": "JP2u2JAVtPcMvAIY-a1hlkiltxw9zSs5nO-yy9DWf-Iv7fqOCRC7GTHRIWVIpBSVngje7p9I5fRJsnJ1dZRPCw",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "bitcoin:btc",
@@ -362,7 +559,35 @@
     },
     {
       "document": {
-        "extensions": {},
+        "extensions": {
+          "org.nthdao.market/publication-v1": {
+            "capability_set": [
+              "atomic-swap"
+            ],
+            "category": "other",
+            "intent": "exchange",
+            "offer_validity_seconds": 31536000
+          },
+          "org.nthdao.market/resource-descriptors-v1": {
+            "descriptors": {
+              "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+                "attributes": {
+                  "delivery": "signed-report",
+                  "display_reference": "Code review package"
+                },
+                "category": "services",
+                "kind": "org.nthdao.resource-profile.inline",
+                "profile_ref": {
+                  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "rule_id": "org.nthdao.profiles/basic-service"
+                },
+                "resource_id": "urn:nthdao:service:review",
+                "resource_type": "service",
+                "version": "1"
+              }
+            }
+          }
+        },
         "kind": "org.nthdao.trade.offer",
         "not_after": "2027-07-29T00:00:00Z",
         "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -370,14 +595,14 @@
         "proof": {
           "created": "0000-07-29T00:00:01Z",
           "proof_purpose": "assertionMethod",
-          "proof_value": "n45uSwqNv8VG9Z1d0VDq-bV1gBBTOi-0pSJf4X2qPlKCm0S8xSh2NS0SbiLZkp3J6DHWMJZeAboxUIuMLs-QBA",
+          "proof_value": "ua_AwFM2HSQ49lvP-nzTJa1Sm7dkN4bmM31Ht1PQhIb8q4LlMZBVwBaDlNG8ystueD3bzsyS3EG9XkoHshs4BQ",
           "type": "NthEd25519SignatureV1",
           "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
         },
         "protocol_version": "2.0",
         "provides": [
           {
-            "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+            "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
             "leg_id": "bitcoin",
             "quantity": "0.01",
             "resource_id": "bitcoin:btc",
@@ -414,7 +639,35 @@
     }
   ],
   "offer": {
-    "extensions": {},
+    "extensions": {
+      "org.nthdao.market/publication-v1": {
+        "capability_set": [
+          "atomic-swap"
+        ],
+        "category": "other",
+        "intent": "exchange",
+        "offer_validity_seconds": 31536000
+      },
+      "org.nthdao.market/resource-descriptors-v1": {
+        "descriptors": {
+          "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0": {
+            "attributes": {
+              "delivery": "signed-report",
+              "display_reference": "Code review package"
+            },
+            "category": "services",
+            "kind": "org.nthdao.resource-profile.inline",
+            "profile_ref": {
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "rule_id": "org.nthdao.profiles/basic-service"
+            },
+            "resource_id": "urn:nthdao:service:review",
+            "resource_type": "service",
+            "version": "1"
+          }
+        }
+      }
+    },
     "kind": "org.nthdao.trade.offer",
     "not_after": "2027-07-29T00:00:00Z",
     "offer_id": "org.nthdao.reference/btc-for-solana-token",
@@ -422,14 +675,14 @@
     "proof": {
       "created": "2026-07-29T00:00:01Z",
       "proof_purpose": "assertionMethod",
-      "proof_value": "kgrxMVDXZoYPFuvv2gUvB-YQG4aO8z0gLNeqPlScMNdfoPg4YcE9DVpvBmozT9nfOGCwKMP-KNU4P-OMuXvdBg",
+      "proof_value": "YwsujTVsv_3DJGh7J2ZLKsKhuALqYR_KdNjCJPD0s8TqkLzLatRLnlX2Qpj9tNhzOLzI2bnd5aTBs1YW0B-tBQ",
       "type": "NthEd25519SignatureV1",
       "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
     },
     "protocol_version": "2.0",
     "provides": [
       {
-        "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+        "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
         "leg_id": "bitcoin",
         "quantity": "0.01",
         "resource_id": "bitcoin:btc",
@@ -467,18 +720,18 @@
     "kind": "org.nthdao.trade.offer",
     "not_after": "2027-07-30T00:00:00Z",
     "offer_id": "org.nthdao.reference/btc-for-solana-token",
-    "previous_offer_digest": "sha256:752fe89bfbb6fd8f6991acf57e136d6dea5c12d6d1c343ca1eb778550622ec3f",
+    "previous_offer_digest": "sha256:f5d578c363aa402f2d07b4221c5b1c1952207958e806bb7de8b30c1ea4365666",
     "proof": {
       "created": "2026-07-30T00:00:01Z",
       "proof_purpose": "assertionMethod",
-      "proof_value": "r2j0HGktgq7r6oaeHypuFF_ZAGDnc5Eo-uEz7M_QDbOvMCaRFM45PwC-1d28DTUYmycT06fMLDf6vEPnEPuvCQ",
+      "proof_value": "CcJppQnRH058zQe7icCSQKz1OLuvHzJGCQsPIYsk0SiEqK1XAxw5jzZ-aUiCrBz60dDpAIg6vLOCKYXYP38rBQ",
       "type": "NthEd25519SignatureV1",
       "verification_method": "did:key:z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd#z6MktjWyw6euB6ntfg6iq3drMAqHWs52sugyCdoLx46m1WWd"
     },
     "protocol_version": "2.0",
     "provides": [
       {
-        "descriptor_digest": "sha256:cddf6356a23110ca9b23295f1815c9f983e5dac831a761c5ef331080afcd55e1",
+        "descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
         "leg_id": "bitcoin",
         "quantity": "0.01",
         "resource_id": "bitcoin:btc",

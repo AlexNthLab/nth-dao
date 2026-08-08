@@ -223,10 +223,15 @@ def test_trade_offer_announce_is_idempotent_and_public_by_digest(
         f"/api/v2/trade/offers/{digest}/announce",
         json={},
     )
+    rebound = client.post(
+        f"/api/v2/trade/offers/{digest}/announce",
+        json={"capability_set": ["different"]},
+    )
 
     assert first.status_code == 200
     assert first.json()["published"] is True
     assert retried.status_code == 200
+    assert rebound.status_code == 409
     assert retried.json()["published"] is False
     assert (
         retried.json()["announcement"]["announcement_id"]

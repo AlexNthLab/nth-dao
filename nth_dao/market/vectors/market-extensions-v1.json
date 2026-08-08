@@ -1,0 +1,134 @@
+{
+  "descriptor": {
+    "attributes": {
+      "delivery": "signed-report",
+      "display_reference": "Code review package"
+    },
+    "category": "services",
+    "kind": "org.nthdao.resource-profile.inline",
+    "profile_ref": {
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "rule_id": "org.nthdao.profiles/basic-service"
+    },
+    "resource_id": "urn:nthdao:service:review",
+    "resource_type": "service",
+    "version": "1"
+  },
+  "expected_descriptor_canonical_hex": "7b2261747472696275746573223a7b2264656c6976657279223a227369676e65642d7265706f7274222c22646973706c61795f7265666572656e6365223a22436f646520726576696577207061636b616765227d2c2263617465676f7279223a227365727669636573222c226b696e64223a226f72672e6e746864616f2e7265736f757263652d70726f66696c652e696e6c696e65222c2270726f66696c655f726566223a7b22646967657374223a227368613235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c2272756c655f6964223a226f72672e6e746864616f2e70726f66696c65732f62617369632d73657276696365227d2c227265736f757263655f6964223a2275726e3a6e746864616f3a736572766963653a726576696577222c227265736f757263655f74797065223a2273657276696365222c2276657273696f6e223a2231227d",
+  "expected_descriptor_digest": "sha256:d036529681ececb771b8b182e726fa73e46d0d8ef8d8608b3848fe0df55b4ac0",
+  "expected_publication_canonical_hex": "7b226361706162696c6974795f736574223a5b22636f64652d726576696577225d2c2263617465676f7279223a227365727669636573222c22696e74656e74223a2270726f76696465222c226f666665725f76616c69646974795f7365636f6e6473223a323539323030307d",
+  "format": "nth-market-extensions-conformance-v1",
+  "negative_descriptors": [
+    {
+      "descriptor": {
+        "attributes": {
+          "delivery": "signed-report",
+          "display_reference": "Code review package"
+        },
+        "category": "services",
+        "kind": "example.invalid",
+        "profile_ref": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rule_id": "org.nthdao.profiles/basic-service"
+        },
+        "resource_id": "urn:nthdao:service:review",
+        "resource_type": "service",
+        "version": "1"
+      },
+      "id": "wrong-kind"
+    },
+    {
+      "descriptor": {
+        "attributes": {
+          "delivery": "signed-report",
+          "display_reference": "Code review package"
+        },
+        "category": "services",
+        "kind": "org.nthdao.resource-profile.inline",
+        "profile_ref": {
+          "rule_id": "org.nthdao.profiles/basic-service"
+        },
+        "resource_id": "urn:nthdao:service:review",
+        "resource_type": "service",
+        "version": "1"
+      },
+      "id": "partial-profile-ref"
+    },
+    {
+      "descriptor": {
+        "attributes": [],
+        "category": "services",
+        "kind": "org.nthdao.resource-profile.inline",
+        "profile_ref": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rule_id": "org.nthdao.profiles/basic-service"
+        },
+        "resource_id": "urn:nthdao:service:review",
+        "resource_type": "service",
+        "version": "1"
+      },
+      "id": "non-object-attributes"
+    }
+  ],
+  "negative_publications": [
+    {
+      "id": "legacy-shared-ttl",
+      "publication": {
+        "capability_set": [
+          "code-review"
+        ],
+        "category": "services",
+        "intent": "provide",
+        "offer_validity_seconds": 2592000,
+        "ttl_seconds": 86400
+      }
+    },
+    {
+      "id": "discovery-ttl-in-offer",
+      "publication": {
+        "capability_set": [
+          "code-review"
+        ],
+        "category": "services",
+        "discovery_ttl_seconds": 86400,
+        "intent": "provide",
+        "offer_validity_seconds": 2592000
+      }
+    },
+    {
+      "id": "unsorted-capabilities",
+      "publication": {
+        "capability_set": [
+          "review",
+          "code"
+        ],
+        "category": "services",
+        "intent": "provide",
+        "offer_validity_seconds": 2592000
+      }
+    },
+    {
+      "id": "short-offer-validity",
+      "publication": {
+        "capability_set": [
+          "code-review"
+        ],
+        "category": "services",
+        "intent": "provide",
+        "offer_validity_seconds": 60
+      }
+    }
+  ],
+  "publication": {
+    "capability_set": [
+      "code-review"
+    ],
+    "category": "services",
+    "intent": "provide",
+    "offer_validity_seconds": 2592000
+  },
+  "publication_extension": "org.nthdao.market/publication-v1",
+  "resource_descriptor_extension": "org.nthdao.market/resource-descriptors-v1",
+  "schema_version": 1,
+  "warning": "Public deterministic data; it grants no trust or execution authority."
+}

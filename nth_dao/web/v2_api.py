@@ -33,6 +33,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
+from nth_dao.market.resource_descriptor import (
+    MARKET_PUBLICATION_EXTENSION as _MARKET_PUBLICATION_EXTENSION,
+    RESOURCE_DESCRIPTOR_EXTENSION as _MARKET_RESOURCE_PROFILE_EXTENSION,
+)
 from nth_dao.trade_rules.recognition_import_coordinator import (
     RuleRecognitionProofImportBusy as TradeRuleRecognitionImportBusy,
 )
@@ -1892,6 +1896,63 @@ def _verified_trade_offer_import_proposal(
 
 _MARKET_LISTING_TYPE_FIELD = "__nth_listing_type"
 _MARKET_LISTING_TYPES = {"task", "service", "product", "exchange"}
+_MARKET_SEARCH_CATEGORIES = {
+    "tasks",
+    "products",
+    "services",
+    "digital-assets",
+    "exchanges",
+    "other",
+}
+_MARKET_SEARCH_INTENTS = {"request", "provide", "exchange"}
+_MARKET_OFFER_CATEGORIES = {"products", "services", "digital-assets", "other"}
+_MARKET_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+
+
+class MarketPublishConflict(ValueError):
+    """An idempotency key is already bound to different signed content."""
+
+
+class MarketPublishDiscoveryError(RuntimeError):
+    """The Offer is durable, but its short-lived discovery hint is not."""
+
+    def __init__(self, digest: str, reason: str) -> None:
+        super().__init__(reason)
+        self.digest = digest
+
+
+class MarketPublishAuditError(RuntimeError):
+    """The Offer is durable, but its required signed audit anchor is not."""
+
+    def __init__(self, digest: str, reason: str) -> None:
+        super().__init__(reason)
+        self.digest = digest
+
+
+class MarketPublishExpired(RuntimeError):
+    """An idempotent retry refers to an Offer that can no longer be announced."""
+
+    def __init__(self, digest: str, offer_id: str) -> None:
+        super().__init__(
+            "the signed Trade Offer has expired; publish a new Offer with a new "
+            "idempotency_key"
+        )
+        self.digest = digest
+        self.offer_id = offer_id
+
+
+def _trade_offer_expiry_ms(offer: Any) -> int:
+    document = offer.to_dict() if hasattr(offer, "to_dict") else dict(offer)
+    value = document.get("not_after")
+    if not isinstance(value, str) or not value:
+        raise ValueError("Trade Offer not_after is missing")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Trade Offer not_after is not ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("Trade Offer not_after must include a timezone")
+    return int(parsed.timestamp() * 1_000)
 
 
 def _normalize_market_listing_type(value: Any) -> str:
@@ -1922,6 +1983,415 @@ def _market_announcement_to_wire(ann: Any) -> Dict[str, Any]:
     data["claimable"] = data["listing_type"] != "exchange"
     data["federation_key"] = announcement_federation_key(ann)
     return data
+
+
+def _market_search_entry(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Project one verified discovery announcement for human search.
+
+    The returned object is deliberately not a protocol fact. Its source
+    identifiers force every action to resolve the signed announcement or
+    content-addressed Offer again.
+    """
+    from nth_dao.market import (
+        NTH_ANNOUNCEMENT_KIND_V3,
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+    )
+
+    listing_type = _normalize_market_listing_type(row.get("listing_type"))
+    signed_kind = str(row.get("kind") or "")
+    is_trade_offer = signed_kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+    is_commerce_listing = signed_kind == NTH_ANNOUNCEMENT_KIND_V3
+    is_offer = is_trade_offer or is_commerce_listing
+    legacy = not is_offer and listing_type != "task"
+
+    category = {
+        "task": "tasks",
+        "product": "products",
+        "service": "services",
+        "exchange": "exchanges",
+    }.get(listing_type, "other")
+    if is_trade_offer:
+        protocol_kind = "trade-offer-announcement"
+        availability = row.get("availability_summary")
+        if not isinstance(availability, dict):
+            availability = {}
+        hinted_category = str(availability.get("market_category") or "")
+        hinted_intent = str(availability.get("market_intent") or "")
+        if hinted_category in _MARKET_OFFER_CATEGORIES:
+            category = hinted_category
+        market_intent = (
+            hinted_intent
+            if hinted_intent in {"provide", "exchange"}
+            else "exchange"
+        )
+    elif is_commerce_listing:
+        protocol_kind = "commerce-listing-announcement"
+        market_intent = "provide"
+    else:
+        protocol_kind = "task-announcement"
+        market_intent = "request"
+
+    value_kind = "none"
+    amount_minor = 0
+    asset = ""
+    if is_commerce_listing:
+        value_kind = "price"
+        amount_minor = int(row.get("price_minor") or 0)
+        asset = str(row.get("price_asset") or "")
+    elif not is_trade_offer:
+        value_kind = "reward"
+        amount_minor = int(row.get("reward_minor") or 0)
+        asset = str(row.get("reward_asset") or "")
+
+    if legacy:
+        warning = (
+            "Legacy claimable TaskAnnouncement with a market category label; "
+            "it is not a signed Trade Offer."
+        )
+    elif is_offer:
+        warning = (
+            "Signed discovery claim only; inspect and verify the exact source "
+            "object before negotiation or execution."
+        )
+    else:
+        warning = (
+            "Signed task request; resolve the claim authority and current task "
+            "state before claiming."
+        )
+
+    return {
+        "entry_id": str(row.get("federation_key") or ""),
+        "entry_kind": "offer" if is_offer else "task",
+        "protocol_kind": protocol_kind,
+        "market_intent": market_intent,
+        "category": category,
+        "title": str(row.get("title") or ""),
+        "summary": str(row.get("description") or ""),
+        "publisher_did": str(row.get("publisher_did") or ""),
+        "published_at_ms": int(row.get("published_at_ms") or 0),
+        "not_after_ms": int(row.get("not_after") or 0),
+        "context": str(row.get("context") or ""),
+        "capability_set": list(row.get("capability_set") or []),
+        "claimable": bool(row.get("claimable", True)) and not is_offer,
+        "legacy": legacy,
+        "source": "federated" if row.get("federated") else "local",
+        "source_peer": str(row.get("source_peer") or ""),
+        "stale": bool(row.get("federation_stale", False)),
+        "last_verified_at_ms": int(
+            row.get("federation_verified_at_ms") or 0
+        ),
+        "value": {
+            "kind": value_kind,
+            "amount_minor": amount_minor,
+            "asset": asset,
+        },
+        "target": {
+            "announcement_id": str(row.get("announcement_id") or ""),
+            "federation_key": str(row.get("federation_key") or ""),
+            "offer_digest": str(row.get("offer_digest") or ""),
+            "offer_uri": str(row.get("offer_uri") or ""),
+        },
+        "projection_only": True,
+        "warning": warning,
+    }
+
+
+def _market_resource_descriptor(
+    leg: Any,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Build one content-addressed inline descriptor and TradeOffer leg."""
+    from nth_dao.market.resource_descriptor import (
+        inline_resource_descriptor_digest,
+    )
+
+    value = leg.model_dump() if hasattr(leg, "model_dump") else dict(leg)
+    category = str(value.get("category") or "").strip().lower()
+    if category not in _MARKET_OFFER_CATEGORIES:
+        raise ValueError(
+            "resource category must be products, services, digital-assets, or other"
+        )
+    profile_rule_id = str(value.get("profile_rule_id") or "").strip()
+    profile_digest = str(value.get("profile_digest") or "").strip()
+    if bool(profile_rule_id) != bool(profile_digest):
+        raise ValueError(
+            "profile_rule_id and profile_digest must be supplied together"
+        )
+    attributes = value.get("attributes")
+
+    descriptor = {
+        "kind": "org.nthdao.resource-profile.inline",
+        "version": "1",
+        "category": category,
+        "resource_type": str(value.get("resource_type") or "").strip(),
+        "resource_id": str(value.get("resource_id") or "").strip(),
+        "profile_ref": (
+            {"rule_id": profile_rule_id, "digest": profile_digest}
+            if profile_rule_id
+            else {}
+        ),
+        "attributes": attributes,
+    }
+    descriptor_digest = inline_resource_descriptor_digest(descriptor)
+    offer_leg = {
+        "leg_id": str(value.get("leg_id") or "").strip(),
+        "resource_type": descriptor["resource_type"],
+        "resource_id": descriptor["resource_id"],
+        "quantity": str(value.get("quantity") or "").strip(),
+        "unit": str(value.get("unit") or "").strip(),
+        "descriptor_digest": descriptor_digest,
+    }
+    return offer_leg, descriptor
+
+
+def _market_offer_descriptor_inspection(offer: Any) -> Dict[str, Any]:
+    """Verify inline descriptor hashes without claiming Profile recognition."""
+    from nth_dao.market.resource_descriptor import (
+        inspect_offer_resource_descriptors,
+    )
+
+    return inspect_offer_resource_descriptors(offer)
+
+
+def _market_offer_material(
+    body: Any,
+    *,
+    publisher_did: str,
+) -> tuple[
+    str,
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    Dict[str, Any],
+    List[str],
+]:
+    """Normalize human input into deterministic signed-offer material."""
+    from nth_dao.market.publication_policy import reject_private_publication_data
+
+    intent = str(body.intent or "").strip().lower()
+    category = str(body.category or "").strip().lower()
+    if intent not in {"provide", "exchange"}:
+        raise ValueError("intent must be provide or exchange")
+    if category not in _MARKET_OFFER_CATEGORIES:
+        raise ValueError(
+            "category must be products, services, digital-assets, or other"
+        )
+    if intent == "provide" and body.requests:
+        raise ValueError("provide intent must not contain requested resource legs")
+    if intent == "exchange" and not body.requests:
+        raise ValueError("exchange intent requires at least one requested resource leg")
+    key = str(body.idempotency_key or "")
+    if _MARKET_IDEMPOTENCY_KEY.fullmatch(key) is None:
+        raise ValueError(
+            "idempotency_key must contain 16..128 ASCII letters, digits, '.', ':', '_' or '-'"
+        )
+    title = str(body.title or "").strip()
+    if not title:
+        raise ValueError("title must contain non-whitespace text")
+    capabilities = sorted(
+        {str(value).strip() for value in body.capability_set}
+    )
+    if any(not value for value in capabilities):
+        raise ValueError("capability_set must not contain empty values")
+    if any(len(value) > 100 for value in capabilities):
+        raise ValueError("capability names must not exceed 100 characters")
+    reject_private_publication_data(
+        {
+            "title": title,
+            "summary": str(body.summary or "").strip(),
+            "capability_set": capabilities,
+            "provides": [item.model_dump() for item in body.provides],
+            "requests": [item.model_dump() for item in body.requests],
+        },
+        label="market_offer",
+    )
+
+    descriptors: Dict[str, Any] = {}
+    provides: List[Dict[str, Any]] = []
+    requests: List[Dict[str, Any]] = []
+    for source, target in ((body.provides, provides), (body.requests, requests)):
+        for leg in source:
+            normalized, descriptor = _market_resource_descriptor(leg)
+            digest = normalized["descriptor_digest"]
+            existing = descriptors.get(digest)
+            if existing is not None and existing != descriptor:
+                raise ValueError("resource descriptor digest collision")
+            descriptors[digest] = descriptor
+            target.append(normalized)
+
+    rule_refs = [item.model_dump() for item in body.rule_refs]
+    key_digest = hashlib.sha256(
+        f"{publisher_did}\0{key}".encode("utf-8")
+    ).hexdigest()
+    offer_id = f"org.nthdao.market/offer-{key_digest}"
+    extensions = {
+        _MARKET_RESOURCE_PROFILE_EXTENSION: {
+            "descriptors": descriptors,
+        },
+        _MARKET_PUBLICATION_EXTENSION: {
+            "category": category,
+            "intent": intent,
+            "capability_set": capabilities,
+            "offer_validity_seconds": body.offer_validity_seconds,
+        },
+    }
+    return offer_id, provides, requests, rule_refs, extensions, capabilities
+
+
+def _same_market_offer_material(
+    document: Dict[str, Any],
+    *,
+    title: str,
+    summary: str,
+    provides: List[Dict[str, Any]],
+    requests: List[Dict[str, Any]],
+    rule_refs: List[Dict[str, Any]],
+    extensions: Dict[str, Any],
+) -> bool:
+    expected = {
+        "title": title,
+        "summary": summary,
+        "provides": provides,
+        "requests": requests,
+        "rule_refs": sorted(
+            rule_refs,
+            key=lambda item: (item["rule_id"], item["digest"]),
+        ),
+        "extensions": extensions,
+    }
+    return all(document.get(field) == value for field, value in expected.items())
+
+
+def _persist_local_trade_offer_locked(
+    request: Request,
+    store: Any,
+    offer: Any,
+    *,
+    source_id: str,
+) -> tuple[Any, str, str]:
+    """Persist and Spine-anchor one local Offer while the caller holds the lock."""
+    result = store.publish(
+        offer.to_dict(),
+        source_kind="local-operator",
+        source_id=source_id,
+    )
+    spine = _state_spine(request)
+    if spine is None:
+        raise RuntimeError("signed Spine unavailable")
+    audit_event_id = ""
+    audit_warning = ""
+    try:
+        existing_anchor = (
+            None
+            if result.appended
+            else _find_trade_offer_spine_anchor(request, result)
+        )
+        if existing_anchor is not None:
+            audit_event_id = existing_anchor.event_id
+        elif result.source_kind == "local-operator" and result.source_id == source_id:
+            event = spine.append(
+                "trade.offer.imported",
+                {
+                    "seq": result.seq,
+                    "offer_digest": result.digest,
+                    "entry_hash": result.entry_hash,
+                    "publisher_did": offer.publisher_did,
+                    "offer_id": offer.offer_id,
+                    "source_kind": result.source_kind,
+                    "source_id": result.source_id,
+                },
+            )
+            audit_event_id = event.event_id
+        else:
+            audit_warning = "existing offer provenance is not local-operator"
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("trade offer spine audit failed: %s", exc)
+        audit_warning = "signed spine append failed"
+    return result, audit_event_id, audit_warning
+
+
+def _ensure_local_trade_offer_announcement(
+    request: Request,
+    store: Any,
+    offer: Any,
+    digest: str,
+    *,
+    capability_set: List[str],
+    availability_summary: Dict[str, Any],
+    discovery_ttl_seconds: int,
+    match_capability_set: bool,
+    match_availability_summary: bool,
+) -> tuple[Any, bool]:
+    """Idempotently publish a short-lived discovery hint for one local Offer."""
+    from nth_dao.market import (
+        NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
+        create_trade_offer_announcement,
+    )
+
+    workspace = _state_workspace(request)
+    identity = _state_node_identity(request)
+    if workspace is None:
+        raise RuntimeError("workspace unavailable")
+    if identity is None or not getattr(identity, "can_sign", False):
+        raise RuntimeError("signing identity unavailable")
+    if offer.publisher_did != identity.as_did():
+        raise PermissionError("only this node's own Trade Offer can be announced")
+    offer_expiry_ms = _trade_offer_expiry_ms(offer)
+    announced_ms = int(datetime.now(timezone.utc).timestamp() * 1_000)
+    if offer_expiry_ms <= announced_ms:
+        raise MarketPublishExpired(digest, offer.offer_id)
+    _verify_trade_offer_spine_anchors(request, store)
+    lock_path = workspace / "market_feed" / ".locks" / f"trade-{digest[7:]}"
+    with InterProcessLock(lock_path):
+        feed = _state_market_feed(request)
+        existing = next(
+            (
+                announcement
+                for announcement in feed.poll(
+                    since_seq=-1,
+                    include_expired=True,
+                ).announcements
+                if (
+                    announcement.kind == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
+                    and announcement.offer_digest == digest
+                    and announcement.publisher_did == identity.as_did()
+                    and not announcement.is_expired()
+                )
+            ),
+            None,
+        )
+        if existing is not None:
+            expected_capabilities = sorted(set(capability_set))
+            existing_availability = dict(existing.availability_summary)
+            for field in ("offer_id", "revision", "state"):
+                existing_availability.pop(field, None)
+            if (
+                (
+                    match_capability_set
+                    and existing.capability_set != expected_capabilities
+                )
+                or (
+                    match_availability_summary
+                    and existing_availability != availability_summary
+                )
+            ):
+                raise MarketPublishConflict(
+                    "the active discovery announcement is already bound to "
+                    "different capability or availability metadata"
+                )
+            return existing, False
+        announcement = create_trade_offer_announcement(
+            identity,
+            offer,
+            capability_set=capability_set,
+            availability_summary=availability_summary,
+            published_at_ms=announced_ms,
+            not_after_ms=min(
+                offer_expiry_ms,
+                announced_ms + discovery_ttl_seconds * 1_000,
+            ),
+        )
+        feed.publish(announcement)
+    return announcement, True
 
 
 def _market_local_open(request: Request, passes) -> List[Dict[str, Any]]:
@@ -4164,6 +4634,62 @@ class AnnounceTradeOfferBody(_Model):
 
     capability_set: List[str] = Field(default_factory=list, max_length=32)
     availability_summary: Dict[str, Any] = Field(default_factory=dict)
+    discovery_ttl_seconds: int = Field(
+        default=24 * 60 * 60,
+        ge=60,
+        le=24 * 60 * 60,
+    )
+
+
+class MarketResourceLegBody(_Model):
+    """Declarative resource input for the human-facing Market publisher."""
+
+    model_config = {"extra": "forbid"}
+    leg_id: str = Field(min_length=1, max_length=64)
+    category: str = Field(default="other", min_length=1, max_length=32)
+    resource_type: str = Field(min_length=1, max_length=160)
+    resource_id: str = Field(min_length=3, max_length=512)
+    quantity: str = Field(default="1", min_length=1, max_length=80)
+    unit: str = Field(default="item", min_length=1, max_length=80)
+    profile_rule_id: str = Field(default="", max_length=160)
+    profile_digest: str = Field(default="", max_length=71)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketTradeRuleRefBody(_Model):
+    """Exact optional Trade Rule Package reference selected by the publisher."""
+
+    model_config = {"extra": "forbid"}
+    rule_id: str = Field(min_length=3, max_length=160)
+    digest: str = Field(min_length=71, max_length=71)
+
+
+class PublishMarketOfferBody(_Model):
+    """Console-authored input that this node converts into a signed TradeOffer."""
+
+    model_config = {"extra": "forbid"}
+    idempotency_key: str = Field(min_length=16, max_length=128)
+    intent: str = Field(default="provide", min_length=1, max_length=16)
+    category: str = Field(default="other", min_length=1, max_length=32)
+    title: str = Field(min_length=1, max_length=160)
+    summary: str = Field(default="", max_length=2_000)
+    provides: List[MarketResourceLegBody] = Field(min_length=1, max_length=8)
+    requests: List[MarketResourceLegBody] = Field(default_factory=list, max_length=8)
+    rule_refs: List[MarketTradeRuleRefBody] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+    capability_set: List[str] = Field(default_factory=list, max_length=32)
+    offer_validity_seconds: int = Field(
+        default=30 * 24 * 60 * 60,
+        ge=60 * 60,
+        le=365 * 24 * 60 * 60,
+    )
+    discovery_ttl_seconds: int = Field(
+        default=24 * 60 * 60,
+        ge=60,
+        le=24 * 60 * 60,
+    )
 
 
 class ImportTradeRulePackageBody(_Model):
@@ -11401,7 +11927,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.post("/api/v2/trade/offers")
     async def v2_trade_offer_publish(request: Request) -> Dict[str, Any]:
-        """Publish one Offer signed by this node's current identity."""
+        """Persist one already-signed Offer published by this node."""
         _require_console_bearer_for_sensitive_read(request)
         from nth_dao.trade_rules import (
             InspectedTradeOffer,
@@ -11428,8 +11954,7 @@ def register_v2_routes(app: FastAPI) -> None:
         if identity is None or not getattr(identity, "can_sign", False):
             raise HTTPException(status_code=503, detail="signing identity unavailable")
         source_id = identity.as_did()
-        spine = _state_spine(request)
-        if spine is None:
+        if _state_spine(request) is None:
             raise HTTPException(status_code=503, detail="signed Spine unavailable")
         transaction_lock_path = _trade_offer_store_spine_transaction_lock_path(
             workspace
@@ -11450,48 +11975,12 @@ def register_v2_routes(app: FastAPI) -> None:
                         "federation import endpoint for remote Offers"
                     )
                 with InterProcessLock(transaction_lock_path):
-                    result = store.publish(
-                        inspected.to_dict(),
-                        source_kind="local-operator",
+                    return _persist_local_trade_offer_locked(
+                        request,
+                        store,
+                        inspected,
                         source_id=source_id,
                     )
-                    audit_event_id = ""
-                    audit_warning = ""
-                    try:
-                        existing_anchor = (
-                            None
-                            if result.appended
-                            else _find_trade_offer_spine_anchor(request, result)
-                        )
-                        if existing_anchor is not None:
-                            audit_event_id = existing_anchor.event_id
-                        elif (
-                            result.source_kind == "local-operator"
-                            and result.source_id == source_id
-                        ):
-                            event = spine.append(
-                                "trade.offer.imported",
-                                {
-                                    "seq": result.seq,
-                                    "offer_digest": result.digest,
-                                    "entry_hash": result.entry_hash,
-                                    "publisher_did": inspected.publisher_did,
-                                    "offer_id": inspected.offer_id,
-                                    "source_kind": result.source_kind,
-                                    "source_id": result.source_id,
-                                },
-                            )
-                            audit_event_id = event.event_id
-                        else:
-                            audit_warning = (
-                                "existing offer provenance is not local-operator"
-                            )
-                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                        logger.warning(
-                            "trade offer spine audit failed: %s", exc
-                        )
-                        audit_warning = "signed spine append failed"
-                    return result, audit_event_id, audit_warning
 
             result, audit_event_id, audit_warning = await run_in_threadpool(
                 _verify_and_publish
@@ -11546,6 +12035,252 @@ def register_v2_routes(app: FastAPI) -> None:
             "chain": _trade_offer_chain_to_wire(result.chain),
             "audit_event_id": audit_event_id,
             "audit_warning": audit_warning,
+        }
+
+    @app.post("/api/v2/market/offers")
+    async def v2_market_offer_publish(
+        body: PublishMarketOfferBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Build, sign, persist, and announce one local TradeOffer.
+
+        This is the human-console convenience boundary. The strict
+        ``/trade/offers`` endpoint remains the route for already-signed Agent
+        documents. No private key or caller-supplied proof crosses this API.
+        """
+        _require_console_bearer_for_sensitive_read(request)
+        from nth_dao.trade_rules import (
+            OfferStoreBusyError,
+            OfferStoreCapacityError,
+            OfferStoreCorruptionError,
+            OfferStoreCryptoUnavailableError,
+            OfferStoreError,
+            OfferStoreValidationError,
+            offer_body,
+            sign_offer,
+        )
+
+        store = _state_trade_offer_store(request)
+        workspace = _state_workspace(request)
+        identity = _state_node_identity(request)
+        if store is None or workspace is None:
+            raise HTTPException(status_code=503, detail="trade offer store unavailable")
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(status_code=503, detail="signing identity unavailable")
+        if _state_spine(request) is None:
+            raise HTTPException(status_code=503, detail="signed Spine unavailable")
+        source_id = identity.as_did()
+        transaction_lock_path = _trade_offer_store_spine_transaction_lock_path(
+            workspace
+        )
+
+        def _build_publish_and_announce() -> tuple[Any, Any, str, str, Any, bool]:
+            (
+                offer_id,
+                provides,
+                requests,
+                rule_refs,
+                extensions,
+                capabilities,
+            ) = (
+                _market_offer_material(body, publisher_did=source_id)
+            )
+            title = body.title.strip()
+            summary = body.summary.strip()
+
+            with InterProcessLock(transaction_lock_path):
+                chain = store.chain(source_id, offer_id)
+                head_digest = chain.canonical_head_digest
+                if head_digest:
+                    offer = store.get(head_digest)
+                    if offer is None:
+                        raise RuntimeError("canonical Trade Offer head disappeared")
+                    document = offer.to_dict()
+                    if not _same_market_offer_material(
+                        document,
+                        title=title,
+                        summary=summary,
+                        provides=provides,
+                        requests=requests,
+                        rule_refs=rule_refs,
+                        extensions=extensions,
+                    ):
+                        raise MarketPublishConflict(
+                            "idempotency_key is already bound to different Offer content"
+                        )
+                elif chain.all_digests:
+                    raise MarketPublishConflict(
+                        "idempotency_key is bound to a non-canonical Offer chain"
+                    )
+                else:
+                    published = datetime.now(timezone.utc).replace(microsecond=0)
+                    expires = published + timedelta(
+                        seconds=body.offer_validity_seconds
+                    )
+                    published_at = published.isoformat().replace("+00:00", "Z")
+                    offer = sign_offer(
+                        identity,
+                        offer_body(
+                            offer_id=offer_id,
+                            publisher_did=source_id,
+                            title=title,
+                            summary=summary,
+                            provides=provides,
+                            requests=requests,
+                            rule_refs=rule_refs,
+                            published_at=published_at,
+                            not_after=expires.isoformat().replace("+00:00", "Z"),
+                            extensions=extensions,
+                        ),
+                        created=published_at,
+                    )
+                result, audit_event_id, audit_warning = (
+                    _persist_local_trade_offer_locked(
+                        request,
+                        store,
+                        offer,
+                        source_id=source_id,
+                    )
+                )
+            if audit_warning:
+                if audit_warning == "existing offer provenance is not local-operator":
+                    raise MarketPublishConflict(audit_warning)
+                raise MarketPublishAuditError(result.digest, audit_warning)
+
+            availability = {
+                "market_category": body.category.strip().lower(),
+                "market_intent": body.intent.strip().lower(),
+                "provides_count": len(provides),
+                "requests_count": len(requests),
+            }
+            try:
+                announcement, announcement_published = (
+                    _ensure_local_trade_offer_announcement(
+                        request,
+                        store,
+                        offer,
+                        result.digest,
+                        capability_set=capabilities,
+                        availability_summary=availability,
+                        discovery_ttl_seconds=body.discovery_ttl_seconds,
+                        match_capability_set=True,
+                        match_availability_summary=True,
+                    )
+                )
+            except MarketPublishConflict:
+                raise
+            except MarketPublishExpired:
+                raise
+            except (
+                OfferStoreError,
+                OSError,
+                PermissionError,
+                RuntimeError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise MarketPublishDiscoveryError(result.digest, str(exc)) from exc
+            return (
+                result,
+                offer,
+                audit_event_id,
+                audit_warning,
+                announcement,
+                announcement_published,
+            )
+
+        try:
+            (
+                result,
+                offer,
+                audit_event_id,
+                audit_warning,
+                announcement,
+                announcement_published,
+            ) = await run_in_threadpool(_build_publish_and_announce)
+        except MarketPublishConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except MarketPublishAuditError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-offer-audit-incomplete",
+                    "message": str(exc),
+                    "offer_digest": exc.digest,
+                    "offer_persisted": True,
+                    "announcement_published": False,
+                    "retryable": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        except MarketPublishExpired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "trade-offer-expired",
+                    "message": str(exc),
+                    "offer_digest": exc.digest,
+                    "offer_id": exc.offer_id,
+                    "offer_persisted": True,
+                    "retryable": False,
+                    "new_idempotency_key_required": True,
+                },
+            ) from exc
+        except MarketPublishDiscoveryError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "trade-offer-discovery-incomplete",
+                    "message": str(exc),
+                    "offer_digest": exc.digest,
+                    "offer_persisted": True,
+                    "retryable": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Trade Offer Store/Spine transaction is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreCryptoUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except OfferStoreBusyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        except OfferStoreValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OfferStoreCapacityError as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except OfferStoreCorruptionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer store integrity failure: {exc}",
+            ) from exc
+        except OfferStoreError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"trade offer persistence failed: {exc}",
+            ) from exc
+        return {
+            "digest": result.digest,
+            "offer": offer.to_dict(),
+            "appended": result.appended,
+            "classification": result.classification,
+            "audit_event_id": audit_event_id,
+            "announcement": _market_announcement_to_wire(announcement),
+            "announcement_published": announcement_published,
+            "warning": (
+                "Published as a signed discovery claim. This does not prove "
+                "availability, ownership, fairness, or execution authority."
+            ),
         }
 
     @app.post(
@@ -13483,6 +14218,9 @@ def register_v2_routes(app: FastAPI) -> None:
         return {
             "digest": digest,
             "offer": record.offer.to_dict(),
+            "resource_descriptors": _market_offer_descriptor_inspection(
+                record.offer
+            ),
             "discoveries": [],
             "verification": {
                 "offer_signature_valid": True,
@@ -13514,17 +14252,11 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """Publish one idempotent discovery hint for a local signed Offer."""
         _require_console_bearer_for_sensitive_read(request)
-        from nth_dao.market import (
-            NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
-            create_trade_offer_announcement,
-        )
         from nth_dao.trade_rules import OfferStoreError
-        from nth_dao.util.io import InterProcessLock
 
         store = _state_trade_offer_store(request)
-        workspace = _state_workspace(request)
         identity = _state_node_identity(request)
-        if store is None or workspace is None:
+        if store is None or _state_workspace(request) is None:
             raise HTTPException(status_code=503, detail="trade storage unavailable")
         if identity is None or not getattr(identity, "can_sign", False):
             raise HTTPException(status_code=503, detail="signing identity unavailable")
@@ -13539,48 +14271,33 @@ def register_v2_routes(app: FastAPI) -> None:
             ) from exc
         if offer is None:
             raise HTTPException(status_code=404, detail="trade offer not found")
-        _verify_trade_offer_spine_anchors(request, store)
-        if offer.publisher_did != identity.as_did():
-            raise HTTPException(
-                status_code=403,
-                detail="only this node's own Trade Offer can be announced",
-            )
-
-        lock_path = (
-            workspace / "market_feed" / ".locks" / f"trade-{digest[7:]}"
-        )
         try:
-            with InterProcessLock(lock_path):
-                feed = _state_market_feed(request)
-                existing = next(
-                    (
-                        announcement
-                        for announcement in feed.poll(
-                            since_seq=-1,
-                            include_expired=True,
-                        ).announcements
-                        if (
-                            announcement.kind
-                            == NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1
-                            and announcement.offer_digest == digest
-                            and announcement.publisher_did == identity.as_did()
-                            and not announcement.is_expired()
-                        )
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    return {
-                        "announcement": _market_announcement_to_wire(existing),
-                        "published": False,
-                    }
-                announcement = create_trade_offer_announcement(
-                    identity,
-                    offer,
-                    capability_set=body.capability_set,
-                    availability_summary=body.availability_summary,
-                )
-                feed.publish(announcement)
+            announcement, published = _ensure_local_trade_offer_announcement(
+                request,
+                store,
+                offer,
+                digest,
+                capability_set=body.capability_set,
+                availability_summary=body.availability_summary,
+                discovery_ttl_seconds=body.discovery_ttl_seconds,
+                match_capability_set="capability_set" in body.model_fields_set,
+                match_availability_summary=(
+                    "availability_summary" in body.model_fields_set
+                ),
+            )
+        except MarketPublishExpired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "trade-offer-expired",
+                    "message": str(exc),
+                    "offer_digest": exc.digest,
+                    "offer_id": exc.offer_id,
+                    "retryable": False,
+                },
+            ) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except TimeoutError as exc:
             raise HTTPException(
                 status_code=503,
@@ -13591,7 +14308,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "announcement": _market_announcement_to_wire(announcement),
-            "published": True,
+            "published": published,
         }
 
     @app.get("/api/v2/trade/federation/offers/{digest}")
@@ -14107,6 +14824,9 @@ def register_v2_routes(app: FastAPI) -> None:
         return {
             "digest": digest,
             "offer": verified_offer.to_dict(),
+            "resource_descriptors": _market_offer_descriptor_inspection(
+                verified_offer
+            ),
             "discoveries": discoveries,
             "verification": {
                 "offer_signature_valid": True,
@@ -14439,8 +15159,141 @@ def register_v2_routes(app: FastAPI) -> None:
                 out.append(d)
         return out
 
+    @app.get("/api/v2/market/search")
+    def v2_market_search(
+        request: Request,
+        q: str = "",
+        category: str = "",
+        intent: str = "",
+        context: str = "",
+        capability: str = "",
+        min_value: int = 0,
+        value_asset: str = "",
+        source: str = "",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Return a bounded human-facing projection over signed discoveries.
+
+        This endpoint does not create a new market fact or weaken the source
+        protocols. Callers must resolve the exact Task announcement or Offer
+        digest before claiming, negotiating, or executing anything.
+        """
+        normalized_category = category.strip().lower()
+        normalized_intent = intent.strip().lower()
+        normalized_source = source.strip().lower()
+        if normalized_category and normalized_category not in _MARKET_SEARCH_CATEGORIES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "category must be tasks, products, services, digital-assets, "
+                    "exchanges, or other"
+                ),
+            )
+        if normalized_intent and normalized_intent not in _MARKET_SEARCH_INTENTS:
+            raise HTTPException(
+                status_code=400,
+                detail="intent must be request, provide, or exchange",
+            )
+        if normalized_source not in {"", "local", "federated"}:
+            raise HTTPException(
+                status_code=400,
+                detail="source must be local or federated",
+            )
+        if isinstance(offset, bool) or not 0 <= offset <= 10_000:
+            raise HTTPException(status_code=400, detail="offset must be in 0..10000")
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be in 1..500")
+        if isinstance(min_value, bool) or min_value < 0:
+            raise HTTPException(status_code=400, detail="min_value must be non-negative")
+        normalized_asset = value_asset.strip()
+        if len(normalized_asset) > 64:
+            raise HTTPException(status_code=400, detail="value_asset is too long")
+        if min_value > 0 and not normalized_asset:
+            raise HTTPException(
+                status_code=400,
+                detail="value_asset is required when min_value is used",
+            )
+        if len(q) > 200 or len(context) > 128 or len(capability) > 128:
+            raise HTTPException(status_code=400, detail="market search filter is too long")
+
+        rows = v2_market_open(
+            request=request,
+            context=context,
+            capability=capability,
+            min_reward=0,
+            q=q,
+        )
+        unfiltered = [_market_search_entry(row) for row in rows]
+        if normalized_source:
+            unfiltered = [
+                entry
+                for entry in unfiltered
+                if entry["source"] == normalized_source
+            ]
+        facets: Dict[str, int] = {}
+        for entry in unfiltered:
+            entry_category = str(entry["category"])
+            facets[entry_category] = facets.get(entry_category, 0) + 1
+            if (
+                entry["market_intent"] == "exchange"
+                and entry_category != "exchanges"
+            ):
+                facets["exchanges"] = facets.get("exchanges", 0) + 1
+
+        entries = [
+            entry
+            for entry in unfiltered
+            if (
+                not normalized_category
+                or (
+                    normalized_category == "exchanges"
+                    and entry["market_intent"] == "exchange"
+                )
+                or entry["category"] == normalized_category
+            )
+            and (
+                not normalized_intent
+                or entry["market_intent"] == normalized_intent
+            )
+            and int(entry["value"]["amount_minor"]) >= min_value
+            and (
+                not normalized_asset
+                or entry["value"]["asset"] == normalized_asset
+            )
+        ]
+        entries.sort(
+            key=lambda entry: (
+                -int(entry["published_at_ms"]),
+                str(entry["entry_id"]),
+            )
+        )
+        total = len(entries)
+        page = entries[offset : offset + limit]
+        return {
+            "items": page,
+            "count": total,
+            "offset": offset,
+            "truncated": offset + len(page) < total,
+            "facets": [
+                {"category": name, "count": count}
+                for name, count in sorted(
+                    facets.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "projection_only": True,
+            "warning": (
+                "Search entries are local projections of signed discovery "
+                "claims, not proof of availability, ownership, fairness, or "
+                "execution authority."
+            ),
+        }
+
     @app.get("/api/v2/market/categories")
-    def v2_market_categories(request: Request) -> List[Dict[str, Any]]:
+    def v2_market_categories(
+        request: Request,
+        listing_type: str = "",
+    ) -> List[Dict[str, Any]]:
         """任务广场的类别分面:列出未认领公告里出现过的 context + 计数,
         给前端做"按类别筛选"的 chips。空 feed → []。涌现式分类(无固定
         词表),贴去中心化:类别由发布者的 context 自然长出来。"""
@@ -14452,11 +15305,24 @@ def register_v2_routes(app: FastAPI) -> None:
             ws / "market_feed" / "announcements.jsonl"
         ).exists():
             return []
+        try:
+            wanted_listing = (
+                _normalize_market_listing_type(listing_type)
+                if listing_type.strip()
+                else ""
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         feed = MarketFeed(ws)
         claims = ClaimStore(ws)
         counts: Dict[str, int] = {}
         for ann in feed.poll(since_seq=-1, limit=500).announcements:
             if claims.is_unavailable(ann.announcement_id):
+                continue
+            if (
+                wanted_listing
+                and _market_announcement_listing_type(ann) != wanted_listing
+            ):
                 continue
             counts[ann.context] = counts.get(ann.context, 0) + 1
         return sorted(
@@ -14551,6 +15417,9 @@ def register_v2_routes(app: FastAPI) -> None:
         """
         from nth_dao.market.announcement import sign_announcement
         from nth_dao.market.feed import MarketFeed
+        from nth_dao.market.publication_policy import (
+            reject_private_publication_data,
+        )
 
         if not body.title.strip():
             raise HTTPException(status_code=400, detail="title must not be empty")
@@ -14559,9 +15428,10 @@ def register_v2_routes(app: FastAPI) -> None:
         # 永久膨胀。在落盘前于 HTTP 边界封顶,给清晰 400。
         try:
             listing_type = _normalize_market_listing_type(body.listing_type)
-            if listing_type == "exchange":
+            if listing_type != "task":
                 raise ValueError(
-                    "exchange listings must be derived from a signed Trade Offer"
+                    "market/announce accepts Tasks only; products, services, "
+                    "and exchanges must use a signed Trade Offer"
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -14583,6 +15453,18 @@ def register_v2_routes(app: FastAPI) -> None:
         ):
             raise HTTPException(
                 status_code=400, detail="reward_asset/context/mission_id too long")
+        try:
+            reject_private_publication_data(
+                {
+                    "title": body.title,
+                    "description": body.description,
+                    "capability_set": body.capability_set,
+                    "context": body.context,
+                },
+                label="market_task",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
