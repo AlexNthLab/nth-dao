@@ -576,8 +576,74 @@ export interface MarketResourceDescriptorInspection {
     attributes?: Record<string, unknown>;
   };
   profile_ref: { rule_id?: string; digest?: string };
-  profile_resolution: "unresolved" | "not-declared";
+  profile_resolution:
+    | "not-declared"
+    | "unresolved"
+    | "missing-local"
+    | "verified-local"
+    | "recognized-local"
+    | "not-yet-active"
+    | "expired"
+    | "invalid-local";
+  profile_error: string;
+  profile_schema_valid: boolean | null;
+  mapped_market_category: string;
+  profile_mapping_reason: string;
   execution_ready: false;
+}
+
+export interface ResourceProfileSummary {
+  digest: string;
+  profile_id: string;
+  version: string;
+  publisher_did: string;
+  summary: string;
+  resource_types: string[];
+  category_mappings: Array<{
+    community_category: string;
+    market_category: "products" | "services" | "digital-assets" | "other";
+  }>;
+  schema: {
+    type: "object";
+    properties: Record<string, {
+      type: "string" | "integer" | "boolean";
+      required: boolean;
+      description: string;
+      enum: Array<string | number | boolean>;
+    }>;
+    additional_properties: boolean;
+  };
+  published_at: string;
+  not_after: string | null;
+  active: boolean;
+  active_reason: string;
+  recognized: boolean;
+  signature_verified: true;
+  execution_authority_granted: false;
+}
+
+export interface ResourceProfilePage {
+  items: ResourceProfileSummary[];
+  count: number;
+  returned: number;
+  next_cursor: string;
+  truncated: boolean;
+  warning: string;
+}
+
+export interface ResourceProfileImportResult {
+  profile: ResourceProfileSummary;
+  installed: boolean;
+  audit_event_id: string;
+  audit_created: boolean;
+}
+
+export interface ResourceProfileRecognitionResult {
+  profile: ResourceProfileSummary;
+  changed: boolean;
+  operation_id: string;
+  audit_event_id: string;
+  audit_created: boolean;
 }
 
 export interface TradeOfferInspection {
@@ -588,7 +654,9 @@ export interface TradeOfferInspection {
     referenced_count: number;
     verified_inline_count: number;
     items: MarketResourceDescriptorInspection[];
-    profile_packages_resolved: false;
+    profile_packages_resolved: boolean;
+    profile_packages_recognized: number;
+    profile_packages_applicable: number;
     execution_ready: false;
     warning: string;
   };
@@ -1012,6 +1080,7 @@ export interface FederationStatus {
   env_peers: string[];
   poller_started: boolean;
   cached_announcements: number;
+  incremental_source_cursors?: number;
   stale_announcements?: number;
   last_refresh_ms: number;
   last_error: string;
@@ -1034,6 +1103,10 @@ export interface FederationStatus {
   lan_discovery_enabled?: boolean;
   lan_transport_available?: boolean;
   lan_publisher_active?: boolean;
+  lan_udp_publisher_active?: boolean;
+  lan_udp_port?: number;
+  lan_mdns_publisher_active?: boolean;
+  lan_mdns_available?: boolean;
   lan_diagnostics?: string[];
   reverse_discovery_enabled?: boolean;
 }

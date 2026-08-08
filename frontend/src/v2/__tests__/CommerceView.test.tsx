@@ -287,6 +287,8 @@ function inspectedTradeOffer(digest: string): TradeOfferInspection {
       referenced_count: 2,
       verified_inline_count: 1,
       profile_packages_resolved: false,
+      profile_packages_recognized: 0,
+      profile_packages_applicable: 0,
       execution_ready: false,
       warning: "Profile references are not resolved or recognized.",
       items: [{
@@ -304,7 +306,11 @@ function inspectedTradeOffer(digest: string): TradeOfferInspection {
           rule_id: "org.nthdao.profiles/compute",
           digest: "sha256:" + "e".repeat(64),
         },
-        profile_resolution: "unresolved",
+        profile_resolution: "missing-local",
+        profile_error: "",
+        profile_schema_valid: null,
+        mapped_market_category: "",
+        profile_mapping_reason: "",
         execution_ready: false,
       }],
     },
@@ -428,6 +434,17 @@ vi.mock("../api", () => ({
     warning: "Observed evidence only",
   }),
   announceTask: vi.fn().mockResolvedValue({ announcement_id: "ann-task" }),
+  getFederationStatus: vi.fn().mockResolvedValue({
+    peers: [], file_peers: [], env_peers: [], poller_started: false,
+    cached_announcements: 0, last_refresh_ms: 0, last_error: "", last_peer_count: 0,
+  }),
+  discoverFederationPeers: vi.fn().mockResolvedValue({
+    peers: [], file_peers: [], env_peers: [], poller_started: false,
+    cached_announcements: 0, last_refresh_ms: 0, last_error: "", last_peer_count: 0,
+    imported_peers: [], identity_verified_peers: [], skipped_peers: [], discovery_errors: [],
+  }),
+  refreshFederation: vi.fn(),
+  updateFederationPeer: vi.fn(),
   searchMarket: vi.fn().mockResolvedValue({
     items: [],
     count: 0,
@@ -436,6 +453,16 @@ vi.mock("../api", () => ({
     projection_only: true,
     warning: "Discovery claims only",
   }),
+  listResourceProfiles: vi.fn().mockResolvedValue({
+    items: [],
+    count: 0,
+    returned: 0,
+    next_cursor: "",
+    truncated: false,
+    warning: "Signature verification proves provenance only.",
+  }),
+  importResourceProfile: vi.fn(),
+  setResourceProfileRecognition: vi.fn(),
   publishMarketOffer: vi.fn().mockResolvedValue({
     digest: "sha256:x", announcement_published: true, warning: "Discovery claim",
   }),
@@ -465,6 +492,7 @@ import {
   importTradeRulePackage,
   importTradeRuleRecognitions,
   importCachedTradeOffer,
+  listResourceProfiles,
   acceptTradeProposal,
   announceTask,
   dispatchCommerceOutbox,
@@ -568,6 +596,14 @@ beforeEach(() => {
   vi.mocked(publishMarketOffer).mockReset().mockResolvedValue({
     digest: "sha256:x", announcement_published: true, warning: "Discovery claim",
   } as never);
+  vi.mocked(listResourceProfiles).mockReset().mockResolvedValue({
+    items: [],
+    count: 0,
+    returned: 0,
+    next_cursor: "",
+    truncated: false,
+    warning: "Signature verification proves provenance only.",
+  });
   vi.mocked(getTradeOfferInspection).mockReset();
   vi.mocked(importCachedTradeOffer).mockReset();
   vi.mocked(remoteCommerceCheckout).mockReset().mockResolvedValue({
@@ -856,6 +892,30 @@ describe("CommerceView", () => {
     expect(screen.getByRole("button", { name: "Inspect offer" })).toBeTruthy();
   });
 
+  it("separates local Profile recognition from schema applicability", async () => {
+    const digest = "sha256:" + "7".repeat(64);
+    const inspection = inspectedTradeOffer(digest);
+    inspection.resource_descriptors.profile_packages_resolved = true;
+    inspection.resource_descriptors.profile_packages_recognized = 1;
+    inspection.resource_descriptors.profile_packages_applicable = 1;
+    inspection.resource_descriptors.items[0] = {
+      ...inspection.resource_descriptors.items[0],
+      profile_resolution: "recognized-local",
+      profile_schema_valid: true,
+      mapped_market_category: "services",
+    };
+    vi.mocked(searchMarket).mockResolvedValueOnce(tradeOfferMarketPage(digest));
+    vi.mocked(getTradeOfferInspection).mockResolvedValueOnce(inspection);
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    await screen.findByText("Swap compute for credits");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect offer" }));
+
+    expect(await screen.findByText("Profile recognized; attributes valid")).toBeTruthy();
+    expect(screen.getByText("Mapped Market category: services")).toBeTruthy();
+    expect(screen.getByText(/1 Profile Skills are recognized locally/)).toBeTruthy();
+  });
+
   it("keeps a verified Trade Offer save retryable after persistence fails", async () => {
     const digest = "sha256:" + "8".repeat(64);
     vi.mocked(searchMarket).mockResolvedValueOnce(tradeOfferMarketPage(digest));
@@ -870,7 +930,7 @@ describe("CommerceView", () => {
     await screen.findByText("Swap compute for credits");
     fireEvent.click(screen.getByRole("button", { name: "Inspect offer" }));
     await screen.findByLabelText("Signed Offer terms");
-    expect(screen.getByText("Profile reference unresolved")).toBeTruthy();
+    expect(screen.getByText("Profile not cached locally")).toBeTruthy();
     expect(screen.getByText(/Compute review/)).toBeTruthy();
     expect(screen.getByText(/1 of 2 referenced inline descriptors/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save locally" }));
@@ -892,6 +952,17 @@ describe("CommerceView", () => {
     await waitFor(() => expect(resolveCommerceDispute).toHaveBeenCalledWith(
       order.order_id, "refund", "",
     ));
+  });
+
+  it("opens the single Market publisher when Tasks delegates publication", async () => {
+    const onPublisherOpened = vi.fn();
+    render(<ToastProvider><CommerceView
+      openPublisher
+      onPublisherOpened={onPublisherOpened}
+    /></ToastProvider>);
+
+    expect(screen.getByRole("form", { name: "Publish to NTH DAO" })).toBeTruthy();
+    await waitFor(() => expect(onPublisherOpened).toHaveBeenCalledTimes(1));
   });
 
   it("publishes a work request through the Task protocol", async () => {
@@ -976,7 +1047,7 @@ describe("CommerceView", () => {
       target: { value: "Private draft" },
     });
     fireEvent.change(within(form).getByLabelText("Offered resource"), {
-      target: { value: "C:\\Users\\Operator\\Desktop\\private.txt" },
+      target: { value: "C:" + "\\Users\\Operator\\Desktop\\private.txt" },
     });
     fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
 
@@ -1009,6 +1080,75 @@ describe("CommerceView", () => {
         profile_digest: "sha256:" + "a".repeat(64),
       })],
     })));
+  });
+
+  it("builds schema-valid attributes from a selected local Resource Profile", async () => {
+    const profileDigest = "sha256:" + "9".repeat(64);
+    vi.mocked(listResourceProfiles).mockResolvedValueOnce({
+      items: [{
+        digest: profileDigest,
+        profile_id: "org.example.profile/game-item",
+        version: "1.0.0",
+        publisher_did: "did:key:zProfilePublisher",
+        summary: "Game item schema",
+        resource_types: ["game/item"],
+        category_mappings: [{
+          community_category: "gaming/items",
+          market_category: "products",
+        }],
+        schema: {
+          type: "object",
+          properties: {
+            game: {
+              type: "string",
+              required: true,
+              description: "Game identifier",
+              enum: [],
+            },
+          },
+          additional_properties: false,
+        },
+        published_at: "2026-08-08T00:00:00Z",
+        not_after: "2027-08-08T00:00:00Z",
+        active: true,
+        active_reason: "active",
+        recognized: true,
+        signature_verified: true,
+        execution_authority_granted: false,
+      }],
+      count: 1,
+      returned: 1,
+      next_cursor: "",
+      truncated: false,
+      warning: "Signature verification proves provenance only.",
+    });
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    const form = screen.getByRole("form", { name: "Publish to NTH DAO" });
+    fireEvent.click(within(form).getByRole("tab", { name: /^Product/ }));
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "Signed sword" } });
+    fireEvent.change(within(form).getByLabelText("Offered resource"), { target: { value: "game:item:sword" } });
+    fireEvent.click(within(form).getByText("Optional Skills and exact digests"));
+    const selector = await within(form).findByLabelText("Provided local Resource Profile");
+    fireEvent.change(selector, { target: { value: profileDigest } });
+    fireEvent.change(within(form).getByLabelText("Provided game *"), {
+      target: { value: "NTH" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Publish" }));
+
+    await waitFor(() => expect(publishMarketOffer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provides: [expect.objectContaining({
+          resource_type: "game/item",
+          profile_rule_id: "org.example.profile/game-item",
+          profile_digest: profileDigest,
+          attributes: {
+            game: "NTH",
+            community_category: "gaming/items",
+          },
+        })],
+      }),
+    ));
   });
 
   it("shows verified-cache Trade Skills without claiming trust or execution", async () => {

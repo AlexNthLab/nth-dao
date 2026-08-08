@@ -45,6 +45,9 @@ import type {
   PublishMarketOfferInput,
   PublishMarketOfferResult,
   ReceiptSummary,
+  ResourceProfileImportResult,
+  ResourceProfilePage,
+  ResourceProfileRecognitionResult,
   Rule,
   TaskAnnouncement,
   TaskCategory,
@@ -2141,6 +2144,36 @@ export async function discoverFederationPeers(input: {
     add: input.add ?? true,
     refresh: input.refresh ?? true,
   });
+}
+
+export async function listResourceProfiles(
+  signal?: AbortSignal,
+  cursor = "",
+  limit = 100,
+): Promise<ResourceProfilePage> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) params.set("cursor", cursor);
+  return getJson<ResourceProfilePage>(`/market/resource-profiles?${params}`, signal);
+}
+
+export async function importResourceProfile(
+  document: Record<string, unknown>,
+): Promise<ResourceProfileImportResult> {
+  return postJson<ResourceProfileImportResult>(
+    "/market/resource-profiles/import",
+    { document },
+  );
+}
+
+export async function setResourceProfileRecognition(
+  digest: string,
+  accepted: boolean,
+  idempotencyKey: string,
+): Promise<ResourceProfileRecognitionResult> {
+  return postJson<ResourceProfileRecognitionResult>(
+    `/market/resource-profiles/${encodeURIComponent(digest)}/recognition`,
+    { accepted, idempotency_key: idempotencyKey },
+  );
 }
 
 // ── Phase 4c/5:审计 / 争议 / 治理(消费 spine 投影端点)─────────────────

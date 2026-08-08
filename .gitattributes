@@ -1,0 +1,2 @@
+# JSON protocol documents and conformance vectors must be byte-stable.
+*.json text eol=lf

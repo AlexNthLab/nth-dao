@@ -2,15 +2,14 @@
  * TasksView — 任务广场(发现态)。A2A 协调底座的核心面:发现可认领的活。
  *
  * 左栏:类别分面(context)+ 能力/赏金/搜索筛选。
- * 主区:发布表单(+ 发布任务)+ 公告卡片列表(标题/类别/能力/赏金/发布者)。
+ * 主区:公告卡片列表(标题/类别/能力/赏金/发布者)。
  * 认领按钮先占位禁用——认领是跨进程(切片B),由 agent 自己用私钥签。
  *
  * 自取数(import api),不经 App 状态,保持视图自洽。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  announceTask, claimFederatedTask, claimTask, discoverFederationPeers, fetchAgents, getFederationStatus,
-  listOpenTasks, listTaskCategories, refreshFederation, updateFederationPeer,
+  claimFederatedTask, claimTask, fetchAgents, listOpenTasks, listTaskCategories,
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
@@ -18,7 +17,6 @@ import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
 import type {
   AgentEntry,
-  FederationStatus,
   TaskAnnouncement,
   TaskCategory,
 } from "../types-v2";
@@ -40,16 +38,11 @@ function visibilityWarningLabel(
   }
 }
 
-function formatFederationRefresh(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "Never";
-  try {
-    return relativeTimeShort(new Date(ms).toISOString());
-  } catch {
-    return "Unknown";
-  }
+interface TasksViewProps {
+  onOpenPublisher?: () => void;
 }
 
-export function TasksView() {
+export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const toast = useToast();
   const { t } = useLang();
   const [tasks, setTasks] = useState<TaskAnnouncement[]>([]);
@@ -66,40 +59,13 @@ export function TasksView() {
   const [tab, setTab] = useState<"market" | "mine">("market");
   const [sort, setSort] = useState<"recent" | "reward">("recent");
 
-  // 发布表单
-  const [showForm, setShowForm] = useState(false);
-  const [fTitle, setFTitle] = useState("");
-  const [fCaps, setFCaps] = useState("");
-  const [fReward, setFReward] = useState("");
-  const [fContext, setFContext] = useState("");
-  const [fDesc, setFDesc] = useState("");
-  const [publishing, setPublishing] = useState(false);
-  // 发布/认领后 bump,触发任务 + 类别 + agent 列表一起刷新(否则筛选没变,
-  // 任务 effect 不会重跑,新发/已认领的任务状态看不见)。
+  // 认领后 bump,触发任务 + agent 列表一起刷新。
   const [reloadKey, setReloadKey] = useState(0);
 
   // 认领:可驱动的 supervised agent + 当前选中的认领身份(按 DID)。
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [claimAgent, setClaimAgent] = useState("");
   const [claimingId, setClaimingId] = useState("");
-  const [fedStatus, setFedStatus] = useState<FederationStatus | null>(null);
-  const [fedPeerUrl, setFedPeerUrl] = useState("");
-  const [fedBusy, setFedBusy] = useState(false);
-  const fedRequestSequence = useRef(0);
-
-  function beginFederationRequest(): number {
-    fedRequestSequence.current += 1;
-    return fedRequestSequence.current;
-  }
-
-  function commitFederationStatus(
-    requestSequence: number,
-    status: FederationStatus,
-  ): boolean {
-    if (requestSequence !== fedRequestSequence.current) return false;
-    setFedStatus(status);
-    return true;
-  }
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -143,17 +109,6 @@ export function TasksView() {
     }
   }
 
-  async function loadFederation(signal?: AbortSignal) {
-    const requestSequence = beginFederationRequest();
-    try {
-      const status = await getFederationStatus(signal);
-      commitFederationStatus(requestSequence, status);
-    } catch {
-      // Federation status is operational context. Keep the market usable when
-      // the status endpoint is temporarily unavailable.
-    }
-  }
-
   // 任务:筛选变化(文本防抖 300ms,避免逐键刷屏)或发布后(reloadKey)重拉。
   // AbortController 取消上一笔,防乱序覆盖。
   useEffect(() => {
@@ -173,44 +128,6 @@ export function TasksView() {
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
-
-  useEffect(() => {
-    const ac = new AbortController();
-    void loadFederation(ac.signal);
-    return () => ac.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey]);
-
-  // Ask for an immediate discovery snapshot on entry. Periodic discovery is
-  // owned by the server lifecycle so it continues without an open browser.
-  useEffect(() => {
-    let cancelled = false;
-    const discover = async () => {
-      if (cancelled) return;
-      const requestSequence = beginFederationRequest();
-      try {
-        const status = await discoverFederationPeers({
-          actorId: "admin",
-          timeoutSeconds: 1.25,
-          add: true,
-          refresh: true,
-        });
-        if (cancelled || !commitFederationStatus(requestSequence, status)) return;
-        if (
-          (status.imported_peers?.length ?? 0) > 0
-          || (status.identity_verified_peers?.length ?? 0) > 0
-        ) {
-          setReloadKey((key) => key + 1);
-        }
-      } catch {
-        // Keep the local task market usable without mDNS.
-      }
-    };
-    void discover();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // 可认领身份:拉可驱动的 supervised agent(supervised+alive+有 a2a_port)。
   useEffect(() => {
@@ -298,177 +215,6 @@ export function TasksView() {
     }
   }
 
-  async function handlePublish(e: React.FormEvent) {
-    e.preventDefault();
-    if (!fTitle.trim() || publishing) return;
-    setPublishing(true);
-    try {
-      await announceTask({
-        title: fTitle.trim(),
-        listing_type: "task",
-        capability_set: fCaps
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        reward_minor: fReward ? Math.max(0, Math.floor(Number(fReward))) : 0,
-        context: fContext.trim(),
-        description: fDesc.trim(),
-      });
-      toast.push(t("任务已发布", "Task published"), "success");
-      setFTitle("");
-      setFCaps("");
-      setFReward("");
-      setFContext("");
-      setFDesc("");
-      setShowForm(false);
-      setReloadKey((k) => k + 1); // 刷新任务 + 类别分面
-    } catch (e) {
-      toast.push(
-        `${t("发布失败", "Publish failed")}:${e instanceof Error ? e.message : String(e)}`,
-        "error",
-      );
-    } finally {
-      setPublishing(false);
-    }
-  }
-
-  async function handleFederationRefresh() {
-    if (fedBusy) return;
-    setFedBusy(true);
-    const requestSequence = beginFederationRequest();
-    try {
-      const status = await refreshFederation();
-      if (!commitFederationStatus(requestSequence, status)) return;
-      setReloadKey((k) => k + 1);
-      toast.push(t("Federation refreshed", "Federation refreshed"), "success");
-    } catch (e) {
-      toast.push(
-        `${t("Federation refresh failed", "Federation refresh failed")}:${e instanceof Error ? e.message : String(e)}`,
-        "error",
-      );
-    } finally {
-      setFedBusy(false);
-    }
-  }
-
-  async function handleFederationDiscover() {
-    if (fedBusy) return;
-    setFedBusy(true);
-    const requestSequence = beginFederationRequest();
-    try {
-      const status = await discoverFederationPeers({
-        actorId: "admin",
-        timeoutSeconds: 2,
-        add: true,
-        refresh: true,
-      });
-      if (!commitFederationStatus(requestSequence, status)) return;
-      setReloadKey((k) => k + 1);
-      const imported = status.imported_peers?.length ?? 0;
-      const skipped = status.skipped_peers?.length ?? 0;
-      const verified = status.identity_verified_peers?.length ?? 0;
-      const errors = status.discovery_errors?.length ?? 0;
-      if (imported > 0) {
-        toast.push(
-          t(
-            `Imported ${imported} verified DAO peer${imported === 1 ? "" : "s"}`,
-            `Imported ${imported} verified DAO peer${imported === 1 ? "" : "s"}`,
-          ),
-          "success",
-        );
-      } else if (verified > 0) {
-        toast.push(
-          t(
-            `${verified} nearby DAO peer${verified === 1 ? "" : "s"} verified; already imported`,
-            `${verified} nearby DAO peer${verified === 1 ? "" : "s"} verified; already imported`,
-          ),
-          "info",
-        );
-      } else if (skipped > 0) {
-        toast.push(
-          t(
-            "Nearby nodes found, but none passed identity/federation verification",
-            "Nearby nodes found, but none passed identity/federation verification",
-          ),
-          "warn",
-        );
-      } else {
-        toast.push(
-          errors > 0
-            ? t("Discovery finished with backend warnings", "Discovery finished with backend warnings")
-            : t("No nearby DAO peers found", "No nearby DAO peers found"),
-          errors > 0 ? "warn" : "info",
-        );
-      }
-    } catch (e) {
-      toast.push(
-        `${t("Federation discovery failed", "Federation discovery failed")}:${e instanceof Error ? e.message : String(e)}`,
-        "error",
-      );
-    } finally {
-      setFedBusy(false);
-    }
-  }
-
-  async function handleFederationPeerSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const peer = fedPeerUrl.trim();
-    if (!peer || fedBusy) return;
-    setFedBusy(true);
-    const requestSequence = beginFederationRequest();
-    try {
-      const status = await updateFederationPeer(peer, "add");
-      if (!commitFederationStatus(requestSequence, status)) return;
-      setFedPeerUrl("");
-      try {
-        const refreshed = await refreshFederation();
-        commitFederationStatus(requestSequence, refreshed);
-      } catch (refreshErr) {
-        toast.push(
-          `${t("Peer saved, refresh failed", "Peer saved, refresh failed")}:${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`,
-          "warn",
-        );
-      }
-      setReloadKey((k) => k + 1);
-      toast.push(t("Federation peer added", "Federation peer added"), "success");
-    } catch (e) {
-      toast.push(
-        `${t("Add peer failed", "Add peer failed")}:${e instanceof Error ? e.message : String(e)}`,
-        "error",
-      );
-    } finally {
-      setFedBusy(false);
-    }
-  }
-
-  async function handleFederationPeerRemove(peer: string) {
-    if (!peer || fedBusy) return;
-    setFedBusy(true);
-    const requestSequence = beginFederationRequest();
-    try {
-      const status = await updateFederationPeer(peer, "remove");
-      if (!commitFederationStatus(requestSequence, status)) return;
-      try {
-        const refreshed = await refreshFederation();
-        commitFederationStatus(requestSequence, refreshed);
-      } catch (refreshErr) {
-        toast.push(
-          `${t("Peer removed, refresh failed", "Peer removed, refresh failed")}:${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`,
-          "warn",
-        );
-      }
-      setReloadKey((k) => k + 1);
-      toast.push(t("Federation peer removed", "Federation peer removed"), "success");
-    } catch (e) {
-      toast.push(
-        `${t("Remove peer failed", "Remove peer failed")}:${e instanceof Error ? e.message : String(e)}`,
-        "error",
-      );
-    } finally {
-      setFedBusy(false);
-    }
-  }
-
   return (
     <>
       <aside className="sidebar">
@@ -545,175 +291,6 @@ export function TasksView() {
               </option>
             ))}
           </select>
-          <div
-            style={{
-              borderTop: "1px solid var(--border)",
-              marginTop: 6,
-              paddingTop: 10,
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <strong style={{ fontSize: 12 }}>{t("Federation", "Federation")}</strong>
-              <span className="pill dim" style={{ fontSize: 10, marginLeft: "auto" }}>
-                {fedStatus?.cached_announcements ?? 0} {t("remote", "remote")}
-              </span>
-            </div>
-            <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
-              {fedStatus?.peers.length
-                ? t(
-                    "Verified peers exchange signed DAO task feeds.",
-                    "Verified peers exchange signed DAO task feeds.",
-                  )
-                : t(
-                    "Add a reachable DAO URL to discover tasks beyond this workspace.",
-                    "Add a reachable DAO URL to discover tasks beyond this workspace.",
-                  )}
-            </div>
-            <form onSubmit={handleFederationPeerSubmit} style={{ display: "flex", gap: 6 }}>
-              <input
-                placeholder="http://192.168.1.20:8080"
-                value={fedPeerUrl}
-                onChange={(e) => setFedPeerUrl(e.target.value)}
-                disabled={fedBusy}
-                style={{ minWidth: 0, flex: 1 }}
-              />
-              <button
-                type="submit"
-                className="btn"
-                disabled={!fedPeerUrl.trim() || fedBusy}
-                style={{ fontSize: 11, padding: "6px 8px" }}
-              >
-                {t("Add", "Add")}
-              </button>
-            </form>
-            <button
-              className="btn btn-ghost"
-              disabled={fedBusy}
-              onClick={() => void handleFederationRefresh()}
-              style={{ fontSize: 11, justifyContent: "center" }}
-            >
-              {fedBusy ? t("Syncing...", "Syncing...") : t("Refresh federation", "Refresh federation")}
-            </button>
-            <button
-              className="btn btn-ghost"
-              disabled={fedBusy}
-              onClick={() => void handleFederationDiscover()}
-              style={{ fontSize: 11, justifyContent: "center" }}
-              title={t(
-                "Scan LAN/mDNS for DAO nodes that publish HTTP federation URLs",
-                "Scan LAN/mDNS for DAO nodes that publish HTTP federation URLs",
-              )}
-            >
-              {fedBusy ? t("Scanning...", "Scanning...") : t("Discover nearby DAOs", "Discover nearby DAOs")}
-            </button>
-            <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.5 }}>
-              {t("Seeds", "Seeds")}: {fedStatus?.seed_peers?.length ?? fedStatus?.peers.length ?? 0}
-              {" · "}
-              {t("Learned", "Learned")}: {Object.keys(fedStatus?.learned_peers ?? {}).length}
-              {" · "}
-              {t("last", "last")}: {formatFederationRefresh(fedStatus?.last_refresh_ms ?? 0)}
-              {fedStatus?.poller_started ? " · poller on" : ""}
-            </div>
-            <div style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.5 }}>
-              {t("Reverse discovery", "Reverse discovery")}: {fedStatus?.reverse_discovery_enabled
-                ? t("ready", "ready")
-                : t("local only", "local only")}
-            </div>
-            <div
-              style={{
-                fontSize: 10,
-                color: fedStatus?.lan_federation_ready
-                  ? "var(--accent)"
-                  : "var(--warning)",
-                lineHeight: 1.5,
-              }}
-            >
-              {t("LAN federation", "LAN federation")}: {fedStatus?.lan_federation_ready
-                ? t("advertising", "advertising")
-                : t("not advertising", "not advertising")}
-              {fedStatus?.public_peer_url ? ` · ${fedStatus.public_peer_url}` : ""}
-            </div>
-            {fedStatus?.lan_diagnostics?.map((diagnostic) => (
-              <div
-                key={diagnostic}
-                style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}
-              >
-                {diagnostic}
-              </div>
-            ))}
-            {fedStatus?.imported_peers?.length ? (
-              <div style={{ fontSize: 10, color: "var(--accent)", lineHeight: 1.4 }}>
-                {t("Imported", "Imported")}: {fedStatus.imported_peers.length}
-              </div>
-            ) : null}
-            {fedStatus?.identity_verified_peers?.length ? (
-              <div style={{ fontSize: 10, color: "var(--accent)", lineHeight: 1.4 }}>
-                {t("Identity verified", "Identity verified")}: {fedStatus.identity_verified_peers.length}
-              </div>
-            ) : null}
-            {fedStatus?.skipped_peers?.length ? (
-              <>
-                <div style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}>
-                  {t("Peers not imported", "Peers not imported")}: {fedStatus.skipped_peers.length}
-                </div>
-                {fedStatus.skipped_peers.slice(0, 3).map((peer) => (
-                  <div
-                    key={`${peer.did ?? peer.agent_id}:${peer.source_addr ?? ""}`}
-                    style={{ fontSize: 10, color: "var(--fg-tertiary)", lineHeight: 1.4 }}
-                  >
-                    {peer.label || peer.agent_id || peer.did || t("Unknown peer", "Unknown peer")}
-                    {": "}
-                    {peer.identity_error || t(
-                      "The peer did not expose a verified federation endpoint.",
-                      "The peer did not expose a verified federation endpoint.",
-                    )}
-                  </div>
-                ))}
-              </>
-            ) : null}
-            {(fedStatus?.stale_announcements ?? 0) > 0 && (
-              <div style={{ fontSize: 10, color: "var(--warning)", lineHeight: 1.4 }}>
-                {fedStatus?.stale_announcements} stale discovery hint(s) are visible but cannot be claimed.
-              </div>
-            )}
-            {fedStatus?.last_error && (
-              <div style={{ fontSize: 10, color: "var(--danger)", lineHeight: 1.4 }}>
-                {fedStatus.last_error}
-              </div>
-            )}
-            {fedStatus?.file_peers.length ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {fedStatus.file_peers.map((peer) => (
-                  <div
-                    key={peer}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 10,
-                      fontFamily: "var(--t-mono)",
-                      color: "var(--fg-secondary)",
-                    }}
-                  >
-                    <span className="truncate" title={peer} style={{ minWidth: 0, flex: 1 }}>
-                      {peer}
-                    </span>
-                    <button
-                      className="btn btn-ghost"
-                      disabled={fedBusy}
-                      onClick={() => void handleFederationPeerRemove(peer)}
-                      style={{ fontSize: 10, padding: "3px 6px" }}
-                    >
-                      {t("Remove", "Remove")}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
         </div>
       </aside>
 
@@ -734,13 +311,13 @@ export function TasksView() {
             <h1 className="main-title">Tasks {loading ? "…" : `(${shown.length})`}</h1>
             <p className="main-subtitle">
               {t(
-                "发布或承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
-                "Publish or claim work requests. A claim creates or links a Mission and exposes execution on the Blackboard.",
+                "查看和承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
+                "Review and claim work requests. A claim creates or links a Mission and exposes execution on the Blackboard.",
               )}
             </p>
           </div>
-          <button className="btn btn-primary" onClick={() => setShowForm((s) => !s)}>
-            {showForm ? t("取消", "Cancel") : t("+ 发布任务", "+ Publish task")}
+          <button className="btn btn-primary" type="button" onClick={onOpenPublisher}>
+            {t("前往市场发布", "Publish in Market")}
           </button>
         </div>
 
@@ -784,63 +361,6 @@ export function TasksView() {
             </label>
           </div>
 
-          {showForm && (
-            <form
-              onSubmit={handlePublish}
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: "var(--r-md)",
-                padding: 14,
-                marginBottom: 16,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              <input
-                placeholder={t("任务标题 *", "Task title *")}
-                value={fTitle}
-                maxLength={200}
-                onChange={(e) => setFTitle(e.target.value)}
-              />
-              <input
-                placeholder={t("所需能力,逗号分隔 (如 code_review, research)", "Required capabilities, comma-separated (e.g. code_review, research)")}
-                value={fCaps}
-                onChange={(e) => setFCaps(e.target.value)}
-              />
-              <div style={{ display: "flex", gap: 8 }}>
-                <input
-                  placeholder={t("类别 (context)", "Category (context)")}
-                  value={fContext}
-                  onChange={(e) => setFContext(e.target.value)}
-                  style={{ flex: 1 }}
-                />
-                <input
-                  placeholder={t("赏金 (整数)", "Reward (integer)")}
-                  inputMode="numeric"
-                  value={fReward}
-                  onChange={(e) => setFReward(e.target.value.replace(/[^0-9]/g, ""))}
-                  style={{ width: 120 }}
-                />
-              </div>
-              <textarea
-                placeholder={t("任务详述", "Task description")}
-                value={fDesc}
-                maxLength={4000}
-                onChange={(e) => setFDesc(e.target.value)}
-                style={{ minHeight: 60 }}
-              />
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={!fTitle.trim() || publishing}
-                style={{ alignSelf: "flex-start" }}
-              >
-                {publishing ? t("发布中…", "Publishing…") : t("发布", "Publish")}
-              </button>
-            </form>
-          )}
-
           {shown.length === 0 ? (
             <div className="main-empty" style={{ minHeight: 200 }}>
               <div className="main-empty-icon">
@@ -853,8 +373,8 @@ export function TasksView() {
               </p>
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
                 {tab === "mine"
-                  ? t("点右上「+ 发布任务」放一条出去。", "Use “+ Publish task” to put one out.")
-                  : t("换个筛选,或配置 NTH_FED_PEERS 接入更多 DAO。", "Adjust filters, or set NTH_FED_PEERS to reach more DAOs.")}
+                  ? t("使用市场的统一发布入口创建任务。", "Use the unified Market publisher to create a Task.")
+                  : t("换个筛选,或前往市场配置联邦节点。", "Adjust filters, or configure federation peers in Market.")}
               </p>
             </div>
           ) : (

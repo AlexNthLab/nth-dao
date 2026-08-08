@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 import hashlib
 from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -92,6 +96,8 @@ def test_health_and_status_expose_lan_dialability(
     assert status["lan_federation_configured"] is True
     assert status["lan_publisher_active"] is True
     assert status["public_peer_url"] == "http://192.168.1.20:8080"
+    assert status["lan_mdns_publisher_active"] is True
+    assert status["lan_udp_publisher_active"] is False
     assert status["lan_diagnostics"] == []
 
 
@@ -117,7 +123,7 @@ def test_lan_readiness_requires_live_publisher(
     assert health["lan_ready"] is False
     assert status["lan_federation_ready"] is False
     assert any(
-        "publication is configured but not active" in message
+        "neither UDP nor mDNS is active" in message
         for message in status["lan_diagnostics"]
     )
 
@@ -130,6 +136,10 @@ def test_status_preserves_last_discovery_failure_for_operator(
         "discovered": True,
         "identity_verified_peers": [],
         "imported_peers": [],
+        "discovered_peers": [{
+            "agent_id": "remote",
+            "identity_verified": False,
+        }],
         "skipped_peers": [{
             "agent_id": "remote",
             "identity_error": "peer did not advertise an HTTP federation URL",
@@ -141,6 +151,7 @@ def test_status_preserves_last_discovery_failure_for_operator(
     status = client.get("/api/v2/market/federation/status").json()
 
     assert status["discovered"] is True
+    assert status["discovered_peers"][0]["agent_id"] == "remote"
     assert status["skipped_peers"][0]["agent_id"] == "remote"
     assert status["lan_federation_ready"] is False
     assert "python -m nth_dao.web --lan" in status["lan_diagnostics"][0]
@@ -355,7 +366,7 @@ def test_app_lifespan_discovers_federation_without_browser(
         assert calls == [{
             "actor_id": "admin",
             "timeout_seconds": 1.25,
-            "add": True,
+            "add": False,
             "refresh": False,
         }]
         assert app.state.market_fed_discovery_thread.is_alive()
@@ -705,6 +716,271 @@ def test_federation_discover_rejects_non_member_actor(tmp_path: Path) -> None:
     )
 
     assert r.status_code == 403
+
+
+def test_operator_seed_registry_rejects_capacity_overflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    monkeypatch.setattr(
+        "nth_dao.web.market_federation_poll.start_poller",
+        lambda *args, **kwargs: None,
+    )
+    existing = [f"http://127.0.0.1:{10_000 + index}" for index in range(128)]
+    v2_api._write_fed_peer_file(tmp_path, existing)
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    response = client.post(
+        "/api/v2/market/federation/peers",
+        json={"peer_url": "http://127.0.0.1:20000", "action": "add"},
+    )
+
+    assert response.status_code == 409
+    assert "capacity" in response.json()["detail"]
+    assert v2_api._read_fed_peer_file(tmp_path) == existing
+
+
+def test_operator_seed_update_preserves_damaged_registry_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "nth_dao.web.market_federation_poll.start_poller",
+        lambda *args, **kwargs: None,
+    )
+    path = tmp_path / "federation" / "peers.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = b"{broken-seed-registry"
+    path.write_bytes(original)
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    response = client.post(
+        "/api/v2/market/federation/peers",
+        json={"peer_url": "http://127.0.0.1:20000", "action": "add"},
+    )
+
+    assert response.status_code == 409
+    assert path.read_bytes() == original
+
+
+def test_operator_seed_remove_preflights_damaged_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    monkeypatch.setattr(
+        "nth_dao.web.market_federation_poll.start_poller",
+        lambda *args, **kwargs: None,
+    )
+    peer = "http://127.0.0.1:20001"
+    v2_api._write_fed_peer_file(tmp_path, [peer])
+    peer_bytes = (tmp_path / "federation" / "peers.json").read_bytes()
+    metadata_path = tmp_path / "federation" / "peers_meta.json"
+    original_metadata = b"{broken-peer-metadata"
+    metadata_path.write_bytes(original_metadata)
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    response = client.post(
+        "/api/v2/market/federation/peers",
+        json={"peer_url": peer, "action": "remove"},
+    )
+
+    assert response.status_code == 409
+    assert (tmp_path / "federation" / "peers.json").read_bytes() == peer_bytes
+    assert metadata_path.read_bytes() == original_metadata
+
+
+def test_seed_registry_transaction_recovers_after_second_file_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    peer = "http://127.0.0.1:20002"
+    metadata = {
+        peer: {
+            "peer_url": peer,
+            "did": NEW_NODE_DID,
+        },
+    }
+    real_write_metadata = v2_api._write_fed_peer_metadata
+
+    def fail_metadata(*_args, **_kwargs):
+        raise OSError("simulated second-file failure")
+
+    monkeypatch.setattr(v2_api, "_write_fed_peer_metadata", fail_metadata)
+    with pytest.raises(OSError, match="second-file failure"):
+        v2_api._write_fed_peer_config_transaction(tmp_path, [peer], metadata)
+
+    transaction = tmp_path / "federation" / "peer_registry.txn.json"
+    assert transaction.exists()
+    monkeypatch.setattr(v2_api, "_write_fed_peer_metadata", real_write_metadata)
+
+    assert v2_api._read_fed_peer_file(tmp_path, strict=True) == [peer]
+    assert v2_api._read_fed_peer_metadata(tmp_path, strict=True) == metadata
+    assert not transaction.exists()
+
+
+def test_damaged_seed_registry_transaction_blocks_mutation_without_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "nth_dao.web.market_federation_poll.start_poller",
+        lambda *args, **kwargs: None,
+    )
+    federation = tmp_path / "federation"
+    federation.mkdir(parents=True)
+    peer_path = federation / "peers.json"
+    peer_path.write_text("[]\n", encoding="utf-8")
+    transaction = federation / "peer_registry.txn.json"
+    transaction.write_bytes(b"{broken-transaction")
+    original_peers = peer_path.read_bytes()
+    original_transaction = transaction.read_bytes()
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    response = client.post(
+        "/api/v2/market/federation/peers",
+        json={"peer_url": "http://127.0.0.1:20003", "action": "add"},
+    )
+
+    assert response.status_code == 409
+    assert peer_path.read_bytes() == original_peers
+    assert transaction.read_bytes() == original_transaction
+
+
+def test_seed_registry_transaction_rejects_non_string_peer(
+    tmp_path: Path,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    federation = tmp_path / "federation"
+    federation.mkdir(parents=True)
+    transaction = federation / "peer_registry.txn.json"
+    transaction.write_text(
+        json.dumps({"version": 1, "peers": [123], "metadata": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        v2_api.FederationSeedConfigError,
+        match="peers must be strings",
+    ):
+        v2_api._read_fed_peer_file(tmp_path, strict=True)
+
+    assert transaction.exists()
+
+
+def test_seed_registry_read_waits_for_complete_two_file_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    peer = "http://127.0.0.1:20004"
+    metadata = {peer: {"peer_url": peer, "did": NEW_NODE_DID}}
+    metadata_write_started = threading.Event()
+    allow_metadata_write = threading.Event()
+    reader_finished = threading.Event()
+    real_write_metadata = v2_api._write_fed_peer_metadata
+    errors: list[BaseException] = []
+    observed: list[tuple[list[str], dict]] = []
+
+    def blocking_metadata_write(*args, **kwargs):
+        metadata_write_started.set()
+        if not allow_metadata_write.wait(2):
+            raise TimeoutError("test did not release metadata write")
+        return real_write_metadata(*args, **kwargs)
+
+    def write_config() -> None:
+        try:
+            v2_api._write_fed_peer_config_transaction(tmp_path, [peer], metadata)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def read_config() -> None:
+        try:
+            observed.append((
+                v2_api._read_fed_peer_file(tmp_path, strict=True),
+                v2_api._read_fed_peer_metadata(tmp_path, strict=True),
+            ))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            reader_finished.set()
+
+    monkeypatch.setattr(
+        v2_api,
+        "_write_fed_peer_metadata",
+        blocking_metadata_write,
+    )
+    writer = threading.Thread(target=write_config)
+    writer.start()
+    assert metadata_write_started.wait(2)
+    reader = threading.Thread(target=read_config)
+    reader.start()
+    assert not reader_finished.wait(0.05)
+    allow_metadata_write.set()
+    writer.join(2)
+    reader.join(2)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert errors == []
+    assert observed == [([peer], metadata)]
+
+
+def test_seed_registry_transaction_is_serialized_across_processes(
+    tmp_path: Path,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    peer = "http://127.0.0.1:20005"
+    script = (
+        "import sys; "
+        "from pathlib import Path; "
+        "from nth_dao.web.v2_api import _write_fed_peer_config_transaction; "
+        "peer=sys.argv[2]; "
+        "_write_fed_peer_config_transaction("
+        "Path(sys.argv[1]),[peer],{peer:{'peer_url':peer,'did':sys.argv[3]}})"
+    )
+    with v2_api._fed_config_guard(tmp_path):
+        child = subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), peer, NEW_NODE_DID],
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        time.sleep(0.2)
+        assert child.poll() is None
+
+    assert child.wait(timeout=15) == 0
+    assert v2_api._read_fed_peer_file(tmp_path, strict=True) == [peer]
+
+
+def test_seed_registry_busy_read_is_soft_unless_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    class BusyLock:
+        def __enter__(self):
+            raise TimeoutError("held by another process")
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(v2_api, "InterProcessLock", lambda *_args, **_kwargs: BusyLock())
+
+    assert v2_api._read_fed_peer_file(tmp_path) == []
+    assert v2_api._read_fed_peer_metadata(tmp_path) == {}
+    with pytest.raises(
+        v2_api.FederationSeedConfigError,
+        match="registry is busy",
+    ):
+        v2_api._read_fed_peer_file(tmp_path, strict=True)
 
 
 def test_identity_card_verification_binds_did_key_and_peer_url() -> None:

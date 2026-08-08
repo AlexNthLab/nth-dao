@@ -128,11 +128,13 @@ def test_trade_offer_publish_list_get_and_duplicate(tmp_path):
             "verified_inline_count": 0,
             "items": [],
             "profile_packages_resolved": False,
+            "profile_packages_recognized": 0,
+            "profile_packages_applicable": 0,
             "execution_ready": False,
             "warning": (
-                "Inline descriptor hashes may be verified, but Resource Profile "
-                "Skill references are not resolved, recognized, or authorized for "
-                "execution by this implementation."
+                "Inline descriptor and local Profile signatures/schema may be "
+                "verified, but recognition is explicit local policy and never "
+                "authorizes execution."
             ),
         },
         "discoveries": [],

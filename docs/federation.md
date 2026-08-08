@@ -33,7 +33,7 @@ $env:NTH_FED_PEERS = "https://seed-a.example,https://seed-b.example"
 python -m nth_dao.web
 ```
 
-Alternatively, manage seeds from the Tasks view or store a JSON string array
+Alternatively, manage seeds from Market's Federation panel or store a JSON string array
 at `<workspace>/federation/peers.json`.
 
 For a node to become reachable from the wider federation, configure the exact
@@ -73,17 +73,21 @@ macOS or Linux:
 python -m nth_dao.web --lan
 ```
 
-Install the LAN extra on both nodes so mDNS is available:
+UDP discovery is built into the core. The optional LAN extra adds mDNS as a
+second discovery path:
 
 ```bash
 pip install -e ".[lan]"
 ```
 
-Opening **Tasks** performs one bounded discovery pass and imports only peers
+Opening **Market / Discover** performs one bounded discovery pass and imports only peers
 whose DID:key identity card, public key, signature, and advertised URL all
 verify. The manual **Discover nearby DAOs** action repeats the scan and shows
 diagnostics. Local firewalls must allow inbound TCP on the configured NTH DAO
-port (8080 by default) and mDNS/UDP traffic on the private network.
+port (8080 by default) and UDP discovery traffic (9877 by default) on the
+private network. Set the same `NTH_LAN_DISCOVERY_PORT` on every node when a
+different UDP port is required. mDNS also needs local multicast when the
+optional extra is installed.
 
 LAN mode exposes signed federation and read-only discovery surfaces to the
 subnet. Console bearer tokens are injected only for loopback browser clients,
@@ -122,6 +126,15 @@ For every accepted peer, the market poller performs:
    digest route. Verify every signed Offer revision from genesis, every
    predecessor edge, the exact announced head, and the announcement lifetime.
 6. Merge unexpired records into the local read-only federation cache.
+
+After the first complete source snapshot, normal poller cycles continue from
+the last verified sequence cursor and merge only newly signed records. Once
+60 seconds have elapsed since a source's last complete snapshot, the next
+successful poll for that source deliberately resets to `since=-1` and
+reconciles a complete open-set snapshot. This full pass is required to observe
+claims, withdrawals, feed restoration, and other absences that an append-only
+cursor cannot express. A peer identity change also discards its cursor and
+forces a full pass. Manual **Refresh** always performs a full reconciliation.
 
 The console may inspect the exact remote Trade Offer head retained with an
 exchange announcement. The complete disclosed revision chain is isolated from
@@ -248,3 +261,8 @@ cloud-metadata destinations.
 - Withdrawal currently uses signed open-set absence, not durable tombstones.
   Nodes that need historical proof of withdrawal must retain their own audit
   events until a tombstone/revocation wire type is standardized.
+Nearby discovery and operator-approved federation seeds have different trust
+semantics. Background and initial UI scans only retain bounded in-memory
+discovery results. A verified identity card proves key control, not trust; the
+operator must explicitly approve a nearby URL before it is persisted as a seed
+and polled. Approved seed persistence is bounded to 128 URLs.

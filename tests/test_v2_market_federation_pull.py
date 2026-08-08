@@ -70,6 +70,37 @@ def test_pull_from_peer_returns_verified(tmp_path: Path) -> None:
     assert verify_announcement(got[0])[0]  # 全文 publisher_sig 验过
 
 
+def test_pull_from_peer_uses_verified_incremental_cursor(tmp_path: Path) -> None:
+    peer = TestClient(create_app(tmp_path / "peer", require_console_auth=False))
+    first_id = peer.post(
+        "/api/v2/market/announce",
+        json={"title": "first", "capability_set": ["review"]},
+    ).json()["announcement_id"]
+    first_cursor: dict[str, int] = {}
+    first = pull_from_peer(
+        "https://peer.example",
+        _http_get_via(peer),
+        expected_source_did=_node_did(peer),
+        _cursor_out=first_cursor,
+    )
+    second_id = peer.post(
+        "/api/v2/market/announce",
+        json={"title": "second", "capability_set": ["review"]},
+    ).json()["announcement_id"]
+    second_cursor: dict[str, int] = {}
+    delta = pull_from_peer(
+        "https://peer.example",
+        _http_get_via(peer),
+        expected_source_did=_node_did(peer),
+        _since_seq=first_cursor["high_seq"],
+        _cursor_out=second_cursor,
+    )
+
+    assert [item.announcement_id for item in first] == [first_id]
+    assert [item.announcement_id for item in delta] == [second_id]
+    assert second_cursor["high_seq"] > first_cursor["high_seq"]
+
+
 def test_pull_from_peer_resolves_and_binds_full_commerce_listing(
     tmp_path: Path,
 ) -> None:
@@ -444,6 +475,89 @@ def test_partial_cycle_replaces_only_completed_sources() -> None:
     retained = next(iter(snapshot.values()))
     assert retained["source"] == second_url
     assert retained["stale"] is True
+
+
+def test_incremental_cycle_merges_then_periodic_full_reconcile_removes_absent() -> None:
+    identity = AgentIdentity.generate(label="remote")
+    source = "https://remote.example"
+    first = sign_announcement(
+        publisher=identity,
+        authority_did=identity.as_did(),
+        title="first",
+    )
+    second = sign_announcement(
+        publisher=identity,
+        authority_did=identity.as_did(),
+        title="second",
+    )
+    cache = FederationCache(stale_ttl_ms=1_000)
+    cache.apply_cycle(
+        {"first": {"ann": first, "source": source}},
+        completed_sources={source},
+        full_sources={source},
+        source_high_seq={source: 0},
+        source_dids={source: identity.as_did()},
+        now_ms_override=1_000,
+    )
+    assert cache.since_for_source(
+        source,
+        identity.as_did(),
+        now_ms_override=1_050,
+        full_reconcile_ms=100,
+    ) == 0
+
+    cache.apply_cycle(
+        {"second": {"ann": second, "source": source}},
+        completed_sources={source},
+        full_sources=set(),
+        source_high_seq={source: 1},
+        source_dids={source: identity.as_did()},
+        now_ms_override=1_050,
+    )
+    titles = {
+        item["ann"].title
+        for item in cache.snapshot(now_ms_override=1_050).values()
+    }
+    assert titles == {"first", "second"}
+    assert cache.since_for_source(
+        source,
+        identity.as_did(),
+        now_ms_override=1_100,
+        full_reconcile_ms=100,
+    ) == -1
+
+    cache.apply_cycle(
+        {"second": {"ann": second, "source": source}},
+        completed_sources={source},
+        full_sources={source},
+        source_high_seq={source: 1},
+        source_dids={source: identity.as_did()},
+        now_ms_override=1_100,
+    )
+    remaining = cache.snapshot(now_ms_override=1_100)
+    assert [item["ann"].title for item in remaining.values()] == ["second"]
+
+
+def test_incremental_cursor_fails_closed_on_identity_rotation() -> None:
+    first = AgentIdentity.generate(label="first")
+    second = AgentIdentity.generate(label="second")
+    source = "https://remote.example"
+    cache = FederationCache(stale_ttl_ms=1_000)
+    cache.apply_cycle(
+        {},
+        completed_sources={source},
+        full_sources={source},
+        source_high_seq={source: 9},
+        source_dids={source: first.as_did()},
+        now_ms_override=1_000,
+    )
+
+    assert cache.since_for_source(
+        source,
+        second.as_did(),
+        now_ms_override=1_010,
+        full_reconcile_ms=100,
+    ) == -1
 
 
 def test_stale_source_is_evicted_after_ttl() -> None:

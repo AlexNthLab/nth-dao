@@ -2143,13 +2143,107 @@ def _market_resource_descriptor(
     return offer_leg, descriptor
 
 
-def _market_offer_descriptor_inspection(offer: Any) -> Dict[str, Any]:
-    """Verify inline descriptor hashes without claiming Profile recognition."""
+def _market_offer_descriptor_inspection(
+    offer: Any,
+    *,
+    workspace: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Inspect inline descriptors and any locally cached Profile Skills."""
     from nth_dao.market.resource_descriptor import (
         inspect_offer_resource_descriptors,
     )
 
-    return inspect_offer_resource_descriptors(offer)
+    if workspace is None:
+        return inspect_offer_resource_descriptors(offer)
+    from nth_dao.market.resource_profile import (
+        ResourceProfilePolicy,
+        ResourceProfileStore,
+    )
+
+    store = ResourceProfileStore(workspace)
+    policy = ResourceProfilePolicy(workspace)
+    return inspect_offer_resource_descriptors(
+        offer,
+        profile_resolver=store.load,
+        accepted_profile_digests=policy.accepted_digests(),
+    )
+
+
+def _market_resource_profile_to_wire(
+    profile: Any,
+    *,
+    recognized: bool,
+) -> Dict[str, Any]:
+    from nth_dao.market.resource_profile import evaluate_resource_profile
+
+    document = profile.to_dict()
+    active, active_reason = evaluate_resource_profile(profile)
+    return {
+        "digest": profile.digest,
+        "profile_id": document["profile_id"],
+        "version": document["version"],
+        "publisher_did": document["publisher_did"],
+        "summary": document["summary"],
+        "resource_types": list(document["resource_types"]),
+        "category_mappings": list(document["category_mappings"]),
+        "schema": dict(document["schema"]),
+        "published_at": document["published_at"],
+        "not_after": document["not_after"],
+        "active": active,
+        "active_reason": active_reason,
+        "recognized": bool(recognized),
+        "signature_verified": True,
+        "execution_authority_granted": False,
+    }
+
+
+def _validate_local_market_profile_references(
+    extensions: Dict[str, Any],
+    *,
+    workspace: Path,
+) -> None:
+    """Validate cached Profile semantics before the node signs an Offer."""
+
+    from nth_dao.market.resource_descriptor import RESOURCE_DESCRIPTOR_EXTENSION
+    from nth_dao.market.resource_profile import (
+        ResourceProfileStore,
+        evaluate_resource_profile,
+        validate_profile_attributes,
+    )
+
+    extension = extensions.get(RESOURCE_DESCRIPTOR_EXTENSION)
+    descriptors = extension.get("descriptors") if isinstance(extension, dict) else None
+    if not isinstance(descriptors, dict):
+        return
+    store = ResourceProfileStore(workspace)
+    for descriptor in descriptors.values():
+        if not isinstance(descriptor, dict):
+            continue
+        profile_ref = descriptor.get("profile_ref")
+        if not isinstance(profile_ref, dict) or not profile_ref:
+            continue
+        digest = profile_ref.get("digest")
+        profile = store.load(digest)
+        if profile is None:
+            continue
+        if profile.profile_id != profile_ref.get("rule_id"):
+            raise ValueError("cached Resource Profile ID does not match profile_ref")
+        document = profile.to_dict()
+        if descriptor.get("resource_type") not in document["resource_types"]:
+            raise ValueError("resource_type is not allowed by the cached Resource Profile")
+        active, reason = evaluate_resource_profile(profile)
+        if not active:
+            raise ValueError(f"cached Resource Profile is {reason}")
+        attributes = descriptor.get("attributes")
+        if not isinstance(attributes, dict):
+            raise ValueError("Resource Profile attributes must be an object")
+        validate_profile_attributes(
+            profile,
+            {
+                key: value for key, value in attributes.items()
+                if key != "community_category"
+            },
+        )
 
 
 def _market_offer_material(
@@ -4651,9 +4745,28 @@ class MarketResourceLegBody(_Model):
     resource_id: str = Field(min_length=3, max_length=512)
     quantity: str = Field(default="1", min_length=1, max_length=80)
     unit: str = Field(default="item", min_length=1, max_length=80)
-    profile_rule_id: str = Field(default="", max_length=160)
+    profile_rule_id: str = Field(default="", max_length=190)
     profile_digest: str = Field(default="", max_length=71)
     attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketResourceProfileImportBody(_Model):
+    """One already-signed declarative Resource Profile document."""
+
+    model_config = {"extra": "forbid"}
+    document: Dict[str, Any]
+
+
+class MarketResourceProfileRecognitionBody(_Model):
+    """Explicit local recognition decision with retry-safe request identity."""
+
+    model_config = {"extra": "forbid"}
+    accepted: bool
+    idempotency_key: str = Field(
+        min_length=16,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class MarketTradeRuleRefBody(_Model):
@@ -8105,6 +8218,7 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
 
 _FED_POLLER_LOCK = threading.Lock()
 _FED_CONFIG_LOCK = threading.RLock()
+_FED_CONFIG_LOCK_STATE = threading.local()
 _FED_IDENTITY_INIT_LOCK = threading.Lock()
 _FED_HELLO_LIMITER_LOCK = threading.Lock()
 _TRADE_PACKAGE_SERVE_BYTES_PER_SOURCE = 64 * 1024 * 1024
@@ -8133,6 +8247,12 @@ def _fed_peer_metadata_file(ws: Optional[Path]) -> Optional[Path]:
     if ws is None:
         return None
     return ws / "federation" / "peers_meta.json"
+
+
+def _fed_peer_transaction_file(ws: Optional[Path]) -> Optional[Path]:
+    if ws is None:
+        return None
+    return ws / "federation" / "peer_registry.txn.json"
 
 
 def _learned_fed_peer_store(ws: Optional[Path]):
@@ -8856,6 +8976,47 @@ _MAX_FED_IDENTITY_CARD_BYTES = 64 * 1024
 _MAX_FED_IDENTITY_HEX = 256
 _FED_IDENTITY_CARD_KIND = "nth-dao-identity-card-v1"
 _MAX_FED_DISCOVERY_CANDIDATES = 32
+_MAX_FED_SEED_PEERS = 128
+_MAX_FED_CONFIG_BYTES = 512 * 1024
+
+
+class FederationSeedCapacityError(ValueError):
+    """Raised when approved operator seed persistence reaches its bound."""
+
+
+class FederationSeedConfigError(ValueError):
+    """Raised when a damaged seed registry must not be overwritten."""
+
+
+@contextmanager
+def _fed_config_guard(ws: Optional[Path]) -> Iterator[None]:
+    """Serialize one peer-registry transaction across threads and processes."""
+
+    transaction = _fed_peer_transaction_file(ws)
+    lock_key = str(transaction) if transaction is not None else "<unavailable>"
+    with _FED_CONFIG_LOCK:
+        held = getattr(_FED_CONFIG_LOCK_STATE, "held", set())
+        if lock_key in held:
+            yield
+            return
+        next_held = set(held)
+        next_held.add(lock_key)
+        _FED_CONFIG_LOCK_STATE.held = next_held
+        try:
+            if transaction is None:
+                yield
+            else:
+                try:
+                    with InterProcessLock(transaction, timeout=10.0):
+                        yield
+                except TimeoutError as exc:
+                    raise FederationSeedConfigError(
+                        "federation peer registry is busy",
+                    ) from exc
+        finally:
+            remaining = set(getattr(_FED_CONFIG_LOCK_STATE, "held", set()))
+            remaining.discard(lock_key)
+            _FED_CONFIG_LOCK_STATE.held = remaining
 
 
 def _normalize_configured_fed_peer(url: str) -> str:
@@ -9330,12 +9491,16 @@ def _market_fed_gossip_identity_verifier(
                             normalized, metadata, resolved_ip=resolved_ip,
                         )
                 elif normalized in _read_fed_peers(ws):
-                    with _FED_CONFIG_LOCK:
-                        persisted = _read_fed_peer_metadata(ws)
+                    with _fed_config_guard(ws):
+                        persisted = _read_fed_peer_metadata(ws, strict=True)
                         if persisted.get(normalized) == metadata:
                             return
                         persisted[normalized] = metadata
-                        _write_fed_peer_metadata(ws, persisted)
+                        _write_fed_peer_config_transaction(
+                            ws,
+                            _read_fed_peer_file(ws, strict=True),
+                            persisted,
+                        )
             except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                 logger.warning(
                     "fed: verified peer metadata persistence failed %s: %s",
@@ -9452,35 +9617,98 @@ def _market_fed_gossip_identity_verifier(
     return verify
 
 
-def _read_fed_peer_metadata(ws: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+def _read_fed_peer_metadata(
+    ws: Optional[Path],
+    *,
+    strict: bool = False,
+) -> Dict[str, Dict[str, Any]]:
+    try:
+        with _fed_config_guard(ws):
+            if not _recover_fed_peer_config_transaction(ws, strict=strict):
+                return {}
+            return _read_fed_peer_metadata_unlocked(ws, strict=strict)
+    except FederationSeedConfigError:
+        if strict:
+            raise
+        logger.warning("federation peer metadata is temporarily busy")
+        return {}
+
+
+def _read_fed_peer_metadata_unlocked(
+    ws: Optional[Path],
+    *,
+    strict: bool,
+) -> Dict[str, Dict[str, Any]]:
     mf = _fed_peer_metadata_file(ws)
     if mf is None or not mf.exists():
         return {}
     try:
+        if mf.stat().st_size > _MAX_FED_CONFIG_BYTES:
+            message = "federation peer metadata exceeds the byte limit"
+            if strict:
+                raise FederationSeedConfigError(message)
+            logger.warning(message)
+            return {}
         data = json.loads(mf.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        if strict:
+            raise FederationSeedConfigError(
+                "federation peer metadata is unreadable",
+            ) from exc
         return {}
     if not isinstance(data, dict):
+        if strict:
+            raise FederationSeedConfigError(
+                "federation peer metadata must be an object",
+            )
         return {}
+    if len(data) > _MAX_FED_SEED_PEERS and strict:
+        raise FederationSeedConfigError(
+            "federation peer metadata exceeds seed capacity",
+        )
+    allowed_fields = {
+        "peer_url", "identity_url", "did", "pubkey_hex",
+        "verified_at", "card_kind", "federation_protocol",
+    }
     out: Dict[str, Dict[str, Any]] = {}
-    for raw_url, raw_meta in data.items():
+    for raw_url, raw_meta in list(data.items())[:_MAX_FED_SEED_PEERS]:
         if not isinstance(raw_url, str) or not isinstance(raw_meta, dict):
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation peer metadata contains a malformed entry",
+                )
             continue
         try:
             peer_url = _normalize_configured_fed_peer(raw_url)
-        except ValueError:
+        except ValueError as exc:
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation peer metadata contains an invalid URL",
+                ) from exc
             continue
+        if strict and (
+            set(raw_meta) - allowed_fields
+            or any(
+                not isinstance(value, str)
+                or len(value) > _MAX_FED_IDENTITY_HEX * 4
+                for value in raw_meta.values()
+            )
+        ):
+            raise FederationSeedConfigError(
+                "federation peer metadata contains invalid fields",
+            )
         meta = {
             key: value for key, value in raw_meta.items()
-            if key in {
-                "peer_url", "identity_url", "did", "pubkey_hex",
-                "verified_at", "card_kind", "federation_protocol",
-            }
+            if key in allowed_fields
             and isinstance(value, str)
             and len(value) <= _MAX_FED_IDENTITY_HEX * 4
         }
         if meta.get("peer_url") == peer_url and meta.get("did"):
             out[peer_url] = meta
+        elif strict:
+            raise FederationSeedConfigError(
+                "federation peer metadata identity binding is malformed",
+            )
     return out
 
 
@@ -9528,25 +9756,7 @@ def _write_fed_peer_metadata(
     mf = _fed_peer_metadata_file(ws)
     if mf is None:
         raise RuntimeError("workspace unavailable")
-    normalized: Dict[str, Dict[str, Any]] = {}
-    for raw_url, raw_meta in metadata.items():
-        try:
-            peer_url = _normalize_configured_fed_peer(raw_url)
-        except ValueError:
-            continue
-        if not isinstance(raw_meta, dict):
-            continue
-        item = {
-            key: value for key, value in raw_meta.items()
-            if key in {
-                "peer_url", "identity_url", "did", "pubkey_hex",
-                "verified_at", "card_kind", "federation_protocol",
-            }
-            and isinstance(value, str)
-            and len(value) <= _MAX_FED_IDENTITY_HEX * 4
-        }
-        if item.get("peer_url") == peer_url and item.get("did"):
-            normalized[peer_url] = item
+    normalized = _normalize_fed_peer_metadata(metadata, strict=False)
     mf.parent.mkdir(parents=True, exist_ok=True)
     tmp = mf.with_suffix(mf.suffix + ".tmp")
     tmp.write_text(
@@ -9554,6 +9764,69 @@ def _write_fed_peer_metadata(
         encoding="utf-8",
     )
     os.replace(tmp, mf)
+
+
+def _normalize_fed_peer_metadata(
+    metadata: Dict[str, Dict[str, Any]],
+    *,
+    strict: bool,
+) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(metadata, dict):
+        raise FederationSeedConfigError("federation peer metadata must be an object")
+    allowed_fields = {
+        "peer_url", "identity_url", "did", "pubkey_hex",
+        "verified_at", "card_kind", "federation_protocol",
+    }
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw_url, raw_meta in metadata.items():
+        if not isinstance(raw_url, str):
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation peer metadata contains a non-string URL",
+                )
+            continue
+        try:
+            peer_url = _normalize_configured_fed_peer(raw_url)
+        except ValueError as exc:
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation peer metadata contains an invalid URL",
+                ) from exc
+            continue
+        if not isinstance(raw_meta, dict):
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation peer metadata contains a malformed entry",
+                )
+            continue
+        if strict and (
+            set(raw_meta) - allowed_fields
+            or any(
+                not isinstance(value, str)
+                or len(value) > _MAX_FED_IDENTITY_HEX * 4
+                for value in raw_meta.values()
+            )
+        ):
+            raise FederationSeedConfigError(
+                "federation peer metadata contains invalid fields",
+            )
+        item = {
+            key: value for key, value in raw_meta.items()
+            if key in allowed_fields
+            and isinstance(value, str)
+            and len(value) <= _MAX_FED_IDENTITY_HEX * 4
+        }
+        if item.get("peer_url") == peer_url and item.get("did"):
+            normalized[peer_url] = item
+        elif strict:
+            raise FederationSeedConfigError(
+                "federation peer metadata identity binding is malformed",
+            )
+    if len(normalized) > _MAX_FED_SEED_PEERS:
+        raise FederationSeedCapacityError(
+            f"federation seed capacity is limited to {_MAX_FED_SEED_PEERS}",
+        )
+    return normalized
 
 
 def _discovered_peer_to_wire(peer: Any) -> Dict[str, Any]:
@@ -9604,12 +9877,13 @@ def _discover_market_federation_peers(
     psk = os.environ.get("NTH_DISCOVERY_PSK", "").strip()
 
     try:
-        from nth_dao.discovery import LANDiscovery
+        from nth_dao.discovery import LANDiscovery, configured_discovery_port
         lan = LANDiscovery(
             agent_id=actor_id,
             pubkey_hex=pubkey_hex,
             did=did,
             psk=psk,
+            port=configured_discovery_port(),
         )
         peers.extend(lan.discover(timeout=timeout_seconds))
     except Exception as exc:  # noqa: BLE001
@@ -9647,22 +9921,83 @@ def _discover_market_federation_peers(
     return rows, errors
 
 
-def _read_fed_peer_file(ws: Optional[Path]) -> List[str]:
+def _read_fed_peer_file(
+    ws: Optional[Path],
+    *,
+    strict: bool = False,
+) -> List[str]:
+    try:
+        with _fed_config_guard(ws):
+            if not _recover_fed_peer_config_transaction(ws, strict=strict):
+                return []
+            return _read_fed_peer_file_unlocked(ws, strict=strict)
+    except FederationSeedConfigError:
+        if strict:
+            raise
+        logger.warning("federation seed registry is temporarily busy")
+        return []
+
+
+def _read_fed_peer_file_unlocked(
+    ws: Optional[Path],
+    *,
+    strict: bool,
+) -> List[str]:
     pf = _fed_peers_file(ws)
     if pf is None or not pf.exists():
         return []
     try:
+        if pf.stat().st_size > _MAX_FED_CONFIG_BYTES:
+            message = "federation seed registry exceeds the byte limit"
+            if strict:
+                raise FederationSeedConfigError(message)
+            logger.warning(message)
+            return []
         data = json.loads(pf.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        if strict:
+            raise FederationSeedConfigError(
+                "federation seed registry is unreadable",
+            ) from exc
         return []
     if not isinstance(data, list):
+        if strict:
+            raise FederationSeedConfigError(
+                "federation seed registry must be an array",
+            )
         return []
     out: List[str] = []
-    for item in data:
-        try:
-            out.append(_normalize_configured_fed_peer(str(item)))
-        except ValueError:
+    if len(data) > _MAX_FED_SEED_PEERS:
+        if strict:
+            raise FederationSeedConfigError(
+                "federation seed registry exceeds seed capacity",
+            )
+        logger.warning(
+            "federation seed registry contains more than %d peers; ignoring overflow",
+            _MAX_FED_SEED_PEERS,
+        )
+    for item in data[:_MAX_FED_SEED_PEERS]:
+        if not isinstance(item, str):
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation seed registry contains a non-string peer",
+                )
             continue
+        try:
+            normalized = _normalize_configured_fed_peer(item)
+        except ValueError as exc:
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation seed registry contains an invalid peer URL",
+                ) from exc
+            continue
+        if normalized in out:
+            if strict:
+                raise FederationSeedConfigError(
+                    "federation seed registry contains duplicate peers",
+                )
+            continue
+        out.append(normalized)
     return out
 
 
@@ -9677,6 +10012,10 @@ def _write_fed_peer_file(ws: Optional[Path], peers: List[str]) -> None:
         if p not in seen:
             seen.add(p)
             normalized.append(p)
+    if len(normalized) > _MAX_FED_SEED_PEERS:
+        raise FederationSeedCapacityError(
+            f"federation seed capacity is limited to {_MAX_FED_SEED_PEERS}",
+        )
     pf.parent.mkdir(parents=True, exist_ok=True)
     tmp = pf.with_suffix(pf.suffix + ".tmp")
     tmp.write_text(
@@ -9684,6 +10023,100 @@ def _write_fed_peer_file(ws: Optional[Path], peers: List[str]) -> None:
         encoding="utf-8",
     )
     os.replace(tmp, pf)
+
+
+def _recover_fed_peer_config_transaction(
+    ws: Optional[Path],
+    *,
+    strict: bool,
+) -> bool:
+    """Replay one durable seed/metadata transaction after an interrupted write."""
+
+    transaction = _fed_peer_transaction_file(ws)
+    if transaction is None or not transaction.exists():
+        return True
+    with _fed_config_guard(ws):
+        if not transaction.exists():
+            return True
+        try:
+            if transaction.stat().st_size > _MAX_FED_CONFIG_BYTES:
+                raise FederationSeedConfigError(
+                    "federation peer transaction exceeds the byte limit",
+                )
+            raw = json.loads(transaction.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or set(raw) != {"version", "peers", "metadata"}:
+                raise FederationSeedConfigError(
+                    "federation peer transaction is malformed",
+                )
+            if raw["version"] != 1 or not isinstance(raw["peers"], list):
+                raise FederationSeedConfigError(
+                    "federation peer transaction version or peers are invalid",
+                )
+            if any(not isinstance(item, str) for item in raw["peers"]):
+                raise FederationSeedConfigError(
+                    "federation peer transaction peers must be strings",
+                )
+            peers = [_normalize_configured_fed_peer(item) for item in raw["peers"]]
+            if len(peers) > _MAX_FED_SEED_PEERS or peers != list(dict.fromkeys(peers)):
+                raise FederationSeedConfigError(
+                    "federation peer transaction peers are invalid",
+                )
+            metadata = _normalize_fed_peer_metadata(raw["metadata"], strict=True)
+            _write_fed_peer_file(ws, peers)
+            _write_fed_peer_metadata(ws, metadata)
+            transaction.unlink(missing_ok=True)
+            return True
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            if strict:
+                if isinstance(exc, FederationSeedConfigError):
+                    raise
+                raise FederationSeedConfigError(
+                    "federation peer transaction cannot be recovered",
+                ) from exc
+            logger.warning("federation peer transaction recovery deferred: %s", exc)
+            return False
+
+
+def _write_fed_peer_config_transaction(
+    ws: Optional[Path],
+    peers: List[str],
+    metadata: Dict[str, Dict[str, Any]],
+) -> None:
+    """Atomically journal and apply the two-file operator seed registry."""
+
+    with _fed_config_guard(ws):
+        transaction = _fed_peer_transaction_file(ws)
+        if transaction is None:
+            raise RuntimeError("workspace unavailable")
+        normalized_peers: List[str] = []
+        for peer in peers:
+            if not isinstance(peer, str):
+                raise FederationSeedConfigError(
+                    "federation seed registry contains a non-string peer",
+                )
+            normalized = _normalize_configured_fed_peer(peer)
+            if normalized not in normalized_peers:
+                normalized_peers.append(normalized)
+        if len(normalized_peers) > _MAX_FED_SEED_PEERS:
+            raise FederationSeedCapacityError(
+                f"federation seed capacity is limited to {_MAX_FED_SEED_PEERS}",
+            )
+        normalized_metadata = _normalize_fed_peer_metadata(metadata, strict=True)
+        transaction.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(transaction, {
+            "version": 1,
+            "peers": normalized_peers,
+            "metadata": normalized_metadata,
+        })
+        _write_fed_peer_file(ws, normalized_peers)
+        _write_fed_peer_metadata(ws, normalized_metadata)
+        transaction.unlink(missing_ok=True)
 
 
 def _read_fed_peers(ws: Optional[Path]) -> List[str]:
@@ -10050,19 +10483,18 @@ def _discover_and_import_market_federation(
 
     imported: List[str] = []
     if add and (urls or verified_rows):
-        with _FED_CONFIG_LOCK:
-            file_peers = _read_fed_peer_file(ws)
+        with _fed_config_guard(ws):
+            file_peers = _read_fed_peer_file(ws, strict=True)
             merged = list(file_peers)
             for url in urls:
                 if url not in merged:
                     merged.append(url)
                     imported.append(url)
-            metadata = _read_fed_peer_metadata(ws)
+            original_metadata = _read_fed_peer_metadata(ws, strict=True)
+            metadata = dict(original_metadata)
             metadata.update(verified_metadata)
-            if imported:
-                _write_fed_peer_file(ws, merged)
-            if metadata != _read_fed_peer_metadata(ws):
-                _write_fed_peer_metadata(ws, metadata)
+            if imported or metadata != original_metadata:
+                _write_fed_peer_config_transaction(ws, merged, metadata)
 
     cache = _ensure_market_fed_cache_for_update(request)
     if refresh and (_read_fed_peers(ws) or _read_learned_fed_peers(ws)):
@@ -10128,7 +10560,7 @@ def start_market_federation_runtime(app: FastAPI) -> None:
                     request,
                     actor_id="admin",
                     timeout_seconds=timeout_seconds,
-                    add=True,
+                    add=False,
                     refresh=False,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -10227,14 +10659,30 @@ def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
     try:
         from nth_dao.discovery import mdns_available
 
-        transport_available = bool(mdns_available())
+        mdns_transport_available = bool(mdns_available())
     except (ImportError, RuntimeError):
-        transport_available = False
+        mdns_transport_available = False
     nth_state = getattr(app.state, "nth", None)
-    publisher_active = bool(
+    mdns_publisher_active = bool(
         getattr(nth_state, "mdns_responder", None)
     )
+    udp_responder = getattr(nth_state, "lan_udp_responder", None)
+    udp_running = getattr(udp_responder, "is_running", None)
+    udp_publisher_active = bool(
+        udp_running() if callable(udp_running) else udp_responder
+    )
+    publisher_active = mdns_publisher_active or udp_publisher_active
+    # UDP discovery is implemented with the Python standard library. Runtime
+    # bind failures are reflected by publisher_active rather than availability.
+    transport_available = True
     diagnostics: List[str] = []
+    try:
+        from nth_dao.discovery import configured_discovery_port
+
+        udp_port = configured_discovery_port()
+    except (ImportError, ValueError) as exc:
+        udp_port = 0
+        diagnostics.append(str(exc))
     if not public_peer_url:
         diagnostics.append(
             "This node is local-only. Restart with "
@@ -10250,14 +10698,10 @@ def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
             "Background LAN discovery is disabled "
             "(NTH_LAN_DISCOVERY is not 1)."
         )
-    if configured and not transport_available:
+    if configured and not publisher_active:
         diagnostics.append(
-            "mDNS transport is unavailable. Install `nth-dao[lan]`."
-        )
-    if configured and transport_available and not publisher_active:
-        diagnostics.append(
-            "mDNS publication is configured but not active; check the server "
-            "log for LAN DID publish failures."
+            "LAN publication is configured but neither UDP nor mDNS is active; "
+            "check the server log and local firewall."
         )
     return {
         "public_peer_url": public_peer_url,
@@ -10269,6 +10713,10 @@ def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
         "lan_discovery_enabled": discovery_enabled,
         "lan_transport_available": transport_available,
         "lan_publisher_active": publisher_active,
+        "lan_udp_publisher_active": udp_publisher_active,
+        "lan_udp_port": udp_port,
+        "lan_mdns_publisher_active": mdns_publisher_active,
+        "lan_mdns_available": mdns_transport_available,
         "lan_diagnostics": diagnostics,
     }
 
@@ -10341,6 +10789,7 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
         "identity_verified_peers": list(
             last_discovery.get("identity_verified_peers") or []
         ),
+        "discovered_peers": list(last_discovery.get("discovered_peers") or []),
         "imported_peers": list(last_discovery.get("imported_peers") or []),
         "skipped_peers": list(last_discovery.get("skipped_peers") or []),
         "discovery_errors": list(last_discovery.get("discovery_errors") or []),
@@ -12084,6 +12533,10 @@ def register_v2_routes(app: FastAPI) -> None:
                 capabilities,
             ) = (
                 _market_offer_material(body, publisher_did=source_id)
+            )
+            _validate_local_market_profile_references(
+                extensions,
+                workspace=workspace,
             )
             title = body.title.strip()
             summary = body.summary.strip()
@@ -14219,7 +14672,8 @@ def register_v2_routes(app: FastAPI) -> None:
             "digest": digest,
             "offer": record.offer.to_dict(),
             "resource_descriptors": _market_offer_descriptor_inspection(
-                record.offer
+                record.offer,
+                workspace=_state_workspace(request),
             ),
             "discoveries": [],
             "verification": {
@@ -14825,7 +15279,8 @@ def register_v2_routes(app: FastAPI) -> None:
             "digest": digest,
             "offer": verified_offer.to_dict(),
             "resource_descriptors": _market_offer_descriptor_inspection(
-                verified_offer
+                verified_offer,
+                workspace=_state_workspace(request),
             ),
             "discoveries": discoveries,
             "verification": {
@@ -15330,6 +15785,231 @@ def register_v2_routes(app: FastAPI) -> None:
             key=lambda x: (-x["count"], x["context"]),
         )
 
+    @app.get("/api/v2/market/resource-profiles")
+    def v2_market_resource_profiles(
+        request: Request,
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str = "",
+    ) -> Dict[str, Any]:
+        """List verified local Resource Profiles and explicit recognition."""
+        from nth_dao.market.resource_profile import (
+            ResourceProfilePolicy,
+            ResourceProfileRejected,
+            ResourceProfileStore,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        workspace = _state_workspace(request)
+        if workspace is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        store = ResourceProfileStore(workspace)
+        policy = ResourceProfilePolicy(workspace)
+        if cursor and re.fullmatch(r"sha256:[0-9a-f]{64}", cursor) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="cursor must be a lowercase sha256 digest",
+            )
+        try:
+            accepted = policy.accepted_digests(strict=True)
+            profiles, next_cursor, total = store.list_page(
+                after=cursor or None,
+                limit=limit,
+            )
+        except (OSError, ResourceProfileRejected, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Resource Profile store unavailable: {exc}",
+            ) from exc
+        return {
+            "items": [
+                _market_resource_profile_to_wire(
+                    profile,
+                    recognized=profile.digest in accepted,
+                )
+                for profile in profiles
+            ],
+            "count": total,
+            "returned": len(profiles),
+            "next_cursor": next_cursor or "",
+            "truncated": bool(next_cursor),
+            "warning": (
+                "Signature verification proves provenance only. Local "
+                "recognition never grants execution or payment authority."
+            ),
+        }
+
+    @app.post("/api/v2/market/resource-profiles/import")
+    def v2_market_resource_profile_import(
+        body: MarketResourceProfileImportBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Verify and cache one signed, declarative Profile document."""
+        from nth_dao.market.resource_profile import (
+            ResourceProfile,
+            ResourceProfilePolicy,
+            ResourceProfileRejected,
+            ResourceProfileStore,
+        )
+
+        _require_console_bearer_for_governance_mutation(request)
+        _enforce_recognition_policy_mutation_limit(
+            request,
+            operation="resource-profile-import",
+        )
+        workspace = _state_workspace(request)
+        spine = _state_spine(request)
+        if workspace is None or spine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="workspace or signed Spine unavailable",
+            )
+        try:
+            profile = ResourceProfile.from_dict(body.document)
+        except (TypeError, ValueError, ResourceProfileRejected) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        store = ResourceProfileStore(workspace)
+        try:
+            stored, installed = store.install_with_status(profile)
+        except (OSError, ResourceProfileRejected, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Resource Profile persistence failed: {exc}",
+            ) from exc
+        document = stored.to_dict()
+        payload = {
+            "profile_digest": stored.digest,
+            "profile_id": document["profile_id"],
+            "profile_version": document["version"],
+            "publisher_did": document["publisher_did"],
+            "action": "verified-local-import",
+        }
+        try:
+            event, audit_created = spine.append_unique(
+                "market.resource-profile.imported",
+                payload,
+                unique_payload_fields=("profile_digest",),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Resource Profile was verified and may be cached, but its "
+                    "signed audit is incomplete; retry the same import"
+                ),
+            ) from exc
+        try:
+            accepted = ResourceProfilePolicy(workspace).accepted_digests(strict=True)
+        except (OSError, ResourceProfileRejected, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Resource Profile policy unavailable: {exc}",
+            ) from exc
+        return {
+            "profile": _market_resource_profile_to_wire(
+                stored,
+                recognized=stored.digest in accepted,
+            ),
+            "installed": installed,
+            "audit_event_id": event.event_id,
+            "audit_created": audit_created,
+        }
+
+    @app.post(
+        "/api/v2/market/resource-profiles/{profile_digest}/recognition",
+    )
+    def v2_market_resource_profile_recognition(
+        profile_digest: str,
+        body: MarketResourceProfileRecognitionBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Apply one explicit local recognition decision with signed audit."""
+        from nth_dao.market.resource_profile import (
+            ResourceProfilePolicy,
+            ResourceProfileRejected,
+            ResourceProfileStore,
+        )
+
+        _require_console_bearer_for_governance_mutation(request)
+        _enforce_recognition_policy_mutation_limit(
+            request,
+            operation="resource-profile-recognition",
+        )
+        workspace = _state_workspace(request)
+        spine = _state_spine(request)
+        if workspace is None or spine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="workspace or signed Spine unavailable",
+            )
+        store = ResourceProfileStore(workspace)
+        try:
+            profile = store.load(profile_digest)
+        except (OSError, ResourceProfileRejected, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Resource Profile not found")
+        operation_id = hashlib.sha256(
+            (
+                "nth-resource-profile-recognition-v1\0"
+                + body.idempotency_key
+            ).encode("ascii")
+        ).hexdigest()
+        proposal_payload = {
+            "operation_id": operation_id,
+            "profile_digest": profile.digest,
+            "accepted": body.accepted,
+            "action": "local-recognition-proposed",
+        }
+        try:
+            spine.append_unique(
+                "market.resource-profile.recognition.proposed",
+                proposal_payload,
+                unique_payload_fields=("operation_id",),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"recognition operation conflicts or cannot be audited: {exc}",
+            ) from exc
+        policy = ResourceProfilePolicy(workspace)
+        try:
+            changed = policy.set_accepted(profile.digest, body.accepted)
+        except (OSError, ResourceProfileRejected, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Resource Profile recognition persistence failed: {exc}",
+            ) from exc
+        completed_payload = {
+            "operation_id": operation_id,
+            "profile_digest": profile.digest,
+            "accepted": body.accepted,
+            "action": "local-recognition-applied",
+        }
+        try:
+            event, audit_created = spine.append_unique(
+                "market.resource-profile.recognition.applied",
+                completed_payload,
+                unique_payload_fields=("operation_id",),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Recognition may already be applied but its completion "
+                    "audit is incomplete; retry with the same idempotency key"
+                ),
+            ) from exc
+        return {
+            "profile": _market_resource_profile_to_wire(
+                profile,
+                recognized=body.accepted,
+            ),
+            "changed": changed,
+            "operation_id": operation_id,
+            "audit_event_id": event.event_id,
+            "audit_created": audit_created,
+        }
+
     @app.get("/api/v2/market/reconcile")
     def v2_market_reconcile(request: Request) -> Dict[str, Any]:
         """新旧事实源对账(Phase 2d):feed+ClaimStore 的 open 集 vs spine 投影。
@@ -15757,25 +16437,28 @@ def register_v2_routes(app: FastAPI) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         action = (body.action or "add").strip().lower()
-        with _FED_CONFIG_LOCK:
-            file_peers = _read_fed_peer_file(ws)
+        if action not in {"add", "remove"}:
+            raise HTTPException(
+                status_code=400,
+                detail="action must be add or remove",
+            )
+        with _fed_config_guard(ws):
+            try:
+                file_peers = _read_fed_peer_file(ws, strict=True)
+                metadata = _read_fed_peer_metadata(ws, strict=True)
+            except FederationSeedConfigError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             if action == "add":
                 if peer not in file_peers:
                     file_peers.append(peer)
-            elif action == "remove":
-                file_peers = [p for p in file_peers if p != peer]
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="action must be add or remove",
-                )
+                file_peers = [p for p in file_peers if p != peer]
             try:
-                _write_fed_peer_file(ws, file_peers)
                 if action == "remove":
-                    metadata = _read_fed_peer_metadata(ws)
-                    if peer in metadata:
-                        metadata.pop(peer, None)
-                        _write_fed_peer_metadata(ws, metadata)
+                    metadata.pop(peer, None)
+                _write_fed_peer_config_transaction(ws, file_peers, metadata)
+            except (FederationSeedCapacityError, FederationSeedConfigError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             except (OSError, RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
         cache = _ensure_market_fed_cache_for_update(request)
@@ -15819,6 +16502,8 @@ def register_v2_routes(app: FastAPI) -> None:
                 add=body.add,
                 refresh=body.refresh,
             )
+        except (FederationSeedCapacityError, FederationSeedConfigError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

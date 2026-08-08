@@ -155,6 +155,7 @@ function AppInner() {
    * 踢回首屏。校验合法 NavId,脏值/旧值降级 blackboard,绝不让坏值崩渲染。 */
   const { t } = useLang();
   const [active, setActive] = useState<NavId>(loadActiveNav);
+  const [marketPublishRequested, setMarketPublishRequested] = useState(false);
   useEffect(() => {
     try {
       localStorage.setItem(ACTIVE_NAV_KEY, active);
@@ -1278,9 +1279,16 @@ function AppInner() {
       />
     );
   } else if (active === "tasks") {
-    view = <TasksView />;
+    view = <TasksView onOpenPublisher={() => {
+      setMarketPublishRequested(true);
+      setActive("commerce");
+    }} />;
   } else if (active === "commerce") {
-    view = <CommerceView />;
+    view = <CommerceView
+      actorId={identity?.agent_id ?? "admin"}
+      openPublisher={marketPublishRequested}
+      onPublisherOpened={() => setMarketPublishRequested(false)}
+    />;
   } else if (active === "agents") {
     view = (
       <AgentDirectoryView

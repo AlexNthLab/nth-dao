@@ -592,6 +592,40 @@ def test_poller_self_terminates_when_peer_set_becomes_empty() -> None:
     assert not thread.is_alive()
 
 
+def test_poller_wires_incremental_cursor_and_cycle_progress(
+    monkeypatch,
+) -> None:
+    from nth_dao.web import market_federation_poll as poll
+
+    source = "https://peer.example"
+    source_did = "did:key:zIncrementalTest"
+    cache = poll.FederationCache(stale_ttl_ms=60_000)
+    stop_event = threading.Event()
+    seen_since: list[int] = []
+
+    def fake_federate(*_args, **kwargs):
+        report = kwargs["cycle_report"]
+        seen_since.append(kwargs["source_since"](source, source_did))
+        report.completed_sources.add(source)
+        report.full_sources.add(source)
+        report.source_high_seq[source] = 3
+        report.source_dids[source] = source_did
+        stop_event.set()
+        return {}
+
+    monkeypatch.setattr(poll, "federate_once", fake_federate)
+    thread = poll.start_poller(
+        lambda: [source],
+        cache,
+        stop_event=stop_event,
+        interval_s=0.01,
+    )
+    thread.join(timeout=1.0)
+
+    assert seen_since == [-1]
+    assert cache.status()["incremental_source_cursors"] == 1
+
+
 @pytest.mark.parametrize("interval", [-1.0, 0.0, float("nan"), float("inf")])
 def test_poller_rejects_non_positive_or_non_finite_interval(interval: float) -> None:
     from nth_dao.web.market_federation_poll import FederationCache, start_poller

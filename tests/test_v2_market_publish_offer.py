@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from nth_dao.identity import crypto_available
+from nth_dao.identity import AgentIdentity, crypto_available
+from nth_dao.market.resource_profile import (
+    ResourceProfileStore,
+    resource_profile_body,
+    sign_resource_profile,
+)
 from nth_dao.trade_rules.canonical import trade_canonical_json
 from nth_dao.web import create_app
 
@@ -160,9 +165,64 @@ def test_market_offer_publish_signs_profiles_announces_and_projects(tmp_path):
     assert descriptor_view["execution_ready"] is False
     assert all(
         item["content_hash_valid"] is True
-        and item["profile_resolution"] == "unresolved"
+        and item["profile_resolution"] == "missing-local"
         for item in descriptor_view["items"]
     )
+
+
+def test_market_offer_publish_validates_cached_profile_before_signing(tmp_path):
+    publisher = AgentIdentity.generate(label="profile-publisher")
+    profile = sign_resource_profile(
+        publisher,
+        resource_profile_body(
+            profile_id="org.nthdao.profiles/game-item",
+            version="1.0.0",
+            publisher_did=publisher.as_did(),
+            summary="Game item attributes.",
+            resource_types=["game/item"],
+            category_mappings=[{
+                "community_category": "gaming/items",
+                "market_category": "products",
+            }],
+            schema={
+                "type": "object",
+                "properties": {
+                    "game": {
+                        "type": "string",
+                        "required": True,
+                        "description": "Game identifier.",
+                        "enum": [],
+                    },
+                },
+                "additional_properties": False,
+            },
+            published_at="2026-08-08T00:00:00Z",
+            not_after="2027-08-08T00:00:00Z",
+        ),
+        created="2026-08-08T00:00:01Z",
+    )
+    ResourceProfileStore(tmp_path).install(profile)
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app, headers=_headers(app))
+    body = _body(key="market-profile-validation-0001")
+    body["provides"][0].update({
+        "resource_type": "game/item",
+        "profile_rule_id": profile.profile_id,
+        "profile_digest": profile.digest,
+        "attributes": {"display_reference": "invalid for this profile"},
+    })
+
+    rejected = client.post("/api/v2/market/offers", json=body)
+
+    assert rejected.status_code == 400
+    assert "profile attribute" in rejected.json()["detail"].lower()
+
+    body["provides"][0]["attributes"] = {
+        "game": "nth",
+        "community_category": "gaming/items",
+    }
+    accepted = client.post("/api/v2/market/offers", json=body)
+    assert accepted.status_code == 200, accepted.text
 
 
 def test_market_offer_digital_asset_facet_is_searchable(tmp_path):
@@ -346,7 +406,9 @@ def test_market_offer_expired_retry_requires_new_idempotency_key(
         ),
         (
             lambda body: body["provides"][0]["attributes"].update(
-                display_reference=r"C:\Users\LocalOperator\Desktop\private.txt"
+                display_reference=(
+                    r"C:" + r"\Users\LocalOperator\Desktop\private.txt"
+                )
             ),
             "Windows user path",
         ),

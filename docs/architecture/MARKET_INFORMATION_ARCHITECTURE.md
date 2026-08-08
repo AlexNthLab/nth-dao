@@ -106,12 +106,32 @@ funds. Untrusted profile data is displayed as publisher-provided metadata.
 
 ### Current implementation boundary
 
+The Core can now sign, verify, content-address, and store bounded Resource
+Profile v1 documents. A separate local policy explicitly recognizes exact
+Profile digests before their community categories may map into broad Market
+facets. Signature validity alone does not grant recognition.
+
+The local console exposes authenticated REST and UI controls to list, verify,
+import, recognize, and revoke exact Profile digests. These controls never fetch
+remote packages automatically and never grant Adapter or payment authority.
+
 The current publisher stores a bounded inline descriptor in the signed Offer
 and may attach a `{rule_id, digest}` Profile reference. Inspection verifies the
-inline descriptor's content hash and its linkage to Offer legs. It does **not**
-yet fetch the referenced Profile package, verify its package signature, apply
-its schema, evaluate recognition or revocation, or grant execution readiness.
-The UI must therefore label Profile references as unresolved publisher claims.
+inline descriptor's content hash and its linkage to Offer legs. When the exact
+Profile is already in the local CAS, inspection also re-verifies its signature,
+checks its activation window and identifier binding, evaluates explicit local
+recognition, and applies its bounded declarative field schema. The UI presents
+these states separately. A Profile that is signed but not recognized remains
+publisher-provided metadata.
+
+Descriptor v1 reserves `attributes.community_category` as the community
+classification hint. A Resource Profile schema MUST NOT define that property;
+its remaining attributes are validated in the Profile-owned namespace. This
+prevents category mapping metadata from being mistaken for a Profile field.
+
+The Web layer does **not** yet fetch a missing Profile from a peer or federate
+recognition/revocation statements. Profile recognition and schema validity do
+not grant execution readiness.
 
 ## Trade Rule Skills
 
@@ -141,9 +161,9 @@ The target architecture requires all of the following before external effects:
 5. append-only audit and signed Receipts.
 
 Real-money and irreversible execution remain disabled by default. The current
-test rail is not represented as real settlement. Because Profile package
-resolution is not implemented yet, a Profile reference never satisfies item 2
-and cannot make an Order execution-ready.
+test rail is not represented as real settlement. Local Profile verification is
+one input to item 2, but the present implementation still does not use it to
+make an Order execution-ready.
 
 ## Federation Boundary
 

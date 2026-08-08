@@ -62,6 +62,19 @@ extension semantics and the enclosing Offer signature/digest. Discovery TTL is
 deliberately absent from signed Offer publication metadata because discovery
 refresh and Offer validity are separate lifecycles.
 
+Resource Profile Skills ship deterministic positive and tamper vectors at
+`nth_dao/market/vectors/resource-profile-v1.json`. The fixture fixes the
+publisher DID, domain-separated signature, profile digest, declarative field
+schema, schema-validation positive/negative cases, and community-to-Market
+category hint. Passing the vector proves wire compatibility only; it does not
+recognize the publisher, activate the category mapping, authorize an Adapter,
+or grant execution authority.
+The vector also fixes the descriptor-reserved attribute field list; Profile v1
+implementations must reject schemas that define `community_category`.
+It additionally fixes the shared Profile ID grammar, the 190-character wire
+limit, and negative non-string/uppercase cases. Implementations must not coerce
+non-string Profile IDs before validation.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

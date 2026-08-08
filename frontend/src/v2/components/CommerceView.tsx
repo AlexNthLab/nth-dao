@@ -43,8 +43,16 @@ import type {
 } from "../types-v2";
 import { useToast } from "./Toast";
 import { MarketPublishForm, type MarketPublication } from "./MarketPublishForm";
+import { MarketFederationPanel } from "./MarketFederationPanel";
+import { ResourceProfilesPanel } from "./ResourceProfilesPanel";
 
 type Scope = "discover" | "purchases" | "offers" | "proposals" | "agreements" | "skills";
+
+interface CommerceViewProps {
+  actorId?: string;
+  openPublisher?: boolean;
+  onPublisherOpened?: () => void;
+}
 
 function short(value: string, size = 18) {
   return value.length <= size ? value : `${value.slice(0, size - 5)}...${value.slice(-4)}`;
@@ -95,7 +103,11 @@ async function sha256Text(value: string): Promise<string> {
   return `sha256:${hex}`;
 }
 
-export function CommerceView() {
+export function CommerceView({
+  actorId = "admin",
+  openPublisher = false,
+  onPublisherOpened,
+}: CommerceViewProps) {
   const toast = useToast();
   const [scope, setScope] = useState<Scope>("discover");
   const [marketEntries, setMarketEntries] = useState<MarketSearchEntry[]>([]);
@@ -149,8 +161,16 @@ export function CommerceView() {
   const [selectedSkill, setSelectedSkill] = useState<TradeRulePackageDetail | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showPublish, setShowPublish] = useState(false);
+  const [showPublish, setShowPublish] = useState(openPublisher);
   const [showBuy, setShowBuy] = useState(false);
+
+  useEffect(() => {
+    if (!openPublisher) return;
+    setScope("discover");
+    setShowBuy(false);
+    setShowPublish(true);
+    onPublisherOpened?.();
+  }, [openPublisher, onPublisherOpened]);
   const [peerUrl, setPeerUrl] = useState("");
   const [listingDigest, setListingDigest] = useState("");
   const [purpose, setPurpose] = useState("Purchase one digital service");
@@ -888,6 +908,10 @@ export function CommerceView() {
           {((scope === "discover" && marketEntries.length === 0) || (scope === "offers" && myMarketEntries.length === 0) || (scope === "proposals" && proposals.length === 0) || (scope === "agreements" && agreements.length === 0) || (scope === "skills" && skills.length === 0) || (scope === "purchases" && visibleOrders.length === 0)) &&
             <p className="muted" style={{ padding: "12px 14px" }}>Nothing here yet.</p>}
         </div>
+        {scope === "discover" && <MarketFederationPanel
+          actorId={actorId}
+          onUpdated={() => setMarketVersion((value) => value + 1)}
+        />}
       </aside>
 
       <section className="main">
@@ -1058,6 +1082,7 @@ export function CommerceView() {
             onRefresh={() => setAgreementDetailVersion((value) => value + 1)}
           />}
           {scope === "skills" && skillError && <p className="trade-proposal-warning" role="status">{skillDataPreserved ? "Trade Skill catalog unavailable; showing last known data" : "Trade Skill authorization failed; cached UI data cleared"}: {skillError}</p>}
+          {scope === "skills" && <ResourceProfilesPanel />}
           {scope === "skills" && !selectedSkill && <div className="main-empty"><p>{skills.length > 0 ? "Select a Trade Skill to inspect its signed manifest." : "No verified Trade Skills are cached locally."}</p></div>}
           {scope === "skills" && selectedSkill && <TradeSkillWorkbench skill={selectedSkill} />}
           {!showPublish && !showBuy && scope === "purchases" && !selected && <div className="main-empty"><p>Select an order or create a purchase.</p></div>}
@@ -1197,6 +1222,9 @@ function MarketOfferInspection({
       <p className="muted">
         {inspection.resource_descriptors.verified_inline_count} of {inspection.resource_descriptors.referenced_count} referenced inline descriptors have matching content hashes.
       </p>
+      <p className="muted">
+        {inspection.resource_descriptors.profile_packages_recognized} Profile Skills are recognized locally; {inspection.resource_descriptors.profile_packages_applicable} also validate their descriptor attributes.
+      </p>
       {inspection.resource_descriptors.items.map((item) => <details key={item.digest}>
         <summary>
           <span>{item.leg_ids.length > 0 ? item.leg_ids.join(", ") : "Unreferenced descriptor"}</span>
@@ -1206,9 +1234,28 @@ function MarketOfferInspection({
         </summary>
         <code title={item.digest}>{item.digest}</code>
         <div className="market-offer-profile-status">
-          {item.profile_resolution === "unresolved" ? <>
-            <span className="pill wait">Profile reference unresolved</span>
+          {item.profile_ref.digest ? <>
+            <span className={`pill ${item.profile_schema_valid === true ? "ok" : "wait"}`}>
+              {{
+                unresolved: "Profile resolver unavailable",
+                "missing-local": "Profile not cached locally",
+                "verified-local": "Profile verified, not recognized",
+                "recognized-local": item.profile_schema_valid === false
+                  ? "Profile recognized; attributes invalid"
+                  : "Profile recognized; attributes valid",
+                "not-yet-active": "Profile not active yet",
+                expired: "Profile expired",
+                "invalid-local": "Local Profile invalid",
+                "not-declared": "Profile not declared",
+              }[item.profile_resolution]}
+            </span>
             <code title={item.profile_ref.digest}>{item.profile_ref.rule_id} / {item.profile_ref.digest}</code>
+            {item.mapped_market_category
+              && <span className="muted">Mapped Market category: {item.mapped_market_category}</span>}
+            {item.profile_mapping_reason && !item.mapped_market_category
+              && <span className="muted">Category mapping: {item.profile_mapping_reason}</span>}
+            {item.profile_error
+              && <span role="alert" className="trade-proposal-warning">{item.profile_error}</span>}
           </> : <span className="muted">No Resource Profile Skill reference declared.</span>}
         </div>
         <pre>{JSON.stringify(item.descriptor.attributes ?? {}, null, 2)}</pre>

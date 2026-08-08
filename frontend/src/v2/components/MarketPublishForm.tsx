@@ -1,9 +1,12 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+import { listResourceProfiles } from "../api";
 
 import type {
   AnnounceTaskInput,
   MarketResourceInput,
   PublishMarketOfferInput,
+  ResourceProfileSummary,
 } from "../types-v2";
 
 type PublishMode = "task" | "product" | "service" | "exchange";
@@ -16,6 +19,118 @@ interface Props {
   busy: boolean;
   onCancel: () => void;
   onPublish: (publication: MarketPublication) => Promise<void>;
+}
+
+type ProfileValues = Record<string, string | boolean>;
+
+interface ProfileEditorProps {
+  prefix: "Provided" | "Requested";
+  profile: ResourceProfileSummary;
+  values: ProfileValues;
+  communityCategory: string;
+  onValues: (next: ProfileValues) => void;
+  onCommunityCategory: (next: string) => void;
+}
+
+function initialProfileValues(profile: ResourceProfileSummary): ProfileValues {
+  return Object.fromEntries(Object.entries(profile.schema.properties).map(([name, property]) => [
+    name,
+    property.enum.length > 0
+      ? String(property.enum[0])
+      : property.type === "boolean" ? false : "",
+  ]));
+}
+
+function buildProfileAttributes(
+  profile: ResourceProfileSummary,
+  values: ProfileValues,
+  communityCategory: string,
+): Record<string, unknown> {
+  const attributes: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(profile.schema.properties)) {
+    const raw = values[name];
+    if (property.type === "boolean") {
+      const value = raw === true || raw === "true";
+      if (property.enum.length > 0 && !property.enum.includes(value)) {
+        throw new Error(`${name} is outside the Profile enum.`);
+      }
+      attributes[name] = value;
+      continue;
+    }
+    const text = typeof raw === "string" ? raw : "";
+    if (!text && !property.required) continue;
+    if (!text) throw new Error(`${name} is required by the selected Resource Profile.`);
+    const value = property.type === "integer" ? Number(text) : text;
+    if (property.type === "integer" && !Number.isSafeInteger(value)) {
+      throw new Error(`${name} must be a safe integer.`);
+    }
+    if (property.enum.length > 0 && !property.enum.includes(value)) {
+      throw new Error(`${name} is outside the Profile enum.`);
+    }
+    attributes[name] = value;
+  }
+  if (communityCategory) attributes.community_category = communityCategory;
+  return attributes;
+}
+
+function parseManualProfileAttributes(value: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value || "{}");
+  } catch {
+    throw new Error("Resource Profile attributes must be valid JSON.");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Resource Profile attributes must be a JSON object.");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function ProfileEditor({
+  prefix,
+  profile,
+  values,
+  communityCategory,
+  onValues,
+  onCommunityCategory,
+}: ProfileEditorProps) {
+  return <div className="market-profile-editor wide">
+    <p className="muted">{profile.summary}</p>
+    {Object.entries(profile.schema.properties).map(([name, property]) => {
+      const label = `${prefix} ${name}${property.required ? " *" : ""}`;
+      if (property.type === "boolean") {
+        return <label key={name} className="market-publish-toggle">
+          <input
+            type="checkbox"
+            checked={values[name] === true || values[name] === "true"}
+            onChange={(event) => onValues({ ...values, [name]: event.target.checked })}
+          /> {label}
+        </label>;
+      }
+      if (property.enum.length > 0) {
+        return <label key={name}>{label}<select
+          value={String(values[name] ?? "")}
+          onChange={(event) => onValues({ ...values, [name]: event.target.value })}
+        >{property.enum.map((item) => <option key={String(item)} value={String(item)}>{String(item)}</option>)}</select></label>;
+      }
+      return <label key={name}>{label}<input
+        inputMode={property.type === "integer" ? "numeric" : undefined}
+        value={String(values[name] ?? "")}
+        onChange={(event) => onValues({ ...values, [name]: event.target.value })}
+        title={property.description}
+      /></label>;
+    })}
+    {profile.category_mappings.length > 0 && <label>{prefix} community category<select
+      value={communityCategory}
+      onChange={(event) => onCommunityCategory(event.target.value)}
+    >
+      <option value="">No community category hint</option>
+      {profile.category_mappings.map((mapping) => <option
+        key={mapping.community_category}
+        value={mapping.community_category}
+      >{mapping.community_category} to {mapping.market_category}</option>)}
+    </select></label>}
+  </div>;
 }
 
 function newIdempotencyKey(): string {
@@ -89,10 +204,85 @@ export function MarketPublishForm({ busy, onCancel, onPublish }: Props) {
   const [requestProfileDigest, setRequestProfileDigest] = useState("");
   const [tradeRuleId, setTradeRuleId] = useState("");
   const [tradeRuleDigest, setTradeRuleDigest] = useState("");
+  const [localProfiles, setLocalProfiles] = useState<ResourceProfileSummary[]>([]);
+  const [profileLoadError, setProfileLoadError] = useState("");
+  const [profileValues, setProfileValues] = useState<ProfileValues>({});
+  const [requestProfileValues, setRequestProfileValues] = useState<ProfileValues>({});
+  const [profileCommunityCategory, setProfileCommunityCategory] = useState("");
+  const [requestProfileCommunityCategory, setRequestProfileCommunityCategory] = useState("");
+  const [manualProfileAttributes, setManualProfileAttributes] = useState("{}");
+  const [manualRequestProfileAttributes, setManualRequestProfileAttributes] = useState("{}");
   const [idempotencyKey] = useState(newIdempotencyKey);
   const [error, setError] = useState("");
 
   const needsRequest = mode === "exchange" || askReturn;
+  const selectedProfile = useMemo(
+    () => localProfiles.find((profile) => (
+      profile.digest === profileDigest && profile.profile_id === profileRuleId
+    )),
+    [localProfiles, profileDigest, profileRuleId],
+  );
+  const selectedRequestProfile = useMemo(
+    () => localProfiles.find((profile) => (
+      profile.digest === requestProfileDigest && profile.profile_id === requestProfileRuleId
+    )),
+    [localProfiles, requestProfileDigest, requestProfileRuleId],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadProfiles() {
+      const profiles: ResourceProfileSummary[] = [];
+      const seenCursors = new Set<string>();
+      let cursor = "";
+      while (true) {
+        const page = await listResourceProfiles(controller.signal, cursor, 200);
+        profiles.push(...page.items.filter((profile) => profile.active));
+        if (!page.next_cursor) break;
+        if (seenCursors.has(page.next_cursor)) {
+          throw new Error("Resource Profile pagination returned a repeated cursor.");
+        }
+        if (profiles.length >= 4_096) {
+          setProfileLoadError(
+            "Only the first 4,096 active Resource Profiles are available in this form.",
+          );
+          break;
+        }
+        seenCursors.add(page.next_cursor);
+        cursor = page.next_cursor;
+      }
+      setLocalProfiles(profiles);
+    }
+    loadProfiles()
+      .catch((reason) => {
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        setProfileLoadError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => controller.abort();
+  }, []);
+
+  function selectLocalProfile(digest: string, requested: boolean) {
+    const profile = localProfiles.find((item) => item.digest === digest);
+    const setId = requested ? setRequestProfileRuleId : setProfileRuleId;
+    const setDigest = requested ? setRequestProfileDigest : setProfileDigest;
+    const setValues = requested ? setRequestProfileValues : setProfileValues;
+    const setCommunity = requested
+      ? setRequestProfileCommunityCategory
+      : setProfileCommunityCategory;
+    if (!profile) {
+      setId("");
+      setDigest("");
+      setValues({});
+      setCommunity("");
+      return;
+    }
+    setId(profile.profile_id);
+    setDigest(profile.digest);
+    setValues(initialProfileValues(profile));
+    setCommunity(profile.category_mappings[0]?.community_category ?? "");
+    if (requested) setRequestType(profile.resource_types[0] ?? requestType);
+    else setProvideType(profile.resource_types[0] ?? provideType);
+  }
 
   function selectMode(next: PublishMode) {
     setMode(next);
@@ -187,6 +377,27 @@ export function MarketPublishForm({ busy, onCancel, onPublish }: Props) {
         ? { profile_digest: requestProfileDigest.trim() }
         : {}),
     };
+    let providedAttributes: Record<string, unknown>;
+    let requestedAttributes: Record<string, unknown>;
+    try {
+      providedAttributes = selectedProfile
+        ? buildProfileAttributes(selectedProfile, profileValues, profileCommunityCategory)
+        : profileRuleId.trim()
+          ? parseManualProfileAttributes(manualProfileAttributes)
+          : { display_reference: provideReference.trim() };
+      requestedAttributes = selectedRequestProfile
+        ? buildProfileAttributes(
+          selectedRequestProfile,
+          requestProfileValues,
+          requestProfileCommunityCategory,
+        )
+        : requestProfileRuleId.trim()
+          ? parseManualProfileAttributes(manualRequestProfileAttributes)
+          : { display_reference: requestReference.trim() };
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      return;
+    }
     const provides: MarketResourceInput[] = [{
       leg_id: "provide-1",
       category: provideCategory,
@@ -195,7 +406,7 @@ export function MarketPublishForm({ busy, onCancel, onPublish }: Props) {
       quantity: provideQuantity.trim(),
       unit: provideUnit.trim(),
       ...profile,
-      attributes: { display_reference: provideReference.trim() },
+      attributes: providedAttributes,
     }];
     const requests: MarketResourceInput[] = needsRequest ? [{
       leg_id: "request-1",
@@ -205,7 +416,7 @@ export function MarketPublishForm({ busy, onCancel, onPublish }: Props) {
       quantity: requestQuantity.trim(),
       unit: requestUnit.trim(),
       ...requestProfile,
-      attributes: { display_reference: requestReference.trim() },
+      attributes: requestedAttributes,
     }] : [];
     await onPublish({
       kind: "offer",
@@ -292,15 +503,62 @@ export function MarketPublishForm({ busy, onCancel, onPublish }: Props) {
       <details className="market-publish-advanced">
         <summary>Optional Skills and exact digests</summary>
         <div className="commerce-form-grid">
-          <label>Provided Resource Profile Skill ID<input value={profileRuleId} onChange={(event) => setProfileRuleId(event.target.value)} placeholder="org.example.profile/item" maxLength={160} /></label>
+          <label className="wide">Use local Profile for provided resource<select
+            aria-label="Provided local Resource Profile"
+            value={selectedProfile?.digest ?? ""}
+            onChange={(event) => selectLocalProfile(event.target.value, false)}
+          ><option value="">Manual reference or none</option>{localProfiles.map((profile) => <option
+            key={profile.digest}
+            value={profile.digest}
+          >{profile.profile_id} v{profile.version}{profile.recognized ? " (recognized)" : " (verified)"}</option>)}</select></label>
+          <label>Provided Resource Profile Skill ID<input value={profileRuleId} onChange={(event) => setProfileRuleId(event.target.value)} placeholder="org.example.profile/item" maxLength={190} /></label>
           <label>Provided Resource Profile digest<input value={profileDigest} onChange={(event) => setProfileDigest(event.target.value)} placeholder="sha256:..." maxLength={71} /></label>
+          {selectedProfile
+            ? <ProfileEditor
+              prefix="Provided"
+              profile={selectedProfile}
+              values={profileValues}
+              communityCategory={profileCommunityCategory}
+              onValues={setProfileValues}
+              onCommunityCategory={setProfileCommunityCategory}
+            />
+            : profileRuleId.trim() && <label className="wide">Provided Profile attributes JSON<textarea
+              value={manualProfileAttributes}
+              onChange={(event) => setManualProfileAttributes(event.target.value)}
+              rows={4}
+              maxLength={16_384}
+            /></label>}
           {needsRequest && <>
-            <label>Requested Resource Profile Skill ID<input value={requestProfileRuleId} onChange={(event) => setRequestProfileRuleId(event.target.value)} placeholder="org.example.profile/payment" maxLength={160} /></label>
+            <label className="wide">Use local Profile for requested resource<select
+              aria-label="Requested local Resource Profile"
+              value={selectedRequestProfile?.digest ?? ""}
+              onChange={(event) => selectLocalProfile(event.target.value, true)}
+            ><option value="">Manual reference or none</option>{localProfiles.map((profile) => <option
+              key={profile.digest}
+              value={profile.digest}
+            >{profile.profile_id} v{profile.version}{profile.recognized ? " (recognized)" : " (verified)"}</option>)}</select></label>
+            <label>Requested Resource Profile Skill ID<input value={requestProfileRuleId} onChange={(event) => setRequestProfileRuleId(event.target.value)} placeholder="org.example.profile/payment" maxLength={190} /></label>
             <label>Requested Resource Profile digest<input value={requestProfileDigest} onChange={(event) => setRequestProfileDigest(event.target.value)} placeholder="sha256:..." maxLength={71} /></label>
+            {selectedRequestProfile
+              ? <ProfileEditor
+                prefix="Requested"
+                profile={selectedRequestProfile}
+                values={requestProfileValues}
+                communityCategory={requestProfileCommunityCategory}
+                onValues={setRequestProfileValues}
+                onCommunityCategory={setRequestProfileCommunityCategory}
+              />
+              : requestProfileRuleId.trim() && <label className="wide">Requested Profile attributes JSON<textarea
+                value={manualRequestProfileAttributes}
+                onChange={(event) => setManualRequestProfileAttributes(event.target.value)}
+                rows={4}
+                maxLength={16_384}
+              /></label>}
           </>}
           <label>Trade Skill ID<input value={tradeRuleId} onChange={(event) => setTradeRuleId(event.target.value)} placeholder="org.example.rules/delivery" maxLength={160} /></label>
           <label>Trade Skill digest<input value={tradeRuleDigest} onChange={(event) => setTradeRuleDigest(event.target.value)} placeholder="sha256:..." maxLength={71} /></label>
         </div>
+        {profileLoadError && <p className="trade-proposal-warning">Local Resource Profiles unavailable: {profileLoadError}</p>}
       </details>
       <p className="trade-proposal-warning">The node signs a discovery claim and exact resource descriptors. Skills are references, not trusted code. Real-money and irreversible execution remain disabled.</p>
     </>}

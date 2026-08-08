@@ -1,15 +1,11 @@
-"""任务市场联邦·拉取侧(FED-2)。
+"""Federated pull side of the task and trade-offer market.
 
-对每个 peer:拉 digest → ``verify_digest``(provenance)→ 据 refs 拉全文 →
-``verify_announcement``(真相)→ 收下未过期的。两层验签照搬 federation.py 的
-信任模型:digest 是不可信提示,全文的 publisher_sig 才是权威。
+Each peer digest is verified as a provenance hint before referenced documents
+are fetched and independently verified. A signed digest is not authority over
+the referenced content; each publisher signature remains authoritative.
 
-传输可注入(``http_get``):生产用 urllib,测试用另一节点的 TestClient ——
-核心拉取/验签逻辑与网络解耦,可纯函数测试。
-
-注意:本节点**只展示**联邦发现到的外部公告(放进内存缓存,不写本地 feed、
-不进自己的 digest →不放大转发)。认领权威仍在公告的主 DAO(见
-federation.py docstring),跨 DAO 认领是后续的事。
+Transport is injectable for deterministic tests. Remote announcements are held
+in a bounded local cache and are not republished through the local feed.
 """
 from __future__ import annotations
 
@@ -54,6 +50,7 @@ _DEFAULT_MAX_RECORDS_PER_PEER = 2_000
 _DEFAULT_MAX_CACHE_RECORDS = 10_000
 _DEFAULT_MAX_CACHE_RECORDS_PER_SOURCE = 2_000
 _DEFAULT_MAX_CACHE_BYTES = 64 * 1024 * 1024
+_DEFAULT_FULL_RECONCILE_MS = 60_000
 
 
 class FederationCacheCapacityError(RuntimeError):
@@ -66,6 +63,9 @@ class FederationCycleReport:
 
     attempted_sources: Set[str] = field(default_factory=set)
     completed_sources: Set[str] = field(default_factory=set)
+    full_sources: Set[str] = field(default_factory=set)
+    source_high_seq: Dict[str, int] = field(default_factory=dict)
+    source_dids: Dict[str, str] = field(default_factory=dict)
     deadline_exhausted: bool = False
     cancelled: bool = False
 
@@ -290,11 +290,13 @@ def _collect_refs_via_digest(
     *,
     expected_source_did: str,
     max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
+    since_seq: int = -1,
+    cursor_out: Optional[Dict[str, int]] = None,
 ) -> Optional[List[Dict[str, str]]]:
-    """增量翻页拉对端 digest,收集所有 ref 的 announcement_id(去重保序)。
+    """Collect bounded, ordered refs from incrementally paged peer digests.
 
-    带 ``since=high_seq`` 一页页翻,直到游标不再推进(到底)或撞安全上限。
-    任一页 provenance 验不过 → 返回 None(整个 peer 不可信,fail-closed)。
+    Return ``None`` if any page fails provenance verification or pagination
+    does not converge within the hard page cap.
     """
     if (
         isinstance(max_records, bool)
@@ -302,9 +304,11 @@ def _collect_refs_via_digest(
         or max_records <= 0
     ):
         raise ValueError("max_records must be a positive integer")
+    if type(since_seq) is not int or since_seq < -1:
+        raise ValueError("since_seq must be an integer >= -1")
     collected: List[Dict[str, str]] = []
     seen: set = set()
-    cursor = -1
+    cursor = since_seq
     for _ in range(_MAX_DIGEST_PAGES):
         try:
             draw = http_get(
@@ -354,7 +358,9 @@ def _collect_refs_via_digest(
             if isinstance(federation_key, str) and federation_key:
                 item["federation_key"] = federation_key
             collected.append(item)
-        if digest.high_seq <= cursor:   # 游标没推进 → 到底/防死循环
+        if digest.high_seq <= cursor:  # End of stream or non-advancing cursor.
+            if cursor_out is not None:
+                cursor_out["high_seq"] = cursor
             return collected if not digest.refs else None
         cursor = digest.high_seq
     # A peer that keeps advancing beyond the hard page cap did not provide a
@@ -370,10 +376,12 @@ def _pull_from_peer_snapshot(
     verified_documents: Optional[Dict[str, Any]] = None,
     max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
     now_ms_override: int = 0,
+    since_seq: int = -1,
+    cursor_out: Optional[Dict[str, int]] = None,
 ) -> Optional[List[TaskAnnouncement]]:
-    """从一个 peer 拉取**已双层验签**的开放公告(digest 翻页 + 全文分批拉)。
+    """Pull open announcements after digest and document verification.
 
-    provenance 验不过 / 任何失败 → 返回 [](fail-closed)。
+    Return ``None`` on an incomplete or invalid snapshot so callers fail closed.
     """
     base = peer_base.rstrip("/")
     if not isinstance(expected_source_did, str) or not is_did_key(
@@ -386,6 +394,8 @@ def _pull_from_peer_snapshot(
         http_get,
         expected_source_did=expected_source_did,
         max_records=max_records,
+        since_seq=since_seq,
+        cursor_out=cursor_out,
     )
     if refs is None:
         return None
@@ -554,6 +564,8 @@ def pull_from_peer(
     _verified_documents: Optional[Dict[str, Any]] = None,
     _max_records: int = _DEFAULT_MAX_RECORDS_PER_PEER,
     _now_ms_override: int = 0,
+    _since_seq: int = -1,
+    _cursor_out: Optional[Dict[str, int]] = None,
 ) -> List[TaskAnnouncement]:
     """Return a verified snapshot, preserving the historical list API."""
     snapshot = _pull_from_peer_snapshot(
@@ -563,6 +575,8 @@ def pull_from_peer(
         verified_documents=_verified_documents,
         max_records=_max_records,
         now_ms_override=_now_ms_override,
+        since_seq=_since_seq,
+        cursor_out=_cursor_out,
     )
     if _completion is not None:
         _completion["complete"] = snapshot is not None
@@ -714,15 +728,13 @@ def federate_once(
     cancelled: Optional[Callable[[], bool]] = None,
     start_offset: int = 0,
     cycle_report: Optional[FederationCycleReport] = None,
+    source_since: Optional[Callable[[str, str], int]] = None,
     max_records: int = _DEFAULT_MAX_CACHE_RECORDS,
 ) -> Dict[str, Dict[str, Any]]:
-    """对 peer 图做 **BFS 传递发现**:从 seed 出发,拉每个 peer 的任务 + 它的
-    peer 列表(gossip 成员),把新 peer 入队继续展开,直到无新 peer 或撞
-    ``max_peers``。返回 {content-bound federation_key: {"ann":..,
-    "source": peer}}。
+    """Traverse the bounded peer graph and return verified announcements.
 
-    任务仍**直连源 DAO 拉取 + 双层验签**(信任模型不变);gossip 只扩大「连谁」。
-    seen 去重 + max_peers 上限 → 防环、防恶意 peer 把图撑爆。
+    Gossip only supplies connection hints. Each source is contacted directly,
+    each digest and document is verified, and ``max_peers`` bounds graph growth.
     """
     now = now_ms_override or now_ms()
     if (
@@ -822,9 +834,14 @@ def federate_once(
         if not peer_did:
             logger.warning("fed: peer %s has no identity-bound authority", peer)
             continue
-        # 任务:直连该 peer 拉全文 + 验签。
+        # Pull documents directly from this peer and verify their signatures.
         completion: Dict[str, bool] = {}
+        since_seq = source_since(peer, peer_did) if source_since else -1
+        if type(since_seq) is not int or since_seq < -1:
+            logger.warning("fed: invalid local cursor for peer %s", peer)
+            since_seq = -1
         verified_documents: Dict[str, Any] = {}
+        cursor_result: Dict[str, int] = {}
         snapshot = pull_from_peer(
             peer,
             federation_http_get,
@@ -832,6 +849,8 @@ def federate_once(
             _completion=completion,
             _verified_documents=verified_documents,
             _now_ms_override=now,
+            _since_seq=since_seq,
+            _cursor_out=cursor_result,
         )
         # Injected legacy pullers return a list without filling the optional
         # report; their historical contract treats that list as complete.
@@ -839,6 +858,12 @@ def federate_once(
             continue
         if cycle_report is not None:
             cycle_report.completed_sources.add(peer)
+            if since_seq == -1:
+                cycle_report.full_sources.add(peer)
+            cycle_report.source_high_seq[peer] = cursor_result.get(
+                "high_seq", since_seq,
+            )
+            cycle_report.source_dids[peer] = peer_did
         for ann in snapshot:
             federation_key = announcement_federation_key(ann)
             if federation_key in merged:
@@ -1046,6 +1071,48 @@ class FederationCache:
         self._last_refresh_ms = 0
         self._last_error = ""
         self._last_peer_count = 0
+        self._source_cursors: Dict[str, tuple[str, int, int]] = {}
+
+    def since_for_source(
+        self,
+        source: str,
+        source_did: str,
+        *,
+        now_ms_override: int = 0,
+        full_reconcile_ms: Optional[int] = None,
+    ) -> int:
+        """Choose delta or full sync without treating a cursor as authority."""
+        interval = (
+            min(_DEFAULT_FULL_RECONCILE_MS, max(1, self._stale_ttl_ms // 2))
+            if full_reconcile_ms is None
+            else full_reconcile_ms
+        )
+        if type(interval) is not int or interval <= 0:
+            raise ValueError("full_reconcile_ms must be a positive integer")
+        if interval >= self._stale_ttl_ms:
+            return -1
+        if (
+            isinstance(now_ms_override, bool)
+            or not isinstance(now_ms_override, int)
+            or now_ms_override < 0
+        ):
+            raise ValueError("now_ms_override must be a non-negative integer")
+        if not isinstance(source_did, str) or not source_did:
+            raise ValueError("source_did must be a non-empty string")
+        normalized = str(source or "").rstrip("/")
+        observed_at = int(now_ms_override or now_ms())
+        with self._lock:
+            state = self._source_cursors.get(normalized)
+        if state is None:
+            return -1
+        did, cursor, last_full_ms = state
+        if (
+            did != source_did
+            or observed_at < last_full_ms
+            or observed_at - last_full_ms >= interval
+        ):
+            return -1
+        return cursor
 
     @staticmethod
     def _entry_size_bytes(entry: Dict[str, Any]) -> int:
@@ -1127,6 +1194,7 @@ class FederationCache:
         self._validate_capacity(normalized)
         with self._lock:
             self._data = normalized
+            self._source_cursors = {}
             self._rebuild_offer_index_locked()
             self._last_refresh_ms = now_ms()
             self._last_error = ""
@@ -1137,6 +1205,9 @@ class FederationCache:
         entries: Dict[str, Dict[str, Any]],
         *,
         completed_sources: Set[str],
+        full_sources: Optional[Set[str]] = None,
+        source_high_seq: Optional[Dict[str, int]] = None,
+        source_dids: Optional[Dict[str, str]] = None,
         peer_count: int = 0,
         error: str = "",
         now_ms_override: int = 0,
@@ -1144,6 +1215,13 @@ class FederationCache:
         """Commit complete source snapshots and retain bounded stale hints."""
         observed_at = int(now_ms_override or now_ms())
         completed = {str(source).rstrip("/") for source in completed_sources}
+        full = (
+            set(completed)
+            if full_sources is None
+            else {str(source).rstrip("/") for source in full_sources}
+        )
+        if not full <= completed:
+            raise ValueError("full_sources must be a subset of completed_sources")
         incoming: Dict[str, Dict[str, Any]] = {}
         for entry in entries.values():
             if not isinstance(entry, dict):
@@ -1165,7 +1243,7 @@ class FederationCache:
             retained: Dict[str, Dict[str, Any]] = {}
             for key, entry in self._data.items():
                 source = str(entry.get("source") or "").rstrip("/")
-                if source in completed:
+                if source in full:
                     continue
                 ann = entry.get("ann")
                 verified_at = int(entry.get("last_verified_ms") or 0)
@@ -1175,10 +1253,27 @@ class FederationCache:
                     continue
                 if verified_at <= 0 or observed_at - verified_at > self._stale_ttl_ms:
                     continue
-                retained[key] = {**entry, "stale": True}
+                retained[key] = (
+                    entry if source in completed else {**entry, "stale": True}
+                )
             retained.update(incoming)
             self._validate_capacity(retained)
             self._data = retained
+            progress = source_high_seq or {}
+            dids = source_dids or {}
+            for source in completed:
+                cursor = progress.get(source)
+                did = dids.get(source)
+                if type(cursor) is not int or cursor < -1 or not isinstance(did, str):
+                    self._source_cursors.pop(source, None)
+                    continue
+                previous = self._source_cursors.get(source)
+                last_full_ms = (
+                    observed_at
+                    if source in full
+                    else previous[2] if previous is not None else 0
+                )
+                self._source_cursors[source] = (did, cursor, last_full_ms)
             self._rebuild_offer_index_locked()
             self._last_refresh_ms = observed_at
             self._last_error = str(error or "")[:500]
@@ -1193,6 +1288,7 @@ class FederationCache:
                 if str(entry.get("source") or "").rstrip("/") != normalized
             }
             self._rebuild_offer_index_locked()
+            self._source_cursors.pop(normalized, None)
 
     def mark_error(self, error: str, *, peer_count: int = 0) -> None:
         self.apply_cycle(
@@ -1279,6 +1375,7 @@ class FederationCache:
                 "stale_announcements": sum(
                     1 for entry in self._data.values() if entry.get("stale") is True
                 ),
+                "incremental_source_cursors": len(self._source_cursors),
             }
 
 
@@ -1339,11 +1436,15 @@ def start_poller(
                         cancelled=shutdown.is_set,
                         start_offset=rotation_offset,
                         cycle_report=report,
+                        source_since=cache.since_for_source,
                     )
                     rotation_offset += 1
                     cache.apply_cycle(
                         entries,
                         completed_sources=report.completed_sources,
+                        full_sources=report.full_sources,
+                        source_high_seq=report.source_high_seq,
+                        source_dids=report.source_dids,
                         peer_count=len(all_peers),
                     )
                 else:

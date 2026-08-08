@@ -64,7 +64,12 @@ from nth_dao.execution_receipt import ReceiptStore as _ReceiptStore
 # inside the search hot loop. sys.modules already caches the module,
 # but a stable top-level binding eliminates the per-call frame setup.
 from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
-from nth_dao.discovery import AgentRegistry, LANDiscovery, PeerFinder
+from nth_dao.discovery import (
+    AgentRegistry,
+    LANDiscovery,
+    PeerFinder,
+    configured_discovery_port,
+)
 from nth_dao.groups import DEFAULT_CHANNEL_ID, GroupManager, TaskStatus
 from nth_dao.group_registry import (
     GroupRegistry,
@@ -104,6 +109,7 @@ _TRADE_RECOGNITION_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_DELIVERY_MAX_BODY_BYTES = 256 * 1024
+_RESOURCE_PROFILE_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
 _TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
 _TRADE_EXECUTION_RECOVERY_POLL_SECONDS = 30.0
@@ -191,6 +197,11 @@ class _FederationBodyLimitMiddleware:
             and path.startswith("/api/v2/trade/proposals/")
             and path.endswith("/accept")
         )
+        is_resource_profile_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/v2/market/resource-profiles/")
+        )
         if not (
             is_foreign_claim
             or is_federation_hello
@@ -202,6 +213,7 @@ class _FederationBodyLimitMiddleware:
             or is_trade_proposal_delivery
             or is_trade_order_delivery
             or is_trade_proposal_accept
+            or is_resource_profile_write
         ):
             await self.app(scope, receive, send)
             return
@@ -236,6 +248,9 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_proposal_accept:
             max_body_bytes = _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Proposal acceptance"
+        elif is_resource_profile_write:
+            max_body_bytes = _RESOURCE_PROFILE_MAX_BODY_BYTES
+            body_label = "Resource Profile"
         else:
             max_body_bytes = _COMMERCE_WRITE_MAX_BODY_BYTES
             body_label = "commerce write"
@@ -691,6 +706,10 @@ class WebState:
         # failed. Closed by ``_register_shutdown_hooks`` on process exit
         # so we don't leak a stale advertisement on the LAN.
         self.mdns_responder: Optional[Any] = None
+        # Stdlib UDP discovery is the fallback when mDNS/Bonjour is missing
+        # or blocked. It is started only in explicit LAN mode and its unsigned
+        # hint is always followed by signed identity-card verification.
+        self.lan_udp_responder: Optional[Any] = None
         # Architect R-4 (2026-06-07): mtime-keyed caches for the two
         # hot-path file scans the search endpoint used to do per request.
         # Both invalidate automatically the next time the underlying
@@ -1263,6 +1282,44 @@ class _MDNSPublisher:
             self._thread = None
 
 
+class _UDPLANPublisher:
+    """Own the stdlib UDP discovery responder for explicit LAN mode."""
+
+    def __init__(self, state: WebState) -> None:
+        self._state = state
+        self._lock = threading.Lock()
+        self._responder: Optional[Any] = None
+
+    def start(self) -> None:
+        with self._lock:
+            if self._responder is not None:
+                return
+            responder = _build_udp_lan_responder(self._state)
+            if responder is None:
+                return
+            try:
+                responder.start()
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.warning(
+                    "UDP LAN publish failed; mDNS may still be available: %s",
+                    exc,
+                )
+                return
+            self._responder = responder
+            self._state.lan_udp_responder = responder
+
+    def stop(self) -> None:
+        with self._lock:
+            responder = self._responder
+            self._responder = None
+            self._state.lan_udp_responder = None
+        if responder is not None:
+            try:
+                responder.stop()
+            except OSError as exc:
+                logger.debug("UDP LAN responder stop failed: %s", exc)
+
+
 def create_app(
     workspace: str | Path | None = None,
     *,
@@ -1279,6 +1336,7 @@ def create_app(
     state = WebState(root)
     _bootstrap(state)
     mdns_publisher = _MDNSPublisher(state)
+    udp_lan_publisher = _UDPLANPublisher(state)
     trade_execution_recovery = _TradeExecutionRecoveryWorker(state)
 
     # Network services are owned by FastAPI lifespan, not create_app().
@@ -1320,6 +1378,7 @@ def create_app(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent supervisor shutdown failed: %s", exc)
         trade_execution_recovery.stop()
+        udp_lan_publisher.stop()
         mdns_publisher.stop()
 
     def _shutdown_at_exit() -> None:
@@ -1331,6 +1390,7 @@ def create_app(
         v2_runtime = None
         try:
             mdns_publisher.start()
+            udp_lan_publisher.start()
             trade_execution_recovery.start()
             if not shutdown_registered:
                 _atexit.register(_shutdown_at_exit)
@@ -3683,6 +3743,54 @@ def create_app(
         )
 
     return app
+
+
+def _build_udp_lan_responder(state: WebState) -> Optional[Any]:
+    """Build the stdlib UDP responder for explicit LAN discovery mode."""
+    if os.environ.get("NTH_LAN_PUBLISH", "1").strip() == "0":
+        return None
+    if os.environ.get("NTH_LAN_DISCOVERY", "").strip() != "1":
+        return None
+    if state.node_identity is None:
+        return None
+    try:
+        config = state.membership.load_config()
+        raw_agent_id = getattr(state.node_identity, "agent_id", "")
+        node_network_id = (
+            str(raw_agent_id) if raw_agent_id else DEFAULT_ADMIN_ID
+        )
+        custom_label = os.environ.get("NTH_LAN_LABEL", "").strip()
+        if custom_label == "team_name":
+            advertised_label = getattr(config, "team_name", "") or "NTH DAO"
+        elif custom_label:
+            advertised_label = custom_label[:60]
+        else:
+            advertised_label = "NTH DAO node"
+        federation_base_url = _configured_public_base_url()
+        metadata = {}
+        if federation_base_url:
+            metadata = {
+                "http_url": federation_base_url,
+                "federation_url": federation_base_url,
+                "agent_card_url": (
+                    f"{federation_base_url}/.well-known/agent.json"
+                ),
+            }
+        return LANDiscovery(
+            agent_id=node_network_id,
+            label=advertised_label,
+            capabilities=["nth-dao", "nth-dao-federation"],
+            groups=["home"],
+            ws_url=federation_base_url,
+            pubkey_hex=getattr(state.node_identity, "pubkey_hex", "") or "",
+            did=_safe_did(state.node_identity),
+            metadata=metadata,
+            psk=os.environ.get("NTH_DISCOVERY_PSK", "").strip(),
+            port=configured_discovery_port(),
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("UDP LAN publish setup failed: %s", exc)
+        return None
 
 
 def _build_mdns_responder(state: WebState) -> Optional[Any]:

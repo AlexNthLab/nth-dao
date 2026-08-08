@@ -1,0 +1,225 @@
+{
+  "attribute_cases": [
+    {
+      "attributes": {
+        "game": "NTH Arena"
+      },
+      "expected_valid": true,
+      "id": "valid-required-field"
+    },
+    {
+      "attributes": {},
+      "expected_valid": false,
+      "id": "missing-required-field"
+    },
+    {
+      "attributes": {
+        "game": 7
+      },
+      "expected_valid": false,
+      "id": "wrong-field-type"
+    },
+    {
+      "attributes": {
+        "game": "NTH Arena",
+        "script": "ignored"
+      },
+      "expected_valid": false,
+      "id": "unknown-field"
+    }
+  ],
+  "expected_profile_digest": "sha256:8e695f21f7a6f5db203c63687c6df39953d710d216a67648531b5e1d26417621",
+  "format": "nth-resource-profile-conformance-v1",
+  "negative_profiles": [
+    {
+      "id": "summary-tamper",
+      "profile": {
+        "category_mappings": [
+          {
+            "community_category": "gaming/items",
+            "market_category": "products"
+          }
+        ],
+        "extensions": {},
+        "kind": "org.nthdao.resource-profile",
+        "not_after": "2027-08-08T00:00:00Z",
+        "profile_id": "org.nthdao.community/game-item",
+        "proof": {
+          "created": "2026-08-08T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "plx8WVbRlF5mgXAKUKFnAe7BHBtv0SsuQIGnxuvzFB2NNTjIrb0tlVhaURQgkQrJ-2MxoM-__BIf58By94DFBA",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK#z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK"
+        },
+        "protocol_version": "1.0",
+        "published_at": "2026-08-08T00:00:00Z",
+        "publisher_did": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK",
+        "resource_types": [
+          "game/item"
+        ],
+        "schema": {
+          "additional_properties": false,
+          "properties": {
+            "game": {
+              "description": "Game namespace.",
+              "enum": [],
+              "required": true,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "summary": "tampered",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "id": "category-tamper",
+      "profile": {
+        "category_mappings": [
+          {
+            "community_category": "gaming/items",
+            "market_category": "services"
+          }
+        ],
+        "extensions": {},
+        "kind": "org.nthdao.resource-profile",
+        "not_after": "2027-08-08T00:00:00Z",
+        "profile_id": "org.nthdao.community/game-item",
+        "proof": {
+          "created": "2026-08-08T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "plx8WVbRlF5mgXAKUKFnAe7BHBtv0SsuQIGnxuvzFB2NNTjIrb0tlVhaURQgkQrJ-2MxoM-__BIf58By94DFBA",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK#z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK"
+        },
+        "protocol_version": "1.0",
+        "published_at": "2026-08-08T00:00:00Z",
+        "publisher_did": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK",
+        "resource_types": [
+          "game/item"
+        ],
+        "schema": {
+          "additional_properties": false,
+          "properties": {
+            "game": {
+              "description": "Game namespace.",
+              "enum": [],
+              "required": true,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "summary": "Deterministic community profile for game items.",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "id": "schema-tamper",
+      "profile": {
+        "category_mappings": [
+          {
+            "community_category": "gaming/items",
+            "market_category": "products"
+          }
+        ],
+        "extensions": {},
+        "kind": "org.nthdao.resource-profile",
+        "not_after": "2027-08-08T00:00:00Z",
+        "profile_id": "org.nthdao.community/game-item",
+        "proof": {
+          "created": "2026-08-08T00:00:01Z",
+          "proof_purpose": "assertionMethod",
+          "proof_value": "plx8WVbRlF5mgXAKUKFnAe7BHBtv0SsuQIGnxuvzFB2NNTjIrb0tlVhaURQgkQrJ-2MxoM-__BIf58By94DFBA",
+          "type": "NthEd25519SignatureV1",
+          "verification_method": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK#z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK"
+        },
+        "protocol_version": "1.0",
+        "published_at": "2026-08-08T00:00:00Z",
+        "publisher_did": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK",
+        "resource_types": [
+          "game/item"
+        ],
+        "schema": {
+          "additional_properties": false,
+          "properties": {
+            "game": {
+              "description": "Game namespace.",
+              "enum": [],
+              "required": false,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "summary": "Deterministic community profile for game items.",
+        "version": "1.0.0"
+      }
+    }
+  ],
+  "profile": {
+    "category_mappings": [
+      {
+        "community_category": "gaming/items",
+        "market_category": "products"
+      }
+    ],
+    "extensions": {},
+    "kind": "org.nthdao.resource-profile",
+    "not_after": "2027-08-08T00:00:00Z",
+    "profile_id": "org.nthdao.community/game-item",
+    "proof": {
+      "created": "2026-08-08T00:00:01Z",
+      "proof_purpose": "assertionMethod",
+      "proof_value": "plx8WVbRlF5mgXAKUKFnAe7BHBtv0SsuQIGnxuvzFB2NNTjIrb0tlVhaURQgkQrJ-2MxoM-__BIf58By94DFBA",
+      "type": "NthEd25519SignatureV1",
+      "verification_method": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK#z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK"
+    },
+    "protocol_version": "1.0",
+    "published_at": "2026-08-08T00:00:00Z",
+    "publisher_did": "did:key:z6Mksp9sfVKVpWAi43niHLXfGQ5NdCTEoiycLmrLPehquVqK",
+    "resource_types": [
+      "game/item"
+    ],
+    "schema": {
+      "additional_properties": false,
+      "properties": {
+        "game": {
+          "description": "Game namespace.",
+          "enum": [],
+          "required": true,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "summary": "Deterministic community profile for game items.",
+    "version": "1.0.0"
+  },
+  "profile_id_contract": {
+    "cases": [
+      {
+        "expected_valid": true,
+        "id": "valid-near-limit",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      {
+        "expected_valid": false,
+        "id": "invalid-non-string",
+        "value": 123
+      },
+      {
+        "expected_valid": false,
+        "id": "invalid-uppercase",
+        "value": "org.nthdao.Community/game-item"
+      }
+    ],
+    "max_length": 190
+  },
+  "reserved_descriptor_attribute_fields": [
+    "community_category"
+  ],
+  "schema_version": 1,
+  "warning": "Signature validity grants provenance, not trust or execution authority."
+}

@@ -2,16 +2,14 @@
 
 import json
 import socket
+import threading
 import time
-
-import pytest
 
 import nth_dao as nth
 from nth_dao.discovery.agent_registry import AgentRecord, AgentRegistry
 from nth_dao.discovery.peer_finder import PeerFinder
 from nth_dao.discovery.lan import (
     LANDiscovery,
-    DEFAULT_DISCOVERY_PORT,
     WIRE_VERSION,
     MSG_HELLO,
     MSG_QUERY,
@@ -166,7 +164,7 @@ def test_lan_discover_finds_started_peer(tmp_path):
         label="Bob",
         capabilities=["python"],
         ws_url="ws://127.0.0.1:9876",
-        pubkey_hex="deadbeef",
+        pubkey_hex="de" * 32,
         port=port,
     )
     responder.start()
@@ -183,7 +181,7 @@ def test_lan_discover_finds_started_peer(tmp_path):
     assert p.label == "Bob"
     assert "python" in p.capabilities
     assert p.ws_url == "ws://127.0.0.1:9876"
-    assert p.pubkey_hex == "deadbeef"
+    assert p.pubkey_hex == "de" * 32
     assert p.rtt_ms >= 0
     assert p.source_addr.startswith("127.0.0.1:")
 
@@ -239,24 +237,38 @@ def test_lan_discover_ignores_stale_nonce(tmp_path):
     """A response with a different nonce (e.g. from earlier round) is dropped."""
     port = _free_port()
     querier = LANDiscovery(agent_id="q", port=port)
+    ready = threading.Event()
 
-    # Open the querier's recv socket out-of-band and inject a bogus hello
-    # with wrong nonce — should NOT be returned.
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    s.bind(("", 0))
-    bogus = {
-        "type": MSG_HELLO, "v": WIRE_VERSION, "agent_id": "ghost",
-        "label": "", "capabilities": [], "groups": [],
-        "ws_url": "", "pubkey_hex": "", "metadata": {},
-        "nonce": "wrong-nonce", "ts": time.time(),
-    }
-    # We can't easily inject into the querier mid-flight without coupling
-    # internal sockets — so this test verifies querier returns empty when
-    # only stale responses exist (the bogus packet goes to a port nobody
-    # bound, which is the expected case for this assertion path).
+    def serve_stale_hello() -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+            server.bind(("127.0.0.1", port))
+            ready.set()
+            query_bytes, address = server.recvfrom(8192)
+            query = json.loads(query_bytes.decode("utf-8"))
+            wrong_nonce = "0" * 16 if query["nonce"] != "0" * 16 else "1" * 16
+            stale = {
+                "type": MSG_HELLO,
+                "v": WIRE_VERSION,
+                "agent_id": "ghost",
+                "label": "",
+                "capabilities": [],
+                "groups": [],
+                "ws_url": "",
+                "pubkey_hex": "",
+                "did": "",
+                "metadata": {},
+                "nonce": wrong_nonce,
+                "ts": time.time(),
+                "psk_tag": "",
+            }
+            server.sendto(json.dumps(stale).encode("utf-8"), address)
+
+    thread = threading.Thread(target=serve_stale_hello, daemon=True)
+    thread.start()
+    assert ready.wait(1.0)
     peers = querier.discover(timeout=0.5, target_addrs=["127.0.0.1"])
-    s.close()
+    thread.join(timeout=1.0)
+
     assert peers == []
 
 

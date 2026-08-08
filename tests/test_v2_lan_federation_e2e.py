@@ -1,8 +1,8 @@
 """Two-node LAN federation acceptance tests.
 
-The discovery transport is injected because multicast is not reliable in CI.
-Everything after discovery is real: a signed identity card is fetched over a
-socket, the peer is persisted, and its signed task feed is pulled over HTTP.
+The UDP query is aimed at loopback because broadcast is not reliable in CI.
+The query/hello transport, signed identity card, peer persistence, HTTP feed,
+and Task verification are otherwise real.
 """
 
 from __future__ import annotations
@@ -70,14 +70,20 @@ def test_discovered_node_is_verified_and_its_task_is_pulled_over_http(
     """A task published on node B becomes visible on node A after discovery."""
     import nth_dao.web.market_federation_poll as poll
     import nth_dao.web.v2_api as v2_api
+    import nth_dao.discovery as discovery
+    from nth_dao.discovery.lan import LANDiscovery
 
+    source_port = _free_port()
+    discovery_port = _free_port()
+    source_url = f"http://127.0.0.1:{source_port}"
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", source_url)
+    monkeypatch.setenv("NTH_LAN_PUBLISH", "1")
+    monkeypatch.setenv("NTH_LAN_DISCOVERY", "1")
+    monkeypatch.setenv("NTH_LAN_DISCOVERY_PORT", str(discovery_port))
     source_app = create_app(
         tmp_path / "source",
         require_console_auth=False,
     )
-    source_port = _free_port()
-    source_url = f"http://127.0.0.1:{source_port}"
-    source_app.state.nth_public_base_url = source_url
     source_did = source_app.state.nth.node_identity.as_did()
 
     with _BackgroundServer(source_app, source_port):
@@ -97,25 +103,19 @@ def test_discovered_node_is_verified_and_its_task_is_pulled_over_http(
             require_console_auth=False,
         )
         target = TestClient(target_app)
-        monkeypatch.setattr(
-            v2_api,
-            "_discover_market_federation_peers",
-            lambda *_args, **_kwargs: ([
-                {
-                    "agent_id": "source-node",
-                    "label": "Source DAO",
-                    "did": source_did,
-                    "capabilities": ["nth-dao-federation"],
-                    "groups": ["home"],
-                    "ws_url": source_url,
-                    "source_addr": f"127.0.0.1:{source_port}",
-                    "federation_peer_url": source_url,
-                    "metadata": {"federation_url": source_url},
-                }
-            ], []),
-        )
+        class _LoopbackQuerier(LANDiscovery):
+            def discover(self, timeout=3.0, wanted_capabilities=None, target_addrs=None):
+                return super().discover(
+                    timeout=timeout,
+                    wanted_capabilities=wanted_capabilities,
+                    target_addrs=["127.0.0.1"],
+                )
+
+        monkeypatch.setattr(discovery, "LANDiscovery", _LoopbackQuerier)
+        monkeypatch.setattr(discovery, "mdns_available", lambda: False)
         # Loopback stands in for two private LAN addresses in CI. Keep the
-        # production resolver and source-IP checks unchanged.
+        # source-IP binding check unchanged; only public-IP rejection is
+        # replaced because loopback is deliberately forbidden in production.
         monkeypatch.setattr(
             v2_api,
             "_resolve_safe_discovered_federation_ip",
@@ -141,6 +141,7 @@ def test_discovered_node_is_verified_and_its_task_is_pulled_over_http(
         assert body["identity_verified_peers"] == [source_url]
         assert body["imported_peers"] == [source_url]
         assert body["skipped_peers"] == []
+        assert body["discovered_peers"][0]["peer_did"] == source_did
 
         visible = target.get("/api/v2/market/open")
         assert visible.status_code == 200, visible.text

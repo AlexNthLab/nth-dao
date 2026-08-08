@@ -59,7 +59,6 @@ vi.mock("../api", () => ({
     skipped_peers: [],
     discovery_errors: [],
   }),
-  announceTask: vi.fn(),
   fetchAgents: vi.fn().mockResolvedValue([]),
   claimTask: vi.fn(),
   claimFederatedTask: vi.fn(),
@@ -74,6 +73,7 @@ import {
   refreshFederation,
   updateFederationPeer,
 } from "../api";
+import { MarketFederationPanel } from "../components/MarketFederationPanel";
 import { TasksView } from "../components/TasksView";
 
 afterEach(() => {
@@ -82,11 +82,11 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
-  it("runs bounded federation discovery when the Tasks view opens", async () => {
+  it("runs bounded federation discovery when the Market panel opens", async () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );
@@ -94,8 +94,8 @@ describe("TasksView", () => {
     await waitFor(() => expect(discoverFederationPeers).toHaveBeenCalledWith({
       actorId: "admin",
       timeoutSeconds: 1.25,
-      add: true,
-      refresh: true,
+      add: false,
+      refresh: false,
     }));
   });
 
@@ -125,12 +125,41 @@ describe("TasksView", () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );
 
     expect(await screen.findByText(/peer did not advertise an HTTP federation URL/)).toBeTruthy();
+  });
+
+  it("retains persisted federation status when initial discovery fails", async () => {
+    const { getFederationStatus } = await import("../api");
+    vi.mocked(getFederationStatus).mockResolvedValueOnce({
+      peers: ["https://seed.example"],
+      seed_peers: ["https://seed.example"],
+      file_peers: ["https://seed.example"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 2,
+      last_refresh_ms: 12,
+      last_error: "",
+      last_peer_count: 1,
+    });
+    vi.mocked(discoverFederationPeers).mockRejectedValueOnce(
+      new Error("mDNS unavailable"),
+    );
+
+    render(
+      <LangProvider>
+        <ToastProvider>
+          <MarketFederationPanel />
+        </ToastProvider>
+      </LangProvider>,
+    );
+
+    expect(await screen.findByText(/Seeds: 1/)).toBeTruthy();
+    expect(screen.getByText(/2 remote/)).toBeTruthy();
   });
 
   it("does not let an older status response overwrite newer discovery", async () => {
@@ -149,7 +178,7 @@ describe("TasksView", () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );
@@ -206,7 +235,7 @@ describe("TasksView", () => {
       render(
         <LangProvider>
           <ToastProvider>
-            <TasksView />
+            <MarketFederationPanel />
           </ToastProvider>
         </LangProvider>,
       );
@@ -220,11 +249,12 @@ describe("TasksView", () => {
     }
   });
 
-  it("板子渲染任务、发布按钮、认领占位禁用", async () => {
+  it("renders work management and delegates publication to Market", async () => {
+    const onOpenPublisher = vi.fn();
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <TasksView onOpenPublisher={onOpenPublisher} />
         </ToastProvider>
       </LangProvider>,
     );
@@ -232,8 +262,9 @@ describe("TasksView", () => {
     // 公告卡片
     expect(await screen.findByText("review the auth PR")).toBeTruthy();
     expect(screen.getByText("look at the token check")).toBeTruthy();
-    // 发布入口
-    expect(screen.getByText("+ Publish task")).toBeTruthy();
+    const publish = screen.getByRole("button", { name: "Publish in Market" });
+    fireEvent.click(publish);
+    expect(onOpenPublisher).toHaveBeenCalledTimes(1);
     // 认领按钮:无可用 agent(fetchAgents 返回 [])→ 禁用。
     const claim = screen.getByText("Claim") as HTMLButtonElement;
     expect(claim.disabled).toBe(true);
@@ -338,7 +369,7 @@ describe("TasksView", () => {
     ));
   });
 
-  it("allows adding a federation seed peer from the Tasks sidebar", async () => {
+  it("allows adding a federation seed peer from Market", async () => {
     vi.mocked(updateFederationPeer).mockResolvedValueOnce({
       peers: ["http://192.168.1.20:8080"],
       file_peers: ["http://192.168.1.20:8080"],
@@ -367,7 +398,7 @@ describe("TasksView", () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );
@@ -386,27 +417,35 @@ describe("TasksView", () => {
     expect(refreshFederation).toHaveBeenCalled();
   });
 
-  it("discovers nearby DAO federation peers from the Tasks sidebar", async () => {
+  it("discovers nearby DAO federation peers from Market", async () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );
     await waitFor(() => expect(discoverFederationPeers).toHaveBeenCalled());
     vi.mocked(discoverFederationPeers).mockClear();
     vi.mocked(discoverFederationPeers).mockResolvedValueOnce({
-      peers: ["http://192.168.1.20:8080"],
-      file_peers: ["http://192.168.1.20:8080"],
+      peers: [],
+      file_peers: [],
       env_peers: [],
-      poller_started: true,
-      cached_announcements: 1,
-      last_refresh_ms: 123,
+      poller_started: false,
+      cached_announcements: 0,
+      last_refresh_ms: 0,
       last_error: "",
-      last_peer_count: 1,
+      last_peer_count: 0,
       discovered: true,
-      imported_peers: ["http://192.168.1.20:8080"],
+      imported_peers: [],
+      identity_verified_peers: ["http://192.168.1.20:8080"],
+      discovered_peers: [{
+        agent_id: "nearby-dao",
+        label: "Nearby DAO",
+        peer_did: "did:key:zNearby",
+        federation_peer_url: "http://192.168.1.20:8080",
+        identity_verified: true,
+      }],
       skipped_peers: [],
       discovery_errors: [],
     });
@@ -417,11 +456,39 @@ describe("TasksView", () => {
       expect(discoverFederationPeers).toHaveBeenCalledWith({
         actorId: "admin",
         timeoutSeconds: 2,
-        add: true,
-        refresh: true,
+        add: false,
+        refresh: false,
       });
     });
-    expect(await screen.findByText(/Imported 1 verified DAO peer/)).toBeTruthy();
+    expect(await screen.findByText(/approve below to sync/)).toBeTruthy();
+    expect(screen.getByText("Approve")).toBeTruthy();
+    expect(updateFederationPeer).not.toHaveBeenCalled();
+
+    vi.mocked(updateFederationPeer).mockResolvedValueOnce({
+      peers: ["http://192.168.1.20:8080"],
+      file_peers: ["http://192.168.1.20:8080"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 0,
+      last_refresh_ms: 0,
+      last_error: "",
+      last_peer_count: 1,
+    });
+    vi.mocked(refreshFederation).mockResolvedValueOnce({
+      peers: ["http://192.168.1.20:8080"],
+      file_peers: ["http://192.168.1.20:8080"],
+      env_peers: [],
+      poller_started: true,
+      cached_announcements: 1,
+      last_refresh_ms: 123,
+      last_error: "",
+      last_peer_count: 1,
+    });
+    fireEvent.click(screen.getByText("Approve"));
+    await waitFor(() => expect(updateFederationPeer).toHaveBeenCalledWith(
+      "http://192.168.1.20:8080",
+      "add",
+    ));
   });
 
   it("shows durable mesh peer sources and reverse discovery readiness", async () => {
@@ -461,7 +528,7 @@ describe("TasksView", () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );
@@ -504,7 +571,7 @@ describe("TasksView", () => {
     render(
       <LangProvider>
         <ToastProvider>
-          <TasksView />
+          <MarketFederationPanel />
         </ToastProvider>
       </LangProvider>,
     );

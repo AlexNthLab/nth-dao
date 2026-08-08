@@ -1,4 +1,4 @@
-"""LANDiscovery — UDP-based "people nearby" agent discovery.
+"""LANDiscovery -- UDP-based "people nearby" agent discovery.
 
 Solves the "I just opened the app, who else is on my LAN?" problem without
 needing a centralized registry, mDNS, or pre-shared peer URLs.
@@ -22,7 +22,7 @@ Design notes:
     - SO_REUSEADDR/REUSEPORT are set on the listener so multiple agents
       on the same host can each bind the discovery port.
     - The discover() method returns whoever responded within `timeout`.
-    - To support unit tests, the broadcast target list is configurable —
+    - To support unit tests, the broadcast target list is configurable --
       tests pass ["127.0.0.1"] to avoid OS-level broadcast quirks.
     - Privacy: this module does NOT speak gossip/sign messages. It's a
       *plaintext local-LAN announce*. Anything you put in `capabilities` /
@@ -34,6 +34,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import os
+import re
 import secrets
 import socket
 import sys
@@ -50,9 +53,104 @@ DEFAULT_BROADCAST_ADDRS = ("255.255.255.255",)
 MAX_MESSAGE_BYTES = 4096          # safe single-packet UDP size
 WIRE_VERSION = 1
 RECV_BUF = 8192
+MAX_DISCOVERED_PEERS = 256
+MAX_DISCOVERED_PEERS_PER_SOURCE = 8
 
 MSG_QUERY = "nth-dao-query"
 MSG_HELLO = "nth-dao-hello"
+
+_NONCE = re.compile(r"^[0-9a-f]{16}$")
+_PUBKEY_HEX = re.compile(r"^[0-9a-fA-F]{64}$")
+_PSK_TAG = re.compile(r"^[0-9a-f]{64}$")
+_QUERY_FIELDS = frozenset({"type", "v", "from", "wants", "nonce", "psk_tag"})
+_HELLO_FIELDS = frozenset({
+    "type", "v", "agent_id", "label", "capabilities", "groups",
+    "ws_url", "pubkey_hex", "did", "metadata", "nonce", "ts", "psk_tag",
+})
+
+
+def _bounded_text(value: Any, *, minimum: int = 0, maximum: int) -> bool:
+    return isinstance(value, str) and minimum <= len(value) <= maximum
+
+
+def _bounded_string_list(value: Any, *, maximum_items: int = 64) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= maximum_items
+        and all(_bounded_text(item, minimum=1, maximum=128) for item in value)
+    )
+
+
+def _valid_psk_tag(value: Any) -> bool:
+    return value == "" or (
+        isinstance(value, str) and _PSK_TAG.fullmatch(value) is not None
+    )
+
+
+def _validate_query_message(message: Any) -> bool:
+    """Validate the exact bounded v1 query shape before using any field."""
+    return (
+        isinstance(message, dict)
+        and set(message) == _QUERY_FIELDS
+        and message.get("type") == MSG_QUERY
+        and message.get("v") == WIRE_VERSION
+        and _bounded_text(message.get("from"), minimum=1, maximum=160)
+        and _bounded_string_list(message.get("wants"))
+        and isinstance(message.get("nonce"), str)
+        and _NONCE.fullmatch(message["nonce"]) is not None
+        and _valid_psk_tag(message.get("psk_tag"))
+    )
+
+
+def _validate_hello_message(message: Any, *, expected_nonce: str) -> bool:
+    """Validate one untrusted v1 hello without granting identity trust."""
+    if (
+        not isinstance(message, dict)
+        or set(message) != _HELLO_FIELDS
+        or message.get("type") != MSG_HELLO
+        or message.get("v") != WIRE_VERSION
+        or message.get("nonce") != expected_nonce
+        or not _bounded_text(message.get("agent_id"), minimum=1, maximum=160)
+        or not _bounded_text(message.get("label"), maximum=256)
+        or not _bounded_string_list(message.get("capabilities"))
+        or not _bounded_string_list(message.get("groups"))
+        or not _bounded_text(message.get("ws_url"), maximum=2048)
+        or not _bounded_text(message.get("pubkey_hex"), maximum=64)
+        or not _bounded_text(message.get("did"), maximum=256)
+        or not isinstance(message.get("metadata"), dict)
+        or not _valid_psk_tag(message.get("psk_tag"))
+    ):
+        return False
+    pubkey_hex = message["pubkey_hex"]
+    if pubkey_hex and _PUBKEY_HEX.fullmatch(pubkey_hex) is None:
+        return False
+    did = message["did"]
+    if did and not did.startswith("did:key:z"):
+        return False
+    timestamp = message.get("ts")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        return False
+    if not math.isfinite(float(timestamp)):
+        return False
+    try:
+        encoded_metadata = json.dumps(
+            message["metadata"], ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return False
+    return len(encoded_metadata) <= 2048
+
+
+def configured_discovery_port() -> int:
+    """Return the shared UDP discovery port with strict env validation."""
+    raw = os.environ.get("NTH_LAN_DISCOVERY_PORT", str(DEFAULT_DISCOVERY_PORT))
+    try:
+        port = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("NTH_LAN_DISCOVERY_PORT must be an integer") from exc
+    if not 1024 <= port <= 65_535:
+        raise ValueError("NTH_LAN_DISCOVERY_PORT must be in 1024..65535")
+    return port
 
 
 @dataclass
@@ -159,13 +257,14 @@ class LANDiscovery:
         self._listener_sock: Optional[socket.socket] = None
         self._listener_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._lifecycle_lock = threading.Lock()
         # Optional filter: lambda (peer_dict) -> bool; reject silently if False
         self.peer_filter: Optional[Callable[[dict], bool]] = None
 
-    # ─── psk helpers ───────────────────────────────────────────────────
+    # PSK helpers
 
     def _psk_tag(self, message: dict) -> str:
-        """HMAC-SHA256(psk, nonce).hex() — empty psk → empty tag."""
+        """Return HMAC-SHA256(psk, nonce) as hex; empty PSK gives an empty tag."""
         if not self.psk:
             return ""
         import hashlib
@@ -200,33 +299,52 @@ class LANDiscovery:
         import hmac as _hmac
         return _hmac.compare_digest(claimed_tag, self._psk_tag(message))
 
-    # ─── responder ─────────────────────────────────────────────────────
+    # Responder
 
     def start(self) -> None:
         """Start background listener that responds to discovery queries."""
-        if self._listener_thread is not None:
-            return
-        sock = self._make_listener_socket()
-        self._listener_sock = sock
-        self._stop.clear()
-        t = threading.Thread(
-            target=self._listen_loop, daemon=True,
-            name=f"LANDiscovery-{self.agent_id}",
+        with self._lifecycle_lock:
+            if self._listener_thread is not None and self._listener_thread.is_alive():
+                return
+            if self._listener_sock is not None:
+                try:
+                    self._listener_sock.close()
+                except OSError:
+                    pass
+            sock = self._make_listener_socket()
+            self._listener_sock = sock
+            self._stop.clear()
+            thread = threading.Thread(
+                target=self._listen_loop, daemon=True,
+                name=f"LANDiscovery-{self.agent_id}",
+            )
+            self._listener_thread = thread
+            thread.start()
+
+    def is_running(self) -> bool:
+        """Return whether the responder thread and socket are both live."""
+        thread = self._listener_thread
+        return bool(
+            thread is not None
+            and thread.is_alive()
+            and self._listener_sock is not None
+            and not self._stop.is_set()
         )
-        self._listener_thread = t
-        t.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._listener_sock is not None:
+        with self._lifecycle_lock:
+            self._stop.set()
+            sock = self._listener_sock
+            thread = self._listener_thread
+            self._listener_sock = None
+            self._listener_thread = None
+        if sock is not None:
             try:
-                self._listener_sock.close()
+                sock.close()
             except OSError:
                 pass
-            self._listener_sock = None
-        if self._listener_thread is not None:
-            self._listener_thread.join(timeout=2)
-            self._listener_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
 
     def _make_listener_socket(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -251,10 +369,10 @@ class LANDiscovery:
             except socket.timeout:
                 continue
             except ConnectionResetError:
-                # Windows ICMP-unreachable bleed-through — ignore and retry
+                # Ignore Windows ICMP-unreachable bleed-through and retry.
                 continue
             except OSError:
-                # Socket closed during stop() (real exit) — break out
+                # A socket closed by stop() is a real exit.
                 if self._stop.is_set():
                     break
                 continue
@@ -262,18 +380,16 @@ class LANDiscovery:
                 msg = json.loads(data.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("type") != MSG_QUERY or msg.get("v") != WIRE_VERSION:
+            if not _validate_query_message(msg):
                 continue
             # Pre-shared-key gate: reject queries without matching tag.
             nonce = msg.get("nonce", "")
             if not self._psk_ok(msg):
                 logger.debug("dropping query from %s: psk mismatch", addr)
                 continue
-            # Optional capability filter — sender said `wants`, only respond
+            # Apply the optional capability filter from the sender's `wants`.
             # if we satisfy all of them. Empty wants = match everyone.
-            wants = msg.get("wants") or []
+            wants = msg["wants"]
             if wants and not set(wants).issubset(set(self.capabilities)):
                 continue
             # Don't echo our own queries back to ourselves
@@ -301,7 +417,11 @@ class LANDiscovery:
         })
 
     def _send_hello(self, sock: socket.socket, dest: Tuple[str, int], reply_nonce: str) -> None:
-        payload = json.dumps(self._build_hello(reply_nonce)).encode("utf-8")
+        try:
+            payload = json.dumps(self._build_hello(reply_nonce)).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            logger.warning("hello payload is not serializable: %s", exc)
+            return
         if len(payload) > MAX_MESSAGE_BYTES:
             logger.warning("hello payload too big (%d bytes); skipping", len(payload))
             return
@@ -310,7 +430,7 @@ class LANDiscovery:
         except OSError as e:
             logger.debug("sendto %s failed: %s", dest, e)
 
-    # ─── querier ───────────────────────────────────────────────────────
+    # Querier
 
     def discover(
         self,
@@ -322,7 +442,7 @@ class LANDiscovery:
 
         Args:
             timeout: seconds to wait for responses
-            wanted_capabilities: only peers whose capabilities ⊇ this list reply
+            wanted_capabilities: only peers containing all listed capabilities reply
             target_addrs: where to send the query. Defaults to broadcast_addrs.
                           Tests can pass ["127.0.0.1"] to avoid OS broadcast quirks.
 
@@ -359,7 +479,9 @@ class LANDiscovery:
             except OSError as e:
                 logger.debug("query sendto %s:%d failed: %s", addr, self.port, e)
 
-        peers: Dict[str, LANPeer] = {}
+        peers: Dict[tuple[str, str, str, str, str], LANPeer] = {}
+        source_counts: Dict[str, int] = {}
+        capacity_warned = False
         deadline = send_ts + timeout
         try:
             while time.time() < deadline:
@@ -370,21 +492,17 @@ class LANDiscovery:
                 except ConnectionResetError:
                     # Windows: a previous sendto landed on a closed port and
                     # the OS surfaced the ICMP "port unreachable" on the next
-                    # recv. Harmless — keep listening for legitimate replies.
+                    # recv. This is harmless; keep listening for legitimate replies.
                     continue
                 except OSError:
-                    # Other transient network errors — keep going until deadline
+                    # Keep going through other transient errors until the deadline.
                     continue
                 try:
                     msg = json.loads(data.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
-                if not isinstance(msg, dict):
+                if not _validate_hello_message(msg, expected_nonce=nonce):
                     continue
-                if msg.get("type") != MSG_HELLO or msg.get("v") != WIRE_VERSION:
-                    continue
-                if msg.get("nonce") != nonce:
-                    continue  # stale response from a previous round
                 # psk gate (querier side): only accept hellos whose psk_tag
                 # matches our nonce under our psk
                 if not self._psk_ok(msg):
@@ -414,10 +532,43 @@ class LANDiscovery:
                     # neither side has crypto - agent_id fallback
                     if aid == self.agent_id:
                         continue
-                if aid in peers:
+                source_ip = str(addr[0])
+                candidate_key = (
+                    source_ip,
+                    aid,
+                    msg_did,
+                    msg_pk,
+                    str(msg.get("ws_url") or ""),
+                )
+                if candidate_key in peers:
                     continue
-                if self.peer_filter and not self.peer_filter(msg):
+                if source_counts.get(source_ip, 0) >= MAX_DISCOVERED_PEERS_PER_SOURCE:
                     continue
+                if len(peers) >= MAX_DISCOVERED_PEERS:
+                    # Do not terminate the receive loop. A later response from a
+                    # new source may replace one surplus candidate from a noisy
+                    # source, preserving discovery under a bounded local flood.
+                    donor = next((
+                        key for key in reversed(peers)
+                        if source_counts.get(key[0], 0) > 1
+                    ), None)
+                    if donor is None:
+                        if not capacity_warned:
+                            logger.warning(
+                                "LAN discovery peer limit reached (%d)",
+                                MAX_DISCOVERED_PEERS,
+                            )
+                            capacity_warned = True
+                        continue
+                    peers.pop(donor)
+                    source_counts[donor[0]] -= 1
+                if self.peer_filter:
+                    try:
+                        if not self.peer_filter(msg):
+                            continue
+                    except Exception:  # noqa: BLE001 - isolate caller callback
+                        logger.exception("LAN peer_filter rejected with an exception")
+                        continue
                 peer = LANPeer(
                     agent_id=aid,
                     label=msg.get("label", ""),
@@ -434,7 +585,8 @@ class LANDiscovery:
                     discovered_at=time.time(),
                     metadata=msg.get("metadata", {}) if isinstance(msg.get("metadata"), dict) else {},
                 )
-                peers[aid] = peer
+                peers[candidate_key] = peer
+                source_counts[source_ip] = source_counts.get(source_ip, 0) + 1
         finally:
             try:
                 sender.close()
@@ -443,7 +595,7 @@ class LANDiscovery:
 
         return list(peers.values())
 
-    # ─── context manager ───────────────────────────────────────────────
+    # Context manager
 
     def __enter__(self) -> "LANDiscovery":
         self.start()

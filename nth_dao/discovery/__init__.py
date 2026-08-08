@@ -18,7 +18,7 @@ Three layers, increasing scope:
 
 from .agent_registry import AgentRecord, AgentRegistry
 from .peer_finder import MatchResult, PeerFinder
-from .lan import LANDiscovery, LANPeer
+from .lan import LANDiscovery, LANPeer, configured_discovery_port
 from .federation_registry import LearnedPeerRecord, LearnedPeerStore
 
 # Optional mDNS backend (requires `pip install nth-dao[lan]`). We re-export
@@ -40,6 +40,7 @@ __all__ = [
     "PeerFinder",
     "LANDiscovery",
     "LANPeer",
+    "configured_discovery_port",
     "LearnedPeerRecord",
     "LearnedPeerStore",
     "MDNSDiscovery",

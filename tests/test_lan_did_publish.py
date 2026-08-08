@@ -11,8 +11,8 @@ Pins:
   * The discoverer reads ``did`` from incoming hello messages
   * MDNSDiscovery threads ``did`` through TXT props
   * Both backends default ``did=""`` for legacy compatibility
-  * The web lifespan opens and closes an mDNS responder when zeroconf
-    is installed AND NTH_LAN_PUBLISH != 0
+  * Explicit LAN mode opens and closes a stdlib UDP responder, while mDNS is
+    used as an optional second transport when zeroconf is installed
   * ``/api/agents/lan_discover`` surfaces ``did`` and ``pubkey_prefix``
     in the peer rows
 """
@@ -20,7 +20,10 @@ Pins:
 from __future__ import annotations
 
 import atexit
+import json
+import socket
 import threading
+import time
 import uuid
 from dataclasses import fields as dataclass_fields
 
@@ -28,9 +31,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 import nth_dao.web as web_mod
-from nth_dao.discovery.lan import LANDiscovery, LANPeer
+import nth_dao.discovery.lan as lan_mod
+from nth_dao.discovery.lan import (
+    LANDiscovery,
+    LANPeer,
+    MAX_DISCOVERED_PEERS_PER_SOURCE,
+)
 from nth_dao.identity import crypto_available
 from nth_dao.web import create_app
+
+
+def _free_udp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 # ===== LANPeer schema =====
@@ -111,6 +125,198 @@ def test_LAN_DID_legacy_hello_without_did_defaults_to_empty_string():
         did=fake_msg.get("did", "") or "",
     )
     assert peer.did == ""
+
+
+def test_udp_responder_survives_malformed_query_and_can_restart_dead_thread():
+    port = _free_udp_port()
+    discovery = LANDiscovery(
+        agent_id="responder",
+        port=port,
+        bind_addr="127.0.0.1",
+    )
+    discovery.start()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.sendto(
+                json.dumps({
+                    "type": "nth-dao-query",
+                    "v": 1,
+                    "from": "attacker",
+                    "wants": 1,
+                    "nonce": "0123456789abcdef",
+                    "psk_tag": "",
+                }).encode("utf-8"),
+                ("127.0.0.1", port),
+            )
+        time.sleep(0.15)
+        assert discovery.is_running() is True
+    finally:
+        discovery.stop()
+
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    stale_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    discovery._listener_thread = dead
+    discovery._listener_sock = stale_socket
+    discovery.start()
+    try:
+        assert discovery.is_running() is True
+        assert stale_socket.fileno() == -1
+    finally:
+        discovery.stop()
+
+
+def test_udp_discovery_skips_malformed_hello_and_keeps_valid_peer():
+    port = _free_udp_port()
+    ready = threading.Event()
+
+    def serve() -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+            server.bind(("127.0.0.1", port))
+            ready.set()
+            data, address = server.recvfrom(8192)
+            query = json.loads(data.decode("utf-8"))
+            hello = {
+                "type": "nth-dao-hello",
+                "v": 1,
+                "agent_id": "valid-peer",
+                "label": "Valid peer",
+                "capabilities": ["market"],
+                "groups": ["home"],
+                "ws_url": "http://192.168.1.20:8080",
+                "pubkey_hex": "ab" * 32,
+                "did": "did:key:zValidPeer",
+                "metadata": {"federation_url": "http://192.168.1.20:8080"},
+                "nonce": query["nonce"],
+                "ts": time.time(),
+                "psk_tag": "",
+            }
+            malformed = {**hello, "capabilities": 1}
+            server.sendto(json.dumps(malformed).encode("utf-8"), address)
+            server.sendto(json.dumps(hello).encode("utf-8"), address)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    assert ready.wait(1.0)
+    peers = LANDiscovery(agent_id="scanner", port=port).discover(
+        timeout=0.75,
+        target_addrs=["127.0.0.1"],
+    )
+    thread.join(timeout=1.0)
+
+    assert [peer.agent_id for peer in peers] == ["valid-peer"]
+
+
+def test_udp_discovery_bounds_unverified_candidates_per_source(monkeypatch):
+    class _FloodSocket:
+        def __init__(self):
+            self.nonce = ""
+            self.index = 0
+
+        def setsockopt(self, *_args):
+            return None
+
+        def bind(self, *_args):
+            return None
+
+        def settimeout(self, *_args):
+            return None
+
+        def sendto(self, payload, _address):
+            self.nonce = json.loads(payload.decode("utf-8"))["nonce"]
+
+        def recvfrom(self, _size):
+            index = self.index
+            self.index += 1
+            hello = {
+                "type": "nth-dao-hello",
+                "v": 1,
+                "agent_id": f"peer-{index}",
+                "label": "Peer",
+                "capabilities": [],
+                "groups": [],
+                "ws_url": "",
+                "pubkey_hex": "",
+                "did": f"did:key:zpeer{index}",
+                "metadata": {},
+                "nonce": self.nonce,
+                "ts": time.time(),
+                "psk_tag": "",
+            }
+            return json.dumps(hello).encode("utf-8"), ("192.0.2.1", 9877)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(lan_mod.socket, "socket", lambda *_args, **_kwargs: _FloodSocket())
+
+    peers = LANDiscovery(agent_id="scanner").discover(
+        timeout=10.0,
+        target_addrs=["192.0.2.1"],
+    )
+
+    assert len(peers) == MAX_DISCOVERED_PEERS_PER_SOURCE
+    assert peers[-1].agent_id == f"peer-{MAX_DISCOVERED_PEERS_PER_SOURCE - 1}"
+
+
+def test_udp_discovery_does_not_collapse_distinct_identities_with_same_label(
+    monkeypatch,
+):
+    class _SameLabelSocket:
+        def __init__(self):
+            self.index = 0
+            self.nonce = ""
+
+        def setsockopt(self, *_args):
+            return None
+
+        def bind(self, *_args):
+            return None
+
+        def settimeout(self, *_args):
+            return None
+
+        def sendto(self, payload, _address):
+            self.nonce = json.loads(payload.decode("utf-8"))["nonce"]
+
+        def recvfrom(self, _size):
+            if self.index >= 2:
+                raise socket.timeout
+            index = self.index
+            self.index += 1
+            hello = {
+                "type": "nth-dao-hello",
+                "v": 1,
+                "agent_id": "admin",
+                "label": "DAO node",
+                "capabilities": [],
+                "groups": [],
+                "ws_url": f"http://192.0.2.{index + 10}:8080",
+                "pubkey_hex": f"{index + 1:02x}" * 32,
+                "did": f"did:key:zDistinct{index}",
+                "metadata": {},
+                "nonce": self.nonce,
+                "ts": time.time(),
+                "psk_tag": "",
+            }
+            return json.dumps(hello).encode("utf-8"), (f"192.0.2.{index + 10}", 9877)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        lan_mod.socket, "socket", lambda *_args, **_kwargs: _SameLabelSocket(),
+    )
+
+    peers = LANDiscovery(agent_id="scanner").discover(
+        timeout=0.01,
+        target_addrs=["192.0.2.1"],
+    )
+
+    assert len(peers) == 2
+    assert {peer.agent_id for peer in peers} == {"admin"}
+    assert len({peer.pubkey_hex for peer in peers}) == 2
 
 
 # ===== mDNS backend (TXT props) =====
@@ -223,6 +429,77 @@ def test_LAN_DID_publish_silently_skips_when_zeroconf_missing(
     app = create_app(tmp_path)
     with TestClient(app):
         assert app.state.nth.mdns_responder is None
+
+
+def test_explicit_LAN_mode_starts_and_stops_udp_fallback(
+    tmp_path, monkeypatch,
+):
+    started: list[dict] = []
+    stopped: list[bool] = []
+
+    class _StubUDP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(dict(self.kwargs))
+
+        def stop(self):
+            stopped.append(True)
+
+    import nth_dao.discovery.lan_mdns as mdns_mod
+
+    monkeypatch.setattr(web_mod, "LANDiscovery", _StubUDP)
+    monkeypatch.setattr(mdns_mod, "is_available", lambda: False)
+    monkeypatch.setenv("NTH_LAN_DISCOVERY", "1")
+    monkeypatch.setenv("NTH_LAN_PUBLISH", "1")
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", "http://192.168.1.20:8080")
+
+    app = create_app(tmp_path)
+    assert started == []
+    with TestClient(app) as client:
+        assert len(started) == 1
+        advertised = started[0]
+        assert advertised["did"].startswith("did:key:z")
+        assert advertised["metadata"]["federation_url"] == (
+            "http://192.168.1.20:8080"
+        )
+        assert app.state.nth.lan_udp_responder is not None
+        federation = client.get("/api/v2/health").json()["federation"]
+        assert federation["publisher_active"] is True
+        assert federation["lan_ready"] is True
+
+    assert stopped == [True]
+    assert app.state.nth.lan_udp_responder is None
+
+
+def test_dead_udp_responder_is_not_reported_as_active(tmp_path, monkeypatch):
+    class _DeadUDP:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def is_running(self):
+            return False
+
+    import nth_dao.discovery.lan_mdns as mdns_mod
+
+    monkeypatch.setattr(web_mod, "LANDiscovery", _DeadUDP)
+    monkeypatch.setattr(mdns_mod, "is_available", lambda: False)
+    monkeypatch.setenv("NTH_LAN_DISCOVERY", "1")
+    monkeypatch.setenv("NTH_LAN_PUBLISH", "1")
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", "http://192.168.1.20:8080")
+
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        federation = client.get("/api/v2/health").json()["federation"]
+        assert federation["publisher_active"] is False
+        assert federation["lan_ready"] is False
 
 
 def test_web_lifespan_registers_and_unregisters_one_shutdown_hook(

@@ -8,9 +8,9 @@ from nth_dao.market.publication_policy import reject_private_publication_data
 @pytest.mark.parametrize(
     "value",
     [
-        r"C:\Users\Operator\Desktop\offer.txt",
-        "/Users/operator/Documents/offer.txt",
-        "/home/operator/offer.txt",
+        r"C:" + r"\Users\Operator\Desktop\offer.txt",
+        "/" + "Users/operator/Documents/offer.txt",
+        "/" + "home/operator/offer.txt",
         "file:///tmp/offer.txt",
         "-----BEGIN OPENSSH " + "PRIVATE KEY-----",
         "ghp_" + ("A" * 24),
