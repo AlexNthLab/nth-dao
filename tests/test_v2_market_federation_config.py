@@ -824,6 +824,17 @@ def test_seed_registry_transaction_recovers_after_second_file_write_fails(
     assert not transaction.exists()
 
 
+def test_seed_registry_transaction_path_is_workspace_scoped(
+    tmp_path: Path,
+) -> None:
+    import nth_dao.web.v2_api as v2_api
+
+    assert v2_api._fed_peer_transaction_file(None) is None
+    assert v2_api._fed_peer_transaction_file(tmp_path) == (
+        tmp_path / "federation" / "peer_registry.txn.json"
+    )
+
+
 def test_damaged_seed_registry_transaction_blocks_mutation_without_overwrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1001,6 +1012,80 @@ def test_identity_card_verification_binds_did_key_and_peer_url() -> None:
     assert metadata["peer_url"] == peer_url
     assert metadata["did"] == identity.as_did()
     assert metadata["pubkey_hex"] == identity.pubkey_hex
+    assert "challenge" not in metadata
+
+
+def test_public_identity_card_signs_challenge_and_rejects_invalid_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.identity import crypto_available
+
+    if not crypto_available():
+        pytest.skip("PyNaCl needed for identity card verification")
+    import nth_dao.web.v2_api as v2_api
+
+    peer_url = "http://192.168.1.20:8080"
+    challenge = "ab" * 32
+    monkeypatch.setenv("NTH_PUBLIC_BASE_URL", peer_url)
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    response = client.get(
+        "/.well-known/nth-dao/identity.json",
+        params={"challenge": challenge},
+    )
+
+    assert response.status_code == 200, response.text
+    card = response.json()
+    assert card["challenge"] == challenge
+    metadata, error = v2_api._verify_federation_identity_card(
+        peer_url,
+        card,
+        expected_challenge=challenge,
+    )
+    assert error == ""
+    assert metadata is not None
+    assert "challenge" not in metadata
+
+    tampered = dict(card)
+    tampered["challenge"] = "cd" * 32
+    metadata, error = v2_api._verify_federation_identity_card(
+        peer_url,
+        tampered,
+        expected_challenge=challenge,
+    )
+    assert metadata is None
+    assert "signature verification failed" in error
+
+    invalid = client.get(
+        "/.well-known/nth-dao/identity.json",
+        params={"challenge": "AB" * 32},
+    )
+    assert invalid.status_code == 400
+
+
+def test_identity_card_rejects_unsolicited_challenge_without_poisoning_metadata(
+    tmp_path: Path,
+) -> None:
+    from nth_dao.identity import AgentIdentity, crypto_available
+
+    if not crypto_available():
+        pytest.skip("PyNaCl needed for identity card verification")
+    import nth_dao.web.v2_api as v2_api
+
+    identity = AgentIdentity.generate(label="peer")
+    peer_url = "http://192.168.1.20:8080"
+    card = _signed_identity_card(identity, peer_url)
+    card["challenge"] = "ab" * 32
+    card["sig"] = identity.sign_json({
+        key: value for key, value in card.items() if key != "sig"
+    })
+
+    metadata, error = v2_api._verify_federation_identity_card(peer_url, card)
+
+    assert metadata is None
+    assert error == "identity card returned an unsolicited challenge"
+    assert v2_api._normalize_fed_peer_metadata({}, strict=True) == {}
 
 
 def test_identity_card_verification_rejects_url_mismatch() -> None:

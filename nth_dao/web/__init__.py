@@ -17,8 +17,8 @@ import re
 import secrets
 import socket
 import threading
-from dataclasses import asdict
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional, TYPE_CHECKING, Union
 from urllib.parse import urlsplit, urlunsplit
@@ -52,7 +52,6 @@ from nth_dao.cap_token import (
     CapTokenStore as _CapTokenStore,
     DEFAULT_TTL_MS as _CAP_DEFAULT_TTL_MS,
     KNOWN_CAPABILITIES as _CAP_KNOWN,
-    MAX_TTL_MS as _CAP_MAX_TTL_MS,
     decode_authorization_value as _decode_cap_auth,
     encode_authorization_header as _encode_cap_auth,
     sign_cap_token as _sign_cap_token,
@@ -72,10 +71,10 @@ from nth_dao.discovery import (
 )
 from nth_dao.groups import DEFAULT_CHANNEL_ID, GroupManager, TaskStatus
 from nth_dao.group_registry import (
+    GroupPolicy,
     GroupRegistry,
     GroupRegistryError,
     PolicyChangeProposal,
-    cast_vote as gr_cast_vote,
     resolve_proposal,
 )
 from nth_dao.identity import AgentID
@@ -109,6 +108,8 @@ _TRADE_RECOGNITION_MAX_BODY_BYTES = 256 * 1024
 _TRADE_RECOGNITION_POLICY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_DELIVERY_MAX_BODY_BYTES = 256 * 1024
+_TRADE_EXECUTION_RECEIPT_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024
+_TRADE_EXECUTION_RECEIPT_DISPATCH_MAX_BODY_BYTES = 16 * 1024
 _RESOURCE_PROFILE_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
 _TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
@@ -191,6 +192,26 @@ class _FederationBodyLimitMiddleware:
             and scope.get("method") == "POST"
             and path == "/api/v2/trade/federation/orders"
         )
+        is_trade_execution_receipt_delivery = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/trade/federation/orders/"
+                r"sha256:[0-9a-f]{64}/execution-receipts",
+                path,
+            )
+            is not None
+        )
+        is_trade_execution_receipt_dispatch = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/trade/orders/sha256:[0-9a-f]{64}/"
+                r"execution-receipts/[^/]+/deliver",
+                path,
+            )
+            is not None
+        )
         is_trade_proposal_accept = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
@@ -212,6 +233,8 @@ class _FederationBodyLimitMiddleware:
             or is_trade_recognition_policy_write
             or is_trade_proposal_delivery
             or is_trade_order_delivery
+            or is_trade_execution_receipt_delivery
+            or is_trade_execution_receipt_dispatch
             or is_trade_proposal_accept
             or is_resource_profile_write
         ):
@@ -245,6 +268,12 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_order_delivery:
             max_body_bytes = _TRADE_ORDER_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Order delivery"
+        elif is_trade_execution_receipt_delivery:
+            max_body_bytes = _TRADE_EXECUTION_RECEIPT_DELIVERY_MAX_BODY_BYTES
+            body_label = "trade Execution Receipt delivery"
+        elif is_trade_execution_receipt_dispatch:
+            max_body_bytes = _TRADE_EXECUTION_RECEIPT_DISPATCH_MAX_BODY_BYTES
+            body_label = "trade Execution Receipt dispatch"
         elif is_trade_proposal_accept:
             max_body_bytes = _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Proposal acceptance"
@@ -756,6 +785,7 @@ class WebState:
             RuleRecognitionStore,
             TradeExecutionAuditOutbox,
             TradeExecutionReceiptStore,
+            TradeExecutionReceiptDispatchStore,
             TradeOrderAuditOutbox,
             TradeOrderDispatchStore,
             TradeOrderStore,
@@ -766,6 +796,10 @@ class WebState:
         self.trade_execution_receipts = TradeExecutionReceiptStore(workspace)
         self.trade_execution_audit_outbox = TradeExecutionAuditOutbox(workspace)
         self.trade_execution_coordinator: Optional[Any] = None
+        self.trade_execution_dispatch_store = (
+            TradeExecutionReceiptDispatchStore(workspace)
+        )
+        self.trade_execution_dispatch: Optional[Any] = None
         self.trade_execution_health_lock = threading.RLock()
         self.trade_execution_recovery_lock = threading.Lock()
         self.trade_execution_recovery_cursor: Optional[str] = None
@@ -782,6 +816,26 @@ class WebState:
         self.trade_execution_adapter_resolver: Optional[Any] = None
         self.trade_execution_adapter_policy: Optional[Any] = None
         self.trade_execution_content_resolver: Optional[Any] = None
+        self.trade_execution_schema_validator: Optional[Any] = None
+        self.trade_execution_receipt_delivery_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "execution_receipt_delivery.json",
+            max_per_window=30,
+            window_seconds=60.0,
+        )
+        self.trade_execution_receipt_delivery_global_limiter = (
+            PersistentRateLimiter(
+                Path(workspace)
+                / "trade"
+                / "rate_limits"
+                / "execution_receipt_delivery_global.json",
+                max_per_window=120,
+                window_seconds=60.0,
+                max_tracked_keys=4,
+            )
+        )
         self.trade_order_store = TradeOrderStore(workspace)
         self.trade_order_audit_outbox = TradeOrderAuditOutbox(workspace)
         self.trade_order_dispatch_store = TradeOrderDispatchStore(workspace)
@@ -1608,6 +1662,22 @@ def create_app(
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
 
+        # Receipt delivery is authenticated by its destination-bound DID
+        # signature.  The handler additionally requires an exact local Order,
+        # replays local execution policy, and retains CAS/Spine evidence before
+        # returning a receiver-signed acknowledgement.
+        if (
+            request.method == "POST"
+            and re.fullmatch(
+                r"/api/v2/trade/federation/orders/"
+                r"sha256:[0-9a-f]{64}/execution-receipts",
+                request.url.path,
+            )
+            is not None
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
         if not require_console_auth:
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)
@@ -1700,6 +1770,12 @@ def create_app(
             )
         ident = state.node_identity
         pubkey_hex = getattr(ident, "pubkey_hex", "") or ""
+        challenge = str(request.query_params.get("challenge") or "").strip()
+        if challenge and re.fullmatch(r"[0-9a-f]{64}", challenge) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="identity challenge must be 32 bytes of lowercase hex",
+            )
         # The card content. Order is significant for canonical_json
         # but we don't enforce key order here - the signing helper
         # does it for us by sorting keys.
@@ -1746,6 +1822,8 @@ def create_app(
             "base_url": base_url,
             "federation": _federation_directory(base_url),
         }
+        if challenge:
+            card["challenge"] = challenge
         # Sign the card so a remote consumer who already has our
         # pubkey can verify they're talking to the right node.
         # ``sign_json`` is the same primitive used everywhere else in
@@ -2825,10 +2903,6 @@ def create_app(
         # else. Both paths emit "" for unknown to keep the front-end
         # truth-value check (`row.did || fallback`) honest.
         node_did = _safe_did(state.node_identity)
-        node_pk = (
-            getattr(state.node_identity, "pubkey_hex", "")
-            if state.node_identity is not None else ""
-        ) or ""
         for agent_id in config.member_ids:
             # R-37 (2026-06-08): pubkey-derived code when we have one
             # (admin via node_identity, others via ContactBook), so
@@ -3222,15 +3296,12 @@ def create_app(
         if payload.actor_pubkey_hex not in group.member_pubkeys:
             raise HTTPException(status_code=403, detail="only members can propose")
         # Build an unsigned skeleton. TS signs and posts via /publish below.
-        from nth_dao.group_registry import PolicyChangeProposal, GroupPolicy
-        from datetime import timedelta
-        import uuid as _uuid
         try:
             new_policy = GroupPolicy(payload.new_policy) if payload.new_policy else group.policy
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"unknown policy {payload.new_policy!r}") from exc
         skeleton = PolicyChangeProposal(
-            proposal_id=_uuid.uuid4().hex[:12],
+            proposal_id=uuid.uuid4().hex[:12],
             group_id=group.group_id,
             proposer_pubkey=payload.actor_pubkey_hex,
             proposed_policy=new_policy,
@@ -3248,7 +3319,6 @@ def create_app(
 
     @app.post("/api/groups/registry/{group_id}/proposals/publish")
     def publish_proposal(group_id: str, payload: ProposalPublishPayload) -> dict[str, Any]:
-        from nth_dao.group_registry import PolicyChangeProposal
         try:
             proposal = PolicyChangeProposal.from_dict(payload.proposal)
         except Exception as exc:
@@ -3921,6 +3991,7 @@ def _bootstrap(state: WebState) -> None:
     if state.spine is not None and node_identity is not None:
         from ..trade_rules import (
             TradeExecutionCoordinator,
+            TradeExecutionReceiptDispatchCoordinator,
             TradeOrderAuditCoordinator,
             TradeOrderDispatchCoordinator,
             TradeOrderIntakeCoordinator,
@@ -3944,6 +4015,12 @@ def _bootstrap(state: WebState) -> None:
             state.trade_execution_audit_outbox,
             state.spine,
         )
+        state.trade_execution_dispatch = (
+            TradeExecutionReceiptDispatchCoordinator(
+                state.trade_execution_dispatch_store,
+                state.spine,
+            )
+        )
         try:
             execution_recovery = _advance_trade_execution_recovery(state)
             if execution_recovery.anchored or execution_recovery.blocked:
@@ -3962,6 +4039,45 @@ def _bootstrap(state: WebState) -> None:
                 )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("trade execution audit recovery failed: %s", exc)
+        try:
+            receipt_dispatch_cursor: str | None = None
+            receipt_dispatch_scanned = 0
+            receipt_dispatch_anchored = 0
+            receipt_dispatch_completed = 0
+            receipt_dispatch_failed = 0
+            receipt_dispatch_has_more = False
+            for _pass in range(_TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES):
+                receipt_dispatch = state.trade_execution_dispatch.reconcile(
+                    limit=_TRADE_ORDER_BOOT_RECOVERY_BATCH,
+                    after=receipt_dispatch_cursor,
+                )
+                receipt_dispatch_scanned += receipt_dispatch.scanned
+                receipt_dispatch_anchored += receipt_dispatch.anchored
+                receipt_dispatch_completed += receipt_dispatch.completed
+                receipt_dispatch_failed += receipt_dispatch.failed
+                receipt_dispatch_has_more = receipt_dispatch.has_more
+                receipt_dispatch_cursor = receipt_dispatch.next_cursor or None
+                if not receipt_dispatch_has_more:
+                    break
+            if receipt_dispatch_anchored or receipt_dispatch_completed:
+                logger.info(
+                    "trade Execution Receipt acknowledgement recovery: "
+                    "scanned=%d anchored=%d completed=%d failed=%d",
+                    receipt_dispatch_scanned,
+                    receipt_dispatch_anchored,
+                    receipt_dispatch_completed,
+                    receipt_dispatch_failed,
+                )
+            if receipt_dispatch_failed or receipt_dispatch_has_more:
+                logger.warning(
+                    "trade Execution Receipt acknowledgement recovery "
+                    "retained unfinished records for operator retry"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "trade Execution Receipt acknowledgement recovery failed: %s",
+                exc,
+            )
         try:
             order_scanned = 0
             order_anchored = 0

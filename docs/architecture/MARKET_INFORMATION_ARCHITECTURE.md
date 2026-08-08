@@ -184,6 +184,16 @@ Search freshness and source provenance must be visible. Stale entries remain
 distinguishable from currently verified entries, and a missing peer must not
 silently convert an old hint into a live listing.
 
+Accepted Agreements may also exchange exact signed Execution Receipts without
+publishing them into Market discovery. The Orders workbench lets an operator
+send one locally retained Receipt directly to the counterparty node. The
+sender shows durable pending/retry state and, after verification, the peer's
+signed acknowledgement and remote audit reference. These are private
+bilateral execution records, not searchable listings. An acknowledgement says
+that the peer claims it retained and locally policy-verified the Receipt. It
+does not independently prove the peer's filesystem, Spine, delivery, payment,
+quality, or settlement.
+
 ## Compatibility and Migration
 
 The existing `/api/v2/market/open` Task announcement feed remains available

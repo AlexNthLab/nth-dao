@@ -4,6 +4,7 @@ import json
 import multiprocessing
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,8 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 import pytest
+import uvicorn
 import nth_dao.trade_rules as trade_rules_api
 import nth_dao.trade_rules.order_dispatch as order_dispatch_api
 import nth_dao.web.v2_api as web_v2_api
@@ -127,6 +130,30 @@ from nth_dao.trade_rules import (
 from nth_dao.trade_rules.execution_receipt import (
     _create_trade_execution_receipt,
 )
+from nth_dao.trade_rules.execution_transport import (
+    TradeExecutionReceiptAcknowledgement,
+    TradeExecutionReceiptAcknowledgementRejected,
+    TradeExecutionReceiptDelivery,
+    TradeExecutionReceiptDeliveryRejected,
+    create_trade_execution_receipt_acknowledgement,
+    create_trade_execution_receipt_delivery,
+    trade_execution_receipt_acknowledgement_digest,
+    trade_execution_receipt_delivery_digest,
+    verify_trade_execution_receipt_acknowledgement,
+    verify_trade_execution_receipt_delivery,
+)
+from nth_dao.trade_rules.execution_intake import (
+    TradeExecutionReceiptIntakeCoordinator,
+)
+from nth_dao.trade_rules.execution_dispatch import (
+    EVENT_TRADE_EXECUTION_RECEIPT_ACKNOWLEDGED,
+    TradeExecutionReceiptDispatchBusy,
+    TradeExecutionReceiptDispatchCapacity,
+    TradeExecutionReceiptDispatchCoordinator,
+    TradeExecutionReceiptDispatchError,
+    TradeExecutionReceiptDispatchStore,
+    execution_receipt_acknowledgement_audit_payload,
+)
 from nth_dao.trade_rules.receipt_review import (
     RECEIPT_REVIEW_SIGNING_DOMAIN,
     TradeReceiptReview,
@@ -155,6 +182,8 @@ from nth_dao.trade_rules.agreement_conformance import (
     EXECUTION_ADAPTER_SCHEMA_PATH,
     EXECUTION_ADAPTER_POLICY_SCHEMA_PATH,
     EXECUTION_RECEIPT_SCHEMA_PATH,
+    EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH,
+    EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH,
     RECEIPT_REVIEW_AUDIT_SCHEMA_PATH,
     RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH,
     RECEIPT_REVIEW_SCHEMA_PATH,
@@ -3010,6 +3039,61 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
         receipt=execution_receipt,
         order=order,
     ) == execution_audit_payload(execution_receipt, order=order)
+    execution_delivery = TradeExecutionReceiptDelivery.from_dict(
+        stored["execution_receipt_delivery"],
+        order=order,
+    )
+    execution_acknowledgement = (
+        TradeExecutionReceiptAcknowledgement.from_dict(
+            stored["execution_receipt_acknowledgement"]
+        )
+    )
+    assert execution_delivery.receipt == execution_receipt
+    assert trade_execution_receipt_delivery_digest(
+        execution_delivery,
+        order=order,
+    ) == stored["execution_receipt_delivery_digest"]
+    assert verify_trade_execution_receipt_delivery(
+        execution_delivery,
+        order=order,
+        recipient_did=order.to_dict()["taker_did"],
+        at=_utc("2026-08-01T02:02:00Z"),
+    ) == (True, "ok")
+    for case in stored[
+        "execution_receipt_delivery_verification_cases"
+    ]:
+        ok, _reason = verify_trade_execution_receipt_delivery(
+            execution_delivery,
+            order=order,
+            recipient_did=case["recipient_did"],
+            at=_utc(case["at"]),
+            max_ttl_seconds=case["max_ttl_seconds"],
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
+    assert trade_execution_receipt_acknowledgement_digest(
+        execution_acknowledgement
+    ) == stored["execution_receipt_acknowledgement_digest"]
+    assert verify_trade_execution_receipt_acknowledgement(
+        execution_acknowledgement,
+        delivery=execution_delivery,
+        order=order,
+        receiver_did=order.to_dict()["taker_did"],
+        audit_event_id="3" * 64,
+    ) == (True, "ok")
+    for case in stored[
+        "execution_receipt_acknowledgement_verification_cases"
+    ]:
+        ok, _reason = verify_trade_execution_receipt_acknowledgement(
+            execution_acknowledgement,
+            delivery=execution_delivery,
+            order=order,
+            receiver_did=case["receiver_did"],
+            audit_event_id=case["audit_event_id"],
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
     receipt_review = TradeReceiptReview.from_dict(
         stored["receipt_review"],
         receipt=execution_receipt,
@@ -3103,6 +3187,15 @@ def test_negative_agreement_vectors_fail_closed():
                 order=stored["order"],
             )
         ),
+        "execution_receipt_delivery": lambda document: (
+            TradeExecutionReceiptDelivery.from_dict(
+                document,
+                order=stored["order"],
+            )
+        ),
+        "execution_receipt_acknowledgement": (
+            TradeExecutionReceiptAcknowledgement.from_dict
+        ),
         "execution_audit_payload": validate_execution_audit_payload,
         "execution_audit_binding": lambda document: (
             validate_execution_audit_binding(
@@ -3152,6 +3245,8 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeOrderDeliveryRejected,
                 TradeOrderIntakeReceiptRejected,
                 TradeExecutionReceiptRejected,
+                TradeExecutionReceiptDeliveryRejected,
+                TradeExecutionReceiptAcknowledgementRejected,
                 TradeExecutionAdapterRejected,
                 TradeExecutionAuditError,
                 TradeReceiptReviewRejected,
@@ -3190,6 +3285,14 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     )
     execution_receipt = json.loads(
         EXECUTION_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    execution_receipt_delivery = json.loads(
+        EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    execution_receipt_acknowledgement = json.loads(
+        EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH.read_text(
+            encoding="utf-8"
+        )
     )
     execution_audit = json.loads(
         EXECUTION_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
@@ -3309,6 +3412,21 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert execution_receipt["$defs"]["proof"]["properties"][
         "proof_purpose"
     ]["const"] == "tradeExecution"
+    assert execution_receipt_delivery["properties"]["kind"]["const"] == (
+        "nth.dao.trade.execution-receipt-delivery"
+    )
+    assert execution_receipt_delivery["properties"]["receipt"]["$ref"] == (
+        execution_receipt["$id"]
+    )
+    assert execution_receipt_delivery["properties"]["proof"]["properties"][
+        "proof_purpose"
+    ]["const"] == "tradeExecutionReceiptDelivery"
+    assert execution_receipt_acknowledgement["properties"]["kind"][
+        "const"
+    ] == "nth.dao.trade.execution-receipt-acknowledgement"
+    assert execution_receipt_acknowledgement["properties"]["status"][
+        "const"
+    ] == "retained-verified"
     assert execution_audit["additionalProperties"] is False
     assert execution_audit["properties"]["protocol_version"]["const"] == "1"
     assert execution_audit["properties"]["execution_id"][
@@ -3403,9 +3521,18 @@ def test_order_acknowledgement_audit_schema_validates_public_vector():
 
 def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     jsonschema = pytest.importorskip("jsonschema")
+    referencing = pytest.importorskip("referencing")
     stored = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
     receipt_schema = json.loads(
         EXECUTION_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    delivery_schema = json.loads(
+        EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    acknowledgement_schema = json.loads(
+        EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH.read_text(
+            encoding="utf-8"
+        )
     )
     adapter_schema = json.loads(
         EXECUTION_ADAPTER_SCHEMA_PATH.read_text(encoding="utf-8")
@@ -3428,6 +3555,10 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
         )
     )
     receipt_validator = jsonschema.validators.validator_for(receipt_schema)
+    delivery_validator = jsonschema.validators.validator_for(delivery_schema)
+    acknowledgement_validator = jsonschema.validators.validator_for(
+        acknowledgement_schema
+    )
     adapter_validator = jsonschema.validators.validator_for(adapter_schema)
     adapter_policy_validator = jsonschema.validators.validator_for(
         adapter_policy_schema
@@ -3441,6 +3572,8 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
         review_conflict_audit_schema
     )
     receipt_validator.check_schema(receipt_schema)
+    delivery_validator.check_schema(delivery_schema)
+    acknowledgement_validator.check_schema(acknowledgement_schema)
     adapter_validator.check_schema(adapter_schema)
     adapter_policy_validator.check_schema(adapter_policy_schema)
     audit_validator.check_schema(audit_schema)
@@ -3452,6 +3585,16 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
 
     receipt_validator(receipt_schema).validate(
         stored["execution_receipt"]
+    )
+    registry = referencing.Registry().with_resource(
+        receipt_schema["$id"],
+        referencing.Resource.from_contents(receipt_schema),
+    )
+    delivery_validator(delivery_schema, registry=registry).validate(
+        stored["execution_receipt_delivery"]
+    )
+    acknowledgement_validator(acknowledgement_schema).validate(
+        stored["execution_receipt_acknowledgement"]
     )
     adapter_validator(adapter_schema).validate(
         stored["execution_adapter"]
@@ -3474,6 +3617,12 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     bad_time["started_at"] = "2026-08-01T02:00:00.000000001Z"
     with pytest.raises(jsonschema.ValidationError):
         receipt_validator(receipt_schema).validate(bad_time)
+    bad_delivery = copy.deepcopy(stored["execution_receipt_delivery"])
+    bad_delivery["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        delivery_validator(delivery_schema, registry=registry).validate(
+            bad_delivery
+        )
     bad_adapter = copy.deepcopy(stored["execution_adapter"])
     bad_adapter["execution_modes"].append("declarative")
     with pytest.raises(jsonschema.ValidationError):
@@ -4688,6 +4837,36 @@ class _UvicornProcessServer:
     def restart(self) -> None:
         self.stop()
         self.start()
+
+
+class _UvicornThreadServer:
+    """Expose an in-memory NTH DAO app through a real loopback socket."""
+
+    def __init__(self, app, port: int) -> None:
+        self.url = f"http://127.0.0.1:{port}"
+        self.server = uvicorn.Server(uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="error",
+            access_log=False,
+        ))
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self.server.started:
+                return self
+            time.sleep(0.025)
+        raise RuntimeError("threaded NTH DAO test server did not start")
+
+    def __exit__(self, *_args):
+        self.server.should_exit = True
+        self.thread.join(timeout=10.0)
+        if self.thread.is_alive():
+            raise RuntimeError("threaded NTH DAO test server did not stop")
 
 
 def test_public_order_delivery_retains_agreement_and_operator_can_read(
@@ -6706,7 +6885,729 @@ def test_agreement_rest_exposes_verified_execution_receipt_history(tmp_path):
         "outcome": "succeeded",
         "started_at": "2026-09-01T00:00:00Z",
         "completed_at": "2026-09-01T00:01:00Z",
+        "federation_status": "local-only",
+        "dispatch_target_url": "",
+        "dispatch_attempts": 0,
+        "dispatch_last_error": "",
+        "dispatch_generation": 0,
+        "dispatch_superseded_deliveries": 0,
+        "remote_acknowledgement_digest": "",
+        "remote_receiver_did": "",
+        "remote_audit_event_id": "",
+        "remote_received_at": "",
     }]
+
+
+def test_agreement_history_isolates_dispatch_projection_failure(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    _execution_receipt(
+        context,
+        order,
+        coordinator=app.state.nth.trade_execution_coordinator,
+    )
+
+    class BrokenDispatchStore:
+        def get_states(self, _receipt_digests):
+            raise OSError("sensitive-dispatch-location")
+
+    app.state.nth.trade_execution_dispatch_store = BrokenDispatchStore()
+    detail = client.get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}",
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert detail.status_code == 200, detail.text
+    history = detail.json()["execution"]["history"]
+    assert history["status"] == "available"
+    assert history["items"][0]["federation_status"] == "unavailable"
+    assert detail.json()["execution"]["coordinator"]["status"] == "healthy"
+    assert "sensitive-dispatch-location" not in json.dumps(detail.json())
+
+
+def _current_execution_receipt(context, order, *, coordinator=None):
+    completed = datetime.now(timezone.utc).replace(microsecond=0)
+    started = completed - timedelta(seconds=1)
+
+    def wire(moment):
+        return moment.isoformat().replace("+00:00", "Z")
+
+    return _execution_receipt(
+        context,
+        order,
+        coordinator=coordinator,
+        started_at=wire(started),
+        completed_at=wire(completed),
+        now=completed,
+    )
+
+
+def _configure_live_execution_receiver(app, context) -> None:
+    app.state.nth.trade_rule_packages = context["package_store"]
+    app.state.nth.trade_executor_policy = context["taker_policy"]
+    app.state.nth.trade_execution_adapter_resolver = context[
+        "adapter_resolver"
+    ]
+    app.state.nth.trade_execution_adapter_policy = context["adapter_policy"]
+    app.state.nth.trade_execution_content_resolver = context[
+        "content_resolver"
+    ]
+    app.state.nth.trade_execution_schema_validator = context[
+        "schema_validator"
+    ]
+
+
+def test_public_execution_receipt_delivery_reverifies_and_returns_signed_ack(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, order_delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    accepted = client.post(
+        "/api/v2/trade/federation/orders",
+        content=order_delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert accepted.status_code == 202, accepted.text
+    app.state.nth.trade_rule_packages = context["package_store"]
+    app.state.nth.trade_executor_policy = context["taker_policy"]
+    app.state.nth.trade_execution_adapter_resolver = context[
+        "adapter_resolver"
+    ]
+    app.state.nth.trade_execution_adapter_policy = context["adapter_policy"]
+    app.state.nth.trade_execution_content_resolver = context[
+        "content_resolver"
+    ]
+    app.state.nth.trade_execution_schema_validator = context[
+        "schema_validator"
+    ]
+    receipt = _current_execution_receipt(context, order)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    delivery = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=receipt,
+        order=order,
+        created_at=now.isoformat().replace("+00:00", "Z"),
+        not_after=(now + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        now=now,
+    )
+    path = (
+        f"/api/v2/trade/federation/orders/{trade_order_digest(order)}"
+        "/execution-receipts"
+    )
+
+    first = client.post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    retry = client.post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert first.status_code == 202, first.text
+    assert retry.status_code == 202, retry.text
+    assert first.json()["status"] == "execution-receipt-retained-verified"
+    assert first.json()["receipt_store_created"] is True
+    assert retry.json()["receipt_store_created"] is False
+    acknowledgement = TradeExecutionReceiptAcknowledgement.from_dict(
+        first.json()["acknowledgement"]
+    )
+    assert verify_trade_execution_receipt_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        order=order,
+        receiver_did=app.state.nth.node_identity.as_did(),
+        audit_event_id=first.json()["audit_event_id"],
+    ) == (True, "ok")
+    assert retry.json()["acknowledgement"] == first.json()["acknowledgement"]
+    anchors = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == trade_rules_api.EVENT_TRADE_EXECUTION_RECORDED
+    ]
+    assert len(anchors) == 1
+
+
+def test_public_execution_receipt_delivery_requires_explicit_local_runtime(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, order_delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=order_delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+    receipt = _current_execution_receipt(context, order)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    delivery = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=receipt,
+        order=order,
+        created_at=now.isoformat().replace("+00:00", "Z"),
+        not_after=(now + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        now=now,
+    )
+
+    response = client.post(
+        f"/api/v2/trade/federation/orders/{trade_order_digest(order)}"
+        "/execution-receipts",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == (
+        "execution-receipt-intake-not-configured"
+    )
+
+
+def test_public_execution_receipt_rejects_unaudited_federated_package(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, order_delivery = _live_order_delivery(tmp_path, app)
+    client = TestClient(app)
+    assert client.post(
+        "/api/v2/trade/federation/orders",
+        content=order_delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    ).status_code == 202
+
+    class FederatedPackageCache:
+        @staticmethod
+        def load(package_digest):
+            return context["package_store"].load(package_digest)
+
+        @staticmethod
+        def provenance_sources(_package_digest):
+            return ("federated",)
+
+    app.state.nth.trade_rule_packages = FederatedPackageCache()
+    app.state.nth.trade_executor_policy = context["taker_policy"]
+    app.state.nth.trade_execution_adapter_resolver = context[
+        "adapter_resolver"
+    ]
+    app.state.nth.trade_execution_adapter_policy = context["adapter_policy"]
+    app.state.nth.trade_execution_content_resolver = context[
+        "content_resolver"
+    ]
+    app.state.nth.trade_execution_schema_validator = context[
+        "schema_validator"
+    ]
+    receipt = _current_execution_receipt(context, order)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    delivery = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=receipt,
+        order=order,
+        created_at=now.isoformat().replace("+00:00", "Z"),
+        not_after=(now + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        now=now,
+    )
+
+    response = client.post(
+        f"/api/v2/trade/federation/orders/{trade_order_digest(order)}"
+        "/execution-receipts",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == (
+        "execution-receipt-policy-rejected"
+    )
+    assert app.state.nth.trade_execution_receipts.get(
+        receipt.execution_id,
+        order=order,
+    ) is None
+
+
+def test_public_execution_receipt_budget_precedes_runtime_disclosure(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    per_client = RateLimiter(max_per_window=1, window_seconds=60)
+    global_limiter = RateLimiter(max_per_window=1, window_seconds=60)
+    per_client.check("testclient")
+    global_limiter.check("global")
+    app.state.nth.trade_execution_receipt_delivery_limiter = per_client
+    app.state.nth.trade_execution_receipt_delivery_global_limiter = (
+        global_limiter
+    )
+
+    response = TestClient(app).post(
+        f"/api/v2/trade/federation/orders/{'sha256:' + '1' * 64}"
+        "/execution-receipts",
+        json={},
+    )
+
+    assert response.status_code == 429
+
+
+def test_operator_delivers_execution_receipt_and_persists_peer_ack(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "maker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1_000)
+    local_order = app.state.nth.trade_order_audit.accept(
+        order,
+        now_ms=now_ms,
+    )
+    assert local_order.record.order_digest == trade_order_digest(order)
+    receipt = _current_execution_receipt(
+        context,
+        order,
+        coordinator=app.state.nth.trade_execution_coordinator,
+    )
+    network_calls = 0
+
+    def receive(peer_url, sent_order_digest, document, *, timeout_seconds=15.0):
+        nonlocal network_calls
+        network_calls += 1
+        assert peer_url == "http://127.0.0.1:18082"
+        assert sent_order_digest == trade_order_digest(order)
+        delivery = TradeExecutionReceiptDelivery.from_dict(
+            document,
+            order=order,
+        )
+        acknowledgement = create_trade_execution_receipt_acknowledgement(
+            context["taker"],
+            delivery=delivery,
+            order=order,
+            received_at=delivery.to_dict()["created_at"],
+            audit_event_id="6" * 64,
+        )
+        return 202, {
+            "status": "execution-receipt-retained-verified",
+            "audit_event_id": "6" * 64,
+            "acknowledgement": acknowledgement.to_dict(),
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_execution_receipt_delivery_to_peer",
+        receive,
+    )
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/deliver"
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+
+    first = TestClient(app).post(
+        path,
+        json={"target_url": "http://127.0.0.1:18082"},
+        headers=headers,
+    )
+    retry = TestClient(app).post(
+        path,
+        json={"target_url": "http://127.0.0.1:18082"},
+        headers=headers,
+    )
+
+    assert first.status_code == 200, first.text
+    assert retry.status_code == 200, retry.text
+    assert first.json()["status"] == "execution-receipt-delivered"
+    assert first.json()["acknowledgement_persisted"] is True
+    assert retry.json() == first.json()
+    assert network_calls == 1
+    receipt_digest = execution_receipt_digest(receipt, order=order)
+    assert app.state.nth.trade_execution_dispatch_store.get_pending(
+        receipt_digest
+    ) is None
+    assert app.state.nth.trade_execution_dispatch_store.get_acknowledgement(
+        receipt_digest
+    ) is not None
+    anchors = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == EVENT_TRADE_EXECUTION_RECEIPT_ACKNOWLEDGED
+    ]
+    assert len(anchors) == 1
+    history = TestClient(app).get(
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        "/execution-receipts",
+        headers=headers,
+    )
+    assert history.status_code == 200, history.text
+    projected = history.json()["items"][0]
+    assert projected["federation_status"] == "acknowledged"
+    assert projected["dispatch_target_url"] == "http://127.0.0.1:18082"
+    assert projected["remote_receiver_did"] == context["taker"].as_did()
+    assert projected["remote_audit_event_id"] == "6" * 64
+    assert projected["remote_acknowledgement_digest"].startswith("sha256:")
+
+
+def test_order_reconcile_repairs_retained_receipt_ack_without_restart(tmp_path):
+    app = create_app(tmp_path / "maker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    moment = datetime.now(timezone.utc).replace(microsecond=0)
+    now_ms = int(moment.timestamp() * 1_000)
+    app.state.nth.trade_order_audit.accept(order, now_ms=now_ms)
+    receipt = _current_execution_receipt(
+        context,
+        order,
+        coordinator=app.state.nth.trade_execution_coordinator,
+    )
+    delivery = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=receipt,
+        order=order,
+        created_at=moment.isoformat().replace("+00:00", "Z"),
+        not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        nonce="fa" * 16,
+        now=moment,
+    )
+    target = "http://127.0.0.1:18082"
+    receipt_digest = execution_receipt_digest(receipt, order=order)
+    store = app.state.nth.trade_execution_dispatch_store
+    store.prepare(
+        delivery,
+        order=order,
+        target_url=target,
+        now_ms=now_ms,
+    )
+    acknowledgement = create_trade_execution_receipt_acknowledgement(
+        context["taker"],
+        delivery=delivery,
+        order=order,
+        received_at=delivery.to_dict()["created_at"],
+        audit_event_id="6" * 64,
+    )
+    store.put_acknowledgement(
+        delivery,
+        acknowledgement,
+        order=order,
+        target_url=target,
+        remote_event_id="6" * 64,
+        observed_at_ms=now_ms,
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    client = TestClient(app)
+    history_path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        "/execution-receipts"
+    )
+
+    before = client.get(history_path, headers=headers)
+
+    assert before.status_code == 200, before.text
+    assert before.json()["items"][0]["federation_status"] == (
+        "acknowledged-pending-anchor"
+    )
+    repaired = client.post(
+        "/api/v2/trade/orders/reconcile",
+        headers=headers,
+    )
+
+    assert repaired.status_code == 200, repaired.text
+    report = repaired.json()
+    assert report["receipt_acknowledgements_scanned"] == 1
+    assert report["receipt_acknowledgements_anchored"] == 1
+    assert report["receipt_dispatches_completed"] == 1
+    assert store.get_pending(receipt_digest) is None
+    after = client.get(history_path, headers=headers)
+    assert after.json()["items"][0]["federation_status"] == "acknowledged"
+
+
+def test_execution_receipt_post_verifies_recipient_on_same_pinned_ip(
+    monkeypatch,
+):
+    recipient = AgentIdentity.generate().as_did()
+    resolved_ip = "198.51.100.20"
+    calls = []
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: (resolved_ip,),
+    )
+
+    def open_card(url, timeout_seconds, pinned_ip=""):
+        calls.append(("identity", url, pinned_ip, timeout_seconds))
+        challenge = urlsplit(url).query.removeprefix("challenge=")
+        return json.dumps({"challenge": challenge}).encode("utf-8")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        open_card,
+    )
+    def verify_card(_peer, card, *, expected_challenge=None):
+        assert expected_challenge == card["challenge"]
+        return ({"did": recipient}, "")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        verify_card,
+    )
+    from nth_dao.web import market_federation_poll
+
+    def post(url, pinned_ip, document, **_kwargs):
+        calls.append(("post", url, pinned_ip, document))
+        return 202, b'{"status":"ok"}'
+
+    monkeypatch.setattr(
+        market_federation_poll,
+        "_urllib_post_json_pinned_raw",
+        post,
+    )
+
+    status, response = (
+        web_v2_api._post_trade_execution_receipt_delivery_to_peer(
+            "https://peer.example",
+            "sha256:" + "1" * 64,
+            {"recipient_did": recipient, "receipt": "private"},
+        )
+    )
+
+    assert status == 202
+    assert response == {"status": "ok"}
+    assert [item[0] for item in calls] == ["identity", "post"]
+    assert calls[0][2] == calls[1][2] == resolved_ip
+
+
+def test_execution_receipt_post_rejects_wrong_peer_before_disclosure(
+    monkeypatch,
+):
+    recipient = AgentIdentity.generate().as_did()
+    wrong_peer = AgentIdentity.generate().as_did()
+    post_calls = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("198.51.100.21",),
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        lambda url, *_args, **_kwargs: json.dumps({
+            "challenge": urlsplit(url).query.removeprefix("challenge=")
+        }).encode("utf-8"),
+    )
+    def verify_wrong_card(_peer, card, *, expected_challenge=None):
+        assert expected_challenge == card["challenge"]
+        return ({"did": wrong_peer}, "")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        verify_wrong_card,
+    )
+    from nth_dao.web import market_federation_poll
+
+    monkeypatch.setattr(
+        market_federation_poll,
+        "_urllib_post_json_pinned_raw",
+        lambda *_args, **_kwargs: post_calls.append(True),
+    )
+
+    with pytest.raises(ValueError, match="does not match Receipt recipient_did"):
+        web_v2_api._post_trade_execution_receipt_delivery_to_peer(
+            "https://peer.example",
+            "sha256:" + "2" * 64,
+            {"recipient_did": recipient, "receipt": "private"},
+        )
+
+    assert post_calls == []
+
+
+def test_execution_receipt_post_rejects_replayed_identity_card(
+    monkeypatch,
+):
+    recipient = AgentIdentity.generate().as_did()
+    post_calls = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("198.51.100.22",),
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        lambda *_args, **_kwargs: b"{}",
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        lambda _peer, _card, **_kwargs: (
+            None,
+            "identity card challenge did not match",
+        ),
+    )
+    from nth_dao.web import market_federation_poll
+
+    monkeypatch.setattr(
+        market_federation_poll,
+        "_urllib_post_json_pinned_raw",
+        lambda *_args, **_kwargs: post_calls.append(True),
+    )
+
+    with pytest.raises(ValueError, match="challenge did not match"):
+        web_v2_api._post_trade_execution_receipt_delivery_to_peer(
+            "https://peer.example",
+            "sha256:" + "3" * 64,
+            {"recipient_did": recipient, "receipt": "private"},
+        )
+
+    assert post_calls == []
+
+
+def test_two_live_http_nodes_deliver_and_ack_execution_receipt(tmp_path):
+    maker_app = create_app(tmp_path / "maker", require_console_auth=True)
+    taker_app = create_app(tmp_path / "taker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=maker_app.state.nth.node_identity,
+        taker=taker_app.state.nth.node_identity,
+    )
+    order = _order(context)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    order_delivery = create_trade_order_delivery(
+        context["maker"],
+        order=order,
+        created_at=now.isoformat().replace("+00:00", "Z"),
+        not_after=(now + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        nonce="d1" * 16,
+        now=now,
+    )
+    with TestClient(taker_app) as client:
+        accepted = client.post(
+            "/api/v2/trade/federation/orders",
+            content=order_delivery.canonical_bytes,
+            headers={"Content-Type": "application/json"},
+        )
+    assert accepted.status_code == 202, accepted.text
+    maker_app.state.nth.trade_order_audit.accept(
+        order,
+        now_ms=int(now.timestamp() * 1_000),
+    )
+    receipt = _current_execution_receipt(
+        context,
+        order,
+        coordinator=maker_app.state.nth.trade_execution_coordinator,
+    )
+    _configure_live_execution_receiver(taker_app, context)
+    maker_server = _UvicornThreadServer(maker_app, _free_tcp_port())
+    taker_server = _UvicornThreadServer(taker_app, _free_tcp_port())
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/deliver"
+    )
+
+    with maker_server, taker_server:
+        delivered = _process_http_json(
+            maker_server.url + path,
+            payload={"target_url": taker_server.url},
+            headers={
+                "Authorization": (
+                    f"Bearer {maker_app.state.nth_console_token}"
+                )
+            },
+        )
+
+    assert delivered["status"] == "execution-receipt-delivered"
+    assert delivered["acknowledgement_persisted"] is True
+    assert delivered["acknowledgement"]["receiver_did"] == (
+        taker_app.state.nth.node_identity.as_did()
+    )
+    assert taker_app.state.nth.trade_execution_receipts.get(
+        receipt.execution_id,
+        order=order,
+    ) == receipt
+    receipt_digest = execution_receipt_digest(receipt, order=order)
+    assert maker_app.state.nth.trade_execution_dispatch_store.get_pending(
+        receipt_digest
+    ) is None
+    assert maker_app.state.nth.trade_execution_dispatch_store.get_acknowledgement(
+        receipt_digest
+    ) is not None
+
+
+def test_live_http_wrong_did_rejects_before_receipt_post(tmp_path):
+    maker_app = create_app(tmp_path / "maker", require_console_auth=True)
+    wrong_app = create_app(tmp_path / "wrong", require_console_auth=True)
+    intended_taker = AgentIdentity.generate(label="intended-taker")
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=maker_app.state.nth.node_identity,
+        taker=intended_taker,
+    )
+    order = _order(context)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    maker_app.state.nth.trade_order_audit.accept(
+        order,
+        now_ms=int(now.timestamp() * 1_000),
+    )
+    receipt = _current_execution_receipt(
+        context,
+        order,
+        coordinator=maker_app.state.nth.trade_execution_coordinator,
+    )
+    receipt_posts = []
+
+    @wrong_app.middleware("http")
+    async def count_receipt_posts(request, call_next):
+        if (
+            request.method == "POST"
+            and request.url.path.endswith("/execution-receipts")
+        ):
+            receipt_posts.append(request.url.path)
+        return await call_next(request)
+
+    maker_server = _UvicornThreadServer(maker_app, _free_tcp_port())
+    wrong_server = _UvicornThreadServer(wrong_app, _free_tcp_port())
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/deliver"
+    )
+
+    with maker_server, wrong_server:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _process_http_json(
+                maker_server.url + path,
+                payload={"target_url": wrong_server.url},
+                headers={
+                    "Authorization": (
+                        f"Bearer {maker_app.state.nth_console_token}"
+                    )
+                },
+            )
+        error_body = json.loads(caught.value.read().decode("utf-8"))
+
+    assert caught.value.code == 502
+    assert "does not match Receipt recipient_did" in error_body["detail"]
+    assert receipt_posts == []
 
 
 def test_web_boot_connects_execution_coordinator_without_enabling_funds(
@@ -6952,12 +7853,13 @@ def test_trade_peer_localhost_dual_stack_uses_dialable_ipv4_fallback():
         addresses = web_v2_api._resolve_operator_trade_peer_ips(url)
         body = web_v2_api._call_operator_trade_peer_with_fallback(
             url,
-            lambda address: _urllib_get_bytes_pinned(
+            lambda address, remaining: _urllib_get_bytes_pinned(
                 url,
                 address,
-                timeout_s=2.0,
+                timeout_s=remaining,
                 max_bytes=16,
             ),
+            timeout_seconds=2.0,
         )
     finally:
         server.shutdown()
@@ -6976,7 +7878,7 @@ def test_trade_peer_address_fallback_retries_connections_not_http_errors(monkeyp
     )
     attempted = []
 
-    def operation(address):
+    def operation(address, _remaining):
         attempted.append(address)
         if address == "192.0.2.1":
             raise ConnectionRefusedError("first address unavailable")
@@ -6985,8 +7887,86 @@ def test_trade_peer_address_fallback_retries_connections_not_http_errors(monkeyp
     assert web_v2_api._call_operator_trade_peer_with_fallback(
         "https://peer.example",
         operation,
+        timeout_seconds=5.0,
     ) == "connected"
     assert attempted == ["192.0.2.1", "192.0.2.2"]
+
+
+def test_trade_peer_dns_address_set_is_bounded(monkeypatch):
+    monkeypatch.setattr(
+        web_v2_api.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (
+                web_v2_api.socket.AF_INET,
+                web_v2_api.socket.SOCK_STREAM,
+                6,
+                "",
+                (f"8.8.8.{index}", 443),
+            )
+            for index in range(1, 10)
+        ],
+    )
+
+    with pytest.raises(ValueError, match="too many addresses"):
+        web_v2_api._resolve_operator_trade_peer_ips(
+            "https://many.example"
+        )
+
+
+def test_trade_peer_fallback_uses_one_shared_deadline(monkeypatch):
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("192.0.2.1", "192.0.2.2"),
+    )
+    moments = iter((100.0, 100.0, 104.0))
+    monkeypatch.setattr(
+        web_v2_api.time,
+        "monotonic",
+        lambda: next(moments),
+    )
+    budgets = []
+
+    def operation(_address, remaining):
+        budgets.append(remaining)
+        if len(budgets) == 1:
+            raise ConnectionRefusedError("retry")
+        return "connected"
+
+    assert web_v2_api._call_operator_trade_peer_with_fallback(
+        "https://peer.example",
+        operation,
+        timeout_seconds=5.0,
+    ) == "connected"
+    assert budgets == [5.0, 1.0]
+
+
+def test_trade_peer_fallback_stops_when_shared_deadline_expires(monkeypatch):
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("192.0.2.1", "192.0.2.2"),
+    )
+    moments = iter((100.0, 100.0, 106.0))
+    monkeypatch.setattr(
+        web_v2_api.time,
+        "monotonic",
+        lambda: next(moments),
+    )
+    attempted = []
+
+    def operation(address, _remaining):
+        attempted.append(address)
+        raise ConnectionRefusedError("retry")
+
+    with pytest.raises(TimeoutError, match="deadline exceeded"):
+        web_v2_api._call_operator_trade_peer_with_fallback(
+            "https://peer.example",
+            operation,
+            timeout_seconds=5.0,
+        )
+    assert attempted == ["192.0.2.1"]
 
 
 def test_public_order_delivery_rejects_foreign_recipient_without_write(
@@ -8026,6 +9006,880 @@ def test_execution_receipt_round_trip_binds_order_and_readiness(tmp_path):
     verify_execution_receipt_order_binding(receipt, order)
 
 
+def _execution_receipt_delivery(context, order, receipt=None):
+    return create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=receipt or _execution_receipt(context, order),
+        order=order,
+        created_at="2026-09-01T00:02:00Z",
+        not_after="2026-09-01T00:12:00Z",
+        nonce="a1" * 16,
+        now=_utc("2026-09-01T00:02:00Z"),
+    )
+
+
+def test_execution_receipt_transport_round_trip_and_acknowledgement(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _execution_receipt_delivery(context, order, receipt)
+
+    assert delivery.receipt == receipt
+    assert TradeExecutionReceiptDelivery.from_json(
+        delivery.canonical_bytes,
+        order=order,
+    ) == delivery
+    assert verify_trade_execution_receipt_delivery(
+        delivery,
+        order=order,
+        recipient_did=context["taker"].as_did(),
+        at=_utc("2026-09-01T00:03:00Z"),
+    ) == (True, "ok")
+    assert trade_execution_receipt_delivery_digest(
+        delivery,
+        order=order,
+    ).startswith("sha256:")
+
+    acknowledgement = create_trade_execution_receipt_acknowledgement(
+        context["taker"],
+        delivery=delivery,
+        order=order,
+        received_at="2026-09-01T00:03:00Z",
+        audit_event_id="2" * 64,
+    )
+    assert TradeExecutionReceiptAcknowledgement.from_json(
+        acknowledgement.canonical_bytes
+    ) == acknowledgement
+    assert verify_trade_execution_receipt_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        order=order,
+        receiver_did=context["taker"].as_did(),
+        audit_event_id="2" * 64,
+        at=_utc("2026-09-01T00:03:01Z"),
+    ) == (True, "ok")
+    assert trade_execution_receipt_acknowledgement_digest(
+        acknowledgement
+    ).startswith("sha256:")
+
+
+def test_execution_receipt_delivery_rejects_tampering_and_wrong_party(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _execution_receipt_delivery(context, order, receipt)
+
+    tampered = delivery.to_dict()
+    tampered["receipt"]["outcome"] = "failed"
+    with pytest.raises(
+        TradeExecutionReceiptDeliveryRejected,
+        match="embedded Receipt is invalid",
+    ):
+        TradeExecutionReceiptDelivery.from_dict(tampered, order=order)
+
+    retargeted = delivery.to_dict()
+    retargeted["recipient_did"] = context["maker"].as_did()
+    with pytest.raises(
+        TradeExecutionReceiptDeliveryRejected,
+        match="different principals|opposing Order party",
+    ):
+        TradeExecutionReceiptDelivery.from_dict(retargeted, order=order)
+
+    with pytest.raises(
+        TradeExecutionReceiptDeliveryRejected,
+        match="signer does not match Receipt executor",
+    ):
+        create_trade_execution_receipt_delivery(
+            context["taker"],
+            receipt=receipt,
+            order=order,
+            created_at="2026-09-01T00:02:00Z",
+            not_after="2026-09-01T00:12:00Z",
+            now=_utc("2026-09-01T00:02:00Z"),
+        )
+
+
+def test_execution_receipt_delivery_rejects_wrong_target_and_stale_window(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    delivery = _execution_receipt_delivery(context, order)
+
+    ok, reason = verify_trade_execution_receipt_delivery(
+        delivery,
+        order=order,
+        recipient_did=context["maker"].as_did(),
+        at=_utc("2026-09-01T00:03:00Z"),
+    )
+    assert ok is False
+    assert "recipient" in reason
+
+    ok, reason = verify_trade_execution_receipt_delivery(
+        delivery,
+        order=order,
+        recipient_did=context["taker"].as_did(),
+        at=_utc("2026-09-01T00:17:01Z"),
+    )
+    assert ok is False
+    assert "expired" in reason
+
+
+def test_execution_receipt_acknowledgement_rejects_tampered_binding(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    delivery = _execution_receipt_delivery(context, order)
+    acknowledgement = create_trade_execution_receipt_acknowledgement(
+        context["taker"],
+        delivery=delivery,
+        order=order,
+        received_at="2026-09-01T00:03:00Z",
+        audit_event_id="3" * 64,
+    )
+    tampered = acknowledgement.to_dict()
+    tampered["audit_event_id"] = "4" * 64
+
+    with pytest.raises(
+        TradeExecutionReceiptAcknowledgementRejected,
+        match="signature invalid",
+    ):
+        TradeExecutionReceiptAcknowledgement.from_dict(tampered)
+
+    ok, reason = verify_trade_execution_receipt_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        order=order,
+        receiver_did=context["taker"].as_did(),
+        audit_event_id="4" * 64,
+    )
+    assert ok is False
+    assert "audit_event_id" in reason
+
+
+def _execution_receipt_intake(
+    tmp_path,
+    context,
+    *,
+    verifier_policy=None,
+    content_resolver=None,
+):
+    store = TradeExecutionReceiptStore(tmp_path)
+    outbox = TradeExecutionAuditOutbox(tmp_path)
+    spine = SignedEventLog(
+        tmp_path / "receipt-intake-spine.jsonl",
+        context["taker"],
+    )
+    coordinator = TradeExecutionCoordinator(store, outbox, spine)
+    intake = TradeExecutionReceiptIntakeCoordinator(
+        coordinator,
+        receiver_identity=context["taker"],
+        package_resolver=context["package_store"],
+        verifier_policy=verifier_policy or context["taker_policy"],
+        adapter_resolver=context["adapter_resolver"],
+        adapter_policy=context["adapter_policy"],
+        content_resolver=content_resolver or context["content_resolver"],
+        schema_validator=context["schema_validator"],
+    )
+    return store, outbox, spine, intake
+
+
+def test_execution_receipt_intake_reverifies_then_records_and_acks(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _execution_receipt_delivery(context, order, receipt)
+    store, outbox, spine, intake = _execution_receipt_intake(
+        tmp_path / "receiver",
+        context,
+    )
+
+    first = intake.receive(
+        delivery,
+        order=order,
+        at=_utc("2026-09-01T00:03:00Z"),
+    )
+    retry = intake.receive(
+        delivery.to_dict(),
+        order=order.to_dict(),
+        at=_utc("2026-09-01T00:03:00Z"),
+    )
+
+    assert first.audit.receipt == receipt
+    assert first.audit.prepared_created is True
+    assert retry.audit.prepared_created is False
+    assert retry.acknowledgement == first.acknowledgement
+    assert store.get(receipt.execution_id, order=order) == receipt
+    assert outbox.get(receipt.execution_id).status == "anchored"
+    assert len(list(spine.read_all())) == 1
+    assert verify_trade_execution_receipt_acknowledgement(
+        first.acknowledgement,
+        delivery=delivery,
+        order=order,
+        receiver_did=context["taker"].as_did(),
+        audit_event_id=first.audit.record.event_id,
+    ) == (True, "ok")
+
+
+def test_execution_receipt_intake_policy_failure_has_no_durable_success(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _execution_receipt_delivery(context, order, receipt)
+    store, outbox, spine, intake = _execution_receipt_intake(
+        tmp_path / "receiver",
+        context,
+        verifier_policy=RuleResolutionPolicy(),
+    )
+
+    with pytest.raises(
+        TradeExecutionReceiptRejected,
+        match="not accepted",
+    ):
+        intake.receive(
+            delivery,
+            order=order,
+            at=_utc("2026-09-01T00:03:00Z"),
+        )
+
+    assert store.get(receipt.execution_id, order=order) is None
+    assert outbox.get(receipt.execution_id) is None
+    assert list(spine.read_all()) == []
+
+
+def _execution_dispatch_artifacts(tmp_path):
+    context = _setup(tmp_path / "setup")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _execution_receipt_delivery(context, order, receipt)
+    receiver_store, _outbox, _receiver_spine, intake = (
+        _execution_receipt_intake(
+            tmp_path / "receiver",
+            context,
+        )
+    )
+    intake_result = intake.receive(
+        delivery,
+        order=order,
+        at=_utc("2026-09-01T00:03:00Z"),
+    )
+    assert receiver_store.get(receipt.execution_id, order=order) == receipt
+    return context, order, delivery, intake_result
+
+
+def test_execution_dispatch_store_persists_pending_and_failures(tmp_path):
+    _context, order, delivery, _intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    store = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+    receipt_digest = delivery.to_dict()["receipt_digest"]
+
+    first = store.prepare(
+        delivery,
+        order=order,
+        target_url="HTTPS://Peer.Example:443/base/",
+        now_ms=1_000,
+    )
+    retry = store.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example:443/base",
+        now_ms=2_000,
+    )
+    failed = store.note_failure(
+        receipt_digest,
+        error="network\nfailed",
+        now_ms=3_000,
+    )
+    restarted = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+
+    assert first == retry
+    assert first.acknowledged is False
+    assert failed.attempts == 1
+    assert failed.last_error == "network failed"
+    assert restarted.get_pending(receipt_digest) == failed
+    with pytest.raises(
+        TradeExecutionReceiptDispatchError,
+        match="conflicts",
+    ):
+        restarted.prepare(
+            delivery,
+            order=order,
+            target_url="https://different.example",
+        )
+
+
+def test_execution_dispatch_prepare_is_concurrently_idempotent(tmp_path):
+    context, order, delivery, intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    store = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+    deliveries = tuple(
+        create_trade_execution_receipt_delivery(
+            context["maker"],
+            receipt=delivery.receipt,
+            order=order,
+            created_at="2026-09-01T00:02:00Z",
+            not_after="2026-09-01T00:12:00Z",
+            nonce=f"{index + 1:032x}",
+            now=_utc("2026-09-01T00:02:00Z"),
+        )
+        for index in range(16)
+    )
+
+    def prepare(index):
+        return store.prepare(
+            deliveries[index],
+            order=order,
+            target_url="https://peer.example",
+            now_ms=1_000,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        records = list(pool.map(prepare, range(16)))
+
+    assert len(set(records)) == 1
+    receipt_digest = delivery.to_dict()["receipt_digest"]
+    assert store.get_states((receipt_digest,)) == {
+        receipt_digest: (records[0], None)
+    }
+
+
+def test_execution_dispatch_writes_do_not_depend_on_post_commit_reads(
+    tmp_path,
+    monkeypatch,
+):
+    context, order, delivery, intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    store = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+    monkeypatch.setattr(
+        store,
+        "get_pending",
+        lambda _digest: (_ for _ in ()).throw(
+            AssertionError("post-commit pending read is forbidden")
+        ),
+    )
+    prepared = store.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(_utc("2026-09-01T00:03:00Z").timestamp() * 1_000),
+    )
+    failed = store.note_failure(
+        delivery.to_dict()["receipt_digest"],
+        error="network failed",
+        now_ms=int(_utc("2026-09-01T00:04:00Z").timestamp() * 1_000),
+    )
+    replacement = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:18:00Z",
+        not_after="2026-09-01T00:28:00Z",
+        nonce="c1" * 16,
+        now=_utc("2026-09-01T00:18:00Z"),
+    )
+    renewed = store.renew_expired(
+        replacement,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(_utc("2026-09-01T00:18:00Z").timestamp() * 1_000),
+    )
+
+    assert prepared.generation == 1
+    assert failed.attempts == 1
+    assert renewed.generation == 2
+    assert renewed.delivery == replacement
+
+    ack_store = TradeExecutionReceiptDispatchStore(tmp_path / "ack-sender")
+    ack_store.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(_utc("2026-09-01T00:03:00Z").timestamp() * 1_000),
+    )
+    monkeypatch.setattr(
+        ack_store,
+        "get_acknowledgement",
+        lambda _digest: (_ for _ in ()).throw(
+            AssertionError("post-commit acknowledgement read is forbidden")
+        ),
+    )
+    retained_ack = ack_store.put_acknowledgement(
+        delivery,
+        intake_result.acknowledgement,
+        order=order,
+        target_url="https://peer.example",
+        remote_event_id=intake_result.audit.record.event_id,
+        observed_at_ms=int(
+            _utc("2026-09-01T00:03:01Z").timestamp() * 1_000
+        ),
+    )
+    assert retained_ack.receipt_digest == delivery.to_dict()["receipt_digest"]
+
+
+def test_execution_dispatch_renews_only_expired_matching_delivery(tmp_path):
+    context, order, delivery, _intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    store = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+    target = "https://peer.example"
+    receipt_digest = delivery.to_dict()["receipt_digest"]
+    store.prepare(
+        delivery,
+        order=order,
+        target_url=target,
+        now_ms=int(_utc("2026-09-01T00:03:00Z").timestamp() * 1_000),
+    )
+    early_replacement = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:10:00Z",
+        not_after="2026-09-01T00:20:00Z",
+        nonce="b1" * 16,
+        now=_utc("2026-09-01T00:10:00Z"),
+    )
+    replacement = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:18:00Z",
+        not_after="2026-09-01T00:28:00Z",
+        nonce="b2" * 16,
+        now=_utc("2026-09-01T00:18:00Z"),
+    )
+
+    with pytest.raises(
+        TradeExecutionReceiptDispatchError,
+        match="not expired",
+    ):
+        store.renew_expired(
+            early_replacement,
+            order=order,
+            target_url=target,
+            now_ms=int(
+                _utc("2026-09-01T00:10:00Z").timestamp() * 1_000
+            ),
+        )
+
+    renewed = store.renew_expired(
+        replacement,
+        order=order,
+        target_url=target,
+        now_ms=int(_utc("2026-09-01T00:18:00Z").timestamp() * 1_000),
+    )
+
+    assert renewed.receipt_digest == receipt_digest
+    assert renewed.delivery == replacement
+    assert renewed.generation == 2
+    assert renewed.superseded_delivery_digests == (
+        trade_execution_receipt_delivery_digest(
+            delivery,
+            order=order,
+        ),
+    )
+    assert renewed.attempts == 0
+
+
+def test_execution_dispatch_usage_counts_generation_history(tmp_path):
+    context, order, delivery, _intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    store = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+    store.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(_utc("2026-09-01T00:03:00Z").timestamp() * 1_000),
+    )
+    replacement = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:18:00Z",
+        not_after="2026-09-01T00:28:00Z",
+        nonce="b3" * 16,
+        now=_utc("2026-09-01T00:18:00Z"),
+    )
+    renewed = store.renew_expired(
+        replacement,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(_utc("2026-09-01T00:18:00Z").timestamp() * 1_000),
+    )
+    history_bytes = json.dumps(
+        list(renewed.superseded_delivery_digests),
+        separators=(",", ":"),
+    ).encode("ascii")
+
+    with store._connect() as connection:
+        pending_count, acknowledgement_count, total = store._usage(
+            connection
+        )
+
+    assert pending_count == 1
+    assert acknowledgement_count == 0
+    assert total == (
+        len(renewed.delivery.canonical_bytes)
+        + len(renewed.order.canonical_bytes)
+        + len(history_bytes)
+    )
+
+
+def test_execution_dispatch_prepare_reserves_empty_history_bytes(tmp_path):
+    _context, order, delivery, _intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    max_without_history = (
+        len(delivery.canonical_bytes) + len(order.canonical_bytes)
+    )
+    store = TradeExecutionReceiptDispatchStore(
+        tmp_path / "constrained",
+        max_bytes=max_without_history + 1,
+    )
+
+    with pytest.raises(
+        TradeExecutionReceiptDispatchCapacity,
+        match="max_bytes",
+    ):
+        store.prepare(
+            delivery,
+            order=order,
+            target_url="https://peer.example",
+            now_ms=int(
+                _utc("2026-09-01T00:03:00Z").timestamp() * 1_000
+            ),
+        )
+
+    assert store.get_pending(delivery.to_dict()["receipt_digest"]) is None
+
+
+def test_execution_dispatch_renewal_enforces_projected_bytes(tmp_path):
+    context, order, delivery, _intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    root = tmp_path / "sender"
+    initial = TradeExecutionReceiptDispatchStore(root)
+    retained = initial.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(_utc("2026-09-01T00:03:00Z").timestamp() * 1_000),
+    )
+    replacement = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:18:00Z",
+        not_after="2026-09-01T00:28:00Z",
+        nonce="b4" * 16,
+        now=_utc("2026-09-01T00:18:00Z"),
+    )
+    old_digest = trade_execution_receipt_delivery_digest(
+        delivery,
+        order=order,
+    )
+    next_history = json.dumps([old_digest], separators=(",", ":")).encode(
+        "ascii"
+    )
+    projected_bytes = (
+        len(replacement.canonical_bytes)
+        + len(order.canonical_bytes)
+        + len(next_history)
+    )
+    constrained = TradeExecutionReceiptDispatchStore(
+        root,
+        max_bytes=projected_bytes - 1,
+    )
+
+    with pytest.raises(
+        TradeExecutionReceiptDispatchCapacity,
+        match="max_bytes",
+    ):
+        constrained.renew_expired(
+            replacement,
+            order=order,
+            target_url="https://peer.example",
+            now_ms=int(
+                _utc("2026-09-01T00:18:00Z").timestamp() * 1_000
+            ),
+        )
+
+    assert constrained.get_pending(retained.receipt_digest) == retained
+
+
+def test_execution_dispatch_ack_preserves_signed_renewal_history(tmp_path):
+    context, order, delivery, intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    root = tmp_path / "sender"
+    store = TradeExecutionReceiptDispatchStore(root)
+    target = "https://peer.example"
+    receipt_digest = delivery.to_dict()["receipt_digest"]
+    store.prepare(
+        delivery,
+        order=order,
+        target_url=target,
+        now_ms=int(_utc("2026-09-01T00:03:00Z").timestamp() * 1_000),
+    )
+    replacement = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:18:00Z",
+        not_after="2026-09-01T00:28:00Z",
+        nonce="e1" * 16,
+        now=_utc("2026-09-01T00:18:00Z"),
+    )
+    store.renew_expired(
+        replacement,
+        order=order,
+        target_url=target,
+        now_ms=int(_utc("2026-09-01T00:18:00Z").timestamp() * 1_000),
+    )
+    acknowledgement = create_trade_execution_receipt_acknowledgement(
+        context["taker"],
+        delivery=replacement,
+        order=order,
+        received_at="2026-09-01T00:19:00Z",
+        audit_event_id=intake_result.audit.record.event_id,
+    )
+    spine = SignedEventLog(root / "sender-spine.jsonl", context["maker"])
+    coordinator = TradeExecutionReceiptDispatchCoordinator(store, spine)
+
+    retained = coordinator.acknowledge(
+        replacement,
+        acknowledgement,
+        order=order,
+        target_url=target,
+        remote_event_id=intake_result.audit.record.event_id,
+        observed_at_ms=int(
+            _utc("2026-09-01T00:19:00Z").timestamp() * 1_000
+        ),
+    )
+
+    assert retained.generation == 2
+    assert retained.superseded_delivery_digests == (
+        trade_execution_receipt_delivery_digest(delivery, order=order),
+    )
+    assert store.get_pending(receipt_digest) is None
+    assert store.get_acknowledgement(receipt_digest) == retained
+    event = list(spine.read_all())[-1]
+    assert event.payload["generation"] == 2
+    assert event.payload["superseded_delivery_digests"] == list(
+        retained.superseded_delivery_digests
+    )
+
+
+def test_execution_dispatch_migrates_ack_generation_history_columns(tmp_path):
+    root = tmp_path / "sender"
+    database = root / "trade" / "execution_dispatch_v1" / "dispatch.sqlite3"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE acknowledgements (
+                receipt_digest TEXT PRIMARY KEY,
+                order_digest TEXT NOT NULL,
+                target_url TEXT NOT NULL,
+                delivery_bytes BLOB NOT NULL,
+                order_bytes BLOB NOT NULL,
+                acknowledgement_bytes BLOB NOT NULL,
+                remote_event_id TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+
+    TradeExecutionReceiptDispatchStore(root)
+
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute(
+                "PRAGMA table_info(acknowledgements)"
+            )
+        }
+    assert {"generation", "superseded_delivery_digests"} <= columns
+
+
+def test_execution_dispatch_ack_is_durable_before_anchor_and_recovers(
+    tmp_path,
+):
+    context, order, delivery, intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    root = tmp_path / "sender"
+    store = TradeExecutionReceiptDispatchStore(root)
+    receipt_digest = delivery.to_dict()["receipt_digest"]
+    store.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=1_000,
+    )
+    retained = store.put_acknowledgement(
+        delivery,
+        intake_result.acknowledgement,
+        order=order,
+        target_url="https://peer.example",
+        remote_event_id=intake_result.audit.record.event_id,
+        observed_at_ms=int(
+            _utc("2026-09-01T00:03:01Z").timestamp() * 1_000
+        ),
+    )
+
+    assert store.get_pending(receipt_digest) is not None
+    assert store.get_acknowledgement(receipt_digest) == retained
+    assert store.get_states((receipt_digest, receipt_digest)) == {
+        receipt_digest: (store.get_pending(receipt_digest), retained)
+    }
+    spine = SignedEventLog(root / "sender-spine.jsonl", context["maker"])
+    restarted = TradeExecutionReceiptDispatchCoordinator(
+        TradeExecutionReceiptDispatchStore(root),
+        spine,
+    )
+    recovered = restarted.recover_acknowledgement(receipt_digest)
+
+    assert recovered == retained
+    assert restarted.store.get_pending(receipt_digest) is None
+    events = list(spine.read_all())
+    assert len(events) == 1
+    assert events[0].type == EVENT_TRADE_EXECUTION_RECEIPT_ACKNOWLEDGED
+    assert events[0].payload == (
+        execution_receipt_acknowledgement_audit_payload(retained)
+    )
+    duplicate_envelope = create_trade_execution_receipt_delivery(
+        context["maker"],
+        receipt=delivery.receipt,
+        order=order,
+        created_at="2026-09-01T00:04:00Z",
+        not_after="2026-09-01T00:14:00Z",
+        nonce="d1" * 16,
+        now=_utc("2026-09-01T00:04:00Z"),
+    )
+    already_done = restarted.prepare(
+        duplicate_envelope,
+        order=order,
+        target_url="https://peer.example",
+    )
+    assert already_done.acknowledged is True
+    assert already_done.delivery == delivery
+
+
+def test_execution_dispatch_does_not_misreport_storage_failure_as_busy(
+    tmp_path,
+    monkeypatch,
+):
+    store = TradeExecutionReceiptDispatchStore(tmp_path / "sender")
+
+    def fail_connect():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store, "_connect", fail_connect)
+    with pytest.raises(TradeExecutionReceiptDispatchError) as caught:
+        store.get_states(("sha256:" + "1" * 64,))
+
+    assert not isinstance(caught.value, TradeExecutionReceiptDispatchBusy)
+    assert str(caught.value) == "unable to read dispatch states"
+
+
+def test_execution_dispatch_recovery_ignores_completed_ack_history(tmp_path):
+    artifacts = (
+        _execution_dispatch_artifacts(tmp_path / "first"),
+        _execution_dispatch_artifacts(tmp_path / "second"),
+    )
+    root = tmp_path / "sender"
+    store = TradeExecutionReceiptDispatchStore(root)
+    retained = []
+    for _context, order, delivery, intake_result in artifacts:
+        store.prepare(
+            delivery,
+            order=order,
+            target_url="https://peer.example",
+            now_ms=1_000,
+        )
+        retained.append(store.put_acknowledgement(
+            delivery,
+            intake_result.acknowledgement,
+            order=order,
+            target_url="https://peer.example",
+            remote_event_id=intake_result.audit.record.event_id,
+            observed_at_ms=int(
+                _utc("2026-09-01T00:03:01Z").timestamp() * 1_000
+            ),
+        ))
+
+    retained.sort(key=lambda item: item.receipt_digest)
+    completed, recoverable = retained
+    assert store.complete_pending(completed.receipt_digest) is True
+    assert store.get_pending(recoverable.receipt_digest) is not None
+    coordinator = TradeExecutionReceiptDispatchCoordinator(
+        store,
+        SignedEventLog(
+            root / "sender-spine.jsonl",
+            artifacts[0][0]["maker"],
+        ),
+    )
+
+    report = coordinator.reconcile(limit=1)
+
+    assert report.scanned == 1
+    assert report.completed == 1
+    assert report.has_more is False
+    assert store.get_pending(recoverable.receipt_digest) is None
+
+
+def test_execution_dispatch_coordinator_acknowledges_once(tmp_path):
+    context, order, delivery, intake_result = (
+        _execution_dispatch_artifacts(tmp_path)
+    )
+    root = tmp_path / "sender"
+    store = TradeExecutionReceiptDispatchStore(root)
+    spine = SignedEventLog(root / "sender-spine.jsonl", context["maker"])
+    coordinator = TradeExecutionReceiptDispatchCoordinator(store, spine)
+    receipt_digest = delivery.to_dict()["receipt_digest"]
+    coordinator.prepare(
+        delivery,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=1_000,
+    )
+
+    first = coordinator.acknowledge(
+        delivery,
+        intake_result.acknowledgement,
+        order=order,
+        target_url="https://peer.example",
+        remote_event_id=intake_result.audit.record.event_id,
+        observed_at_ms=int(
+            _utc("2026-09-01T00:03:01Z").timestamp() * 1_000
+        ),
+    )
+    retry = coordinator.acknowledge(
+        delivery,
+        intake_result.acknowledgement,
+        order=order,
+        target_url="https://peer.example",
+        remote_event_id=intake_result.audit.record.event_id,
+        observed_at_ms=int(
+            _utc("2026-09-01T00:03:01Z").timestamp() * 1_000
+        ),
+    )
+
+    assert retry == first
+    assert store.get_pending(receipt_digest) is None
+    assert len(list(spine.read_all())) == 1
+
+
 def test_execution_receipt_rejects_unavailable_operation_content(tmp_path):
     context = _setup(tmp_path)
     context["content_resolver"].content.clear()
@@ -8322,6 +10176,94 @@ def test_execution_coordinator_anchors_once_and_is_idempotent(tmp_path):
     assert len(events) == 1
     assert events[0].payload == execution_audit_payload(first, order=order)
     assert events[0].event_id == record.event_id
+
+
+def test_execution_coordinator_records_remote_signed_receipt_once(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    store = TradeExecutionReceiptStore(tmp_path)
+    outbox = TradeExecutionAuditOutbox(tmp_path)
+    spine = SignedEventLog(
+        tmp_path / "receiver-spine.jsonl",
+        context["taker"],
+    )
+    coordinator = TradeExecutionCoordinator(store, outbox, spine)
+    now_ms = int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+
+    first = coordinator.record(receipt, order=order, now_ms=now_ms)
+    second = coordinator.record(
+        receipt.to_dict(),
+        order=order.to_dict(),
+        now_ms=now_ms,
+    )
+
+    assert first.receipt == receipt
+    assert first.prepared_created is True
+    assert first.store_created is True
+    assert first.anchor_created is True
+    assert second.receipt == receipt
+    assert second.prepared_created is False
+    assert second.store_created is False
+    assert second.anchor_created is False
+    assert store.get(receipt.execution_id, order=order) == receipt
+    assert len(list(spine.read_all())) == 1
+
+
+def test_execution_coordinator_record_rejects_invalid_signed_binding(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    document = receipt.to_dict()
+    document["outcome"] = "failed"
+    store, outbox, spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+
+    with pytest.raises(
+        TradeExecutionReceiptRejected,
+        match="signature invalid",
+    ):
+        coordinator.record(document, order=order)
+
+    assert store.get(receipt.execution_id, order=order) is None
+    assert outbox.get(receipt.execution_id) is None
+    assert list(spine.read_all()) == []
+
+
+def test_execution_coordinator_record_retains_remote_equivocation(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    succeeded = _execution_receipt(context, order)
+    failed = _execution_receipt(
+        context,
+        order,
+        outcome="failed",
+        result_payload=b'{"error":"remote contradiction"}',
+        result={
+            "media_type": "application/problem+json",
+            "digest": _digest(b'{"error":"remote contradiction"}'),
+            "size_bytes": len(b'{"error":"remote contradiction"}'),
+        },
+    )
+    store, outbox, _spine, coordinator = _execution_audit_components(
+        tmp_path,
+        context,
+    )
+    now_ms = int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000)
+
+    coordinator.record(succeeded, order=order, now_ms=now_ms)
+    with pytest.raises(TradeExecutionReceiptConflict):
+        coordinator.record(failed, order=order, now_ms=now_ms)
+
+    status = store.conflict_status(succeeded.execution_id, order=order)
+    assert status.has_conflict is True
+    assert execution_receipt_digest(
+        failed,
+        order=order,
+    ) in status.retained_receipt_digests
+    assert outbox.get(succeeded.execution_id).status == "blocked"
 
 
 def test_execution_coordinator_history_reverifies_receipt_and_spine(tmp_path):

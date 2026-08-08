@@ -833,6 +833,29 @@ export interface TradeExecutionHistoryItem {
   outcome: "succeeded" | "failed" | "cancelled";
   started_at: string;
   completed_at: string;
+  federation_status: "local-only" | "pending" | "acknowledged-pending-anchor" | "acknowledged" | "unavailable";
+  dispatch_target_url: string;
+  dispatch_attempts: number;
+  dispatch_last_error: string;
+  dispatch_generation: number;
+  dispatch_superseded_deliveries: number;
+  remote_acknowledgement_digest: string;
+  remote_receiver_did: string;
+  remote_audit_event_id: string;
+  remote_received_at: string;
+}
+
+export interface TradeExecutionReceiptDeliveryResult {
+  status: "execution-receipt-delivered";
+  order_digest: string;
+  execution_id: string;
+  receipt_digest: string;
+  delivery_digest: string;
+  acknowledgement_digest: string;
+  remote_audit_event_id: string;
+  remote_received_at: string;
+  acknowledgement_persisted: true;
+  delivery_or_payment_proven: false;
 }
 
 export interface TradeExecutionHistoryPage {

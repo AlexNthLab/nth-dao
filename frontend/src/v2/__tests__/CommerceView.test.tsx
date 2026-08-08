@@ -123,6 +123,16 @@ function executionProjection(): TradeExecutionView {
         outcome: "succeeded" as const,
         started_at: "2026-08-03T00:00:00Z",
         completed_at: "2026-08-03T00:01:00Z",
+        federation_status: "local-only" as const,
+        dispatch_target_url: "",
+        dispatch_attempts: 0,
+        dispatch_last_error: "",
+        dispatch_generation: 0,
+        dispatch_superseded_deliveries: 0,
+        remote_acknowledgement_digest: "",
+        remote_receiver_did: "",
+        remote_audit_event_id: "",
+        remote_received_at: "",
       }],
     },
     blocking_reasons: ["An exact approved Adapter must be selected per operation"],
@@ -396,6 +406,10 @@ vi.mock("../api", () => ({
     next_cursor: null,
     error_code: "",
   }),
+  deliverTradeExecutionReceipt: vi.fn().mockResolvedValue({
+    status: "execution-receipt-delivered",
+    remote_audit_event_id: "d".repeat(64),
+  }),
   importTradeRulePackage: vi.fn().mockResolvedValue({
     status: "installed",
     installed: true,
@@ -479,6 +493,7 @@ vi.mock("../api", () => ({
 
 import {
   ApiHttpError,
+  deliverTradeExecutionReceipt,
   fetchCommerceOrders,
   fetchTradeProposals,
   fetchTradeOrders,
@@ -531,6 +546,10 @@ beforeEach(() => {
     next_cursor: null,
     error_code: "",
   });
+  vi.mocked(deliverTradeExecutionReceipt).mockReset().mockResolvedValue({
+    status: "execution-receipt-delivered",
+    remote_audit_event_id: "d".repeat(64),
+  } as never);
   vi.mocked(getTradeProposal).mockReset().mockResolvedValue(null as never);
   vi.mocked(getTradeRulePackage).mockReset().mockResolvedValue(null as never);
   vi.mocked(importTradeRulePackage).mockReset().mockResolvedValue({
@@ -1723,7 +1742,7 @@ describe("CommerceView", () => {
     render(<ToastProvider><CommerceView /></ToastProvider>);
     fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
     await screen.findByText("Not imported");
-    const source = await screen.findByLabelText("NTH DAO source URL");
+    const source = await screen.findByLabelText("Peer NTH DAO URL");
     const fetchButton = await screen.findByRole("button", { name: "Fetch signed evidence" });
     expect((source as HTMLInputElement).value).toBe("");
     expect((fetchButton as HTMLButtonElement).disabled).toBe(true);
@@ -1823,7 +1842,7 @@ describe("CommerceView", () => {
 
     render(<ToastProvider><CommerceView /></ToastProvider>);
     fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
-    const source = await screen.findByLabelText("NTH DAO source URL");
+    const source = await screen.findByLabelText("Peer NTH DAO URL");
     expect((source as HTMLInputElement).value).toBe("http://peer.example:8080");
     fireEvent.click(screen.getByRole("button", { name: "Fetch and verify" }));
 
@@ -1924,12 +1943,12 @@ describe("CommerceView", () => {
 
     render(<ToastProvider><CommerceView /></ToastProvider>);
     fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
-    expect((await screen.findByLabelText("NTH DAO source URL") as HTMLInputElement).value)
+    expect((await screen.findByLabelText("Peer NTH DAO URL") as HTMLInputElement).value)
       .toBe(first.dispatch_target_url);
     const rows = await screen.findAllByText("Accepted terms");
     fireEvent.click(rows[1].closest("button") as HTMLButtonElement);
     await waitFor(() => expect(
-      (screen.getByLabelText("NTH DAO source URL") as HTMLInputElement).value,
+      (screen.getByLabelText("Peer NTH DAO URL") as HTMLInputElement).value,
     ).toBe(second.dispatch_target_url));
   });
 
@@ -1991,7 +2010,7 @@ describe("CommerceView", () => {
     });
 
     await waitFor(() => expect(
-      (screen.getByLabelText("NTH DAO source URL") as HTMLInputElement).value,
+      (screen.getByLabelText("Peer NTH DAO URL") as HTMLInputElement).value,
     ).toBe(second.dispatch_target_url));
     expect(screen.queryByText("Trade Skill verified and cached")).toBeNull();
   });
@@ -2076,6 +2095,145 @@ describe("CommerceView", () => {
     expect(screen.queryByRole("button", {
       name: "Load earlier Receipts",
     })).toBeNull();
+  });
+
+  it("delivers a local signed execution Receipt and reports the retained peer ACK", async () => {
+    const summary = agreementSummary();
+    const detail = {
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: executionProjection(),
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValue(detail);
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.change(await screen.findByLabelText("Peer NTH DAO URL"), {
+      target: { value: "https://peer.example" },
+    });
+    fireEvent.click(screen.getByRole("button", {
+      name: "Deliver signed Receipt",
+    }));
+
+    await waitFor(() => expect(deliverTradeExecutionReceipt).toHaveBeenCalledWith(
+      summary.order_digest,
+      detail.execution.history.items[0].execution_id,
+      "https://peer.example",
+      expect.any(AbortSignal),
+    ));
+    expect(
+      await screen.findByText(/Signed peer ACK retained locally/),
+    ).toBeTruthy();
+    expect(screen.getByText(/Claimed remote Spine event/)).toBeTruthy();
+  });
+
+  it("shows peer acknowledgement as a claim receipt, not delivery truth", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    projection.history.items[0] = {
+      ...projection.history.items[0],
+      federation_status: "acknowledged",
+      dispatch_target_url: "https://peer.example",
+      remote_acknowledgement_digest: "sha256:" + "4".repeat(64),
+      remote_receiver_did: "did:key:zPeerReceiver",
+      remote_audit_event_id: "5".repeat(64),
+      remote_received_at: "2026-08-03T00:02:00Z",
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText(/Peer claims it retained/)).toBeTruthy();
+    expect(screen.getByText(/does not independently prove the peer's filesystem/)).toBeTruthy();
+    expect(screen.queryByText(/^Peer retained and policy-verified/)).toBeNull();
+    expect(screen.getByText(/Peer signer/)).toBeTruthy();
+    expect(screen.queryByRole("button", {
+      name: "Deliver signed Receipt",
+    })).toBeNull();
+  });
+
+  it("offers local ACK anchor repair when persistence outlives Spine projection", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    projection.history.items[0] = {
+      ...projection.history.items[0],
+      federation_status: "acknowledged-pending-anchor",
+      dispatch_target_url: "https://peer.example",
+      remote_acknowledgement_digest: "sha256:" + "4".repeat(64),
+      remote_receiver_did: "did:key:zPeerReceiver",
+      remote_audit_event_id: "5".repeat(64),
+      remote_received_at: "2026-08-03T00:02:00Z",
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+
+    expect(await screen.findByText(/local Spine anchor or pending cleanup is incomplete/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", {
+      name: "Repair local ACK anchor",
+    }));
+    await waitFor(() => expect(deliverTradeExecutionReceipt).toHaveBeenCalled());
+  });
+
+  it("keeps a pending Receipt visible when peer retry fails", async () => {
+    const summary = {
+      ...agreementSummary(),
+      dispatch_target_url: "https://peer.example",
+    };
+    const projection = executionProjection();
+    projection.history.items[0] = {
+      ...projection.history.items[0],
+      federation_status: "pending",
+      dispatch_target_url: "https://peer.example",
+      dispatch_attempts: 2,
+      dispatch_last_error: "peer offline",
+      dispatch_generation: 2,
+      dispatch_superseded_deliveries: 1,
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({
+      items: [summary],
+      next_cursor: "",
+    });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(deliverTradeExecutionReceipt).mockRejectedValueOnce(
+      new Error("peer still offline"),
+    );
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: "Retry signed Receipt",
+    }));
+
+    expect((await screen.findAllByText("peer still offline")).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/Attempts 2/)).toBeTruthy();
+    expect(screen.getByText(/Last attempt: peer offline/)).toBeTruthy();
   });
 
   it("keeps verified receipts visible when older history loading fails", async () => {

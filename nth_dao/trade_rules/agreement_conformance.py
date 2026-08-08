@@ -34,6 +34,12 @@ from nth_dao.trade_rules.execution_receipt import (
     _create_trade_execution_receipt,
     execution_receipt_digest,
 )
+from nth_dao.trade_rules.execution_transport import (
+    create_trade_execution_receipt_acknowledgement,
+    create_trade_execution_receipt_delivery,
+    trade_execution_receipt_acknowledgement_digest,
+    trade_execution_receipt_delivery_digest,
+)
 from nth_dao.trade_rules.execution_audit import (
     EVENT_TRADE_EXECUTION_RECORDED,
     execution_audit_payload,
@@ -125,6 +131,14 @@ ORDER_INTAKE_ACKNOWLEDGEMENT_AUDIT_SCHEMA_PATH = (
 EXECUTION_RECEIPT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-execution-receipt.schema.json"
+)
+EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-execution-receipt-delivery.schema.json"
+)
+EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-execution-receipt-acknowledgement.schema.json"
 )
 EXECUTION_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -471,6 +485,26 @@ def generate_vectors() -> dict[str, Any]:
             completed_at="2026-08-01T02:01:00Z",
             now=_utc("2026-08-01T02:01:00Z"),
         )
+        execution_receipt_delivery = (
+            create_trade_execution_receipt_delivery(
+                maker,
+                receipt=execution_receipt,
+                order=order,
+                created_at="2026-08-01T02:01:01Z",
+                not_after="2026-08-01T02:11:01Z",
+                nonce="23456789abcdef0123456789abcdef01",
+                now=_utc("2026-08-01T02:01:01Z"),
+            )
+        )
+        execution_receipt_acknowledgement = (
+            create_trade_execution_receipt_acknowledgement(
+                taker,
+                delivery=execution_receipt_delivery,
+                order=order,
+                received_at="2026-08-01T02:02:00Z",
+                audit_event_id="3" * 64,
+            )
+        )
         receipt_review = create_trade_receipt_review(
             taker,
             receipt=execution_receipt,
@@ -593,6 +627,12 @@ def generate_vectors() -> dict[str, Any]:
         execution_operation_tamper["operation"]["hook_name"] = (
             "fulfillment.cancel"
         )
+        execution_delivery_tamper = execution_receipt_delivery.to_dict()
+        execution_delivery_tamper["recipient_did"] = maker.as_did()
+        execution_acknowledgement_tamper = (
+            execution_receipt_acknowledgement.to_dict()
+        )
+        execution_acknowledgement_tamper["audit_event_id"] = "4" * 64
         adapter_unknown_field = adapter.to_dict()
         adapter_unknown_field["unexpected"] = True
         receipt_review_tamper = receipt_review.to_dict()
@@ -768,6 +808,99 @@ def generate_vectors() -> dict[str, Any]:
         "execution_receipt_digest": execution_receipt_digest(
             execution_receipt
         ),
+        "execution_receipt_delivery": (
+            execution_receipt_delivery.to_dict()
+        ),
+        "execution_receipt_delivery_digest": (
+            trade_execution_receipt_delivery_digest(
+                execution_receipt_delivery,
+                order=order,
+            )
+        ),
+        "execution_receipt_delivery_verification_cases": [
+            {
+                "case": "valid-recipient-and-window",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:02:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-recipient",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T02:02:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "ttl-policy-exceeded",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:02:00Z",
+                "max_ttl_seconds": 599,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "expired-after-clock-skew",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:16:02Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "created-too-far-in-future",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T01:56:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
+        "execution_receipt_acknowledgement": (
+            execution_receipt_acknowledgement.to_dict()
+        ),
+        "execution_receipt_acknowledgement_digest": (
+            trade_execution_receipt_acknowledgement_digest(
+                execution_receipt_acknowledgement
+            )
+        ),
+        "execution_receipt_acknowledgement_verification_cases": [
+            {
+                "case": "valid-delivery-binding",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "3" * 64,
+                "at": "2026-08-01T02:02:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-receiver",
+                "receiver_did": maker.as_did(),
+                "audit_event_id": "3" * 64,
+                "at": "2026-08-01T02:02:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "wrong-audit-event",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "4" * 64,
+                "at": "2026-08-01T02:02:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "received-too-far-in-future",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "3" * 64,
+                "at": "2026-08-01T01:56:59Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
         "receipt_review": receipt_review.to_dict(),
         "receipt_review_digest": receipt_review_digest(receipt_review),
         "expected_execution_readiness": (
@@ -893,6 +1026,18 @@ def generate_vectors() -> dict[str, Any]:
                 "document": execution_operation_tamper,
             },
             {
+                "case": "execution-receipt-delivery-retarget",
+                "target": "execution_receipt_delivery",
+                "expected_valid": False,
+                "document": execution_delivery_tamper,
+            },
+            {
+                "case": "execution-receipt-acknowledgement-event-tamper",
+                "target": "execution_receipt_acknowledgement",
+                "expected_valid": False,
+                "document": execution_acknowledgement_tamper,
+            },
+            {
                 "case": "execution-adapter-unknown-field",
                 "target": "execution_adapter",
                 "expected_valid": False,
@@ -963,6 +1108,8 @@ def write_vectors(path: str | Path = VECTORS_PATH) -> Path:
 __all__ = [
     "ACCEPTANCE_SCHEMA_PATH",
     "EXECUTION_RECEIPT_SCHEMA_PATH",
+    "EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH",
+    "EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH",
     "EXECUTION_AUDIT_SCHEMA_PATH",
     "EXECUTION_ADAPTER_SCHEMA_PATH",
     "EXECUTION_ADAPTER_POLICY_SCHEMA_PATH",

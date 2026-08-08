@@ -13,8 +13,10 @@ import ipaddress
 import inspect
 import json
 import logging
+import math
 import os
 import re
+import secrets
 import socket
 import tempfile
 import threading
@@ -5556,12 +5558,13 @@ def _fetch_trade_rule_package_from_peer(
     url = normalized + path
     raw = _call_operator_trade_peer_with_fallback(
         normalized,
-        lambda resolved_ip: _urllib_get_bytes_pinned(
+        lambda resolved_ip, remaining: _urllib_get_bytes_pinned(
             url,
             resolved_ip,
-            timeout_s=timeout_seconds,
+            timeout_s=remaining,
             max_bytes=MAX_RULE_PACKAGE_BUNDLE_BYTES,
         ),
+        timeout_seconds=timeout_seconds,
     )
     return parse_rule_package_bundle(
         raw,
@@ -5595,12 +5598,13 @@ def _fetch_trade_rule_recognition_proof_from_peer(
     )
     raw = _call_operator_trade_peer_with_fallback(
         normalized,
-        lambda resolved_ip: _urllib_get_bytes_pinned(
+        lambda resolved_ip, remaining: _urllib_get_bytes_pinned(
             normalized + path,
             resolved_ip,
-            timeout_s=timeout_seconds,
+            timeout_s=remaining,
             max_bytes=MAX_TRADE_JSON_BYTES,
         ),
+        timeout_seconds=timeout_seconds,
     )
     return parse_rule_recognition_proof_bundle(
         raw,
@@ -5634,8 +5638,11 @@ def _fetch_trade_rule_recognition_proof_pages_from_peer(
         f"{quote(package.digest, safe='')}/recognition-proof-pages/"
     )
 
-    def fetch_all(resolved_ip: str) -> tuple[bytes, ...]:
-        deadline = time.monotonic() + timeout_seconds
+    def fetch_all(
+        resolved_ip: str,
+        remaining_seconds: float,
+    ) -> tuple[bytes, ...]:
+        deadline = time.monotonic() + remaining_seconds
 
         def fetch_page(page_index: int) -> bytes:
             remaining = deadline - time.monotonic()
@@ -5665,6 +5672,7 @@ def _fetch_trade_rule_recognition_proof_pages_from_peer(
     raw_pages = _call_operator_trade_peer_with_fallback(
         normalized,
         fetch_all,
+        timeout_seconds=timeout_seconds,
     )
     return parse_rule_recognition_proof_pages(
         raw_pages,
@@ -6226,6 +6234,27 @@ class _OrderAuditedRulePackageResolver:
             return package
         finally:
             lock.release()
+
+
+def _trade_order_rule_package_resolver(
+    request: Request,
+    order_digest: str,
+) -> Any:
+    """Return the single fail-closed Package resolver for one Order."""
+
+    package_store = _state_trade_rule_package_store(request)
+    spine = _state_spine(request)
+    workspace = _state_workspace(request)
+    if package_store is None:
+        raise RuntimeError("Trade Rule Package store is unavailable")
+    if spine is None or workspace is None:
+        raise RuntimeError("Trade Rule Package import audit is unavailable")
+    return _OrderAuditedRulePackageResolver(
+        package_store,
+        spine,
+        order_digest,
+        workspace,
+    )
 
 
 def _trade_rule_package_import_lock_target(
@@ -8255,6 +8284,41 @@ def _fed_peer_transaction_file(ws: Optional[Path]) -> Optional[Path]:
     return ws / "federation" / "peer_registry.txn.json"
 
 
+def _state_trade_execution_dispatch(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_execution_dispatch
+    except AttributeError:
+        return None
+
+
+def _state_trade_execution_dispatch_store(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_execution_dispatch_store
+    except AttributeError:
+        return None
+
+
+def _state_trade_execution_receipt_delivery_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_execution_receipt_delivery_limiter
+    except AttributeError:
+        return None
+
+
+def _state_trade_execution_receipt_delivery_global_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return (
+            request.app.state.nth
+            .trade_execution_receipt_delivery_global_limiter
+        )
+    except AttributeError:
+        return None
+
+
 def _learned_fed_peer_store(ws: Optional[Path]):
     if ws is None:
         return None
@@ -8978,6 +9042,7 @@ _FED_IDENTITY_CARD_KIND = "nth-dao-identity-card-v1"
 _MAX_FED_DISCOVERY_CANDIDATES = 32
 _MAX_FED_SEED_PEERS = 128
 _MAX_FED_CONFIG_BYTES = 512 * 1024
+_MAX_OPERATOR_TRADE_PEER_ADDRESSES = 8
 
 
 class FederationSeedCapacityError(ValueError):
@@ -9108,6 +9173,8 @@ def _resolve_operator_trade_peer_ips(url: str) -> tuple[str, ...]:
     if not addresses:
         raise ValueError("trade peer host has no usable address")
     unique = list(dict.fromkeys(addresses))
+    if len(unique) > _MAX_OPERATOR_TRADE_PEER_ADDRESSES:
+        raise ValueError("trade peer DNS returned too many addresses")
     if localhost:
         unique.sort(key=lambda item: (ipaddress.ip_address(item).version != 4, item))
     return tuple(unique)
@@ -9121,14 +9188,27 @@ def _resolve_operator_trade_peer_ip(url: str) -> str:
 
 def _call_operator_trade_peer_with_fallback(
     url: str,
-    operation: Callable[[str], Any],
+    operation: Callable[[str, float], Any],
+    *,
+    timeout_seconds: float,
 ) -> Any:
-    """Try each prevalidated address, retrying only connection failures."""
+    """Try bounded addresses under one shared monotonic deadline."""
 
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds must be finite and positive")
+    deadline = time.monotonic() + float(timeout_seconds)
     last_error: OSError | None = None
     for resolved_ip in _resolve_operator_trade_peer_ips(url):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("trade peer request deadline exceeded")
         try:
-            return operation(resolved_ip)
+            return operation(resolved_ip, remaining)
         except urllib.error.HTTPError:
             # A reached HTTP server gave a definitive protocol response.
             raise
@@ -9153,13 +9233,99 @@ def _post_trade_order_delivery_to_peer(
     url = normalized + "/api/v2/trade/federation/orders"
     status, raw = _call_operator_trade_peer_with_fallback(
         normalized,
-        lambda resolved_ip: _urllib_post_json_pinned_raw(
+        lambda resolved_ip, remaining: _urllib_post_json_pinned_raw(
             url,
             resolved_ip,
             document,
-            timeout_s=timeout_seconds,
+            timeout_s=remaining,
             max_bytes=256 * 1024,
         ),
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        response = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("trade peer returned invalid JSON") from exc
+    if not isinstance(response, dict):
+        raise ValueError("trade peer returned a non-object response")
+    return status, response
+
+
+def _post_trade_execution_receipt_delivery_to_peer(
+    peer_url: str,
+    order_digest: str,
+    document: dict[str, Any],
+    *,
+    timeout_seconds: float = 15.0,
+) -> tuple[int, dict[str, Any]]:
+    """Verify the destination DID, then POST over the same pinned address."""
+
+    from .market_federation_poll import _urllib_post_json_pinned_raw
+    from nth_dao.did_key import is_did_key
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+        raise ValueError("order_digest is invalid")
+    normalized = _normalize_configured_fed_peer(peer_url)
+    recipient_did = document.get("recipient_did")
+    if not isinstance(recipient_did, str) or not is_did_key(recipient_did):
+        raise ValueError("Receipt delivery recipient_did is invalid")
+    url = (
+        normalized
+        + f"/api/v2/trade/federation/orders/{order_digest}"
+        + "/execution-receipts"
+    )
+
+    def verify_and_post(
+        resolved_ip: str,
+        remaining_seconds: float,
+    ) -> tuple[int, bytes]:
+        started = time.monotonic()
+        challenge = secrets.token_hex(32)
+        identity_url = (
+            normalized
+            + "/.well-known/nth-dao/identity.json"
+            + f"?challenge={challenge}"
+        )
+        raw_card = _open_federation_identity_card(
+            identity_url,
+            min(remaining_seconds, 3.0),
+            resolved_ip,
+        )
+        try:
+            card = json.loads(raw_card.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("trade peer returned an invalid identity card") from exc
+        metadata, identity_error = _verify_federation_identity_card(
+            normalized,
+            card,
+            expected_challenge=challenge,
+        )
+        if metadata is None:
+            raise ValueError(
+                f"trade peer identity verification failed: {identity_error}"
+            )
+        if not hmac.compare_digest(
+            str(metadata.get("did") or ""),
+            recipient_did,
+        ):
+            raise ValueError(
+                "trade peer identity does not match Receipt recipient_did"
+            )
+        post_timeout = remaining_seconds - (time.monotonic() - started)
+        if post_timeout <= 0:
+            raise TimeoutError("trade peer request deadline exceeded")
+        return _urllib_post_json_pinned_raw(
+            url,
+            resolved_ip,
+            document,
+            timeout_s=post_timeout,
+            max_bytes=256 * 1024,
+        )
+
+    status, raw = _call_operator_trade_peer_with_fallback(
+        normalized,
+        verify_and_post,
+        timeout_seconds=timeout_seconds,
     )
     try:
         response = json.loads(raw.decode("utf-8"))
@@ -9300,13 +9466,17 @@ def _open_federation_identity_card(
 def _verify_federation_identity_card(
     peer_url: str,
     card: Any,
+    *,
+    expected_challenge: str | None = None,
 ) -> tuple[Optional[Dict[str, Any]], str]:
     """Verify a peer's signed identity card and bind it to ``peer_url``.
 
     This is an authenticity/self-consistency check, not a governance trust
-    decision. It proves that the HTTP endpoint controls the Ed25519 key named
-    in the card and that the card advertises the same federation URL. Trust
-    roots, endorsements, and membership policy remain separate concerns.
+    decision. It proves that the card was signed by the named Ed25519 key and
+    advertises the same federation URL. A fresh echoed challenge additionally
+    rejects stale cards, but is not channel binding and cannot by itself defeat
+    a live relay. Trust roots, transport security, endorsements, and membership
+    policy remain separate concerns.
     """
     try:
         normalized_peer = _normalize_configured_fed_peer(peer_url)
@@ -9379,8 +9549,25 @@ def _verify_federation_identity_card(
             return None, "identity card base_url is invalid"
         if card_base != normalized_peer:
             return None, "identity card base_url does not match discovery"
+    challenge_present = "challenge" in card
+    challenge = card.get("challenge", "")
+    if expected_challenge is None:
+        if challenge_present:
+            return None, "identity card returned an unsolicited challenge"
+    else:
+        if (
+            not isinstance(expected_challenge, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_challenge) is None
+        ):
+            return None, "expected identity challenge is invalid"
+        if (
+            not isinstance(challenge, str)
+            or re.fullmatch(r"[0-9a-f]{64}", challenge) is None
+            or not hmac.compare_digest(challenge, expected_challenge)
+        ):
+            return None, "identity card challenge did not match"
 
-    return {
+    metadata = {
         "peer_url": normalized_peer,
         "identity_url": f"{normalized_peer}/.well-known/nth-dao/identity.json",
         "did": did,
@@ -9388,7 +9575,8 @@ def _verify_federation_identity_card(
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "card_kind": _FED_IDENTITY_CARD_KIND,
         "federation_protocol": "nth-dao-federation-v1",
-    }, ""
+    }
+    return metadata, ""
 
 
 def _fetch_and_verify_federation_identity(
@@ -13532,6 +13720,241 @@ def register_v2_routes(app: FastAPI) -> None:
             "delivery_or_payment_proven": False,
         }
 
+    @app.post(
+        "/api/v2/trade/federation/orders/{order_digest}/execution-receipts",
+        status_code=202,
+    )
+    async def v2_trade_execution_receipt_receive(
+        order_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Re-verify and retain one remote execution claim for a local Order."""
+
+        from nth_dao.trade_rules import (
+            JsonSchema202012Validator,
+            TradeExecutionAuditBusy,
+            TradeExecutionAuditCapacity,
+            TradeExecutionAuditError,
+            TradeExecutionReceiptConflict,
+            TradeExecutionReceiptDelivery,
+            TradeExecutionReceiptDeliveryRejected,
+            TradeExecutionReceiptIntakeCoordinator,
+            TradeExecutionReceiptRejected,
+            TradeExecutionReceiptStoreBusy,
+            TradeExecutionReceiptStoreCapacity,
+            TradeOrderAuditError,
+        )
+
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "trade Execution Receipt delivery requires "
+                    "Content-Type application/json"
+                ),
+            )
+        limiter = _state_trade_execution_receipt_delivery_limiter(request)
+        global_limiter = (
+            _state_trade_execution_receipt_delivery_global_limiter(request)
+        )
+        order_audit = _state_trade_order_audit(request)
+        execution_coordinator = _state_trade_execution_coordinator(request)
+        identity = _state_node_identity(request)
+        package_store = _state_trade_rule_package_store(request)
+        state = request.app.state.nth
+        runtime = (
+            getattr(state, "trade_executor_policy", None),
+            getattr(state, "trade_execution_adapter_resolver", None),
+            getattr(state, "trade_execution_adapter_policy", None),
+            getattr(state, "trade_execution_content_resolver", None),
+        )
+        if limiter is None or global_limiter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt rate limiter unavailable",
+            )
+        client_key = (
+            str(request.client.host).strip()
+            if request.client is not None and request.client.host
+            else "anonymous"
+        )
+        try:
+            decision = await run_in_threadpool(limiter.check, client_key)
+            global_decision = await run_in_threadpool(
+                global_limiter.check,
+                "global",
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt budget is unavailable",
+            ) from exc
+        if not decision.allowed or not global_decision.allowed:
+            retry_after = max(
+                1,
+                int(
+                    max(
+                        decision.retry_after_seconds,
+                        global_decision.retry_after_seconds,
+                    )
+                )
+                + 1,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="trade Execution Receipt delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        if (
+            order_audit is None
+            or execution_coordinator is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+            or package_store is None
+            or any(item is None for item in runtime)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "execution-receipt-intake-not-configured",
+                    "message": (
+                        "local execution policy, Adapter, and content "
+                        "verification must be configured before intake"
+                    ),
+                },
+            )
+        try:
+            order_view = await run_in_threadpool(
+                order_audit.get_accepted,
+                order_digest,
+            )
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+        if order_view is None:
+            raise HTTPException(status_code=404, detail="Trade Order not found")
+        order = order_view.order
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        raw_body = await request.body()
+        received_at = datetime.now(timezone.utc)
+        schema_validator = getattr(
+            state,
+            "trade_execution_schema_validator",
+            None,
+        ) or JsonSchema202012Validator()
+
+        def _receive_execution_receipt() -> Any:
+            intake = TradeExecutionReceiptIntakeCoordinator(
+                execution_coordinator,
+                receiver_identity=identity,
+                package_resolver=package_resolver,
+                verifier_policy=runtime[0],
+                adapter_resolver=runtime[1],
+                adapter_policy=runtime[2],
+                content_resolver=runtime[3],
+                schema_validator=schema_validator,
+            )
+            delivery = TradeExecutionReceiptDelivery.from_json(
+                raw_body,
+                order=order,
+            )
+            return intake.receive(
+                delivery,
+                order=order,
+                at=received_at,
+            )
+
+        try:
+            result = await run_in_threadpool(_receive_execution_receipt)
+        except TradeExecutionReceiptDeliveryRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TradeExecutionReceiptRejected as exc:
+            logger.info(
+                "remote execution Receipt rejected by local policy: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "execution-receipt-policy-rejected",
+                    "message": (
+                        "Receipt could not be verified under local "
+                        "execution policy"
+                    ),
+                },
+            ) from exc
+        except TradeExecutionReceiptConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Receipt conflicts with retained signed bytes",
+            ) from exc
+        except (TradeExecutionAuditBusy, TradeExecutionReceiptStoreBusy) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt receiver is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (
+            TradeExecutionAuditCapacity,
+            TradeExecutionReceiptStoreCapacity,
+        ) as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Execution Receipt receiver capacity exceeded",
+            ) from exc
+        except (
+            TradeExecutionAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.warning(
+                "trade Execution Receipt durable intake failed: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "execution-receipt-intake-incomplete",
+                    "message": "Receipt acknowledgement is incomplete",
+                    "safe_to_redeliver": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        receipt_document = result.audit.receipt.to_dict()
+        return {
+            "status": "execution-receipt-retained-verified",
+            "order_digest": order_digest,
+            "execution_id": receipt_document["execution_id"],
+            "receipt_digest": result.audit.record.receipt_digest,
+            "delivery_digest": result.delivery_digest,
+            "receipt_store_created": result.audit.store_created,
+            "audit_anchor_created": result.audit.anchor_created,
+            "audit_event_id": result.audit.record.event_id,
+            "acknowledgement": result.acknowledgement.to_dict(),
+            "acknowledgement_digest": result.acknowledgement_digest,
+            "claim_verified_under_local_policy": True,
+            "delivery_or_payment_proven": False,
+        }
+
     def _trade_order_audit_view(
         view: Any,
         *,
@@ -13674,16 +14097,19 @@ def register_v2_routes(app: FastAPI) -> None:
                 before_seq=before_seq,
             )
             items = []
+            receipt_digests = []
             for item in history.items:
                 document = item.receipt.to_dict()
                 operation = document["operation"]
                 adapter = document["adapter"]
+                receipt_digest = execution_receipt_digest(
+                    item.receipt,
+                    order=order,
+                )
+                receipt_digests.append(receipt_digest)
                 items.append({
                     "execution_id": document["execution_id"],
-                    "receipt_digest": execution_receipt_digest(
-                        item.receipt,
-                        order=order,
-                    ),
+                    "receipt_digest": receipt_digest,
                     "audit_event_id": item.event.event_id,
                     "audit_seq": item.event.seq,
                     "executor_did": document["executor_did"],
@@ -13698,6 +14124,79 @@ def register_v2_routes(app: FastAPI) -> None:
                     "started_at": document["started_at"],
                     "completed_at": document["completed_at"],
                 })
+            dispatch_states: Dict[str, Any] = {}
+            dispatch_state_error = False
+            dispatch_store = _state_trade_execution_dispatch_store(request)
+            if dispatch_store is not None and receipt_digests:
+                try:
+                    dispatch_states = dispatch_store.get_states(
+                        tuple(receipt_digests)
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    dispatch_state_error = True
+                    logger.warning(
+                        "trade execution dispatch projection unavailable (%s)",
+                        type(exc).__name__,
+                    )
+            for item in items:
+                federation = {
+                    "federation_status": (
+                        "unavailable" if dispatch_state_error else "local-only"
+                    ),
+                    "dispatch_target_url": "",
+                    "dispatch_attempts": 0,
+                    "dispatch_last_error": "",
+                    "dispatch_generation": 0,
+                    "dispatch_superseded_deliveries": 0,
+                    "remote_acknowledgement_digest": "",
+                    "remote_receiver_did": "",
+                    "remote_audit_event_id": "",
+                    "remote_received_at": "",
+                }
+                pending, acknowledgement = dispatch_states.get(
+                    item["receipt_digest"],
+                    (None, None),
+                )
+                if acknowledgement is not None:
+                    ack_document = acknowledgement.acknowledgement.to_dict()
+                    federation.update({
+                        "federation_status": (
+                            "acknowledged-pending-anchor"
+                            if pending is not None
+                            else "acknowledged"
+                        ),
+                        "dispatch_target_url": acknowledgement.target_url,
+                        "dispatch_attempts": (
+                            pending.attempts if pending is not None else 0
+                        ),
+                        "dispatch_last_error": (
+                            pending.last_error if pending is not None else ""
+                        ),
+                        "dispatch_generation": acknowledgement.generation,
+                        "dispatch_superseded_deliveries": len(
+                            acknowledgement.superseded_delivery_digests
+                        ),
+                        "remote_acknowledgement_digest": (
+                            acknowledgement.acknowledgement_digest
+                        ),
+                        "remote_receiver_did": ack_document["receiver_did"],
+                        "remote_audit_event_id": (
+                            acknowledgement.remote_event_id
+                        ),
+                        "remote_received_at": ack_document["received_at"],
+                    })
+                elif pending is not None:
+                    federation.update({
+                        "federation_status": "pending",
+                        "dispatch_target_url": pending.target_url,
+                        "dispatch_attempts": pending.attempts,
+                        "dispatch_last_error": pending.last_error,
+                        "dispatch_generation": pending.generation,
+                        "dispatch_superseded_deliveries": len(
+                            pending.superseded_delivery_digests
+                        ),
+                    })
+                item.update(federation)
             _record_trade_execution_history_health(
                 request,
                 available=True,
@@ -13745,22 +14244,9 @@ def register_v2_routes(app: FastAPI) -> None:
         health = _trade_execution_runtime_health(request)
         moment = datetime.now(timezone.utc)
         try:
-            package_store = _state_trade_rule_package_store(request)
-            spine = _state_spine(request)
-            workspace = _state_workspace(request)
-            package_resolver = (
-                _OrderAuditedRulePackageResolver(
-                    package_store,
-                    spine,
-                    order_digest,
-                    workspace,
-                )
-                if (
-                    package_store is not None
-                    and spine is not None
-                    and workspace is not None
-                )
-                else package_store
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
             )
             projection = project_trade_order_execution(
                 order,
@@ -13859,6 +14345,7 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request,
         limit: int = 100,
         acknowledgement_cursor: str = "",
+        receipt_acknowledgement_cursor: str = "",
     ) -> Dict[str, Any]:
         """Retry Order Store/Spine projection without peer resubmission."""
 
@@ -13878,9 +14365,24 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=400,
                 detail="acknowledgement_cursor must be a lowercase sha256 digest",
             )
+        if receipt_acknowledgement_cursor and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", receipt_acknowledgement_cursor
+        ) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "receipt_acknowledgement_cursor must be a lowercase "
+                    "sha256 digest"
+                ),
+            )
         coordinator = _state_trade_order_audit(request)
         dispatch_coordinator = _state_trade_order_dispatch(request)
-        if coordinator is None or dispatch_coordinator is None:
+        receipt_dispatch_coordinator = _state_trade_execution_dispatch(request)
+        if (
+            coordinator is None
+            or dispatch_coordinator is None
+            or receipt_dispatch_coordinator is None
+        ):
             raise HTTPException(
                 status_code=503,
                 detail="trade Order audit coordinator unavailable",
@@ -13891,6 +14393,11 @@ def register_v2_routes(app: FastAPI) -> None:
                 dispatch_coordinator.reconcile,
                 limit=limit,
                 after=acknowledgement_cursor or None,
+            )
+            receipt_dispatch_result = await run_in_threadpool(
+                receipt_dispatch_coordinator.reconcile,
+                limit=limit,
+                after=receipt_acknowledgement_cursor or None,
             )
             from nth_dao.web import _advance_trade_execution_recovery
 
@@ -13923,6 +14430,24 @@ def register_v2_routes(app: FastAPI) -> None:
             "acknowledgement_failures": dispatch_result.failed,
             "acknowledgement_next_cursor": dispatch_result.next_cursor,
             "acknowledgement_has_more": dispatch_result.has_more,
+            "receipt_acknowledgements_scanned": (
+                receipt_dispatch_result.scanned
+            ),
+            "receipt_acknowledgements_anchored": (
+                receipt_dispatch_result.anchored
+            ),
+            "receipt_dispatches_completed": (
+                receipt_dispatch_result.completed
+            ),
+            "receipt_acknowledgement_failures": (
+                receipt_dispatch_result.failed
+            ),
+            "receipt_acknowledgement_next_cursor": (
+                receipt_dispatch_result.next_cursor
+            ),
+            "receipt_acknowledgement_has_more": (
+                receipt_dispatch_result.has_more
+            ),
             "executions_scanned": execution_result.scanned,
             "executions_anchored": execution_result.anchored,
             "execution_failures": execution_result.failed,
@@ -14561,6 +15086,309 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=503,
                 detail="trade Order audit integrity failure",
             ) from exc
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/deliver"
+    )
+    async def v2_trade_execution_receipt_deliver(
+        order_digest: str,
+        execution_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Durably deliver one locally signed Receipt to the other party."""
+
+        from nth_dao.trade_rules import (
+            TradeExecutionReceiptAcknowledgement,
+            TradeExecutionReceiptDeliveryRejected,
+            TradeExecutionReceiptDispatchBusy,
+            TradeExecutionReceiptDispatchCapacity,
+            TradeExecutionReceiptDispatchError,
+            TradeExecutionReceiptStoreBusy,
+            TradeExecutionReceiptStoreError,
+            TradeOrderAuditError,
+            create_trade_execution_receipt_delivery,
+            execution_receipt_digest,
+            verify_trade_execution_receipt_delivery,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        if re.fullmatch(
+            r"nth-trade-execution-sha256:[0-9a-f]{64}",
+            execution_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="execution_id is invalid")
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict) or set(body) != {"target_url"}:
+            raise HTTPException(
+                status_code=400,
+                detail="body requires only target_url",
+            )
+        try:
+            target_url = _normalize_configured_fed_peer(body["target_url"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        order_audit = _state_trade_order_audit(request)
+        dispatch = _state_trade_execution_dispatch(request)
+        dispatch_store = _state_trade_execution_dispatch_store(request)
+        receipt_store = getattr(
+            request.app.state.nth,
+            "trade_execution_receipts",
+            None,
+        )
+        identity = _state_node_identity(request)
+        if (
+            order_audit is None
+            or dispatch is None
+            or dispatch_store is None
+            or receipt_store is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt dispatch runtime unavailable",
+            )
+        try:
+            order_view = await run_in_threadpool(
+                order_audit.get_accepted,
+                order_digest,
+            )
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+        if order_view is None:
+            raise HTTPException(status_code=404, detail="Trade Order not found")
+        order = order_view.order
+        try:
+            receipt = await run_in_threadpool(
+                receipt_store.get,
+                execution_id,
+                order=order,
+            )
+        except TradeExecutionReceiptStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeExecutionReceiptStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Execution Receipt integrity conflict",
+            ) from exc
+        if receipt is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Trade Execution Receipt not found",
+            )
+        receipt_digest = execution_receipt_digest(receipt, order=order)
+
+        def _acknowledged_response(acknowledgement: Any) -> Dict[str, Any]:
+            document = acknowledgement.acknowledgement.to_dict()
+            return {
+                "status": "execution-receipt-delivered",
+                "order_digest": acknowledgement.order_digest,
+                "execution_id": execution_id,
+                "receipt_digest": acknowledgement.receipt_digest,
+                "delivery_digest": acknowledgement.delivery_digest,
+                "acknowledgement": document,
+                "acknowledgement_digest": (
+                    acknowledgement.acknowledgement_digest
+                ),
+                "remote_audit_event_id": acknowledgement.remote_event_id,
+                "remote_received_at": document["received_at"],
+                "acknowledgement_persisted": True,
+                "delivery_or_payment_proven": False,
+            }
+
+        try:
+            existing_ack = await run_in_threadpool(
+                dispatch.recover_acknowledgement,
+                receipt_digest,
+            )
+            if existing_ack is not None:
+                return _acknowledged_response(existing_ack)
+            pending = await run_in_threadpool(
+                dispatch_store.get_pending,
+                receipt_digest,
+            )
+        except (TradeExecutionReceiptDispatchBusy,) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt dispatch is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeExecutionReceiptDispatchError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"dispatch recovery failed: {exc}",
+                headers={"Retry-After": "1"},
+            ) from exc
+
+        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        now_ms = int(moment.timestamp() * 1_000)
+        created_at = moment.isoformat().replace("+00:00", "Z")
+        try:
+            if pending is not None:
+                if pending.target_url != target_url:
+                    raise TradeExecutionReceiptDispatchError(
+                        "pending dispatch targets a different peer"
+                    )
+                ok, reason = verify_trade_execution_receipt_delivery(
+                    pending.delivery,
+                    order=order,
+                    recipient_did=pending.delivery.to_dict()["recipient_did"],
+                    at=moment,
+                )
+                if ok:
+                    delivery = pending.delivery
+                elif "expired" in reason:
+                    replacement = create_trade_execution_receipt_delivery(
+                        identity,
+                        receipt=receipt,
+                        order=order,
+                        created_at=created_at,
+                        not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                        now=moment,
+                    )
+                    pending = await run_in_threadpool(
+                        dispatch.renew_expired,
+                        replacement,
+                        order=order,
+                        target_url=target_url,
+                        now_ms=now_ms,
+                    )
+                    delivery = pending.delivery
+                else:
+                    raise TradeExecutionReceiptDispatchError(
+                        f"pending delivery is not usable: {reason}"
+                    )
+            else:
+                delivery = create_trade_execution_receipt_delivery(
+                    identity,
+                    receipt=receipt,
+                    order=order,
+                    created_at=created_at,
+                    not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    now=moment,
+                )
+                pending = await run_in_threadpool(
+                    dispatch.prepare,
+                    delivery,
+                    order=order,
+                    target_url=target_url,
+                    now_ms=now_ms,
+                )
+                if pending.acknowledged:
+                    existing_ack = await run_in_threadpool(
+                        dispatch.recover_acknowledgement,
+                        receipt_digest,
+                    )
+                    if existing_ack is None:
+                        raise TradeExecutionReceiptDispatchError(
+                            "acknowledged dispatch state disappeared"
+                        )
+                    return _acknowledged_response(existing_ack)
+                delivery = pending.delivery
+        except TradeExecutionReceiptDeliveryRejected as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TradeExecutionReceiptDispatchCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Execution Receipt dispatch capacity exceeded",
+            ) from exc
+        except (TradeExecutionReceiptDispatchBusy,) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt dispatch is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeExecutionReceiptDispatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        async def _note_failure(message: str) -> None:
+            try:
+                await run_in_threadpool(
+                    dispatch.failed,
+                    receipt_digest,
+                    error=message,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "unable to record failed Execution Receipt dispatch: %s",
+                    type(exc).__name__,
+                )
+
+        try:
+            peer_status, peer_body = await run_in_threadpool(
+                _post_trade_execution_receipt_delivery_to_peer,
+                target_url,
+                order_digest,
+                delivery.to_dict(),
+            )
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+            await _note_failure(str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Receipt is retained locally but peer delivery "
+                    f"failed: {exc}"
+                ),
+            ) from exc
+        if not 200 <= peer_status < 300:
+            await _note_failure(f"peer returned HTTP {peer_status}")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Receipt is retained locally but the peer "
+                    f"rejected delivery with HTTP {peer_status}"
+                ),
+            )
+        try:
+            acknowledgement = TradeExecutionReceiptAcknowledgement.from_dict(
+                peer_body["acknowledgement"]
+            )
+            peer_event_id = peer_body["audit_event_id"]
+        except (KeyError, TypeError, ValueError) as exc:
+            await _note_failure(f"invalid acknowledgement: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail="peer returned an invalid signed acknowledgement",
+            ) from exc
+        try:
+            retained = await run_in_threadpool(
+                dispatch.acknowledge,
+                delivery,
+                acknowledgement,
+                order=order,
+                target_url=target_url,
+                remote_event_id=peer_event_id,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote acknowledgement verified but local persistence "
+                    "is incomplete"
+                ),
+                headers={"Retry-After": "1"},
+            ) from exc
+        return _acknowledged_response(retained)
 
     @app.get("/api/v2/trade/offers")
     def v2_trade_offer_list(

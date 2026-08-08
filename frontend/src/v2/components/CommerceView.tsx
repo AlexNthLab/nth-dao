@@ -4,6 +4,7 @@ import {
   acceptTradeProposal,
   announceTask,
   ApiHttpError,
+  deliverTradeExecutionReceipt,
   dispatchCommerceOutbox,
   disputeCommerceOrder,
   fetchCommerceOrders,
@@ -1499,7 +1500,11 @@ function AgreementExecutionReadiness({
   const toast = useToast();
   const execution = agreement.execution;
   const initialHistoryKey = execution
-    ? `${execution.order_digest}:${execution.history.items.map((item) => item.execution_id).join(",")}`
+    ? `${execution.order_digest}:${execution.history.items.map((item) => (
+      `${item.execution_id}:${item.federation_status}:`
+      + `${item.remote_acknowledgement_digest}:${item.dispatch_attempts}:`
+      + `${item.dispatch_generation}`
+    )).join(",")}`
     : "";
   const [historyItems, setHistoryItems] = useState(
     execution?.history.items ?? [],
@@ -1519,8 +1524,13 @@ function AgreementExecutionReadiness({
   const [importingSkill, setImportingSkill] = useState("");
   const [skillImportMessages, setSkillImportMessages] = useState<Record<string, string>>({});
   const [skillImportErrors, setSkillImportErrors] = useState<Record<string, boolean>>({});
+  const [receiptDeliveryBusy, setReceiptDeliveryBusy] = useState("");
+  const [receiptDeliveryMessages, setReceiptDeliveryMessages] = useState<Record<string, string>>({});
+  const [receiptDeliveryErrors, setReceiptDeliveryErrors] = useState<Record<string, boolean>>({});
   const skillImportAbort = useRef<AbortController | null>(null);
   const skillImportGeneration = useRef(0);
+  const receiptDeliveryAbort = useRef<AbortController | null>(null);
+  const receiptDeliveryGeneration = useRef(0);
 
   useEffect(() => {
     setHistoryItems(execution?.history.items ?? []);
@@ -1534,6 +1544,9 @@ function AgreementExecutionReadiness({
       skillImportGeneration.current += 1;
       skillImportAbort.current?.abort();
       skillImportAbort.current = null;
+      receiptDeliveryGeneration.current += 1;
+      receiptDeliveryAbort.current?.abort();
+      receiptDeliveryAbort.current = null;
     }
   ), []);
 
@@ -1627,6 +1640,55 @@ function AgreementExecutionReadiness({
       }
     }
   }
+  async function deliverReceipt(executionId: string, retainedTargetUrl = "") {
+    const peerUrl = skillPeerUrl.trim() || retainedTargetUrl.trim();
+    if (!peerUrl || receiptDeliveryBusy) return;
+    receiptDeliveryGeneration.current += 1;
+    const generation = receiptDeliveryGeneration.current;
+    const controller = new AbortController();
+    receiptDeliveryAbort.current?.abort();
+    receiptDeliveryAbort.current = controller;
+    const isCurrent = () => (
+      !controller.signal.aborted
+      && receiptDeliveryGeneration.current === generation
+      && agreement.order_digest === executionDigest
+    );
+    setReceiptDeliveryBusy(executionId);
+    setReceiptDeliveryMessages((current) => ({ ...current, [executionId]: "" }));
+    setReceiptDeliveryErrors((current) => ({ ...current, [executionId]: false }));
+    try {
+      const result = await deliverTradeExecutionReceipt(
+        executionDigest,
+        executionId,
+        peerUrl,
+        controller.signal,
+      );
+      if (!isCurrent()) return;
+      rememberTradeSkillPeer(executionDigest, peerUrl);
+      setReceiptDeliveryMessages((current) => ({
+        ...current,
+        [executionId]: `Signed peer ACK retained locally. Claimed remote Spine event ${short(result.remote_audit_event_id, 20)}.`,
+      }));
+      toast.push("Signed Receipt acknowledged by peer", "success");
+      onRefresh();
+    } catch (error) {
+      if (isAbort(error) || !isCurrent()) return;
+      const message = error instanceof Error
+        ? error.message
+        : "Execution Receipt delivery failed.";
+      setReceiptDeliveryMessages((current) => ({
+        ...current,
+        [executionId]: message,
+      }));
+      setReceiptDeliveryErrors((current) => ({ ...current, [executionId]: true }));
+      toast.push(message, "error");
+    } finally {
+      if (isCurrent()) {
+        receiptDeliveryAbort.current = null;
+        setReceiptDeliveryBusy("");
+      }
+    }
+  }
   return <div className="commerce-action trade-execution-readiness">
     <div className="commerce-order-heading">
       <h3>Execution readiness</h3>
@@ -1644,24 +1706,25 @@ function AgreementExecutionReadiness({
     </dl>
     <code title={execution.order_digest}>{short(execution.order_digest, 42)}</code>
     {execution.error_code && <p className="trade-proposal-warning" role="status">Execution projection unavailable ({execution.error_code}). The signed Agreement remains readable, but no operation is authorized.</p>}
+    <div className="commerce-action">
+      <label className="commerce-target">Peer NTH DAO URL
+        <input
+          type="url"
+          value={skillPeerUrl}
+          onChange={(event) => setSkillPeerUrl(event.target.value)}
+          onBlur={(event) => {
+            const normalized = event.currentTarget.value.trim();
+            setSkillPeerUrl(normalized);
+            rememberTradeSkillPeer(agreement.order_digest, normalized);
+          }}
+          placeholder="http://peer-host:8080"
+        />
+      </label>
+      <p className="muted">Operator-selected destination for exact Trade Skill imports and signed Execution Receipt delivery. The node verifies signed responses before retention.</p>
+    </div>
     <div className="trade-execution-column">
       <h3>Trade Skills</h3>
-      {execution.skills.length > 0 && <div className="commerce-action">
-        <label className="commerce-target">NTH DAO source URL
-          <input
-            type="url"
-            value={skillPeerUrl}
-            onChange={(event) => setSkillPeerUrl(event.target.value)}
-            onBlur={(event) => {
-              const normalized = event.currentTarget.value.trim();
-              setSkillPeerUrl(normalized);
-              rememberTradeSkillPeer(agreement.order_digest, normalized);
-            }}
-            placeholder="http://peer-host:8080"
-          />
-        </label>
-        <p className="muted">Package and Recognition fetching is operator-directed. The node verifies signed content and its accepted Order binding before retention. Neither caching nor Recognition evidence grants trust or execution authority.</p>
-      </div>}
+      {execution.skills.length > 0 && <p className="muted">Package and Recognition fetching is operator-directed. The node verifies signed content and its accepted Order binding before retention. Neither caching nor Recognition evidence grants trust or execution authority.</p>}
       {execution.skills.length === 0 ? <p className="muted">No signed Rule Packages are bound to this Agreement.</p> : <ul className="trade-proposal-rules">
         {execution.skills.map((skill) => <li key={skill.package_digest}>
           <div className="trade-execution-row"><strong>{skill.rule_id}</strong><span className={`pill ${skill.status === "available" ? "ok" : "wait"}`}>{readinessLabel(skill.status)}</span></div>
@@ -1714,11 +1777,51 @@ function AgreementExecutionReadiness({
       {execution.history.status === "available" && historyItems.length > 0 && <ul className="trade-proposal-rules">
         {historyItems.map((item) => <li key={item.execution_id}>
           <div className="trade-execution-row"><strong>{item.operation_id}</strong><span className={`pill ${item.outcome === "succeeded" ? "ok" : "wait"}`}>{readinessLabel(item.outcome)}</span></div>
-          <span>{item.hook_name} · {item.side_effect} · {item.executor_role}</span>
-          <span className="muted">Completed {new Date(item.completed_at).toLocaleString()} · Adapter {item.adapter_id} v{item.adapter_version}</span>
+          <span>{item.hook_name} | {item.side_effect} | {item.executor_role}</span>
+          <span className="muted">Completed {new Date(item.completed_at).toLocaleString()} | Adapter {item.adapter_id} v{item.adapter_version}</span>
           <code title={item.executor_did}>Signer {short(item.executor_did, 30)}</code>
           <code title={item.receipt_digest}>Receipt {short(item.receipt_digest, 34)}</code>
-          <code title={item.audit_event_id}>Spine {short(item.audit_event_id, 34)}</code>
+          <code title={item.audit_event_id}>Local Spine {short(item.audit_event_id, 34)}</code>
+          <div className="trade-execution-row">
+            <strong>Federation</strong>
+            <span className={`pill ${item.federation_status === "acknowledged" ? "ok" : "wait"}`}>{readinessLabel(item.federation_status)}</span>
+          </div>
+          {item.federation_status === "pending" && <>
+            <span className="muted">Attempts {item.dispatch_attempts} | Delivery generation {item.dispatch_generation}</span>
+            {item.dispatch_last_error && <span className="trade-proposal-warning">Last attempt: {item.dispatch_last_error}</span>}
+          </>}
+          {(item.federation_status === "acknowledged"
+            || item.federation_status === "acknowledged-pending-anchor") && <>
+            <span className="muted">Peer claims it retained and policy-verified this signed claim at {new Date(item.remote_received_at).toLocaleString()}. The signed ACK does not independently prove the peer's filesystem, Spine, delivery quality, or payment.</span>
+            <code title={item.remote_receiver_did}>Peer signer {short(item.remote_receiver_did, 30)}</code>
+            <code title={item.remote_acknowledgement_digest}>ACK {short(item.remote_acknowledgement_digest, 34)}</code>
+            <code title={item.remote_audit_event_id}>Remote Spine {short(item.remote_audit_event_id, 34)}</code>
+          </>}
+          {item.federation_status === "acknowledged-pending-anchor" && <span className="trade-proposal-warning" role="status">The signed peer ACK is retained locally, but its local Spine anchor or pending cleanup is incomplete. Repair before treating this node's audit trail as complete.</span>}
+          {item.federation_status === "unavailable" && <span className="trade-proposal-warning">Dispatch state could not be verified. The local Receipt remains readable; do not assume it was sent.</span>}
+          {item.federation_status !== "acknowledged" && <button
+            className="btn btn-secondary"
+            type="button"
+            disabled={
+              !(skillPeerUrl.trim() || item.dispatch_target_url.trim())
+              || Boolean(receiptDeliveryBusy)
+              || item.federation_status === "unavailable"
+            }
+            onClick={() => deliverReceipt(
+              item.execution_id,
+              item.dispatch_target_url,
+            )}
+          >{receiptDeliveryBusy === item.execution_id
+              ? "Delivering..."
+              : item.federation_status === "acknowledged-pending-anchor"
+                ? "Repair local ACK anchor"
+              : item.federation_status === "pending"
+                ? "Retry signed Receipt"
+                : "Deliver signed Receipt"}</button>}
+          {receiptDeliveryMessages[item.execution_id] && <span
+            className={receiptDeliveryErrors[item.execution_id] ? "trade-proposal-warning" : "muted"}
+            role="status"
+          >{receiptDeliveryMessages[item.execution_id]}</span>}
         </li>)}
       </ul>}
       {historyError && <p className="trade-proposal-warning" role="status">{historyError} Existing verified Receipts remain visible.</p>}

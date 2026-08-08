@@ -481,16 +481,64 @@ class TradeExecutionCoordinator:
             if isinstance(now, datetime)
             else time.time_ns() // 1_000_000
         )
+        return self.record(
+            candidate,
+            order=order,
+            now_ms=audit_now_ms,
+        ).receipt
+
+    def record(
+        self,
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        *,
+        order: TradeOrder | dict[str, Any],
+        now_ms: int | None = None,
+    ) -> TradeExecutionAuditResult:
+        """Verify and durably record an already-signed execution Receipt.
+
+        This is the only supported ingestion path for Receipts created by a
+        remote trade party.  Transport authentication and current local
+        execution policy are separate receiver concerns; this method enforces
+        the signed Receipt/Order binding and the WAL -> CAS -> Spine invariant.
+        """
+
+        verified_order = (
+            TradeOrder.from_json(order.canonical_bytes)
+            if isinstance(order, TradeOrder)
+            else TradeOrder.from_dict(order)
+        )
+        verified_receipt = TradeExecutionReceipt.from_json(
+            (
+                receipt.canonical_bytes
+                if isinstance(receipt, TradeExecutionReceipt)
+                else TradeExecutionReceipt.from_dict(
+                    receipt,
+                    order=verified_order,
+                ).canonical_bytes
+            ),
+            order=verified_order,
+        )
+        audit_now_ms = (
+            time.time_ns() // 1_000_000
+            if now_ms is None
+            else now_ms
+        )
+        if (
+            isinstance(audit_now_ms, bool)
+            or not isinstance(audit_now_ms, int)
+            or audit_now_ms < 0
+        ):
+            raise ValueError("now_ms must be a non-negative integer")
         try:
             prepared, created = self.audit_outbox.prepare(
-                candidate,
-                order=order,
+                verified_receipt,
+                order=verified_order,
                 now_ms=audit_now_ms,
             )
         except TradeExecutionReceiptConflict:
             self._retain_and_block_conflict(
-                candidate,
-                order=order,
+                verified_receipt,
+                order=verified_order,
                 now_ms=audit_now_ms,
             )
         try:
@@ -506,7 +554,7 @@ class TradeExecutionCoordinator:
             raise TradeExecutionAuditBusy(
                 "execution audit reconciliation is busy"
             ) from exc
-        return result.receipt
+        return result
 
     def history(
         self,

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   acceptTradeProposal,
+  deliverTradeExecutionReceipt,
   fetchTradeProposals,
   fetchTradeOrders,
   fetchTradeRulePackages,
@@ -456,6 +457,39 @@ describe("Trade Offer inspection API wiring", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/v2/trade/orders/${encodeURIComponent(digest)}/execution-receipts?limit=100&before_seq=42`,
       expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("delivers one signed execution Receipt to an operator-selected peer", async () => {
+    const executionId = `nth-trade-execution-sha256:${"e".repeat(64)}`;
+    const result = {
+      status: "execution-receipt-delivered",
+      order_digest: digest,
+      execution_id: executionId,
+      receipt_digest: `sha256:${"f".repeat(64)}`,
+      delivery_digest: `sha256:${"1".repeat(64)}`,
+      acknowledgement_digest: `sha256:${"2".repeat(64)}`,
+      remote_audit_event_id: "3".repeat(64),
+      remote_received_at: "2026-09-01T00:02:00Z",
+      acknowledgement_persisted: true,
+      delivery_or_payment_proven: false,
+    } as const;
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(result));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(deliverTradeExecutionReceipt(
+      digest,
+      executionId,
+      "https://peer.example",
+    )).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/trade/orders/${encodeURIComponent(digest)}`
+        + `/execution-receipts/${encodeURIComponent(executionId)}/deliver`,
+      expect.objectContaining({
+        body: JSON.stringify({ target_url: "https://peer.example" }),
+        credentials: "same-origin",
+        method: "POST",
+      }),
     );
   });
 

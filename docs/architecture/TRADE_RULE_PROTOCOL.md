@@ -562,8 +562,46 @@ boundaries; it recognizes an already committed exact event without duplicating
 it and rechecks established anchors against a lock-consistent, signature-
 verified Spine snapshot. The semantic uniqueness check and append execute
 under the same Spine lock, closing the gap between verification and reading.
-Automatic Web or daemon startup scheduling is not part of this
-protocol-kernel slice.
+The protocol kernel does not start threads. The Web runtime invokes bounded
+startup reconciliation and its lifecycle-owned recovery worker advances local
+execution-audit pages; callers embedding the kernel directly must schedule
+reconciliation themselves.
+
+Execution Receipt federation uses two additional signed v1 envelopes. A
+`TradeExecutionReceiptDelivery` binds the exact Receipt and Order digests,
+sender DID, counterparty DID, destination, nonce, and a short validity window.
+Before disclosing that envelope, the sender issues a fresh 256-bit challenge
+to the destination identity-card endpoint. The signed card must echo the
+challenge and the Order counterparty DID over the same DNS-pinned IP used for
+the Receipt POST; a stale replay therefore cannot authorize disclosure.
+This is freshness and destination-mismatch protection, not encryption or
+cryptographic channel binding: a live relay can forward a challenge. Operators
+must use authenticated HTTPS for untrusted networks and must not place
+confidential material in the v1 envelope. Recipient-key encrypted delivery is a
+future protocol extension rather than an implied property of this transport.
+The receiving node must already retain the accepted Order and must re-run the
+Receipt under explicitly configured local Rule, Adapter, content, and schema
+policies before writing the Receipt through the normal CAS/Spine coordinator.
+It then returns a counterparty-signed
+`TradeExecutionReceiptAcknowledgement` bound to the delivery digest, Receipt
+digest, receiver DID, and the receiver's local Spine event ID.
+
+The sender persists the signed delivery and exact Order in a process-safe
+SQLite outbox before network I/O. A verified acknowledgement is persisted
+before the local `trade.execution.receipt-acknowledged` Spine projection, and
+startup reconciliation repairs an interrupted projection or pending cleanup.
+Only an expired delivery may be renewed; renewal preserves the Receipt,
+Order, parties, target, and prior delivery digests while creating a new signed
+nonce and validity window. UI and REST history expose `local-only`, `pending`,
+`acknowledged`, or `unavailable` transport state without exposing operation
+input or result content.
+
+The acknowledgement means only that the named peer claims it retained and
+locally policy-verified the signed claim at the referenced audit event. It does not
+prove delivery quality, asset transfer, payment, legal acceptance, global
+availability, or objective truth. Receipt intake remains unavailable until an
+operator explicitly configures the receiver's local execution policies and
+resolvers; signed remote data never supplies those trust decisions.
 
 A Receipt counterparty may issue a Trade Receipt Review v1 after independently
 replaying the Receipt under its own Rule and Adapter policies. The Review binds
@@ -634,11 +672,12 @@ The Agreement conformance vector uses deterministic public test keys and
 contains the exact Offer, Proposal, Proposal Delivery, receiver-signed intake
 receipt, Acceptance, Order, Rule Package and
 resources, verifier and Adapter policies, Adapter artifact, execution content,
-expected readiness, execution Receipt, and content digests. Delivery vectors
-also specify recipient, verification time, TTL, clock skew, wrong-recipient,
-expiry, and future-time outcomes so another implementation must exercise wire
-semantics rather than only parse a signature. Those keys must never be reused
-or trusted.
+expected readiness, execution Receipt, content digests, destination-bound
+Execution Receipt delivery, and receiver-signed acknowledgement. Delivery
+vectors also specify recipient, verification time, TTL, clock skew,
+wrong-recipient, expiry, future-time, acknowledgement-binding, and tamper
+outcomes so another implementation must exercise wire semantics rather than
+only parse a signature. Those keys must never be reused or trusted.
 
 ## Compatibility
 
@@ -722,6 +761,10 @@ The reviewed protocol kernel currently contains:
   persistence, exact idempotent `trade.execution.recorded` Spine anchoring,
   verified-snapshot replay, bounded cursor reconciliation, and externally
   checked fail-closed equivocation state;
+- destination-bound signed Execution Receipt delivery, mandatory counterparty
+  policy replay, receiver-signed acknowledgement, durable sender outbox,
+  restart reconciliation, expired-envelope generation history, and explicit
+  non-settlement UI projection;
 - counterparty-signed Trade Receipt Review v1 claims with mandatory local
   Receipt replay, exact policy snapshot binding, conflict-retaining CAS
   storage, write-ahead restart recovery, and idempotent
@@ -742,7 +785,8 @@ The reviewed protocol kernel currently contains:
   serialization, restart-safe idempotent completion anchoring, and explicit
   non-trust/non-acceptance semantics;
 - schemas and deterministic positive and negative conformance vectors,
-  including Agreement v1, Proposal Delivery v1, Execution Receipt v1, Receipt Review v1, and the
+  including Agreement v1, Proposal Delivery v1, Execution Receipt v1,
+  Execution Receipt Delivery/Acknowledgement v1, Receipt Review v1, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
   Rule Recognition, Recognition Policy, and Receipt Review audit payloads;
 - focused tests.
@@ -759,7 +803,7 @@ The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
 renewal requires a new publisher signature.
 
 Globally convergent latest-revision proofs, Acceptance federation, inventory
-or asset reservation, fulfillment, payment, federation of Receipt anchors,
+or asset reservation, fulfillment, payment, global Receipt/Review propagation,
 delegation, and sandboxed
 executable Adapters remain separate, independently reviewed slices. Durable
 remote retention preserves the complete chain disclosed by one signed,

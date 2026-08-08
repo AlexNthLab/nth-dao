@@ -57,6 +57,7 @@ import type {
   TradeProposalAcceptanceResult,
   TradeProposalPage,
   TradeExecutionHistoryPage,
+  TradeExecutionReceiptDeliveryResult,
   TradeOrderDetail,
   TradeOrderPage,
   TradeRuleRecognitionImportResult,
@@ -1158,6 +1159,20 @@ export async function getTradeExecutionReceipts(
   });
   return getJson<TradeExecutionHistoryPage>(
     `/trade/orders/${encodeURIComponent(digest)}/execution-receipts?${params.toString()}`,
+    signal,
+  );
+}
+
+export async function deliverTradeExecutionReceipt(
+  orderDigest: string,
+  executionId: string,
+  targetUrl: string,
+  signal?: AbortSignal,
+): Promise<TradeExecutionReceiptDeliveryResult> {
+  return postJson<TradeExecutionReceiptDeliveryResult>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}`
+      + `/execution-receipts/${encodeURIComponent(executionId)}/deliver`,
+    { target_url: targetUrl },
     signal,
   );
 }
