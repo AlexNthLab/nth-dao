@@ -398,6 +398,22 @@ vi.mock("../api", () => ({
     remote_intake_receipt_digest: "sha256:" + "e".repeat(64),
   }),
   getTradeOrder: vi.fn().mockResolvedValue(null),
+  getTradeReceiptReview: vi.fn().mockResolvedValue({
+    status: "not-reviewed",
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    review: null,
+    retained_review_digests: [],
+    federation: { status: "local-only" },
+  }),
+  createTradeReceiptReview: vi.fn().mockResolvedValue({
+    status: "review-signed",
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    review_digest: "sha256:" + "6".repeat(64),
+  }),
+  deliverTradeReceiptReview: vi.fn().mockResolvedValue({
+    status: "receipt-review-delivered",
+    remote_audit_event_id: "7".repeat(64),
+  }),
   getTradeRulePackage: vi.fn().mockResolvedValue(null),
   getTradeExecutionReceipts: vi.fn().mockResolvedValue({
     status: "available",
@@ -493,6 +509,8 @@ vi.mock("../api", () => ({
 
 import {
   ApiHttpError,
+  createTradeReceiptReview,
+  deliverTradeReceiptReview,
   deliverTradeExecutionReceipt,
   fetchCommerceOrders,
   fetchTradeProposals,
@@ -500,6 +518,7 @@ import {
   fetchTradeRulePackages,
   fetchTradeRuleRecognitionImportBatch,
   getTradeOrder,
+  getTradeReceiptReview,
   getTradeOfferInspection,
   getTradeExecutionReceipts,
   getTradeProposal,
@@ -539,6 +558,22 @@ beforeEach(() => {
     items: [],
   }]);
   vi.mocked(getTradeOrder).mockReset().mockResolvedValue(null as never);
+  vi.mocked(getTradeReceiptReview).mockReset().mockResolvedValue({
+    status: "not-reviewed",
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    review: null,
+    retained_review_digests: [],
+    federation: { status: "local-only" },
+  });
+  vi.mocked(createTradeReceiptReview).mockReset().mockResolvedValue({
+    status: "review-signed",
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    review_digest: "sha256:" + "6".repeat(64),
+  } as never);
+  vi.mocked(deliverTradeReceiptReview).mockReset().mockResolvedValue({
+    status: "receipt-review-delivered",
+    remote_audit_event_id: "7".repeat(64),
+  } as never);
   vi.mocked(getTradeExecutionReceipts).mockReset().mockResolvedValue({
     status: "available",
     items: [],
@@ -2163,6 +2198,183 @@ describe("CommerceView", () => {
     expect(screen.queryByRole("button", {
       name: "Deliver signed Receipt",
     })).toBeNull();
+  });
+
+  it("loads Receipt Review status lazily and lets only the counterparty sign", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    projection.local_executor = {
+      did: summary.taker_did,
+      role: "taker",
+      authorized_operation_count: 0,
+    };
+    const reviewId = "nth-trade-review-sha256:" + "f".repeat(64);
+    const reviewDocument = {
+      kind: "nth.dao.trade.receipt-review",
+      protocol_version: "1",
+      review_id: reviewId,
+      order_id: summary.order_id,
+      order_digest: summary.order_digest,
+      execution_id: projection.history.items[0].execution_id,
+      receipt_digest: projection.history.items[0].receipt_digest,
+      reviewer_did: summary.taker_did,
+      reviewer_role: "taker" as const,
+      verifier_policy_digest: "sha256:" + "8".repeat(64),
+      adapter_policy_digest: "sha256:" + "9".repeat(64),
+      decision: "disputed" as const,
+      reason_codes: ["result.mismatch"],
+      reviewed_at: "2026-08-03T00:02:00Z",
+      proof: {},
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(getTradeReceiptReview)
+      .mockResolvedValueOnce({
+        status: "not-reviewed",
+        review_id: reviewId,
+        review: null,
+        retained_review_digests: [],
+        federation: { status: "local-only" },
+      })
+      .mockResolvedValueOnce({
+        status: "reviewed",
+        review_id: reviewId,
+        review_digest: "sha256:" + "6".repeat(64),
+        review: reviewDocument,
+        retained_review_digests: ["sha256:" + "6".repeat(64)],
+        federation: { status: "local-only" },
+      });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    expect(getTradeReceiptReview).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByText("Counterparty review"));
+
+    expect(await screen.findByRole("button", { name: "Sign counterparty Review" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "disputed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign counterparty Review" }));
+    expect(await screen.findByText(/require at least one reason code/i)).toBeTruthy();
+    expect(createTradeReceiptReview).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Reason codes"), {
+      target: { value: "result.mismatch, result.mismatch" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign counterparty Review" }));
+    await waitFor(() => expect(createTradeReceiptReview).toHaveBeenCalledWith(
+      summary.order_digest,
+      projection.history.items[0].execution_id,
+      "disputed",
+      ["result.mismatch"],
+      expect.any(AbortSignal),
+    ));
+    expect(await screen.findByText("Disputed")).toBeTruthy();
+    expect(screen.getByText(/counterparty claim, not a verified fact/i)).toBeTruthy();
+  });
+
+  it("blocks a conflicted Receipt Review and exposes every retained digest", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    const reviewId = "nth-trade-review-sha256:" + "f".repeat(64);
+    const firstDigest = "sha256:" + "6".repeat(64);
+    const secondDigest = "sha256:" + "7".repeat(64);
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(getTradeReceiptReview).mockResolvedValueOnce({
+      status: "conflicted",
+      review_id: reviewId,
+      review: null,
+      retained_review_digests: [firstDigest, secondDigest],
+      federation: { status: "blocked-by-conflict" },
+    });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.click(await screen.findByText("Counterparty review"));
+
+    expect(await screen.findByText("Signer equivocation detected.")).toBeTruthy();
+    expect(screen.getByText(firstDigest)).toBeTruthy();
+    expect(screen.getByText(secondDigest)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Deliver signed Review/ })).toBeNull();
+  });
+
+  it("delivers a signed counterparty Review and labels the peer ACK as a claim", async () => {
+    const summary = agreementSummary();
+    const projection = executionProjection();
+    projection.local_executor = {
+      did: summary.taker_did,
+      role: "taker",
+      authorized_operation_count: 0,
+    };
+    const reviewId = "nth-trade-review-sha256:" + "f".repeat(64);
+    const reviewed = {
+      status: "reviewed" as const,
+      review_id: reviewId,
+      review_digest: "sha256:" + "6".repeat(64),
+      review: {
+        kind: "nth.dao.trade.receipt-review",
+        protocol_version: "1",
+        review_id: reviewId,
+        order_id: summary.order_id,
+        order_digest: summary.order_digest,
+        execution_id: projection.history.items[0].execution_id,
+        receipt_digest: projection.history.items[0].receipt_digest,
+        reviewer_did: summary.taker_did,
+        reviewer_role: "taker" as const,
+        verifier_policy_digest: "sha256:" + "8".repeat(64),
+        adapter_policy_digest: "sha256:" + "9".repeat(64),
+        decision: "accepted" as const,
+        reason_codes: [],
+        reviewed_at: "2026-08-03T00:02:00Z",
+        proof: {},
+      },
+      retained_review_digests: ["sha256:" + "6".repeat(64)],
+      federation: { status: "local-only" as const },
+    };
+    vi.mocked(fetchTradeOrders).mockResolvedValueOnce({ items: [summary], next_cursor: "" });
+    vi.mocked(getTradeOrder).mockResolvedValueOnce({
+      ...summary,
+      order: { kind: "nth.dao.trade.order" },
+      execution: projection,
+    });
+    vi.mocked(getTradeReceiptReview)
+      .mockResolvedValueOnce(reviewed)
+      .mockResolvedValueOnce({
+        ...reviewed,
+        federation: {
+          status: "acknowledged",
+          target_url: "https://peer.example",
+          acknowledgement_digest: "sha256:" + "3".repeat(64),
+          remote_receiver_did: summary.maker_did,
+          remote_audit_event_id: "4".repeat(64),
+          remote_received_at: "2026-08-03T00:03:00Z",
+        },
+      });
+
+    render(<ToastProvider><CommerceView /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("tab", { name: /Agreements/ }));
+    fireEvent.change(await screen.findByLabelText("Peer NTH DAO URL"), {
+      target: { value: "https://peer.example" },
+    });
+    fireEvent.click(await screen.findByText("Counterparty review"));
+    fireEvent.click(await screen.findByRole("button", { name: "Deliver signed Review" }));
+
+    await waitFor(() => expect(deliverTradeReceiptReview).toHaveBeenCalledWith(
+      summary.order_digest,
+      projection.history.items[0].execution_id,
+      reviewId,
+      "https://peer.example",
+      expect.any(AbortSignal),
+    ));
+    expect(await screen.findByText(/peer claims it retained and independently replayed/i)).toBeTruthy();
+    expect(screen.getByText(/not proof of quality, payment, or the truth/i)).toBeTruthy();
   });
 
   it("offers local ACK anchor repair when persistence outlives Spine projection", async () => {

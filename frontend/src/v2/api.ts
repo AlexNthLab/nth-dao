@@ -58,6 +58,9 @@ import type {
   TradeProposalPage,
   TradeExecutionHistoryPage,
   TradeExecutionReceiptDeliveryResult,
+  TradeReceiptReviewCreateResult,
+  TradeReceiptReviewDeliveryResult,
+  TradeReceiptReviewState,
   TradeOrderDetail,
   TradeOrderPage,
   TradeRuleRecognitionImportResult,
@@ -1172,6 +1175,49 @@ export async function deliverTradeExecutionReceipt(
   return postJson<TradeExecutionReceiptDeliveryResult>(
     `/trade/orders/${encodeURIComponent(orderDigest)}`
       + `/execution-receipts/${encodeURIComponent(executionId)}/deliver`,
+    { target_url: targetUrl },
+    signal,
+  );
+}
+
+export async function getTradeReceiptReview(
+  orderDigest: string,
+  executionId: string,
+  signal?: AbortSignal,
+): Promise<TradeReceiptReviewState> {
+  return getJson<TradeReceiptReviewState>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}`
+      + `/execution-receipts/${encodeURIComponent(executionId)}/reviews`,
+    signal,
+  );
+}
+
+export async function createTradeReceiptReview(
+  orderDigest: string,
+  executionId: string,
+  decision: "accepted" | "rejected" | "disputed",
+  reasonCodes: string[],
+  signal?: AbortSignal,
+): Promise<TradeReceiptReviewCreateResult> {
+  return postJson<TradeReceiptReviewCreateResult>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}`
+      + `/execution-receipts/${encodeURIComponent(executionId)}/reviews`,
+    { decision, reason_codes: reasonCodes },
+    signal,
+  );
+}
+
+export async function deliverTradeReceiptReview(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+  targetUrl: string,
+  signal?: AbortSignal,
+): Promise<TradeReceiptReviewDeliveryResult> {
+  return postJson<TradeReceiptReviewDeliveryResult>(
+    `/trade/orders/${encodeURIComponent(orderDigest)}`
+      + `/execution-receipts/${encodeURIComponent(executionId)}`
+      + `/reviews/${encodeURIComponent(reviewId)}/deliver`,
     { target_url: targetUrl },
     signal,
   );

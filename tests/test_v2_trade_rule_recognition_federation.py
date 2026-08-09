@@ -283,7 +283,10 @@ def test_peer_page_fetch_uses_one_pinned_ip_and_complete_deadline(
     monkeypatch.setattr(
         web_v2_api,
         "_call_operator_trade_peer_with_fallback",
-        lambda _url, operation: operation("203.0.113.7"),
+        lambda _url, operation, *, timeout_seconds: operation(
+            "203.0.113.7",
+            timeout_seconds,
+        ),
     )
 
     proof_set = web_v2_api._fetch_trade_rule_recognition_proof_pages_from_peer(

@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import json
@@ -30,7 +31,7 @@ from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity, crypto_available
 from nth_dao.spine import SignedEventLog
 from nth_dao.util import InterProcessLock
-from nth_dao.web import create_app
+from nth_dao.web import _FederationBodyLimitMiddleware, create_app
 from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
 from nth_dao.web.rate_limit import RateLimiter
 from nth_dao.trade_rules import (
@@ -162,6 +163,28 @@ from nth_dao.trade_rules.receipt_review import (
     receipt_review_digest,
     verify_trade_receipt_review_under_policy,
 )
+from nth_dao.trade_rules.receipt_review_transport import (
+    TradeReceiptReviewAcknowledgement,
+    TradeReceiptReviewAcknowledgementRejected,
+    TradeReceiptReviewDelivery,
+    TradeReceiptReviewDeliveryRejected,
+    create_trade_receipt_review_acknowledgement,
+    create_trade_receipt_review_delivery,
+    trade_receipt_review_acknowledgement_digest,
+    trade_receipt_review_delivery_digest,
+    verify_trade_receipt_review_acknowledgement,
+    verify_trade_receipt_review_delivery,
+)
+from nth_dao.trade_rules.receipt_review_intake import (
+    TradeReceiptReviewIntakeCoordinator,
+)
+from nth_dao.trade_rules.receipt_review_dispatch import (
+    EVENT_TRADE_RECEIPT_REVIEW_ACKNOWLEDGED,
+    TradeReceiptReviewDispatchCoordinator,
+    TradeReceiptReviewDispatchError,
+    TradeReceiptReviewDispatchStore,
+    receipt_review_acknowledgement_audit_payload,
+)
 from nth_dao.trade_rules.receipt_review_store import (
     TradeReceiptReviewConflict,
     TradeReceiptReviewStore,
@@ -185,7 +208,9 @@ from nth_dao.trade_rules.agreement_conformance import (
     EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH,
     EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH,
     RECEIPT_REVIEW_AUDIT_SCHEMA_PATH,
+    RECEIPT_REVIEW_ACKNOWLEDGEMENT_SCHEMA_PATH,
     RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH,
+    RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH,
     RECEIPT_REVIEW_SCHEMA_PATH,
     RULE_PACKAGE_BUNDLE_SCHEMA_PATH,
     ORDER_AUDIT_SCHEMA_PATH,
@@ -2999,6 +3024,24 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
         receiver_did=order.to_dict()["taker_did"],
         audit_event_id=order_intake_receipt.to_dict()["audit_event_id"],
     ) == (True, "ok")
+    order_clock_skew_receipt = TradeOrderIntakeReceipt.from_dict(
+        stored["order_intake_receipt_clock_skew"]
+    )
+    assert trade_order_intake_receipt_digest(order_clock_skew_receipt) == (
+        stored["order_intake_receipt_clock_skew_digest"]
+    )
+    for case in stored[
+        "order_intake_receipt_clock_skew_verification_cases"
+    ]:
+        ok, _reason = verify_trade_order_intake_receipt(
+            order_clock_skew_receipt,
+            delivery=order_delivery,
+            receiver_did=case["receiver_did"],
+            audit_event_id=case["audit_event_id"],
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
     for case in stored["order_delivery_verification_cases"]:
         ok, _reason = verify_trade_order_delivery(
             order_delivery,
@@ -3094,6 +3137,27 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
             clock_skew_seconds=case["clock_skew_seconds"],
         )
         assert ok is case["expected_valid"], case["case"]
+    execution_clock_skew_ack = (
+        TradeExecutionReceiptAcknowledgement.from_dict(
+            stored["execution_receipt_acknowledgement_clock_skew"]
+        )
+    )
+    assert trade_execution_receipt_acknowledgement_digest(
+        execution_clock_skew_ack
+    ) == stored["execution_receipt_acknowledgement_clock_skew_digest"]
+    for case in stored[
+        "execution_receipt_acknowledgement_clock_skew_verification_cases"
+    ]:
+        ok, _reason = verify_trade_execution_receipt_acknowledgement(
+            execution_clock_skew_ack,
+            delivery=execution_delivery,
+            order=order,
+            receiver_did=case["receiver_did"],
+            audit_event_id=case["audit_event_id"],
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
     receipt_review = TradeReceiptReview.from_dict(
         stored["receipt_review"],
         receipt=execution_receipt,
@@ -3102,6 +3166,72 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
     assert receipt_review_digest(receipt_review) == (
         stored["receipt_review_digest"]
     )
+    receipt_review_delivery = TradeReceiptReviewDelivery.from_dict(
+        stored["receipt_review_delivery"],
+        receipt=execution_receipt,
+        order=order,
+    )
+    receipt_review_acknowledgement = (
+        TradeReceiptReviewAcknowledgement.from_dict(
+            stored["receipt_review_acknowledgement"]
+        )
+    )
+    assert receipt_review_delivery.review == receipt_review
+    assert trade_receipt_review_delivery_digest(
+        receipt_review_delivery,
+        receipt=execution_receipt,
+        order=order,
+    ) == stored["receipt_review_delivery_digest"]
+    for case in stored["receipt_review_delivery_verification_cases"]:
+        ok, _reason = verify_trade_receipt_review_delivery(
+            receipt_review_delivery,
+            receipt=execution_receipt,
+            order=order,
+            recipient_did=case["recipient_did"],
+            at=_utc(case["at"]),
+            max_ttl_seconds=case["max_ttl_seconds"],
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
+    assert trade_receipt_review_acknowledgement_digest(
+        receipt_review_acknowledgement
+    ) == stored["receipt_review_acknowledgement_digest"]
+    for case in stored[
+        "receipt_review_acknowledgement_verification_cases"
+    ]:
+        ok, _reason = verify_trade_receipt_review_acknowledgement(
+            receipt_review_acknowledgement,
+            delivery=receipt_review_delivery,
+            receipt=execution_receipt,
+            order=order,
+            receiver_did=case["receiver_did"],
+            audit_event_id=case["audit_event_id"],
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
+    receipt_review_clock_skew_ack = (
+        TradeReceiptReviewAcknowledgement.from_dict(
+            stored["receipt_review_acknowledgement_clock_skew"]
+        )
+    )
+    assert trade_receipt_review_acknowledgement_digest(
+        receipt_review_clock_skew_ack
+    ) == stored["receipt_review_acknowledgement_clock_skew_digest"]
+    for case in stored[
+        "receipt_review_acknowledgement_clock_skew_verification_cases"
+    ]:
+        ok, _reason = verify_trade_receipt_review_acknowledgement(
+            receipt_review_clock_skew_ack,
+            delivery=receipt_review_delivery,
+            receipt=execution_receipt,
+            order=order,
+            receiver_did=case["receiver_did"],
+            audit_event_id=case["audit_event_id"],
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
     assert stored["receipt_review_audit"]["event_type"] == (
         EVENT_TRADE_RECEIPT_REVIEWED
     )
@@ -3167,6 +3297,22 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
             content_resolver,
             JsonSchema202012Validator(),
         )
+        verify_trade_receipt_review_under_policy(
+            receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            package_resolver=package_store,
+            verifier_policy=receipt_review_delivery.verifier_policy,
+            adapter_resolver=_AdapterResolver(
+                adapter,
+                artifacts={
+                    adapter.to_dict()["artifact_digest"]: adapter_artifact
+                },
+            ),
+            adapter_policy=receipt_review_delivery.adapter_policy,
+            content_resolver=content_resolver,
+            schema_validator=JsonSchema202012Validator(),
+        )
     assert replayed.to_dict() == stored["expected_execution_readiness"]
 
 
@@ -3210,6 +3356,16 @@ def test_negative_agreement_vectors_fail_closed():
             receipt=stored["execution_receipt"],
             order=stored["order"],
         ),
+        "receipt_review_delivery": lambda document: (
+            TradeReceiptReviewDelivery.from_dict(
+                document,
+                receipt=stored["execution_receipt"],
+                order=stored["order"],
+            )
+        ),
+        "receipt_review_acknowledgement": (
+            TradeReceiptReviewAcknowledgement.from_dict
+        ),
         "receipt_review_audit_binding": lambda document: (
             validate_receipt_review_audit_binding(
                 document,
@@ -3248,9 +3404,11 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeExecutionReceiptDeliveryRejected,
                 TradeExecutionReceiptAcknowledgementRejected,
                 TradeExecutionAdapterRejected,
-                TradeExecutionAuditError,
-                TradeReceiptReviewRejected,
-                TradeReceiptReviewAuditError,
+                    TradeExecutionAuditError,
+                    TradeReceiptReviewRejected,
+                    TradeReceiptReviewDeliveryRejected,
+                    TradeReceiptReviewAcknowledgementRejected,
+                    TradeReceiptReviewAuditError,
                 RulePackageBundleRejected,
             )
         ):
@@ -3306,6 +3464,14 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     receipt_review = json.loads(
         RECEIPT_REVIEW_SCHEMA_PATH.read_text(encoding="utf-8")
     )
+    receipt_review_delivery = json.loads(
+        RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    receipt_review_acknowledgement = json.loads(
+        RECEIPT_REVIEW_ACKNOWLEDGEMENT_SCHEMA_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
     receipt_review_audit = json.loads(
         RECEIPT_REVIEW_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
     )
@@ -3319,6 +3485,15 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     )
 
     assert proposal["$schema"].endswith("2020-12/schema")
+    assert receipt_review_delivery["properties"]["proof"]["$ref"].endswith(
+        "proof"
+    )
+    assert receipt_review_delivery["properties"]["review"]["$ref"] == (
+        receipt_review["$id"]
+    )
+    assert receipt_review_acknowledgement["properties"]["status"][
+        "const"
+    ] == "review-retained-verified"
     assert rule_package_bundle["properties"]["kind"]["const"] == (
         RULE_PACKAGE_BUNDLE_KIND
     )
@@ -3546,6 +3721,14 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     review_schema = json.loads(
         RECEIPT_REVIEW_SCHEMA_PATH.read_text(encoding="utf-8")
     )
+    review_delivery_schema = json.loads(
+        RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    review_acknowledgement_schema = json.loads(
+        RECEIPT_REVIEW_ACKNOWLEDGEMENT_SCHEMA_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
     review_audit_schema = json.loads(
         RECEIPT_REVIEW_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
     )
@@ -3565,6 +3748,12 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     )
     audit_validator = jsonschema.validators.validator_for(audit_schema)
     review_validator = jsonschema.validators.validator_for(review_schema)
+    review_delivery_validator = jsonschema.validators.validator_for(
+        review_delivery_schema
+    )
+    review_acknowledgement_validator = jsonschema.validators.validator_for(
+        review_acknowledgement_schema
+    )
     review_audit_validator = jsonschema.validators.validator_for(
         review_audit_schema
     )
@@ -3578,6 +3767,10 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     adapter_policy_validator.check_schema(adapter_policy_schema)
     audit_validator.check_schema(audit_schema)
     review_validator.check_schema(review_schema)
+    review_delivery_validator.check_schema(review_delivery_schema)
+    review_acknowledgement_validator.check_schema(
+        review_acknowledgement_schema
+    )
     review_audit_validator.check_schema(review_audit_schema)
     review_conflict_audit_validator.check_schema(
         review_conflict_audit_schema
@@ -3606,6 +3799,25 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
         stored["execution_audit"]["payload"]
     )
     review_validator(review_schema).validate(stored["receipt_review"])
+    review_registry = referencing.Registry()
+    for referenced_schema in (
+        review_schema,
+        json.loads(
+            PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8")
+        ),
+        adapter_policy_schema,
+    ):
+        review_registry = review_registry.with_resource(
+            referenced_schema["$id"],
+            referencing.Resource.from_contents(referenced_schema),
+        )
+    review_delivery_validator(
+        review_delivery_schema,
+        registry=review_registry,
+    ).validate(stored["receipt_review_delivery"])
+    review_acknowledgement_validator(
+        review_acknowledgement_schema
+    ).validate(stored["receipt_review_acknowledgement"])
     review_audit_validator(review_audit_schema).validate(
         stored["receipt_review_audit"]["payload"]
     )
@@ -3635,6 +3847,13 @@ def test_execution_schemas_validate_public_vectors_and_reject_shape_drift():
     bad_review["decision"] = "unknown"
     with pytest.raises(jsonschema.ValidationError):
         review_validator(review_schema).validate(bad_review)
+    bad_review_delivery = copy.deepcopy(stored["receipt_review_delivery"])
+    bad_review_delivery["verifier_policy"]["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        review_delivery_validator(
+            review_delivery_schema,
+            registry=review_registry,
+        ).validate(bad_review_delivery)
 
 
 def _order(context):
@@ -3891,6 +4110,81 @@ def test_order_intake_receipt_rejects_impossible_chronology(tmp_path):
 
     assert ok is False
     assert "outside the signed Delivery lifetime" in reason
+
+
+def test_order_intake_receipt_allows_symmetric_clock_skew(tmp_path):
+    context = _setup(tmp_path)
+    delivery = _order_delivery(context)
+    received_at = "2026-08-01T01:00:59Z"
+
+    receipt = create_trade_order_intake_receipt(
+        context["taker"],
+        delivery=delivery,
+        received_at=received_at,
+        audit_event_id="1" * 64,
+        clock_skew_seconds=2,
+    )
+
+    assert verify_trade_order_intake_receipt(
+        receipt,
+        delivery=delivery,
+        receiver_did=context["taker"].as_did(),
+        audit_event_id="1" * 64,
+        at=_utc(received_at),
+        clock_skew_seconds=2,
+    ) == (True, "ok")
+    with pytest.raises(
+        TradeOrderIntakeReceiptRejected,
+        match="within the signed Delivery lifetime",
+    ):
+        create_trade_order_intake_receipt(
+            context["taker"],
+            delivery=delivery,
+            received_at=received_at,
+            audit_event_id="1" * 64,
+            clock_skew_seconds=0,
+        )
+
+
+def test_order_intake_receipt_validation_keeps_ack_error_contract(tmp_path):
+    context = _setup(tmp_path)
+    delivery = _order_delivery(context)
+
+    with pytest.raises(
+        TradeOrderIntakeReceiptRejected,
+        match="received_at must be a UTC RFC3339 timestamp",
+    ):
+        create_trade_order_intake_receipt(
+            context["taker"],
+            delivery=delivery,
+            received_at="not-a-timestamp",
+            audit_event_id="1" * 64,
+        )
+    with pytest.raises(
+        TradeOrderIntakeReceiptRejected,
+        match="clock_skew_seconds must be a finite non-negative number",
+    ):
+        create_trade_order_intake_receipt(
+            context["taker"],
+            delivery=delivery,
+            received_at="2026-08-01T01:03:00Z",
+            audit_event_id="1" * 64,
+            clock_skew_seconds=float("nan"),
+        )
+
+    receipt = create_trade_order_intake_receipt(
+        context["taker"],
+        delivery=delivery,
+        received_at="2026-08-01T01:03:00Z",
+        audit_event_id="1" * 64,
+    )
+    malformed = receipt.to_dict()
+    malformed["proof"]["created"] = "not-a-timestamp"
+    with pytest.raises(
+        TradeOrderIntakeReceiptRejected,
+        match="proof.created must be a UTC RFC3339 timestamp",
+    ):
+        TradeOrderIntakeReceipt.from_dict(malformed)
 
 
 def _order_intake_runtime(tmp_path, context):
@@ -7159,6 +7453,467 @@ def test_public_execution_receipt_budget_precedes_runtime_disclosure(tmp_path):
     assert response.status_code == 429
 
 
+def _retain_order_and_receipt(app, context, order, receipt) -> None:
+    moment = int(datetime.now(timezone.utc).timestamp() * 1_000)
+    app.state.nth.trade_order_audit.accept(order, now_ms=moment)
+    app.state.nth.trade_execution_coordinator.record(
+        receipt,
+        order=order,
+        now_ms=moment,
+    )
+
+
+def test_operator_signs_and_reads_local_receipt_review(tmp_path):
+    app = create_app(tmp_path / "taker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        taker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    _retain_order_and_receipt(app, context, order, receipt)
+    _configure_live_execution_receiver(app, context)
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews"
+    )
+    client = TestClient(app)
+
+    created = client.post(
+        path,
+        json={"decision": "accepted", "reason_codes": []},
+        headers=auth,
+    )
+    fetched = client.get(path, headers=auth)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["status"] == "review-signed"
+    assert created.json()["review"]["reviewer_did"] == (
+        app.state.nth.node_identity.as_did()
+    )
+    assert created.json()["is_counterparty_claim"] is True
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["status"] == "reviewed"
+    assert fetched.json()["review_id"] == created.json()["review_id"]
+    assert fetched.json()["federation"]["status"] == "local-only"
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_public_receipt_review_replays_signed_policies_and_returns_ack(
+    tmp_path,
+):
+    app = create_app(tmp_path / "maker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    _retain_order_and_receipt(app, context, order, receipt)
+    _configure_live_execution_receiver(app, context)
+    reviewed = datetime.now(timezone.utc) + timedelta(seconds=1)
+    if reviewed.microsecond == 0:
+        reviewed = reviewed.replace(microsecond=1)
+    reviewed_at = reviewed.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    review = create_trade_receipt_review(
+        context["taker"],
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        verifier_policy=context["taker_policy"],
+        adapter_resolver=context["adapter_resolver"],
+        adapter_policy=context["adapter_policy"],
+        content_resolver=context["content_resolver"],
+        schema_validator=context["schema_validator"],
+        decision="accepted",
+        reviewed_at=reviewed_at,
+        now=reviewed,
+    )
+    delivery = create_trade_receipt_review_delivery(
+        context["taker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+        created_at=reviewed_at,
+        not_after=(reviewed + timedelta(minutes=5)).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z"),
+        now=reviewed,
+    )
+    path = (
+        f"/api/v2/trade/federation/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews"
+    )
+
+    first = TestClient(app).post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    retry = TestClient(app).post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert first.status_code == 202, first.text
+    assert retry.status_code == 202, retry.text
+    assert first.json()["status"] == "receipt-review-retained-verified"
+    assert first.json()["review_store_created"] is True
+    assert retry.json()["review_store_created"] is False
+    acknowledgement = TradeReceiptReviewAcknowledgement.from_dict(
+        first.json()["acknowledgement"]
+    )
+    assert verify_trade_receipt_review_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=app.state.nth.node_identity.as_did(),
+        audit_event_id=first.json()["audit_event_id"],
+    ) == (True, "ok")
+    assert retry.json()["acknowledgement"] == first.json()["acknowledgement"]
+
+
+def test_public_receipt_review_endpoint_enforces_preparse_body_limit(tmp_path):
+    client = TestClient(create_app(tmp_path, require_console_auth=True))
+    path = (
+        "/api/v2/trade/federation/orders/sha256:"
+        + ("0" * 64)
+        + "/execution-receipts/nth-trade-execution-sha256:"
+        + ("1" * 64)
+        + "/reviews"
+    )
+
+    response = client.post(
+        path,
+        content=b"{" + (b"x" * (2 * 1024 * 1024)) + b"}",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert "2048 KiB" in response.json()["detail"]
+
+
+def test_public_receipt_review_chunked_body_is_bounded_without_length():
+    downstream_completed = False
+
+    async def drain(_scope, receive, send):
+        nonlocal downstream_completed
+        while True:
+            message = await receive()
+            if not message.get("more_body", False):
+                break
+        downstream_completed = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    chunks = [
+        {
+            "type": "http.request",
+            "body": b"x" * (2 * 1024 * 1024),
+            "more_body": True,
+        },
+        {"type": "http.request", "body": b"x", "more_body": False},
+    ]
+    sent = []
+
+    async def receive():
+        return chunks.pop(0)
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        _FederationBodyLimitMiddleware(drain)(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": (
+                    "/api/v2/trade/federation/orders/sha256:"
+                    + ("0" * 64)
+                    + "/execution-receipts/nth-trade-execution-sha256:"
+                    + ("1" * 64)
+                    + "/reviews"
+                ),
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert downstream_completed is False
+    assert sent[0]["status"] == 413
+
+
+def test_operator_delivers_receipt_review_once_and_projects_ack(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "taker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        taker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    _retain_order_and_receipt(app, context, order, receipt)
+    _configure_live_execution_receiver(app, context)
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    base = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews"
+    )
+    client = TestClient(app)
+    created = client.post(
+        base,
+        json={"decision": "accepted", "reason_codes": []},
+        headers=auth,
+    )
+    assert created.status_code == 201, created.text
+    review_id = created.json()["review_id"]
+    network_calls = 0
+
+    def receive(
+        peer_url,
+        sent_order_digest,
+        sent_execution_id,
+        document,
+        *,
+        timeout_seconds=15.0,
+    ):
+        nonlocal network_calls
+        network_calls += 1
+        assert peer_url == "http://127.0.0.1:18083"
+        assert sent_order_digest == trade_order_digest(order)
+        assert sent_execution_id == receipt.execution_id
+        delivery = TradeReceiptReviewDelivery.from_dict(
+            document,
+            receipt=receipt,
+            order=order,
+        )
+        acknowledgement = create_trade_receipt_review_acknowledgement(
+            context["maker"],
+            delivery=delivery,
+            receipt=receipt,
+            order=order,
+            received_at=delivery.to_dict()["created_at"],
+            audit_event_id="c" * 64,
+        )
+        return 202, {
+            "status": "receipt-review-retained-verified",
+            "audit_event_id": "c" * 64,
+            "acknowledgement": acknowledgement.to_dict(),
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_receipt_review_delivery_to_peer",
+        receive,
+    )
+    delivery_path = f"{base}/{review_id}/deliver"
+    first = client.post(
+        delivery_path,
+        json={"target_url": "http://127.0.0.1:18083"},
+        headers=auth,
+    )
+    retry = client.post(
+        delivery_path,
+        json={"target_url": "http://127.0.0.1:18083"},
+        headers=auth,
+    )
+    wrong_target = client.post(
+        delivery_path,
+        json={"target_url": "http://127.0.0.1:18084"},
+        headers=auth,
+    )
+    projected = client.get(base, headers=auth)
+
+    assert first.status_code == 200, first.text
+    assert retry.status_code == 200, retry.text
+    assert first.json()["status"] == "receipt-review-delivered"
+    assert retry.json() == first.json()
+    assert wrong_target.status_code == 409, wrong_target.text
+    assert "different peer target" in wrong_target.json()["detail"]
+    assert network_calls == 1
+    assert projected.status_code == 200, projected.text
+    assert projected.json()["federation"]["status"] == "acknowledged"
+    assert projected.json()["federation"]["remote_receiver_did"] == (
+        context["maker"].as_did()
+    )
+    assert projected.json()["federation"]["remote_audit_event_id"] == (
+        "c" * 64
+    )
+
+
+def test_receipt_review_delivery_survives_policy_rotation_and_restart(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = tmp_path / "taker"
+    app = create_app(runtime, require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        taker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    _retain_order_and_receipt(app, context, order, receipt)
+    _configure_live_execution_receiver(app, context)
+    client = TestClient(app)
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    base = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews"
+    )
+    created = client.post(
+        base,
+        json={"decision": "accepted", "reason_codes": []},
+        headers=auth,
+    )
+    assert created.status_code == 201, created.text
+
+    restarted = create_app(runtime, require_console_auth=True)
+    _configure_live_execution_receiver(restarted, context)
+    rotated_policy = TradeExecutionAdapterPolicy(
+        accepted_adapter_digests=frozenset(),
+        allowed_execution_modes=frozenset({"declarative"}),
+        allowed_permissions=frozenset(),
+    )
+    assert rotated_policy.digest != context["adapter_policy"].digest
+    restarted.state.nth.trade_execution_adapter_policy = rotated_policy
+    network_calls = 0
+
+    def receive(
+        _peer_url,
+        _order_digest,
+        _execution_id,
+        document,
+        *,
+        timeout_seconds=15.0,
+    ):
+        nonlocal network_calls
+        network_calls += 1
+        delivery = TradeReceiptReviewDelivery.from_dict(
+            document,
+            receipt=receipt,
+            order=order,
+        )
+        assert delivery.adapter_policy.digest == context["adapter_policy"].digest
+        acknowledgement = create_trade_receipt_review_acknowledgement(
+            context["maker"],
+            delivery=delivery,
+            receipt=receipt,
+            order=order,
+            received_at=delivery.to_dict()["created_at"],
+            audit_event_id="d" * 64,
+        )
+        return 202, {
+            "audit_event_id": "d" * 64,
+            "acknowledgement": acknowledgement.to_dict(),
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_receipt_review_delivery_to_peer",
+        receive,
+    )
+    restarted_client = TestClient(restarted)
+    response = restarted_client.post(
+        f"{base}/{created.json()['review_id']}/deliver",
+        json={"target_url": "http://127.0.0.1:18083"},
+        headers={
+            "Authorization": f"Bearer {restarted.state.nth_console_token}"
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "receipt-review-delivered"
+    assert network_calls == 1
+
+
+def test_receipt_review_delivery_rejects_corrupt_policy_before_network(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "taker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        taker=app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    _retain_order_and_receipt(app, context, order, receipt)
+    _configure_live_execution_receiver(app, context)
+    client = TestClient(app)
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    base = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews"
+    )
+    created = client.post(
+        base,
+        json={"decision": "accepted", "reason_codes": []},
+        headers=auth,
+    )
+    assert created.status_code == 201, created.text
+    review_digest = created.json()["review_digest"]
+    outbox = app.state.nth.trade_receipt_review_coordinator.audit_outbox
+    path = outbox._path(review_digest)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["adapter_policy_b64u"] = "AA"
+    path.write_bytes(canonical_json(document))
+    network_calls = 0
+
+    def receive(*_args, **_kwargs):
+        nonlocal network_calls
+        network_calls += 1
+        raise AssertionError("network must not receive a corrupt Review")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_receipt_review_delivery_to_peer",
+        receive,
+    )
+    response = client.post(
+        f"{base}/{created.json()['review_id']}/deliver",
+        json={"target_url": "http://127.0.0.1:18083"},
+        headers=auth,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Receipt Review policy snapshots are unavailable or invalid"
+    )
+    assert str(path) not in response.text
+    assert network_calls == 0
+
+
+def test_public_receipt_review_budget_precedes_runtime_disclosure(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    per_client = RateLimiter(max_per_window=1, window_seconds=60)
+    global_limiter = RateLimiter(max_per_window=1, window_seconds=60)
+    per_client.check("testclient")
+    global_limiter.check("global")
+    app.state.nth.trade_receipt_review_delivery_limiter = per_client
+    app.state.nth.trade_receipt_review_delivery_global_limiter = global_limiter
+
+    response = TestClient(app).post(
+        f"/api/v2/trade/federation/orders/{'sha256:' + '1' * 64}"
+        "/execution-receipts/"
+        f"{'nth-trade-execution-sha256:' + '2' * 64}/reviews",
+        json={},
+    )
+
+    assert response.status_code == 429
+
+
 def test_operator_delivers_execution_receipt_and_persists_peer_ack(
     tmp_path,
     monkeypatch,
@@ -7266,14 +8021,21 @@ def test_order_reconcile_repairs_retained_receipt_ack_without_restart(tmp_path):
         maker=app.state.nth.node_identity,
     )
     order = _order(context)
-    moment = datetime.now(timezone.utc).replace(microsecond=0)
-    now_ms = int(moment.timestamp() * 1_000)
-    app.state.nth.trade_order_audit.accept(order, now_ms=now_ms)
+    accepted_at = datetime.now(timezone.utc).replace(microsecond=0)
+    app.state.nth.trade_order_audit.accept(
+        order,
+        now_ms=int(accepted_at.timestamp() * 1_000),
+    )
     receipt = _current_execution_receipt(
         context,
         order,
         coordinator=app.state.nth.trade_execution_coordinator,
     )
+    completed_at = datetime.fromisoformat(
+        receipt.to_dict()["completed_at"].replace("Z", "+00:00")
+    )
+    moment = completed_at + timedelta(seconds=1)
+    now_ms = int(moment.timestamp() * 1_000)
     delivery = create_trade_execution_receipt_delivery(
         context["maker"],
         receipt=receipt,
@@ -7608,6 +8370,75 @@ def test_live_http_wrong_did_rejects_before_receipt_post(tmp_path):
     assert caught.value.code == 502
     assert "does not match Receipt recipient_did" in error_body["detail"]
     assert receipt_posts == []
+
+
+def test_two_live_http_nodes_deliver_and_ack_receipt_review(tmp_path):
+    maker_app = create_app(tmp_path / "maker", require_console_auth=True)
+    taker_app = create_app(tmp_path / "taker", require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=maker_app.state.nth.node_identity,
+        taker=taker_app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    for app in (maker_app, taker_app):
+        _retain_order_and_receipt(app, context, order, receipt)
+        _configure_live_execution_receiver(app, context)
+    maker_server = _UvicornThreadServer(maker_app, _free_tcp_port())
+    taker_server = _UvicornThreadServer(taker_app, _free_tcp_port())
+    base = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews"
+    )
+
+    with maker_server, taker_server:
+        signed = _process_http_json(
+            taker_server.url + base,
+            payload={"decision": "accepted", "reason_codes": []},
+            headers={
+                "Authorization": (
+                    f"Bearer {taker_app.state.nth_console_token}"
+                )
+            },
+        )
+        delivered = _process_http_json(
+            taker_server.url + f"{base}/{signed['review_id']}/deliver",
+            payload={"target_url": maker_server.url},
+            headers={
+                "Authorization": (
+                    f"Bearer {taker_app.state.nth_console_token}"
+                )
+            },
+        )
+
+    assert delivered["status"] == "receipt-review-delivered"
+    assert delivered["acknowledgement_persisted"] is True
+    assert delivered["acknowledgement"]["receiver_did"] == (
+        maker_app.state.nth.node_identity.as_did()
+    )
+    review = maker_app.state.nth.trade_receipt_reviews.get(
+        signed["review_id"],
+        receipt=receipt,
+        order=order,
+    )
+    assert review is not None
+    review_digest = receipt_review_digest(
+        review,
+        receipt=receipt,
+        order=order,
+    )
+    assert (
+        taker_app.state.nth.trade_receipt_review_dispatch_store.get_pending(
+            review_digest
+        )
+        is None
+    )
+    assert (
+        taker_app.state.nth.trade_receipt_review_dispatch_store
+        .get_acknowledgement(review_digest)
+        is not None
+    )
 
 
 def test_web_boot_connects_execution_coordinator_without_enabling_funds(
@@ -9063,6 +9894,46 @@ def test_execution_receipt_transport_round_trip_and_acknowledgement(
     assert trade_execution_receipt_acknowledgement_digest(
         acknowledgement
     ).startswith("sha256:")
+
+
+def test_execution_receipt_acknowledgement_allows_symmetric_clock_skew(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    delivery = _execution_receipt_delivery(context, order)
+    received_at = "2026-09-01T00:01:59Z"
+
+    acknowledgement = create_trade_execution_receipt_acknowledgement(
+        context["taker"],
+        delivery=delivery,
+        order=order,
+        received_at=received_at,
+        audit_event_id="2" * 64,
+        clock_skew_seconds=2,
+    )
+
+    assert verify_trade_execution_receipt_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        order=order,
+        receiver_did=context["taker"].as_did(),
+        audit_event_id="2" * 64,
+        at=_utc(received_at),
+        clock_skew_seconds=2,
+    ) == (True, "ok")
+    with pytest.raises(
+        TradeExecutionReceiptAcknowledgementRejected,
+        match="within signed delivery lifetime",
+    ):
+        create_trade_execution_receipt_acknowledgement(
+            context["taker"],
+            delivery=delivery,
+            order=order,
+            received_at=received_at,
+            audit_event_id="2" * 64,
+            clock_skew_seconds=0,
+        )
 
 
 def test_execution_receipt_delivery_rejects_tampering_and_wrong_party(
@@ -11959,6 +12830,739 @@ def test_receipt_review_reverse_role_taker_executes_maker_reviews(tmp_path):
     ) == review
 
 
+def _receipt_review_delivery(context, order, receipt, review=None):
+    verified_review = review or _receipt_review(
+        context,
+        order,
+        receipt,
+    )
+    reviewer = (
+        context["maker"]
+        if verified_review.to_dict()["reviewer_role"] == "maker"
+        else context["taker"]
+    )
+    verifier_policy = (
+        context["maker_policy"]
+        if verified_review.to_dict()["reviewer_role"] == "maker"
+        else context["taker_policy"]
+    )
+    return create_trade_receipt_review_delivery(
+        reviewer,
+        review=verified_review,
+        receipt=receipt,
+        order=order,
+        verifier_policy=verifier_policy,
+        adapter_policy=context["adapter_policy"],
+        created_at="2026-09-01T00:03:00Z",
+        not_after="2026-09-01T00:13:00Z",
+        nonce="b2" * 16,
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+
+
+def test_receipt_review_transport_round_trip_and_acknowledgement(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    delivery = _receipt_review_delivery(context, order, receipt, review)
+
+    assert delivery.review == review
+    assert TradeReceiptReviewDelivery.from_json(
+        delivery.canonical_bytes,
+        receipt=receipt,
+        order=order,
+    ) == delivery
+    assert verify_trade_receipt_review_delivery(
+        delivery,
+        receipt=receipt,
+        order=order,
+        recipient_did=context["maker"].as_did(),
+        at=_utc("2026-09-01T00:04:00Z"),
+    ) == (True, "ok")
+    assert trade_receipt_review_delivery_digest(
+        delivery,
+        receipt=receipt,
+        order=order,
+    ).startswith("sha256:")
+
+    acknowledgement = create_trade_receipt_review_acknowledgement(
+        context["maker"],
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        received_at="2026-09-01T00:04:00Z",
+        audit_event_id="5" * 64,
+    )
+    assert TradeReceiptReviewAcknowledgement.from_json(
+        acknowledgement.canonical_bytes
+    ) == acknowledgement
+    assert verify_trade_receipt_review_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=context["maker"].as_did(),
+        audit_event_id="5" * 64,
+        at=_utc("2026-09-01T00:04:01Z"),
+    ) == (True, "ok")
+    assert trade_receipt_review_acknowledgement_digest(
+        acknowledgement
+    ).startswith("sha256:")
+
+
+def test_receipt_review_acknowledgement_allows_symmetric_clock_skew(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _receipt_review_delivery(context, order, receipt)
+    received_at = "2026-09-01T00:02:59Z"
+
+    acknowledgement = create_trade_receipt_review_acknowledgement(
+        context["maker"],
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        received_at=received_at,
+        audit_event_id="5" * 64,
+        clock_skew_seconds=2,
+    )
+
+    assert verify_trade_receipt_review_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=context["maker"].as_did(),
+        audit_event_id="5" * 64,
+        at=_utc(received_at),
+        clock_skew_seconds=2,
+    ) == (True, "ok")
+    with pytest.raises(
+        TradeReceiptReviewAcknowledgementRejected,
+        match="within signed delivery lifetime",
+    ):
+        create_trade_receipt_review_acknowledgement(
+            context["maker"],
+            delivery=delivery,
+            receipt=receipt,
+            order=order,
+            received_at=received_at,
+            audit_event_id="5" * 64,
+            clock_skew_seconds=0,
+        )
+
+
+def test_receipt_review_delivery_rejects_tamper_wrong_party_and_expiry(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    delivery = _receipt_review_delivery(context, order, receipt, review)
+
+    with pytest.raises(
+        TradeReceiptReviewDeliveryRejected,
+        match="signer does not match Review signer",
+    ):
+        create_trade_receipt_review_delivery(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+            created_at="2026-09-01T00:03:00Z",
+            not_after="2026-09-01T00:13:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+
+    tampered = delivery.to_dict()
+    tampered["review"]["decision"] = "disputed"
+    with pytest.raises(
+        TradeReceiptReviewDeliveryRejected,
+        match="embedded Receipt Review is invalid",
+    ):
+        TradeReceiptReviewDelivery.from_dict(
+            tampered,
+            receipt=receipt,
+            order=order,
+        )
+
+    retargeted = delivery.to_dict()
+    retargeted["recipient_did"] = context["taker"].as_did()
+    with pytest.raises(
+        TradeReceiptReviewDeliveryRejected,
+        match="different principals|Receipt executor|opposing Order party",
+    ):
+        TradeReceiptReviewDelivery.from_dict(
+            retargeted,
+            receipt=receipt,
+            order=order,
+        )
+
+    ok, reason = verify_trade_receipt_review_delivery(
+        delivery,
+        receipt=receipt,
+        order=order,
+        recipient_did=context["taker"].as_did(),
+        at=_utc("2026-09-01T00:04:00Z"),
+    )
+    assert ok is False
+    assert "recipient" in reason
+
+    ok, reason = verify_trade_receipt_review_delivery(
+        delivery,
+        receipt=receipt,
+        order=order,
+        recipient_did=context["maker"].as_did(),
+        at=_utc("2026-09-01T00:18:01Z"),
+    )
+    assert ok is False
+    assert "expired" in reason
+
+
+def test_receipt_review_acknowledgement_rejects_tampered_binding_and_time(
+    tmp_path,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _receipt_review_delivery(context, order, receipt)
+    acknowledgement = create_trade_receipt_review_acknowledgement(
+        context["maker"],
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        received_at="2026-09-01T00:04:00Z",
+        audit_event_id="6" * 64,
+    )
+
+    tampered = acknowledgement.to_dict()
+    tampered["review_digest"] = "sha256:" + "7" * 64
+    with pytest.raises(
+        TradeReceiptReviewAcknowledgementRejected,
+        match="signature invalid",
+    ):
+        TradeReceiptReviewAcknowledgement.from_dict(tampered)
+
+    ok, reason = verify_trade_receipt_review_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=context["maker"].as_did(),
+        audit_event_id="8" * 64,
+    )
+    assert ok is False
+    assert "audit_event_id" in reason
+
+    ok, reason = verify_trade_receipt_review_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=context["taker"].as_did(),
+        audit_event_id="6" * 64,
+    )
+    assert ok is False
+    assert "receiver" in reason
+
+    ok, reason = verify_trade_receipt_review_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=context["maker"].as_did(),
+        audit_event_id="6" * 64,
+        at=_utc("2026-09-01T00:03:00Z"),
+        clock_skew_seconds=0,
+    )
+    assert ok is False
+    assert "future" in reason
+
+
+def test_receipt_review_transport_supports_reverse_executor_role(tmp_path):
+    context = _setup(tmp_path)
+    proposal = _proposal(
+        context,
+        grants=[
+            {
+                "operation_id": "deliver-service",
+                "rule_id": "org.nthdao.test.delivery",
+                "package_digest": context["package_digest"],
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+                "executor_role": "taker",
+            }
+        ],
+    )
+    order = create_trade_order(
+        offer=context["offer"],
+        proposal=proposal,
+        acceptance=_acceptance(context, proposal),
+    )
+    receipt = _execution_receipt(context, order, role="taker")
+    review = _receipt_review(
+        context,
+        order,
+        receipt,
+        identity=context["maker"],
+        verifier_policy=context["maker_policy"],
+    )
+    delivery = _receipt_review_delivery(context, order, receipt, review)
+
+    assert delivery.to_dict()["sender_did"] == context["maker"].as_did()
+    assert delivery.to_dict()["recipient_did"] == context["taker"].as_did()
+    assert verify_trade_receipt_review_delivery(
+        delivery,
+        receipt=receipt,
+        order=order,
+        recipient_did=context["taker"].as_did(),
+        at=_utc("2026-09-01T00:04:00Z"),
+    ) == (True, "ok")
+
+
+def _receipt_review_intake(tmp_path, context):
+    store = TradeReceiptReviewStore(tmp_path)
+    spine = SignedEventLog(
+        tmp_path / "receipt-review-intake-spine.jsonl",
+        context["maker"],
+    )
+    coordinator = TradeReceiptReviewCoordinator(store, spine)
+    intake = TradeReceiptReviewIntakeCoordinator(
+        coordinator,
+        receiver_identity=context["maker"],
+        package_resolver=context["package_store"],
+        adapter_resolver=context["adapter_resolver"],
+        content_resolver=context["content_resolver"],
+        schema_validator=context["schema_validator"],
+    )
+    return store, spine, intake
+
+
+def test_receipt_review_intake_reverifies_persists_and_acknowledges(
+    tmp_path,
+):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    delivery = _receipt_review_delivery(context, order, receipt, review)
+    store, spine, intake = _receipt_review_intake(
+        tmp_path / "runtime",
+        context,
+    )
+
+    result = intake.receive(
+        delivery,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:04:00Z"),
+    )
+    replay = intake.receive(
+        delivery,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:04:01Z"),
+    )
+
+    assert result.audit.store_created is True
+    assert result.audit.anchor_created is True
+    assert replay.audit.store_created is False
+    assert replay.audit.anchor_created is False
+    assert result.audit.event == replay.audit.event
+    assert result.acknowledgement == replay.acknowledgement
+    assert result.acknowledgement.to_dict()["received_at"] == (
+        "2026-09-01T00:04:00.000Z"
+    )
+    assert store.get(
+        review.review_id,
+        receipt=receipt,
+        order=order,
+    ) == review
+    assert spine.verify_chain() == (True, "ok")
+    assert verify_trade_receipt_review_acknowledgement(
+        result.acknowledgement,
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        receiver_did=context["maker"].as_did(),
+        audit_event_id=result.audit.event.event_id,
+        at=_utc("2026-09-01T00:04:01Z"),
+    ) == (True, "ok")
+
+
+def test_receipt_review_intake_upgrades_legacy_time_before_signing_ack(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    delivery = _receipt_review_delivery(context, order, receipt, review)
+    runtime = tmp_path / "runtime"
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(runtime)
+    legacy, _created = outbox.prepare_legacy(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=int(_utc("2026-09-01T00:05:00Z").timestamp() * 1_000),
+    )
+    _store, _spine, intake = _receipt_review_intake(runtime, context)
+
+    result = intake.receive(
+        delivery,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:04:00Z"),
+    )
+    replay = intake.receive(
+        delivery,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:04:01Z"),
+    )
+
+    assert legacy.protocol_version == "1"
+    assert result.acknowledgement == replay.acknowledgement
+    assert result.acknowledgement.to_dict()["received_at"] == (
+        "2026-09-01T00:04:00.000Z"
+    )
+    assert outbox.get_policy_snapshots(legacy.review_digest) is not None
+
+
+def test_receipt_review_intake_rejects_wrong_node_before_retention(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _receipt_review_delivery(context, order, receipt)
+    store = TradeReceiptReviewStore(tmp_path / "runtime")
+    spine = SignedEventLog(
+        tmp_path / "runtime" / "receipt-review-intake-spine.jsonl",
+        context["taker"],
+    )
+    intake = TradeReceiptReviewIntakeCoordinator(
+        TradeReceiptReviewCoordinator(store, spine),
+        receiver_identity=context["taker"],
+        package_resolver=context["package_store"],
+        adapter_resolver=context["adapter_resolver"],
+        content_resolver=context["content_resolver"],
+        schema_validator=context["schema_validator"],
+    )
+
+    with pytest.raises(
+        TradeReceiptReviewDeliveryRejected,
+        match="recipient",
+    ):
+        intake.receive(
+            delivery,
+            receipt=receipt,
+            order=order,
+            at=_utc("2026-09-01T00:04:00Z"),
+        )
+    assert not store.root.exists()
+    assert spine.verified_snapshot() == ()
+
+
+def test_receipt_review_delivery_rejects_policy_outside_order_snapshot(
+    tmp_path,
+):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    mismatched_policy = replace(
+        context["taker_policy"],
+        max_depth=context["taker_policy"].max_depth + 1,
+    )
+    review = _receipt_review(
+        context,
+        order,
+        receipt,
+        verifier_policy=mismatched_policy,
+    )
+
+    with pytest.raises(
+        TradeReceiptReviewDeliveryRejected,
+        match="reviewer Order snapshot",
+    ):
+        create_trade_receipt_review_delivery(
+            context["taker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            verifier_policy=mismatched_policy,
+            adapter_policy=context["adapter_policy"],
+            created_at="2026-09-01T00:03:00Z",
+            not_after="2026-09-01T00:13:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+
+
+def _receipt_review_dispatch(tmp_path, context):
+    store = TradeReceiptReviewDispatchStore(tmp_path)
+    spine = SignedEventLog(
+        tmp_path / "receipt-review-dispatch-spine.jsonl",
+        context["taker"],
+    )
+    return store, spine, TradeReceiptReviewDispatchCoordinator(store, spine)
+
+
+def test_receipt_review_dispatch_persists_ack_and_anchors_once(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _receipt_review_delivery(context, order, receipt)
+    root = tmp_path / "runtime"
+    store, spine, dispatch = _receipt_review_dispatch(root, context)
+    pending = dispatch.prepare(
+        delivery,
+        receipt=receipt,
+        order=order,
+        target_url="https://PEER.example/a2a/",
+        now_ms=1_788_221_040_000,
+    )
+    dispatch.failed(
+        pending.review_digest,
+        error="temporary\nnetwork failure",
+        now_ms=1_788_221_041_000,
+    )
+    acknowledgement = create_trade_receipt_review_acknowledgement(
+        context["maker"],
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        received_at="2026-09-01T00:04:00Z",
+        audit_event_id="9" * 64,
+    )
+    retained = dispatch.acknowledge(
+        delivery,
+        acknowledgement,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example/a2a",
+        remote_event_id="9" * 64,
+        observed_at_ms=1_788_221_041_000,
+    )
+
+    restarted_store = TradeReceiptReviewDispatchStore(root)
+    restarted_spine = SignedEventLog(
+        root / "receipt-review-dispatch-spine.jsonl",
+        context["taker"],
+    )
+    restarted = TradeReceiptReviewDispatchCoordinator(
+        restarted_store,
+        restarted_spine,
+    )
+    replay = restarted.prepare(
+        delivery,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example/a2a",
+        now_ms=1_788_221_042_000,
+    )
+
+    assert pending.target_url == "https://peer.example/a2a"
+    assert store.get_pending(pending.review_digest) is None
+    assert restarted_store.get_acknowledgement(
+        pending.review_digest
+    ) == retained
+    assert replay.acknowledged is True
+    assert replay.delivery == retained.delivery
+    assert restarted.recover_acknowledgement(pending.review_digest) == retained
+    events = restarted_spine.verified_snapshot()
+    assert len(events) == 1
+    assert events[0].type == EVENT_TRADE_RECEIPT_REVIEW_ACKNOWLEDGED
+    assert events[0].payload == receipt_review_acknowledgement_audit_payload(
+        retained
+    )
+    assert restarted_spine.verify_chain() == (True, "ok")
+
+
+def test_receipt_review_dispatch_recovers_after_spine_failure(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _receipt_review_delivery(context, order, receipt)
+    root = tmp_path / "runtime"
+    store, spine, dispatch = _receipt_review_dispatch(root, context)
+    pending = dispatch.prepare(
+        delivery,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=1_788_221_040_000,
+    )
+    acknowledgement = create_trade_receipt_review_acknowledgement(
+        context["maker"],
+        delivery=delivery,
+        receipt=receipt,
+        order=order,
+        received_at="2026-09-01T00:04:00Z",
+        audit_event_id="a" * 64,
+    )
+
+    monkeypatch.setattr(
+        spine,
+        "append_unique",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("spine unavailable")
+        ),
+    )
+    with pytest.raises(OSError, match="spine unavailable"):
+        dispatch.acknowledge(
+            delivery,
+            acknowledgement,
+            receipt=receipt,
+            order=order,
+            target_url="https://peer.example",
+            remote_event_id="a" * 64,
+            observed_at_ms=1_788_221_041_000,
+        )
+
+    assert store.get_pending(pending.review_digest) is not None
+    assert store.get_acknowledgement(pending.review_digest) is not None
+    recovered_spine = SignedEventLog(
+        root / "receipt-review-dispatch-spine.jsonl",
+        context["taker"],
+    )
+    recovered = TradeReceiptReviewDispatchCoordinator(store, recovered_spine)
+    result = recovered.reconcile()
+    assert result.scanned == 1
+    assert result.anchored == 1
+    assert result.completed == 1
+    assert result.failed == 0
+    assert store.get_pending(pending.review_digest) is None
+    assert recovered_spine.verify_chain() == (True, "ok")
+
+
+def test_receipt_review_dispatch_renews_only_expired_envelope(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    old_delivery = _receipt_review_delivery(
+        context,
+        order,
+        receipt,
+        review,
+    )
+    store = TradeReceiptReviewDispatchStore(tmp_path / "runtime")
+    pending = store.prepare(
+        old_delivery,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=1_788_221_040_000,
+    )
+    replacement = create_trade_receipt_review_delivery(
+        context["taker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+        created_at="2026-09-01T00:19:00Z",
+        not_after="2026-09-01T00:29:00Z",
+        nonce="c3" * 16,
+        now=_utc("2026-09-01T00:19:00Z"),
+    )
+
+    with pytest.raises(
+        TradeReceiptReviewDispatchError,
+        match="not expired",
+    ):
+        store.renew_expired(
+            replacement,
+            receipt=receipt,
+            order=order,
+            target_url="https://peer.example",
+            now_ms=1_788_221_640_000,
+        )
+
+    renewed = store.renew_expired(
+        replacement,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=1_788_221_940_000,
+    )
+    assert renewed.generation == 2
+    assert renewed.attempts == 0
+    assert renewed.superseded_delivery_digests == (
+        trade_receipt_review_delivery_digest(
+            old_delivery,
+            receipt=receipt,
+            order=order,
+        ),
+    )
+    assert renewed.review_digest == pending.review_digest
+
+    stale_ack = create_trade_receipt_review_acknowledgement(
+        context["maker"],
+        delivery=old_delivery,
+        receipt=receipt,
+        order=order,
+        received_at="2026-09-01T00:04:00Z",
+        audit_event_id="b" * 64,
+    )
+    with pytest.raises(
+        TradeReceiptReviewDispatchError,
+        match="delivery_digest|pending delivery",
+    ):
+        store.put_acknowledgement(
+            replacement,
+            stale_ack,
+            receipt=receipt,
+            order=order,
+            target_url="https://peer.example",
+            remote_event_id="b" * 64,
+            observed_at_ms=1_788_221_941_000,
+        )
+
+
+def test_receipt_review_dispatch_rejects_target_scope_change(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    delivery = _receipt_review_delivery(context, order, receipt)
+    store = TradeReceiptReviewDispatchStore(tmp_path / "runtime")
+    store.prepare(
+        delivery,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=1_788_221_040_000,
+    )
+
+    with pytest.raises(
+        TradeReceiptReviewDispatchError,
+        match="conflicts with Review scope",
+    ):
+        store.prepare(
+            delivery,
+            receipt=receipt,
+            order=order,
+            target_url="https://other.example",
+            now_ms=1_788_221_041_000,
+        )
+    with pytest.raises(
+        TradeReceiptReviewDispatchError,
+        match="credentials",
+    ):
+        store.prepare(
+            delivery,
+            receipt=receipt,
+            order=order,
+            target_url="https://user:secret@peer.example",
+            now_ms=1_788_221_041_000,
+        )
+
+
 def test_receipt_review_is_public_trade_rule_api():
     assert trade_rules_api.TradeReceiptReview is TradeReceiptReview
     assert trade_rules_api.TradeReceiptReviewStore is TradeReceiptReviewStore
@@ -12307,8 +13911,8 @@ def test_receipt_review_coordinator_anchors_once_and_recovers_retry(tmp_path):
     )
     coordinator = TradeReceiptReviewCoordinator(store, spine)
 
-    first = coordinator.record(review, receipt=receipt, order=order)
-    second = coordinator.record(review, receipt=receipt, order=order)
+    first = coordinator.record_legacy(review, receipt=receipt, order=order)
+    second = coordinator.record_legacy(review, receipt=receipt, order=order)
 
     assert first.store_created is True
     assert first.anchor_created is True
@@ -12350,11 +13954,11 @@ def test_receipt_review_coordinator_projects_late_equivocation(tmp_path):
     )
     coordinator = TradeReceiptReviewCoordinator(store, spine)
 
-    coordinator.record(accepted, receipt=receipt, order=order)
+    coordinator.record_legacy(accepted, receipt=receipt, order=order)
     with pytest.raises(TradeReceiptReviewConflict):
-        coordinator.record(disputed, receipt=receipt, order=order)
+        coordinator.record_legacy(disputed, receipt=receipt, order=order)
     with pytest.raises(TradeReceiptReviewConflict):
-        coordinator.record(disputed, receipt=receipt, order=order)
+        coordinator.record_legacy(disputed, receipt=receipt, order=order)
 
     events = spine.verified_snapshot()
     assert [event.type for event in events] == [
@@ -12415,10 +14019,10 @@ def test_receipt_review_coordinator_retains_each_distinct_equivocation(
     )
     coordinator = TradeReceiptReviewCoordinator(store, spine)
 
-    coordinator.record(accepted, receipt=receipt, order=order)
+    coordinator.record_legacy(accepted, receipt=receipt, order=order)
     for candidate in (disputed, rejected):
         with pytest.raises(TradeReceiptReviewConflict):
-            coordinator.record(candidate, receipt=receipt, order=order)
+            coordinator.record_legacy(candidate, receipt=receipt, order=order)
 
     status = store.conflict_status(
         accepted.review_id,
@@ -12467,7 +14071,7 @@ def test_receipt_review_projection_failure_leaves_recoverable_cas(
 
     monkeypatch.setattr(spine, "append_unique", fail_before_append)
     with pytest.raises(TradeReceiptReviewAuditError, match="projection outage"):
-        coordinator.record(review, receipt=receipt, order=order)
+        coordinator.record_legacy(review, receipt=receipt, order=order)
     assert store.get(
         review.review_id,
         receipt=receipt,
@@ -12476,7 +14080,7 @@ def test_receipt_review_projection_failure_leaves_recoverable_cas(
     assert spine.verified_snapshot() == ()
 
     monkeypatch.setattr(spine, "append_unique", original)
-    recovered = coordinator.record(review, receipt=receipt, order=order)
+    recovered = coordinator.record_legacy(review, receipt=receipt, order=order)
     assert recovered.store_created is False
     assert recovered.anchor_created is True
 
@@ -12505,7 +14109,7 @@ def test_receipt_review_restarts_and_reconciles_without_resubmission(
         TradeReceiptReviewAuditError,
         match="process crash",
     ):
-        first_process.record(review, receipt=receipt, order=order)
+        first_process.record_legacy(review, receipt=receipt, order=order)
     assert spine.verified_snapshot() == ()
 
     restarted_spine = SignedEventLog(
@@ -12555,7 +14159,7 @@ def test_receipt_review_conflict_reconciles_after_restart(
         context["maker"],
     )
     first_process = TradeReceiptReviewCoordinator(store, spine)
-    first_process.record(accepted, receipt=receipt, order=order)
+    first_process.record_legacy(accepted, receipt=receipt, order=order)
     original_append = spine.append_unique
 
     def fail_conflict_append(event_type, *args, **kwargs):
@@ -12568,7 +14172,7 @@ def test_receipt_review_conflict_reconciles_after_restart(
         TradeReceiptReviewAuditError,
         match="conflict projection crash",
     ):
-        first_process.record(disputed, receipt=receipt, order=order)
+        first_process.record_legacy(disputed, receipt=receipt, order=order)
 
     restarted_spine = SignedEventLog(
         runtime / "review-spine.jsonl",
@@ -12594,7 +14198,7 @@ def test_receipt_review_outbox_rejects_artifact_tamper(tmp_path):
     receipt = _execution_receipt(context, order)
     review = _receipt_review(context, order, receipt)
     outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
-    record, _created = outbox.prepare(
+    record, _created = outbox.prepare_legacy(
         review,
         receipt=receipt,
         order=order,
@@ -12613,13 +14217,315 @@ def test_receipt_review_outbox_rejects_artifact_tamper(tmp_path):
         outbox.pending()
 
 
-def test_receipt_review_outbox_rejects_status_event_mismatch(tmp_path):
+def test_receipt_review_outbox_upgrades_v1_with_bound_policy_snapshots(
+    tmp_path,
+):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
+    legacy, created = outbox.prepare_legacy(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=1,
+    )
+
+    upgraded, upgraded_created = outbox.prepare(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=2,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+    snapshots = outbox.get_policy_snapshots(upgraded.review_digest)
+
+    assert created is True
+    assert legacy.protocol_version == "1"
+    assert upgraded_created is False
+    assert upgraded.protocol_version == "3"
+    assert upgraded.updated_at_ms == 2
+    assert upgraded.first_observed_at_ms == 2
+    assert outbox.observed_at_ms(upgraded.review_digest) == 2
+    assert snapshots is not None
+    assert snapshots[0].canonical_bytes == context["taker_policy"].canonical_bytes
+    assert snapshots[1].canonical_bytes == context["adapter_policy"].canonical_bytes
+
+
+def test_receipt_review_v3_publication_requires_policy_and_observation(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    runtime = tmp_path / "runtime"
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(runtime)
+
+    with pytest.raises(TypeError, match="verifier_policy"):
+        outbox.prepare(
+            review,
+            receipt=receipt,
+            order=order,
+            now_ms=1,
+        )
+
+    coordinator = TradeReceiptReviewCoordinator(
+        TradeReceiptReviewStore(runtime),
+        SignedEventLog(runtime / "review-spine.jsonl", context["maker"]),
+    )
+    with pytest.raises(TypeError, match="verifier_policy"):
+        coordinator.record(review, receipt=receipt, order=order)
+    with pytest.raises(TypeError, match="observed_at_ms"):
+        coordinator.record(
+            review,
+            receipt=receipt,
+            order=order,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+        )
+
+
+def test_receipt_review_outbox_upgrades_v2_observation_compatibly(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
+    current, _created = outbox.prepare(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=1,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+    path = outbox._path(current.review_digest)
+    legacy_v2 = current.to_dict()
+    legacy_v2["protocol_version"] = "2"
+    legacy_v2.pop("first_observed_at_ms")
+    legacy_v2.update(
+        {
+            "status": "anchored",
+            "event_type": "trade.receipt.reviewed",
+            "event_id": "a" * 64,
+            "updated_at_ms": 9,
+            "attempts": 2,
+        }
+    )
+    path.write_bytes(canonical_json(legacy_v2))
+
+    upgraded, created = outbox.prepare(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=2,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+
+    assert created is False
+    assert upgraded.protocol_version == "3"
+    assert upgraded.first_observed_at_ms == 1
+    assert upgraded.updated_at_ms == 9
+    assert upgraded.status == "anchored"
+    assert upgraded.attempts == 2
+    assert outbox.observed_at_ms(upgraded.review_digest) == 1
+
+
+def test_receipt_review_prepare_only_fully_validates_target_record(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    first_review = _receipt_review(context, order, receipt)
+    second_review = _receipt_review(
+        context,
+        order,
+        receipt,
+        reviewed_at="2026-09-01T00:02:01Z",
+        now=_utc("2026-09-01T00:02:01Z"),
+    )
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
+    outbox.prepare(
+        first_review,
+        receipt=receipt,
+        order=order,
+        now_ms=1,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+
+    original_read = outbox._read
+    read_paths = []
+
+    def counted_read(path):
+        read_paths.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(outbox, "_read", counted_read)
+    outbox.prepare(
+        second_review,
+        receipt=receipt,
+        order=order,
+        now_ms=2,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+    assert read_paths == []
+
+    outbox.prepare(
+        first_review,
+        receipt=receipt,
+        order=order,
+        now_ms=3,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+    first_digest = receipt_review_digest(
+        first_review,
+        receipt=receipt,
+        order=order,
+    )
+    assert read_paths == [outbox._path(first_digest)]
+
+
+def test_receipt_review_outbox_counts_crash_residue_before_new_record(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(
+        tmp_path / "runtime",
+        max_records=1,
+    )
+    outbox.root.mkdir(parents=True, exist_ok=True)
+    (outbox.root / (("0" * 64) + ".json.crash.tmp")).write_bytes(b"x")
+
+    with pytest.raises(
+        trade_rules_api.TradeReceiptReviewOutboxCapacity,
+        match="max_records",
+    ):
+        outbox.prepare(
+            review,
+            receipt=receipt,
+            order=order,
+            now_ms=1,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+        )
+
+
+def test_receipt_review_outbox_counts_residue_bytes_before_new_record(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    baseline = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "baseline")
+    record, _created = baseline.prepare(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=1,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+    record_size = baseline._path(record.review_digest).stat().st_size
+    residue_bytes = b"residue"
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(
+        tmp_path / "runtime",
+        max_bytes=record_size + len(residue_bytes) - 1,
+    )
+    outbox.root.mkdir(parents=True, exist_ok=True)
+    (outbox.root / (("0" * 64) + ".json.crash.tmp")).write_bytes(
+        residue_bytes
+    )
+
+    with pytest.raises(
+        trade_rules_api.TradeReceiptReviewOutboxCapacity,
+        match="max_bytes",
+    ):
+        outbox.prepare(
+            review,
+            receipt=receipt,
+            order=order,
+            now_ms=1,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+        )
+
+
+def test_receipt_review_outbox_counts_crash_residue_during_v2_upgrade(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
+    legacy, _created = outbox.prepare_legacy(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=1,
+    )
+    legacy_size = outbox._path(legacy.review_digest).stat().st_size
+    residue = outbox.root / (("0" * 64) + ".json.crash.tmp")
+    residue.write_bytes(b"residue")
+    outbox.max_bytes = legacy_size + residue.stat().st_size
+
+    with pytest.raises(
+        trade_rules_api.TradeReceiptReviewOutboxCapacity,
+        match="max_bytes",
+    ):
+        outbox.prepare(
+            review,
+            receipt=receipt,
+            order=order,
+            now_ms=2,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+        )
+
+
+def test_receipt_review_outbox_rejects_policy_snapshot_tamper(tmp_path):
     context = _setup(tmp_path / "fixtures")
     order = _order(context)
     receipt = _execution_receipt(context, order)
     review = _receipt_review(context, order, receipt)
     outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
     record, _created = outbox.prepare(
+        review,
+        receipt=receipt,
+        order=order,
+        now_ms=1,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+    )
+    path = outbox._path(record.review_digest)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    replacement = (
+        "A" if document["adapter_policy_b64u"][-1] != "A" else "B"
+    )
+    document["adapter_policy_b64u"] = (
+        document["adapter_policy_b64u"][:-1] + replacement
+    )
+    path.write_bytes(canonical_json(document))
+
+    with pytest.raises(
+        trade_rules_api.TradeReceiptReviewOutboxError,
+        match="policy snapshots|encoding|digest binding",
+    ):
+        outbox.get_policy_snapshots(record.review_digest)
+
+
+def test_receipt_review_outbox_rejects_status_event_mismatch(tmp_path):
+    context = _setup(tmp_path / "fixtures")
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _receipt_review(context, order, receipt)
+    outbox = trade_rules_api.TradeReceiptReviewOutbox(tmp_path / "runtime")
+    record, _created = outbox.prepare_legacy(
         review,
         receipt=receipt,
         order=order,
@@ -12652,7 +14558,7 @@ def test_receipt_review_store_failure_is_durable_and_retryable(tmp_path):
     coordinator = TradeReceiptReviewCoordinator(constrained, spine)
 
     with pytest.raises(trade_rules_api.TradeReceiptReviewStoreCapacity):
-        coordinator.record(review, receipt=receipt, order=order)
+        coordinator.record_legacy(review, receipt=receipt, order=order)
     records, _has_more = coordinator.audit_outbox.pending()
     assert len(records) == 1
     assert records[0].status == "prepared"
@@ -12676,7 +14582,7 @@ def test_receipt_review_reconcile_detects_anchored_spine_rollback(tmp_path):
     store = TradeReceiptReviewStore(runtime)
     spine_path = runtime / "review-spine.jsonl"
     spine = SignedEventLog(spine_path, context["maker"])
-    TradeReceiptReviewCoordinator(store, spine).record(
+    TradeReceiptReviewCoordinator(store, spine).record_legacy(
         review,
         receipt=receipt,
         order=order,
@@ -12719,11 +14625,11 @@ def test_receipt_review_projection_recovers_commit_then_raise(
         TradeReceiptReviewAuditError,
         match="lost acknowledgement",
     ):
-        coordinator.record(review, receipt=receipt, order=order)
+        coordinator.record_legacy(review, receipt=receipt, order=order)
     assert len(spine.verified_snapshot()) == 1
 
     monkeypatch.setattr(spine, "append_unique", original)
-    recovered = coordinator.record(review, receipt=receipt, order=order)
+    recovered = coordinator.record_legacy(review, receipt=receipt, order=order)
     assert recovered.store_created is False
     assert recovered.anchor_created is False
     assert len(spine.verified_snapshot()) == 1

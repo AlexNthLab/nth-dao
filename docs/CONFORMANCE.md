@@ -95,6 +95,16 @@ digest and size, the Package digest, and all caller-known expected values.
 JSON Schema validation alone is insufficient, and a valid bundle grants no
 local trust or execution authority.
 
+Agreement v1 additionally fixes deterministic Receipt Review Delivery and
+Acknowledgement envelopes. The positive vectors bind the exact Review,
+Receipt, Order, reviewer Rule policy, Adapter policy, destination, TTL, nonce,
+receiver, and remote Spine event. Negative vectors cover signed delivery
+retargeting and ACK audit-event mutation. Ports MUST perform both JSON Schema
+validation and the protocol validator's signature, digest, role, policy,
+chronology, TTL, and destination checks. A valid ACK is a signed peer retention
+claim, not evidence that the Review is true or that delivery, payment, or
+settlement occurred.
+
 Recognition Policy v1 has a separate deterministic vector in the same
 directory. It covers a node-signed genesis, a successor signed by a delegated
 controller, byte-exact canonical JSON and domain-separated signing input, and

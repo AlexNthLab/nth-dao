@@ -8319,6 +8319,59 @@ def _state_trade_execution_receipt_delivery_global_limiter(
         return None
 
 
+def _state_trade_receipt_review_coordinator(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_receipt_review_coordinator
+    except AttributeError:
+        return None
+
+
+def _state_trade_receipt_review_store(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_receipt_reviews
+    except AttributeError:
+        return None
+
+
+def _state_trade_receipt_review_dispatch(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_receipt_review_dispatch
+    except AttributeError:
+        return None
+
+
+def _state_trade_receipt_review_dispatch_store(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_receipt_review_dispatch_store
+    except AttributeError:
+        return None
+
+
+def _state_trade_receipt_review_delivery_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_receipt_review_delivery_limiter
+    except AttributeError:
+        return None
+
+
+def _state_trade_receipt_review_delivery_global_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return (
+            request.app.state.nth
+            .trade_receipt_review_delivery_global_limiter
+        )
+    except AttributeError:
+        return None
+
+
 def _learned_fed_peer_store(ws: Optional[Path]):
     if ws is None:
         return None
@@ -9310,6 +9363,99 @@ def _post_trade_execution_receipt_delivery_to_peer(
         ):
             raise ValueError(
                 "trade peer identity does not match Receipt recipient_did"
+            )
+        post_timeout = remaining_seconds - (time.monotonic() - started)
+        if post_timeout <= 0:
+            raise TimeoutError("trade peer request deadline exceeded")
+        return _urllib_post_json_pinned_raw(
+            url,
+            resolved_ip,
+            document,
+            timeout_s=post_timeout,
+            max_bytes=256 * 1024,
+        )
+
+    status, raw = _call_operator_trade_peer_with_fallback(
+        normalized,
+        verify_and_post,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        response = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("trade peer returned invalid JSON") from exc
+    if not isinstance(response, dict):
+        raise ValueError("trade peer returned a non-object response")
+    return status, response
+
+
+def _post_trade_receipt_review_delivery_to_peer(
+    peer_url: str,
+    order_digest: str,
+    execution_id: str,
+    document: dict[str, Any],
+    *,
+    timeout_seconds: float = 15.0,
+) -> tuple[int, dict[str, Any]]:
+    """Verify the execution peer DID, then POST a signed Review."""
+
+    from .market_federation_poll import _urllib_post_json_pinned_raw
+    from nth_dao.did_key import is_did_key
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+        raise ValueError("order_digest is invalid")
+    if re.fullmatch(
+        r"nth-trade-execution-sha256:[0-9a-f]{64}",
+        execution_id,
+    ) is None:
+        raise ValueError("execution_id is invalid")
+    normalized = _normalize_configured_fed_peer(peer_url)
+    recipient_did = document.get("recipient_did")
+    if not isinstance(recipient_did, str) or not is_did_key(recipient_did):
+        raise ValueError("Review delivery recipient_did is invalid")
+    url = (
+        normalized
+        + f"/api/v2/trade/federation/orders/{order_digest}"
+        + f"/execution-receipts/{execution_id}/reviews"
+    )
+
+    def verify_and_post(
+        resolved_ip: str,
+        remaining_seconds: float,
+    ) -> tuple[int, bytes]:
+        started = time.monotonic()
+        challenge = secrets.token_hex(32)
+        identity_url = (
+            normalized
+            + "/.well-known/nth-dao/identity.json"
+            + f"?challenge={challenge}"
+        )
+        raw_card = _open_federation_identity_card(
+            identity_url,
+            min(remaining_seconds, 3.0),
+            resolved_ip,
+        )
+        try:
+            card = json.loads(raw_card.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "trade peer returned an invalid identity card"
+            ) from exc
+        metadata, identity_error = _verify_federation_identity_card(
+            normalized,
+            card,
+            expected_challenge=challenge,
+        )
+        if metadata is None:
+            raise ValueError(
+                f"trade peer identity verification failed: {identity_error}"
+            )
+        if not hmac.compare_digest(
+            str(metadata.get("did") or ""),
+            recipient_did,
+        ):
+            raise ValueError(
+                "trade peer identity does not match Review recipient_did"
             )
         post_timeout = remaining_seconds - (time.monotonic() - started)
         if post_timeout <= 0:
@@ -13955,6 +14101,288 @@ def register_v2_routes(app: FastAPI) -> None:
             "delivery_or_payment_proven": False,
         }
 
+    @app.post(
+        "/api/v2/trade/federation/orders/{order_digest}/"
+        "execution-receipts/{execution_id}/reviews",
+        status_code=202,
+    )
+    async def v2_trade_receipt_review_receive(
+        order_digest: str,
+        execution_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Re-verify and retain one counterparty-signed Receipt Review."""
+
+        from nth_dao.trade_rules import (
+            JsonSchema202012Validator,
+            TradeExecutionReceiptStoreBusy,
+            TradeExecutionReceiptStoreError,
+            TradeOrderAuditError,
+            TradeReceiptReviewAuditError,
+            TradeReceiptReviewConflict,
+            TradeReceiptReviewDelivery,
+            TradeReceiptReviewDeliveryRejected,
+            TradeReceiptReviewIntakeCoordinator,
+            TradeReceiptReviewOutboxBusy,
+            TradeReceiptReviewOutboxCapacity,
+            TradeReceiptReviewRejected,
+            TradeReceiptReviewStoreBusy,
+            TradeReceiptReviewStoreCapacity,
+        )
+
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        if re.fullmatch(
+            r"nth-trade-execution-sha256:[0-9a-f]{64}",
+            execution_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="execution_id is invalid")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "trade Receipt Review delivery requires "
+                    "Content-Type application/json"
+                ),
+            )
+        limiter = _state_trade_receipt_review_delivery_limiter(request)
+        global_limiter = (
+            _state_trade_receipt_review_delivery_global_limiter(request)
+        )
+        order_audit = _state_trade_order_audit(request)
+        review_coordinator = _state_trade_receipt_review_coordinator(request)
+        receipt_store = getattr(
+            request.app.state.nth,
+            "trade_execution_receipts",
+            None,
+        )
+        identity = _state_node_identity(request)
+        package_store = _state_trade_rule_package_store(request)
+        state = request.app.state.nth
+        adapter_resolver = getattr(
+            state,
+            "trade_execution_adapter_resolver",
+            None,
+        )
+        content_resolver = getattr(
+            state,
+            "trade_execution_content_resolver",
+            None,
+        )
+        if limiter is None or global_limiter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review rate limiter unavailable",
+            )
+        client_key = (
+            str(request.client.host).strip()
+            if request.client is not None and request.client.host
+            else "anonymous"
+        )
+        try:
+            decision = await run_in_threadpool(limiter.check, client_key)
+            global_decision = await run_in_threadpool(
+                global_limiter.check,
+                "global",
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review budget is unavailable",
+            ) from exc
+        if not decision.allowed or not global_decision.allowed:
+            retry_after = max(
+                1,
+                int(
+                    max(
+                        decision.retry_after_seconds,
+                        global_decision.retry_after_seconds,
+                    )
+                )
+                + 1,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="trade Receipt Review delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        if (
+            order_audit is None
+            or review_coordinator is None
+            or receipt_store is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+            or package_store is None
+            or adapter_resolver is None
+            or content_resolver is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "receipt-review-intake-not-configured",
+                    "message": (
+                        "local Rule Package, Adapter, and content resolvers "
+                        "must be configured before Review intake"
+                    ),
+                },
+            )
+        try:
+            order_view = await run_in_threadpool(
+                order_audit.get_accepted,
+                order_digest,
+            )
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+        if order_view is None:
+            raise HTTPException(status_code=404, detail="Trade Order not found")
+        order = order_view.order
+        try:
+            receipt = await run_in_threadpool(
+                receipt_store.get,
+                execution_id,
+                order=order,
+            )
+        except TradeExecutionReceiptStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeExecutionReceiptStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Execution Receipt integrity conflict",
+            ) from exc
+        if receipt is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Trade Execution Receipt not found",
+            )
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        raw_body = await request.body()
+        received_at = datetime.now(timezone.utc)
+        schema_validator = getattr(
+            state,
+            "trade_execution_schema_validator",
+            None,
+        ) or JsonSchema202012Validator()
+
+        def _receive_review() -> Any:
+            delivery = TradeReceiptReviewDelivery.from_json(
+                raw_body,
+                receipt=receipt,
+                order=order,
+            )
+            if delivery.review.to_dict()["execution_id"] != execution_id:
+                raise TradeReceiptReviewDeliveryRejected(
+                    "Review execution_id does not match request path"
+                )
+            intake = TradeReceiptReviewIntakeCoordinator(
+                review_coordinator,
+                receiver_identity=identity,
+                package_resolver=package_resolver,
+                adapter_resolver=adapter_resolver,
+                content_resolver=content_resolver,
+                schema_validator=schema_validator,
+            )
+            return intake.receive(
+                delivery,
+                receipt=receipt,
+                order=order,
+                at=received_at,
+            )
+
+        try:
+            result = await run_in_threadpool(_receive_review)
+        except TradeReceiptReviewDeliveryRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TradeReceiptReviewRejected as exc:
+            logger.info(
+                "remote Receipt Review rejected during replay: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "receipt-review-policy-rejected",
+                    "message": (
+                        "Review claim could not be replayed from its "
+                        "signed policy snapshots"
+                    ),
+                },
+            ) from exc
+        except TradeReceiptReviewConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Review conflicts with retained signed bytes",
+            ) from exc
+        except (TradeReceiptReviewStoreBusy, TradeReceiptReviewOutboxBusy) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review receiver is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (
+            TradeReceiptReviewStoreCapacity,
+            TradeReceiptReviewOutboxCapacity,
+        ) as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Receipt Review receiver capacity exceeded",
+            ) from exc
+        except (
+            TradeReceiptReviewAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.warning(
+                "trade Receipt Review durable intake failed: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "receipt-review-intake-incomplete",
+                    "message": "Review acknowledgement is incomplete",
+                    "safe_to_redeliver": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        review_document = result.audit.review.to_dict()
+        return {
+            "status": "receipt-review-retained-verified",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_document["review_id"],
+            "review_digest": result.delivery.to_dict()["review_digest"],
+            "delivery_digest": result.delivery_digest,
+            "review_store_created": result.audit.store_created,
+            "audit_anchor_created": result.audit.anchor_created,
+            "audit_event_id": result.audit.event.event_id,
+            "acknowledgement": result.acknowledgement.to_dict(),
+            "acknowledgement_digest": result.acknowledgement_digest,
+            "claim_replayed_from_signed_policy_snapshots": True,
+            "delivery_quality_or_payment_proven": False,
+        }
+
     def _trade_order_audit_view(
         view: Any,
         *,
@@ -14346,6 +14774,7 @@ def register_v2_routes(app: FastAPI) -> None:
         limit: int = 100,
         acknowledgement_cursor: str = "",
         receipt_acknowledgement_cursor: str = "",
+        review_acknowledgement_cursor: str = "",
     ) -> Dict[str, Any]:
         """Retry Order Store/Spine projection without peer resubmission."""
 
@@ -14375,13 +14804,29 @@ def register_v2_routes(app: FastAPI) -> None:
                     "sha256 digest"
                 ),
             )
+        if review_acknowledgement_cursor and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", review_acknowledgement_cursor
+        ) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "review_acknowledgement_cursor must be a lowercase "
+                    "sha256 digest"
+                ),
+            )
         coordinator = _state_trade_order_audit(request)
         dispatch_coordinator = _state_trade_order_dispatch(request)
         receipt_dispatch_coordinator = _state_trade_execution_dispatch(request)
+        review_coordinator = _state_trade_receipt_review_coordinator(request)
+        review_dispatch_coordinator = (
+            _state_trade_receipt_review_dispatch(request)
+        )
         if (
             coordinator is None
             or dispatch_coordinator is None
             or receipt_dispatch_coordinator is None
+            or review_coordinator is None
+            or review_dispatch_coordinator is None
         ):
             raise HTTPException(
                 status_code=503,
@@ -14398,6 +14843,15 @@ def register_v2_routes(app: FastAPI) -> None:
                 receipt_dispatch_coordinator.reconcile,
                 limit=limit,
                 after=receipt_acknowledgement_cursor or None,
+            )
+            review_result = await run_in_threadpool(
+                review_coordinator.reconcile,
+                limit=limit,
+            )
+            review_dispatch_result = await run_in_threadpool(
+                review_dispatch_coordinator.reconcile,
+                limit=limit,
+                after=review_acknowledgement_cursor or None,
             )
             from nth_dao.web import _advance_trade_execution_recovery
 
@@ -14447,6 +14901,31 @@ def register_v2_routes(app: FastAPI) -> None:
             ),
             "receipt_acknowledgement_has_more": (
                 receipt_dispatch_result.has_more
+            ),
+            "reviews_scanned": review_result.scanned,
+            "reviews_anchored": review_result.anchored,
+            "reviews_verified_anchored": review_result.verified_anchored,
+            "review_conflicts": review_result.conflicted,
+            "review_failures": review_result.failed,
+            "review_recovery_next_cursor": review_result.next_cursor,
+            "review_recovery_has_more": review_result.has_more,
+            "review_acknowledgements_scanned": (
+                review_dispatch_result.scanned
+            ),
+            "review_acknowledgements_anchored": (
+                review_dispatch_result.anchored
+            ),
+            "review_dispatches_completed": (
+                review_dispatch_result.completed
+            ),
+            "review_acknowledgement_failures": (
+                review_dispatch_result.failed
+            ),
+            "review_acknowledgement_next_cursor": (
+                review_dispatch_result.next_cursor
+            ),
+            "review_acknowledgement_has_more": (
+                review_dispatch_result.has_more
             ),
             "executions_scanned": execution_result.scanned,
             "executions_anchored": execution_result.anchored,
@@ -15037,6 +15516,75 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail="Rule Recognition proof repair failed",
             ) from exc
 
+    async def _load_trade_order_execution_receipt(
+        request: Request,
+        *,
+        order_digest: str,
+        execution_id: str,
+    ) -> tuple[Any, Any]:
+        from nth_dao.trade_rules import (
+            TradeExecutionReceiptStoreBusy,
+            TradeExecutionReceiptStoreError,
+            TradeOrderAuditError,
+        )
+
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        if re.fullmatch(
+            r"nth-trade-execution-sha256:[0-9a-f]{64}",
+            execution_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="execution_id is invalid")
+        order_audit = _state_trade_order_audit(request)
+        receipt_store = getattr(
+            request.app.state.nth,
+            "trade_execution_receipts",
+            None,
+        )
+        if order_audit is None or receipt_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade execution history runtime unavailable",
+            )
+        try:
+            order_view = await run_in_threadpool(
+                order_audit.get_accepted,
+                order_digest,
+            )
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+        if order_view is None:
+            raise HTTPException(status_code=404, detail="Trade Order not found")
+        try:
+            receipt = await run_in_threadpool(
+                receipt_store.get,
+                execution_id,
+                order=order_view.order,
+            )
+        except TradeExecutionReceiptStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeExecutionReceiptStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Execution Receipt integrity conflict",
+            ) from exc
+        if receipt is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Trade Execution Receipt not found",
+            )
+        return order_view.order, receipt
+
     @app.get(
         "/api/v2/trade/orders/{order_digest}/execution-receipts"
     )
@@ -15375,6 +15923,756 @@ def register_v2_routes(app: FastAPI) -> None:
                 dispatch.acknowledge,
                 delivery,
                 acknowledgement,
+                order=order,
+                target_url=target_url,
+                remote_event_id=peer_event_id,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote acknowledgement verified but local persistence "
+                    "is incomplete"
+                ),
+                headers={"Retry-After": "1"},
+            ) from exc
+        return _acknowledged_response(retained)
+
+    @app.get(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews"
+    )
+    async def v2_trade_receipt_review_get(
+        order_digest: str,
+        execution_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Return the one counterparty Review and its federation state."""
+
+        from nth_dao.trade_rules import (
+            TradeReceiptReviewConflict,
+            TradeReceiptReviewDispatchError,
+            TradeReceiptReviewStoreBusy,
+            TradeReceiptReviewStoreError,
+            execution_receipt_digest,
+            receipt_review_digest,
+            receipt_review_id,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        order, receipt = await _load_trade_order_execution_receipt(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+        )
+        order_document = order.to_dict()
+        receipt_document = receipt.to_dict()
+        reviewer_role = (
+            "taker"
+            if receipt_document["executor_role"] == "maker"
+            else "maker"
+        )
+        reviewer_did = order_document[f"{reviewer_role}_did"]
+        review_id = receipt_review_id(
+            receipt_digest=execution_receipt_digest(receipt, order=order),
+            reviewer_did=reviewer_did,
+        )
+        store = _state_trade_receipt_review_store(request)
+        dispatch_store = _state_trade_receipt_review_dispatch_store(request)
+        if store is None or dispatch_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review runtime unavailable",
+            )
+        try:
+            review = await run_in_threadpool(
+                store.get,
+                review_id,
+                receipt=receipt,
+                order=order,
+            )
+        except TradeReceiptReviewConflict:
+            try:
+                conflict = await run_in_threadpool(
+                    store.conflict_status,
+                    review_id,
+                    receipt=receipt,
+                    order=order,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade Receipt Review conflict state unavailable",
+                ) from exc
+            return {
+                "status": "conflicted",
+                "review_id": review_id,
+                "review": None,
+                "retained_review_digests": list(
+                    conflict.retained_review_digests
+                ),
+                "federation": {"status": "blocked-by-conflict"},
+            }
+        except TradeReceiptReviewStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Receipt Review integrity conflict",
+            ) from exc
+        if review is None:
+            return {
+                "status": "not-reviewed",
+                "review_id": review_id,
+                "review": None,
+                "retained_review_digests": [],
+                "federation": {"status": "local-only"},
+            }
+        digest = receipt_review_digest(
+            review,
+            receipt=receipt,
+            order=order,
+        )
+        try:
+            pending, acknowledgement = await run_in_threadpool(
+                dispatch_store.get_state,
+                digest,
+            )
+        except TradeReceiptReviewDispatchError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review dispatch state unavailable",
+            ) from exc
+        federation: Dict[str, Any] = {
+            "status": "local-only",
+            "target_url": "",
+            "attempts": 0,
+            "last_error": "",
+            "generation": 0,
+            "superseded_deliveries": 0,
+            "acknowledgement_digest": "",
+            "remote_receiver_did": "",
+            "remote_audit_event_id": "",
+            "remote_received_at": "",
+        }
+        if acknowledgement is not None:
+            ack_document = acknowledgement.acknowledgement.to_dict()
+            federation.update({
+                "status": (
+                    "acknowledged-pending-anchor"
+                    if pending is not None
+                    else "acknowledged"
+                ),
+                "target_url": acknowledgement.target_url,
+                "attempts": pending.attempts if pending is not None else 0,
+                "last_error": (
+                    pending.last_error if pending is not None else ""
+                ),
+                "generation": acknowledgement.generation,
+                "superseded_deliveries": len(
+                    acknowledgement.superseded_delivery_digests
+                ),
+                "acknowledgement_digest": (
+                    acknowledgement.acknowledgement_digest
+                ),
+                "remote_receiver_did": ack_document["receiver_did"],
+                "remote_audit_event_id": acknowledgement.remote_event_id,
+                "remote_received_at": ack_document["received_at"],
+            })
+        elif pending is not None:
+            federation.update({
+                "status": "pending",
+                "target_url": pending.target_url,
+                "attempts": pending.attempts,
+                "last_error": pending.last_error,
+                "generation": pending.generation,
+                "superseded_deliveries": len(
+                    pending.superseded_delivery_digests
+                ),
+            })
+        return {
+            "status": "reviewed",
+            "review_id": review_id,
+            "review_digest": digest,
+            "review": review.to_dict(),
+            "retained_review_digests": [digest],
+            "federation": federation,
+        }
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews",
+        status_code=201,
+    )
+    async def v2_trade_receipt_review_create(
+        order_digest: str,
+        execution_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Re-run a Receipt locally, sign a Review, and durably audit it."""
+
+        from nth_dao.trade_rules import (
+            JsonSchema202012Validator,
+            RuleResolutionPolicy,
+            TradeReceiptReviewAuditError,
+            TradeReceiptReviewConflict,
+            TradeReceiptReviewOutboxBusy,
+            TradeReceiptReviewOutboxCapacity,
+            TradeReceiptReviewRejected,
+            TradeReceiptReviewStoreBusy,
+            TradeReceiptReviewStoreCapacity,
+            create_trade_receipt_review,
+            receipt_review_digest,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict) or set(body) != {
+            "decision",
+            "reason_codes",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="body requires only decision and reason_codes",
+            )
+        order, receipt = await _load_trade_order_execution_receipt(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+        )
+        identity = _state_node_identity(request)
+        coordinator = _state_trade_receipt_review_coordinator(request)
+        state = request.app.state.nth
+        package_store = _state_trade_rule_package_store(request)
+        adapter_resolver = getattr(
+            state,
+            "trade_execution_adapter_resolver",
+            None,
+        )
+        adapter_policy = getattr(
+            state,
+            "trade_execution_adapter_policy",
+            None,
+        )
+        content_resolver = getattr(
+            state,
+            "trade_execution_content_resolver",
+            None,
+        )
+        if (
+            identity is None
+            or not getattr(identity, "can_sign", False)
+            or coordinator is None
+            or package_store is None
+            or adapter_resolver is None
+            or adapter_policy is None
+            or content_resolver is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review signing runtime unavailable",
+            )
+        order_document = order.to_dict()
+        receipt_document = receipt.to_dict()
+        reviewer_role = (
+            "taker"
+            if receipt_document["executor_role"] == "maker"
+            else "maker"
+        )
+        if identity.as_did() != order_document[f"{reviewer_role}_did"]:
+            raise HTTPException(
+                status_code=403,
+                detail="only the Receipt counterparty can sign its Review",
+            )
+        policy_document = (
+            order_document["snapshot"]["proposal"]["taker_policy"]
+            if reviewer_role == "taker"
+            else order_document["snapshot"]["acceptance"]["maker_policy"]
+        )
+        verifier_policy = RuleResolutionPolicy.from_dict(policy_document)
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        moment = datetime.now(timezone.utc)
+        if moment.microsecond == 0:
+            moment = moment.replace(microsecond=1)
+        reviewed_at = moment.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
+        schema_validator = getattr(
+            state,
+            "trade_execution_schema_validator",
+            None,
+        ) or JsonSchema202012Validator()
+
+        def _create_and_record_review() -> Any:
+            review = create_trade_receipt_review(
+                identity,
+                receipt=receipt,
+                order=order,
+                package_resolver=package_resolver,
+                verifier_policy=verifier_policy,
+                adapter_resolver=adapter_resolver,
+                adapter_policy=adapter_policy,
+                content_resolver=content_resolver,
+                schema_validator=schema_validator,
+                decision=body["decision"],
+                reason_codes=body["reason_codes"],
+                reviewed_at=reviewed_at,
+                now=moment,
+            )
+            return coordinator.record(
+                review,
+                receipt=receipt,
+                order=order,
+                verifier_policy=verifier_policy,
+                adapter_policy=adapter_policy,
+                observed_at_ms=int(moment.timestamp() * 1_000),
+            )
+
+        try:
+            result = await run_in_threadpool(_create_and_record_review)
+        except TradeReceiptReviewRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TradeReceiptReviewConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Review conflicts with retained signed bytes",
+            ) from exc
+        except (TradeReceiptReviewStoreBusy, TradeReceiptReviewOutboxBusy) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (
+            TradeReceiptReviewStoreCapacity,
+            TradeReceiptReviewOutboxCapacity,
+        ) as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Receipt Review capacity exceeded",
+            ) from exc
+        except (
+            TradeReceiptReviewAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review persistence is incomplete",
+                headers={"Retry-After": "1"},
+            ) from exc
+        digest = receipt_review_digest(
+            result.review,
+            receipt=receipt,
+            order=order,
+        )
+        return {
+            "status": "review-signed",
+            "review_id": result.review.review_id,
+            "review_digest": digest,
+            "review": result.review.to_dict(),
+            "review_store_created": result.store_created,
+            "audit_anchor_created": result.anchor_created,
+            "audit_event_id": result.event.event_id,
+            "is_counterparty_claim": True,
+            "delivery_quality_or_payment_proven": False,
+        }
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews/{review_id}/deliver"
+    )
+    async def v2_trade_receipt_review_deliver(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Durably deliver one locally signed Review to its executor."""
+
+        from nth_dao.trade_rules import (
+            RuleResolutionPolicy,
+            TradeReceiptReviewAcknowledgement,
+            TradeReceiptReviewAuditError,
+            TradeReceiptReviewConflict,
+            TradeReceiptReviewDeliveryRejected,
+            TradeReceiptReviewDispatchBusy,
+            TradeReceiptReviewDispatchCapacity,
+            TradeReceiptReviewDispatchError,
+            TradeReceiptReviewOutboxBusy,
+            TradeReceiptReviewOutboxCapacity,
+            TradeReceiptReviewOutboxError,
+            TradeReceiptReviewStoreBusy,
+            TradeReceiptReviewStoreError,
+            create_trade_receipt_review_delivery,
+            receipt_review_digest,
+            verify_trade_receipt_review_delivery,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(
+            r"nth-trade-review-sha256:[0-9a-f]{64}",
+            review_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="review_id is invalid")
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict) or set(body) != {"target_url"}:
+            raise HTTPException(
+                status_code=400,
+                detail="body requires only target_url",
+            )
+        try:
+            target_url = _normalize_configured_fed_peer(body["target_url"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        order, receipt = await _load_trade_order_execution_receipt(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+        )
+        review_store = _state_trade_receipt_review_store(request)
+        dispatch = _state_trade_receipt_review_dispatch(request)
+        dispatch_store = _state_trade_receipt_review_dispatch_store(request)
+        coordinator = _state_trade_receipt_review_coordinator(request)
+        identity = _state_node_identity(request)
+        if (
+            review_store is None
+            or dispatch is None
+            or dispatch_store is None
+            or coordinator is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review dispatch runtime unavailable",
+            )
+        try:
+            review = await run_in_threadpool(
+                review_store.get,
+                review_id,
+                receipt=receipt,
+                order=order,
+            )
+        except TradeReceiptReviewStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Receipt Review integrity conflict",
+            ) from exc
+        if review is None:
+            raise HTTPException(status_code=404, detail="Receipt Review not found")
+        if review.to_dict()["execution_id"] != execution_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Receipt Review does not match execution_id",
+            )
+        review_digest = receipt_review_digest(
+            review,
+            receipt=receipt,
+            order=order,
+        )
+        try:
+            policy_snapshots = await run_in_threadpool(
+                coordinator.policy_snapshots,
+                review_digest,
+            )
+            if policy_snapshots is None:
+                review_document = review.to_dict()
+                order_document = order.to_dict()
+                policy_document = (
+                    order_document["snapshot"]["proposal"]["taker_policy"]
+                    if review_document["reviewer_role"] == "taker"
+                    else order_document["snapshot"]["acceptance"]["maker_policy"]
+                )
+                verifier_policy = RuleResolutionPolicy.from_dict(
+                    policy_document
+                )
+                adapter_policy = getattr(
+                    request.app.state.nth,
+                    "trade_execution_adapter_policy",
+                    None,
+                )
+                if adapter_policy is None:
+                    raise TradeReceiptReviewOutboxError(
+                        "legacy Review has no recoverable Adapter Policy snapshot"
+                    )
+                await run_in_threadpool(
+                    coordinator.record,
+                    review,
+                    receipt=receipt,
+                    order=order,
+                    verifier_policy=verifier_policy,
+                    adapter_policy=adapter_policy,
+                )
+                policy_snapshots = await run_in_threadpool(
+                    coordinator.policy_snapshots,
+                    review_digest,
+                )
+            if policy_snapshots is None:
+                raise TradeReceiptReviewOutboxError(
+                    "Receipt Review policy snapshots are unavailable"
+                )
+            verifier_policy, adapter_policy = policy_snapshots
+        except TradeReceiptReviewOutboxBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review audit outbox is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewOutboxCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Receipt Review audit outbox capacity exceeded",
+            ) from exc
+        except TradeReceiptReviewAuditError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review audit recovery is incomplete",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Receipt Review conflicts with retained signed bytes",
+            ) from exc
+        except (TradeReceiptReviewOutboxError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Receipt Review policy snapshots are unavailable or invalid"
+                ),
+            ) from exc
+
+        def _acknowledged_response(acknowledgement: Any) -> Dict[str, Any]:
+            document = acknowledgement.acknowledgement.to_dict()
+            return {
+                "status": "receipt-review-delivered",
+                "order_digest": acknowledgement.order_digest,
+                "execution_id": execution_id,
+                "review_id": review_id,
+                "review_digest": acknowledgement.review_digest,
+                "delivery_digest": acknowledgement.delivery_digest,
+                "acknowledgement": document,
+                "acknowledgement_digest": (
+                    acknowledgement.acknowledgement_digest
+                ),
+                "remote_audit_event_id": acknowledgement.remote_event_id,
+                "remote_received_at": document["received_at"],
+                "acknowledgement_persisted": True,
+                "delivery_quality_or_payment_proven": False,
+            }
+
+        try:
+            existing_ack = await run_in_threadpool(
+                dispatch.recover_acknowledgement,
+                review_digest,
+            )
+            if existing_ack is not None:
+                if existing_ack.target_url != target_url:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Receipt Review was acknowledged by a different "
+                            "peer target"
+                        ),
+                    )
+                return _acknowledged_response(existing_ack)
+            pending, _ack = await run_in_threadpool(
+                dispatch_store.get_state,
+                review_digest,
+            )
+        except TradeReceiptReviewDispatchBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review dispatch is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewDispatchError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"dispatch recovery failed: {exc}",
+                headers={"Retry-After": "1"},
+            ) from exc
+
+        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        now_ms = int(moment.timestamp() * 1_000)
+        created_at = moment.isoformat().replace("+00:00", "Z")
+        try:
+            if pending is not None:
+                if pending.target_url != target_url:
+                    raise TradeReceiptReviewDispatchError(
+                        "pending dispatch targets a different peer"
+                    )
+                ok, reason = verify_trade_receipt_review_delivery(
+                    pending.delivery,
+                    receipt=receipt,
+                    order=order,
+                    recipient_did=(
+                        pending.delivery.to_dict()["recipient_did"]
+                    ),
+                    at=moment,
+                )
+                if ok:
+                    delivery = pending.delivery
+                elif "expired" in reason:
+                    replacement = create_trade_receipt_review_delivery(
+                        identity,
+                        review=review,
+                        receipt=receipt,
+                        order=order,
+                        verifier_policy=pending.delivery.verifier_policy,
+                        adapter_policy=pending.delivery.adapter_policy,
+                        created_at=created_at,
+                        not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                        now=moment,
+                    )
+                    pending = await run_in_threadpool(
+                        dispatch.renew_expired,
+                        replacement,
+                        receipt=receipt,
+                        order=order,
+                        target_url=target_url,
+                        now_ms=now_ms,
+                    )
+                    delivery = pending.delivery
+                else:
+                    raise TradeReceiptReviewDispatchError(
+                        f"pending delivery is not usable: {reason}"
+                    )
+            else:
+                delivery = create_trade_receipt_review_delivery(
+                    identity,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    verifier_policy=verifier_policy,
+                    adapter_policy=adapter_policy,
+                    created_at=created_at,
+                    not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    now=moment,
+                )
+                pending = await run_in_threadpool(
+                    dispatch.prepare,
+                    delivery,
+                    receipt=receipt,
+                    order=order,
+                    target_url=target_url,
+                    now_ms=now_ms,
+                )
+                if pending.acknowledged:
+                    existing_ack = await run_in_threadpool(
+                        dispatch.recover_acknowledgement,
+                        review_digest,
+                    )
+                    if existing_ack is None:
+                        raise TradeReceiptReviewDispatchError(
+                            "acknowledged dispatch state disappeared"
+                        )
+                    return _acknowledged_response(existing_ack)
+                delivery = pending.delivery
+        except TradeReceiptReviewDeliveryRejected as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TradeReceiptReviewDispatchCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Receipt Review dispatch capacity exceeded",
+            ) from exc
+        except TradeReceiptReviewDispatchBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review dispatch is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewDispatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        async def _note_failure(message: str) -> None:
+            try:
+                await run_in_threadpool(
+                    dispatch.failed,
+                    review_digest,
+                    error=message,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "unable to record failed Receipt Review dispatch: %s",
+                    type(exc).__name__,
+                )
+
+        try:
+            peer_status, peer_body = await run_in_threadpool(
+                _post_trade_receipt_review_delivery_to_peer,
+                target_url,
+                order_digest,
+                execution_id,
+                delivery.to_dict(),
+            )
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+            await _note_failure(str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Review is retained locally but peer delivery "
+                    f"failed: {exc}"
+                ),
+            ) from exc
+        if not 200 <= peer_status < 300:
+            await _note_failure(f"peer returned HTTP {peer_status}")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Review is retained locally but the peer "
+                    f"rejected delivery with HTTP {peer_status}"
+                ),
+            )
+        try:
+            acknowledgement = TradeReceiptReviewAcknowledgement.from_dict(
+                peer_body["acknowledgement"]
+            )
+            peer_event_id = peer_body["audit_event_id"]
+        except (KeyError, TypeError, ValueError) as exc:
+            await _note_failure(f"invalid acknowledgement: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail="peer returned an invalid signed acknowledgement",
+            ) from exc
+        try:
+            retained = await run_in_threadpool(
+                dispatch.acknowledge,
+                delivery,
+                acknowledgement,
+                receipt=receipt,
                 order=order,
                 target_url=target_url,
                 remote_event_id=peer_event_id,

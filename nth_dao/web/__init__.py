@@ -23,17 +23,6 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, TYPE_CHECKING, Union
 from urllib.parse import urlsplit, urlunsplit
 
-# R-60 (2026-06-08): forward-reference ContactRecord for the
-# _resolve_member_identity return type. The contact_book module is
-# already imported at runtime below; the TYPE_CHECKING guard here is
-# strictly for static analysers (mypy/pyright) so they can validate
-# field access on the returned third tuple element without forcing an
-# import-order rearrangement.
-if TYPE_CHECKING:
-    from nth_dao.contact_book import ContactRecord
-
-logger = logging.getLogger("nth_dao.web")
-
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +46,7 @@ from nth_dao.cap_token import (
     sign_cap_token as _sign_cap_token,
     verify_cap_token as _verify_cap_token,
 )
+from nth_dao.contact_book import SOURCE_MANUAL as CONTACT_SOURCE_MANUAL
 from nth_dao.execution_receipt import ReceiptStore as _ReceiptStore
 # R-58 (2026-06-08): hoist did_key helpers to module scope so
 # `_resolve_member_identity` doesn't re-execute the import statement
@@ -96,6 +86,19 @@ from nth_dao.mandate import (
     verify_intent_mandate,
     verify_payment_mandate,
 )
+from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
+from nth_dao.orchestration import MissionStore
+from nth_dao.web.rate_limit import (
+    PersistentRateLimiter,
+    RateLimiter,
+    enforce_min_response_time,
+)
+from team_layer.blackboard import Blackboard
+
+if TYPE_CHECKING:
+    from nth_dao.contact_book import ContactRecord
+
+logger = logging.getLogger("nth_dao.web")
 
 
 _FOREIGN_CLAIM_MAX_BODY_BYTES = 256 * 1024
@@ -110,6 +113,8 @@ _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_DELIVERY_MAX_BODY_BYTES = 256 * 1024
 _TRADE_EXECUTION_RECEIPT_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024
 _TRADE_EXECUTION_RECEIPT_DISPATCH_MAX_BODY_BYTES = 16 * 1024
+_TRADE_RECEIPT_REVIEW_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024
+_TRADE_RECEIPT_REVIEW_WRITE_MAX_BODY_BYTES = 32 * 1024
 _RESOURCE_PROFILE_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
 _TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
@@ -212,6 +217,26 @@ class _FederationBodyLimitMiddleware:
             )
             is not None
         )
+        is_trade_receipt_review_delivery = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/trade/federation/orders/"
+                r"sha256:[0-9a-f]{64}/execution-receipts/[^/]+/reviews",
+                path,
+            )
+            is not None
+        )
+        is_trade_receipt_review_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/trade/orders/sha256:[0-9a-f]{64}/"
+                r"execution-receipts/[^/]+/reviews(?:/[^/]+/deliver)?",
+                path,
+            )
+            is not None
+        )
         is_trade_proposal_accept = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
@@ -235,6 +260,8 @@ class _FederationBodyLimitMiddleware:
             or is_trade_order_delivery
             or is_trade_execution_receipt_delivery
             or is_trade_execution_receipt_dispatch
+            or is_trade_receipt_review_delivery
+            or is_trade_receipt_review_write
             or is_trade_proposal_accept
             or is_resource_profile_write
         ):
@@ -274,6 +301,12 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_execution_receipt_dispatch:
             max_body_bytes = _TRADE_EXECUTION_RECEIPT_DISPATCH_MAX_BODY_BYTES
             body_label = "trade Execution Receipt dispatch"
+        elif is_trade_receipt_review_delivery:
+            max_body_bytes = _TRADE_RECEIPT_REVIEW_DELIVERY_MAX_BODY_BYTES
+            body_label = "trade Receipt Review delivery"
+        elif is_trade_receipt_review_write:
+            max_body_bytes = _TRADE_RECEIPT_REVIEW_WRITE_MAX_BODY_BYTES
+            body_label = "trade Receipt Review write"
         elif is_trade_proposal_accept:
             max_body_bytes = _TRADE_PROPOSAL_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Proposal acceptance"
@@ -339,14 +372,6 @@ class _FederationBodyLimitMiddleware:
                 content={"detail": f"{body_label} body exceeds {limit_label}"},
             )
             await response(scope, receive, send)
-from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
-from nth_dao.orchestration import MissionStore
-from nth_dao.web.rate_limit import (
-    PersistentRateLimiter,
-    RateLimiter,
-    enforce_min_response_time,
-)
-from team_layer.blackboard import Blackboard
 
 
 DEFAULT_ADMIN_ID = "admin"
@@ -357,11 +382,6 @@ CONSOLE_TOKEN_FILENAME = "console.token"
 # 公网部署设为 0/false:页面不再内嵌全权 console token(否则"任何拿到 URL 的人
 # GET / 即得全权 token")。默认 1(本地便利:浏览器加载即自带令牌)。
 CONSOLE_TOKEN_IN_PAGE_ENV = "NTH_CONSOLE_TOKEN_IN_PAGE"
-
-# DID persistence (2026-06-08): a stable alias so the source-of-add tag
-# used by /api/agents/add doesn't require an inline import in the
-# request handler.
-from ..contact_book import SOURCE_MANUAL as CONTACT_SOURCE_MANUAL  # noqa: E402
 
 # Week-1 Task 5: capture the process boot time once at import so the
 # /api/build_id endpoint can report it. Used by the dashboard top bar
@@ -786,6 +806,8 @@ class WebState:
             TradeExecutionAuditOutbox,
             TradeExecutionReceiptStore,
             TradeExecutionReceiptDispatchStore,
+            TradeReceiptReviewDispatchStore,
+            TradeReceiptReviewStore,
             TradeOrderAuditOutbox,
             TradeOrderDispatchStore,
             TradeOrderStore,
@@ -800,6 +822,12 @@ class WebState:
             TradeExecutionReceiptDispatchStore(workspace)
         )
         self.trade_execution_dispatch: Optional[Any] = None
+        self.trade_receipt_reviews = TradeReceiptReviewStore(workspace)
+        self.trade_receipt_review_coordinator: Optional[Any] = None
+        self.trade_receipt_review_dispatch_store = (
+            TradeReceiptReviewDispatchStore(workspace)
+        )
+        self.trade_receipt_review_dispatch: Optional[Any] = None
         self.trade_execution_health_lock = threading.RLock()
         self.trade_execution_recovery_lock = threading.Lock()
         self.trade_execution_recovery_cursor: Optional[str] = None
@@ -831,6 +859,25 @@ class WebState:
                 / "trade"
                 / "rate_limits"
                 / "execution_receipt_delivery_global.json",
+                max_per_window=120,
+                window_seconds=60.0,
+                max_tracked_keys=4,
+            )
+        )
+        self.trade_receipt_review_delivery_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "receipt_review_delivery.json",
+            max_per_window=30,
+            window_seconds=60.0,
+        )
+        self.trade_receipt_review_delivery_global_limiter = (
+            PersistentRateLimiter(
+                Path(workspace)
+                / "trade"
+                / "rate_limits"
+                / "receipt_review_delivery_global.json",
                 max_per_window=120,
                 window_seconds=60.0,
                 max_tracked_keys=4,
@@ -1671,6 +1718,21 @@ def create_app(
             and re.fullmatch(
                 r"/api/v2/trade/federation/orders/"
                 r"sha256:[0-9a-f]{64}/execution-receipts",
+                request.url.path,
+            )
+            is not None
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # Receipt Review delivery is likewise authenticated by the review,
+        # destination-bound envelope, signed policy snapshots, and freshness
+        # checks. Remote counterparties cannot possess the console token.
+        if (
+            request.method == "POST"
+            and re.fullmatch(
+                r"/api/v2/trade/federation/orders/"
+                r"sha256:[0-9a-f]{64}/execution-receipts/[^/]+/reviews",
                 request.url.path,
             )
             is not None
@@ -3992,6 +4054,8 @@ def _bootstrap(state: WebState) -> None:
         from ..trade_rules import (
             TradeExecutionCoordinator,
             TradeExecutionReceiptDispatchCoordinator,
+            TradeReceiptReviewCoordinator,
+            TradeReceiptReviewDispatchCoordinator,
             TradeOrderAuditCoordinator,
             TradeOrderDispatchCoordinator,
             TradeOrderIntakeCoordinator,
@@ -4018,6 +4082,16 @@ def _bootstrap(state: WebState) -> None:
         state.trade_execution_dispatch = (
             TradeExecutionReceiptDispatchCoordinator(
                 state.trade_execution_dispatch_store,
+                state.spine,
+            )
+        )
+        state.trade_receipt_review_coordinator = TradeReceiptReviewCoordinator(
+            state.trade_receipt_reviews,
+            state.spine,
+        )
+        state.trade_receipt_review_dispatch = (
+            TradeReceiptReviewDispatchCoordinator(
+                state.trade_receipt_review_dispatch_store,
                 state.spine,
             )
         )
@@ -4078,6 +4152,81 @@ def _bootstrap(state: WebState) -> None:
                 "trade Execution Receipt acknowledgement recovery failed: %s",
                 exc,
             )
+        try:
+            review_cursor: str | None = None
+            review_scanned = 0
+            review_anchored = 0
+            review_conflicted = 0
+            review_failed = 0
+            review_has_more = False
+            for _pass in range(_TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES):
+                review_recovery = (
+                    state.trade_receipt_review_coordinator.reconcile(
+                        limit=_TRADE_ORDER_BOOT_RECOVERY_BATCH,
+                        after_digest=review_cursor,
+                    )
+                )
+                review_scanned += review_recovery.scanned
+                review_anchored += review_recovery.anchored
+                review_conflicted += review_recovery.conflicted
+                review_failed += review_recovery.failed
+                review_has_more = review_recovery.has_more
+                review_cursor = review_recovery.next_cursor
+                if not review_has_more:
+                    break
+            if review_anchored or review_conflicted:
+                logger.info(
+                    "trade Receipt Review recovery: scanned=%d anchored=%d "
+                    "conflicted=%d failed=%d",
+                    review_scanned,
+                    review_anchored,
+                    review_conflicted,
+                    review_failed,
+                )
+            if review_failed or review_has_more:
+                logger.warning(
+                    "trade Receipt Review recovery retained unfinished "
+                    "records for operator retry"
+                )
+            review_dispatch_cursor: str | None = None
+            review_dispatch_scanned = 0
+            review_dispatch_anchored = 0
+            review_dispatch_completed = 0
+            review_dispatch_failed = 0
+            review_dispatch_has_more = False
+            for _pass in range(_TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES):
+                review_dispatch = (
+                    state.trade_receipt_review_dispatch.reconcile(
+                        limit=_TRADE_ORDER_BOOT_RECOVERY_BATCH,
+                        after=review_dispatch_cursor,
+                    )
+                )
+                review_dispatch_scanned += review_dispatch.scanned
+                review_dispatch_anchored += review_dispatch.anchored
+                review_dispatch_completed += review_dispatch.completed
+                review_dispatch_failed += review_dispatch.failed
+                review_dispatch_has_more = review_dispatch.has_more
+                review_dispatch_cursor = (
+                    review_dispatch.next_cursor or None
+                )
+                if not review_dispatch_has_more:
+                    break
+            if review_dispatch_anchored or review_dispatch_completed:
+                logger.info(
+                    "trade Receipt Review acknowledgement recovery: "
+                    "scanned=%d anchored=%d completed=%d failed=%d",
+                    review_dispatch_scanned,
+                    review_dispatch_anchored,
+                    review_dispatch_completed,
+                    review_dispatch_failed,
+                )
+            if review_dispatch_failed or review_dispatch_has_more:
+                logger.warning(
+                    "trade Receipt Review acknowledgement recovery retained "
+                    "unfinished records for operator retry"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("trade Receipt Review recovery failed: %s", exc)
         try:
             order_scanned = 0
             order_anchored = 0

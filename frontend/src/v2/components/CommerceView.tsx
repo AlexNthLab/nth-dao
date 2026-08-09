@@ -4,6 +4,8 @@ import {
   acceptTradeProposal,
   announceTask,
   ApiHttpError,
+  createTradeReceiptReview,
+  deliverTradeReceiptReview,
   deliverTradeExecutionReceipt,
   dispatchCommerceOutbox,
   disputeCommerceOrder,
@@ -14,6 +16,7 @@ import {
   fetchTradeRulePackages,
   getTradeOfferInspection,
   getTradeExecutionReceipts,
+  getTradeReceiptReview,
   getTradeOrder,
   getTradeProposal,
   getTradeRulePackage,
@@ -38,7 +41,9 @@ import type {
   TradeOrderSummary,
   TradeRuleRecognitionImportStatusPage,
   TradeExecutionSkillView,
+  TradeExecutionHistoryItem,
   TradeOfferInspection,
+  TradeReceiptReviewState,
   TradeRulePackageCatalogItem,
   TradeRulePackageDetail,
 } from "../types-v2";
@@ -1490,6 +1495,235 @@ function rememberTradeSkillPeer(orderDigest: string, peerUrl: string) {
   }
 }
 
+type ReceiptReviewLoad =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; value: TradeReceiptReviewState }
+  | { status: "error"; message: string };
+
+function parseReviewReasonCodes(value: string): string[] {
+  return [...new Set(value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean))]
+    .sort();
+}
+
+function ReceiptReviewPanel({
+  orderDigest,
+  receipt,
+  localRole,
+  peerUrl,
+}: {
+  orderDigest: string;
+  receipt: TradeExecutionHistoryItem;
+  localRole: "maker" | "taker" | "observer" | "unavailable";
+  peerUrl: string;
+}) {
+  const toast = useToast();
+  const [load, setLoad] = useState<ReceiptReviewLoad>({ status: "idle" });
+  const [decision, setDecision] = useState<"accepted" | "rejected" | "disputed">("accepted");
+  const [reasonText, setReasonText] = useState("");
+  const [actionBusy, setActionBusy] = useState<"sign" | "deliver" | "">("");
+  const [actionMessage, setActionMessage] = useState("");
+  const [actionError, setActionError] = useState(false);
+  const loadAbort = useRef<AbortController | null>(null);
+  const actionAbort = useRef<AbortController | null>(null);
+  const generation = useRef(0);
+  const reviewerRole = receipt.executor_role === "maker" ? "taker" : "maker";
+  const canSignReview = localRole === reviewerRole;
+
+  useEffect(() => () => {
+    generation.current += 1;
+    loadAbort.current?.abort();
+    actionAbort.current?.abort();
+  }, []);
+
+  async function loadReview() {
+    generation.current += 1;
+    const currentGeneration = generation.current;
+    const controller = new AbortController();
+    loadAbort.current?.abort();
+    loadAbort.current = controller;
+    setLoad({ status: "loading" });
+    try {
+      const value = await getTradeReceiptReview(
+        orderDigest,
+        receipt.execution_id,
+        controller.signal,
+      );
+      if (!controller.signal.aborted && generation.current === currentGeneration) {
+        setLoad({ status: "ready", value });
+      }
+    } catch (error) {
+      if (isAbort(error) || controller.signal.aborted) return;
+      if (generation.current === currentGeneration) {
+        setLoad({
+          status: "error",
+          message: error instanceof Error ? error.message : "Receipt Review request failed.",
+        });
+      }
+    } finally {
+      if (loadAbort.current === controller) loadAbort.current = null;
+    }
+  }
+
+  async function signReview() {
+    if (actionBusy || load.status !== "ready" || load.value.status !== "not-reviewed") return;
+    const reasonCodes = parseReviewReasonCodes(reasonText);
+    if (reasonCodes.length > 32 || reasonCodes.some((reason) => !/^[a-z][a-z0-9._:-]{0,127}$/.test(reason))) {
+      setActionError(true);
+      setActionMessage("Reason codes must be lowercase protocol tokens separated by commas, with at most 32 entries.");
+      return;
+    }
+    if (decision !== "accepted" && reasonCodes.length === 0) {
+      setActionError(true);
+      setActionMessage("Rejected and disputed reviews require at least one reason code.");
+      return;
+    }
+    const controller = new AbortController();
+    actionAbort.current?.abort();
+    actionAbort.current = controller;
+    setActionBusy("sign");
+    setActionError(false);
+    setActionMessage("");
+    try {
+      await createTradeReceiptReview(
+        orderDigest,
+        receipt.execution_id,
+        decision,
+        reasonCodes,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setActionMessage("Signed counterparty Review retained and anchored in the local Spine.");
+      toast.push("Receipt Review signed", "success");
+      await loadReview();
+    } catch (error) {
+      if (isAbort(error) || controller.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "Receipt Review signing failed.";
+      setActionError(true);
+      setActionMessage(message);
+      toast.push(message, "error");
+    } finally {
+      if (actionAbort.current === controller) actionAbort.current = null;
+      setActionBusy("");
+    }
+  }
+
+  async function deliverReview(value: TradeReceiptReviewState) {
+    if (actionBusy || value.status !== "reviewed") return;
+    const targetUrl = peerUrl.trim() || value.federation.target_url?.trim() || "";
+    if (!targetUrl) {
+      setActionError(true);
+      setActionMessage("Enter the peer NTH DAO URL before delivering this Review.");
+      return;
+    }
+    const controller = new AbortController();
+    actionAbort.current?.abort();
+    actionAbort.current = controller;
+    setActionBusy("deliver");
+    setActionError(false);
+    setActionMessage("");
+    try {
+      const result = await deliverTradeReceiptReview(
+        orderDigest,
+        receipt.execution_id,
+        value.review_id,
+        targetUrl,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setActionMessage(
+        `Signed peer ACK retained locally. Claimed remote Spine event ${short(result.remote_audit_event_id, 20)}.`,
+      );
+      toast.push("Signed Receipt Review acknowledged by peer", "success");
+      await loadReview();
+    } catch (error) {
+      if (isAbort(error) || controller.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "Receipt Review delivery failed.";
+      setActionError(true);
+      setActionMessage(message);
+      toast.push(message, "error");
+    } finally {
+      if (actionAbort.current === controller) actionAbort.current = null;
+      setActionBusy("");
+    }
+  }
+
+  const value = load.status === "ready" ? load.value : null;
+  return <details
+    className="trade-receipt-review"
+    onToggle={(event) => {
+      if (event.currentTarget.open && load.status === "idle") void loadReview();
+    }}
+  >
+    <summary>
+      <strong>Counterparty review</strong>
+      <span className={`pill ${value?.status === "reviewed" ? "ok" : "wait"}`}>
+        {load.status === "loading" ? "Checking" : value ? readinessLabel(value.status) : "Check status"}
+      </span>
+    </summary>
+    <p className="muted">A signed Review is a counterparty claim, not a verified fact. Policy replay proves protocol consistency and signer provenance, not delivery quality or payment.</p>
+    {load.status === "error" && <p className="trade-proposal-warning" role="status">{load.message} <button className="btn btn-secondary" type="button" onClick={loadReview}>Retry status</button></p>}
+    {value?.status === "not-reviewed" && (canSignReview ? <div className="trade-review-form">
+      <label>Decision
+        <select value={decision} onChange={(event) => setDecision(event.target.value as typeof decision)}>
+          <option value="accepted">Accept recorded result</option>
+          <option value="rejected">Reject recorded result</option>
+          <option value="disputed">Dispute recorded result</option>
+        </select>
+      </label>
+      {decision !== "accepted" && <label>Reason codes
+        <input
+          type="text"
+          value={reasonText}
+          onChange={(event) => setReasonText(event.target.value)}
+          placeholder="result.mismatch, evidence.missing"
+        />
+      </label>}
+      <button className="btn btn-secondary" type="button" disabled={Boolean(actionBusy)} onClick={signReview}>
+        {actionBusy === "sign" ? "Signing..." : "Sign counterparty Review"}
+      </button>
+    </div> : <p className="muted">Waiting for the {reviewerRole} counterparty to review this Receipt.</p>)}
+    {value?.status === "conflicted" && <div className="trade-proposal-warning" role="status">
+      <strong>Signer equivocation detected.</strong>
+      <span>Conflicting signed Review bytes are retained. Federation is blocked until the conflict is resolved.</span>
+      <ul className="trade-review-conflict-digests" aria-label="Retained Review digests">
+        {value.retained_review_digests.map((digest) => <li key={digest}><code>{digest}</code></li>)}
+      </ul>
+    </div>}
+    {value?.status === "reviewed" && value.review && <div className="trade-review-state">
+      <div className="trade-execution-row">
+        <strong>{readinessLabel(value.review.decision)}</strong>
+        <span className={`pill ${value.federation.status === "acknowledged" ? "ok" : "wait"}`}>{readinessLabel(value.federation.status)}</span>
+      </div>
+      <code title={value.review.reviewer_did}>Reviewer {short(value.review.reviewer_did, 30)}</code>
+      {value.review.reason_codes.length > 0 && <span className="muted">Reasons: {value.review.reason_codes.join(", ")}</span>}
+      {value.federation.status === "pending" && <>
+        <span className="muted">Attempts {value.federation.attempts ?? 0} | Delivery generation {value.federation.generation ?? 0}</span>
+        {value.federation.last_error && <span className="trade-proposal-warning">Last attempt: {value.federation.last_error}</span>}
+      </>}
+      {(value.federation.status === "acknowledged" || value.federation.status === "acknowledged-pending-anchor") && <>
+        <span className="muted">The peer claims it retained and independently replayed this signed Review at {new Date(value.federation.remote_received_at ?? "").toLocaleString()}. Its ACK is not proof of quality, payment, or the truth of the Review.</span>
+        <code title={value.federation.remote_receiver_did}>Peer signer {short(value.federation.remote_receiver_did ?? "", 30)}</code>
+        <code title={value.federation.acknowledgement_digest}>ACK {short(value.federation.acknowledgement_digest ?? "", 34)}</code>
+      </>}
+      {value.federation.status === "acknowledged-pending-anchor" && <span className="trade-proposal-warning" role="status">The signed peer ACK is retained, but its local Spine anchor or pending cleanup is incomplete.</span>}
+      {canSignReview && value.federation.status !== "acknowledged" && <button
+        className="btn btn-secondary"
+        type="button"
+        disabled={Boolean(actionBusy) || !(peerUrl.trim() || value.federation.target_url?.trim())}
+        onClick={() => deliverReview(value)}
+      >{actionBusy === "deliver"
+          ? "Delivering..."
+          : value.federation.status === "acknowledged-pending-anchor"
+            ? "Repair local Review ACK anchor"
+            : value.federation.status === "pending"
+              ? "Retry signed Review"
+              : "Deliver signed Review"}</button>}
+    </div>}
+    {actionMessage && <span className={actionError ? "trade-proposal-warning" : "muted"} role="status">{actionMessage}</span>}
+  </details>;
+}
+
 function AgreementExecutionReadiness({
   agreement,
   onRefresh,
@@ -1822,6 +2056,12 @@ function AgreementExecutionReadiness({
             className={receiptDeliveryErrors[item.execution_id] ? "trade-proposal-warning" : "muted"}
             role="status"
           >{receiptDeliveryMessages[item.execution_id]}</span>}
+          <ReceiptReviewPanel
+            orderDigest={executionDigest}
+            receipt={item}
+            localRole={execution.local_executor.role}
+            peerUrl={skillPeerUrl}
+          />
         </li>)}
       </ul>}
       {historyError && <p className="trade-proposal-warning" role="status">{historyError} Existing verified Receipts remain visible.</p>}

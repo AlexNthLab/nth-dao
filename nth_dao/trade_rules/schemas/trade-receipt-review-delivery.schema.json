@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-receipt-review-delivery-v1.json",
+  "title": "NTH DAO Trade Receipt Review Delivery v1",
+  "$comment": "Signature, destination, Order/Receipt/Review digest bindings, policy snapshot bindings, chronology, TTL, and nonce/id binding require the protocol validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "delivery_id",
+    "nonce",
+    "order_digest",
+    "receipt_digest",
+    "review_digest",
+    "sender_did",
+    "recipient_did",
+    "created_at",
+    "not_after",
+    "review",
+    "verifier_policy",
+    "adapter_policy",
+    "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.receipt-review-delivery"},
+    "protocol_version": {"const": "1"},
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^nth:trade:receipt-review-delivery:(?:[0-9a-f]{2}){16,64}$"
+    },
+    "nonce": {"type": "string", "pattern": "^(?:[0-9a-f]{2}){16,64}$"},
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "review_digest": {"$ref": "#/$defs/digest"},
+    "sender_did": {"$ref": "#/$defs/did"},
+    "recipient_did": {"$ref": "#/$defs/did"},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "not_after": {"$ref": "#/$defs/timestamp"},
+    "review": {
+      "$ref": "https://nthdao.org/schemas/trade-receipt-review-v1.json"
+    },
+    "verifier_policy": {
+      "$ref": "https://nthdao.org/schemas/trade-proposal-v1.json#/$defs/policy"
+    },
+    "adapter_policy": {
+      "$ref": "https://nthdao.org/schemas/trade-execution-adapter-policy-v1.json"
+    },
+    "proof": {"$ref": "#/$defs/proof"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "Ed25519Signature2020"},
+        "created": {"$ref": "#/$defs/timestamp"},
+        "verification_method": {
+          "type": "string",
+          "maxLength": 300,
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+#z[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "proof_purpose": {"const": "tradeReceiptReviewDelivery"},
+        "proof_value": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  }
+}

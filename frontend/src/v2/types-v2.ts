@@ -858,6 +858,78 @@ export interface TradeExecutionReceiptDeliveryResult {
   delivery_or_payment_proven: false;
 }
 
+export interface TradeReceiptReviewDocument {
+  kind: string;
+  protocol_version: string;
+  review_id: string;
+  order_id: string;
+  order_digest: string;
+  execution_id: string;
+  receipt_digest: string;
+  reviewer_did: string;
+  reviewer_role: "maker" | "taker";
+  verifier_policy_digest: string;
+  adapter_policy_digest: string;
+  decision: "accepted" | "rejected" | "disputed";
+  reason_codes: string[];
+  reviewed_at: string;
+  proof: Record<string, unknown>;
+}
+
+export interface TradeReceiptReviewFederationState {
+  status:
+    | "local-only"
+    | "pending"
+    | "acknowledged-pending-anchor"
+    | "acknowledged"
+    | "blocked-by-conflict";
+  target_url?: string;
+  attempts?: number;
+  last_error?: string;
+  generation?: number;
+  superseded_deliveries?: number;
+  acknowledgement_digest?: string;
+  remote_receiver_did?: string;
+  remote_audit_event_id?: string;
+  remote_received_at?: string;
+}
+
+export interface TradeReceiptReviewState {
+  status: "not-reviewed" | "reviewed" | "conflicted";
+  review_id: string;
+  review_digest?: string;
+  review: TradeReceiptReviewDocument | null;
+  retained_review_digests: string[];
+  federation: TradeReceiptReviewFederationState;
+}
+
+export interface TradeReceiptReviewCreateResult {
+  status: "review-signed";
+  review_id: string;
+  review_digest: string;
+  review: TradeReceiptReviewDocument;
+  review_store_created: boolean;
+  audit_anchor_created: boolean;
+  audit_event_id: string;
+  is_counterparty_claim: true;
+  delivery_quality_or_payment_proven: false;
+}
+
+export interface TradeReceiptReviewDeliveryResult {
+  status: "receipt-review-delivered";
+  order_digest: string;
+  execution_id: string;
+  review_id: string;
+  review_digest: string;
+  delivery_digest: string;
+  acknowledgement: Record<string, unknown>;
+  acknowledgement_digest: string;
+  remote_audit_event_id: string;
+  remote_received_at: string;
+  acknowledgement_persisted: true;
+  delivery_quality_or_payment_proven: false;
+}
+
 export interface TradeExecutionHistoryPage {
   status: "available" | "unavailable";
   items: TradeExecutionHistoryItem[];

@@ -154,7 +154,12 @@ def _utc_now(value: datetime | None) -> datetime:
     return moment.astimezone(timezone.utc)
 
 
-def _review_id(*, receipt_digest: str, reviewer_did: str) -> str:
+def receipt_review_id(*, receipt_digest: str, reviewer_did: str) -> str:
+    """Derive the one stable review identity for a Receipt counterparty."""
+
+    _digest(receipt_digest, label="receipt_digest")
+    if not isinstance(reviewer_did, str) or not is_did_key(reviewer_did):
+        _reject("reviewer_did must be an Ed25519 did:key")
     binding = {
         "receipt_digest": receipt_digest,
         "reviewer_did": reviewer_did,
@@ -300,7 +305,7 @@ def _assert_binding(
         _reject("receipt review must be signed by the counterparty role")
     if review_document["reviewer_did"] != order_document[f"{expected_role}_did"]:
         _reject("receipt review signer does not match reviewer_role")
-    if review_document["review_id"] != _review_id(
+    if review_document["review_id"] != receipt_review_id(
         receipt_digest=expected_receipt_digest,
         reviewer_did=review_document["reviewer_did"],
     ):
@@ -519,7 +524,7 @@ def create_trade_receipt_review(
     document = {
         "kind": RECEIPT_REVIEW_KIND,
         "protocol_version": RECEIPT_REVIEW_PROTOCOL_VERSION,
-        "review_id": _review_id(
+        "review_id": receipt_review_id(
             receipt_digest=receipt_digest_value,
             reviewer_did=reviewer_did,
         ),
@@ -572,5 +577,6 @@ __all__ = [
     "TradeReceiptReviewRejected",
     "create_trade_receipt_review",
     "receipt_review_digest",
+    "receipt_review_id",
     "verify_trade_receipt_review_under_policy",
 ]

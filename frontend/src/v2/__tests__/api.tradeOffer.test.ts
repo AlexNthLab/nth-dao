@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   acceptTradeProposal,
+  createTradeReceiptReview,
+  deliverTradeReceiptReview,
   deliverTradeExecutionReceipt,
   fetchTradeProposals,
   fetchTradeOrders,
   fetchTradeRulePackages,
   getTradeRulePackage,
   getTradeExecutionReceipts,
+  getTradeReceiptReview,
   getTradeOfferInspection,
   getTradeOrder,
   getTradeProposal,
@@ -485,6 +488,76 @@ describe("Trade Offer inspection API wiring", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/v2/trade/orders/${encodeURIComponent(digest)}`
         + `/execution-receipts/${encodeURIComponent(executionId)}/deliver`,
+      expect.objectContaining({
+        body: JSON.stringify({ target_url: "https://peer.example" }),
+        credentials: "same-origin",
+        method: "POST",
+      }),
+    );
+  });
+
+  it("reads, signs, and delivers the counterparty Receipt Review", async () => {
+    const executionId = `nth-trade-execution-sha256:${"e".repeat(64)}`;
+    const reviewId = `nth-trade-review-sha256:${"f".repeat(64)}`;
+    const reviewState = {
+      status: "not-reviewed",
+      review_id: reviewId,
+      review: null,
+      retained_review_digests: [],
+      federation: { status: "local-only" },
+    } as const;
+    const created = {
+      status: "review-signed",
+      review_id: reviewId,
+      review_digest: `sha256:${"1".repeat(64)}`,
+    };
+    const delivered = {
+      status: "receipt-review-delivered",
+      review_id: reviewId,
+      remote_audit_event_id: "2".repeat(64),
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(reviewState))
+      .mockResolvedValueOnce(jsonResponse(created, 201))
+      .mockResolvedValueOnce(jsonResponse(delivered));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getTradeReceiptReview(digest, executionId)).resolves.toEqual(reviewState);
+    await expect(createTradeReceiptReview(
+      digest,
+      executionId,
+      "disputed",
+      ["result.invalid", "result.mismatch"],
+    )).resolves.toEqual(created);
+    await expect(deliverTradeReceiptReview(
+      digest,
+      executionId,
+      reviewId,
+      "https://peer.example",
+    )).resolves.toEqual(delivered);
+
+    const base = `/api/v2/trade/orders/${encodeURIComponent(digest)}`
+      + `/execution-receipts/${encodeURIComponent(executionId)}/reviews`;
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      base,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      base,
+      expect.objectContaining({
+        body: JSON.stringify({
+          decision: "disputed",
+          reason_codes: ["result.invalid", "result.mismatch"],
+        }),
+        credentials: "same-origin",
+        method: "POST",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      `${base}/${encodeURIComponent(reviewId)}/deliver`,
       expect.objectContaining({
         body: JSON.stringify({ target_url: "https://peer.example" }),
         credentials: "same-origin",

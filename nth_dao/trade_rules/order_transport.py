@@ -29,6 +29,11 @@ from nth_dao.trade_rules.signing import (
     verification_method_for_did,
     verify_ed25519_did_signature,
 )
+from nth_dao.trade_rules.transport_common import (
+    bounded_seconds as _transport_bounded_seconds,
+    timestamp_ns as _transport_timestamp_ns,
+    within_clock_skewed_lifetime,
+)
 
 ORDER_DELIVERY_KIND = "nth.dao.trade.order-delivery"
 ORDER_DELIVERY_PROTOCOL_VERSION = "1"
@@ -319,7 +324,11 @@ def _validate_intake_receipt_static(document: dict[str, Any]) -> None:
         raise TradeOrderIntakeReceiptRejected(
             "Order intake receipt parties must be different principals"
         )
-    _timestamp_ns(document["received_at"], label="received_at")
+    _transport_timestamp_ns(
+        document["received_at"],
+        label="received_at",
+        error_type=TradeOrderIntakeReceiptRejected,
+    )
     if (
         not isinstance(document["audit_event_id"], str)
         or _EVENT_ID.fullmatch(document["audit_event_id"]) is None
@@ -352,8 +361,14 @@ def _validate_intake_receipt_static(document: dict[str, Any]) -> None:
         raise TradeOrderIntakeReceiptRejected(
             "Order intake receipt proof value is invalid"
         )
-    if _timestamp_ns(proof["created"], label="proof.created") != _timestamp_ns(
-        document["received_at"], label="received_at"
+    if _transport_timestamp_ns(
+        proof["created"],
+        label="proof.created",
+        error_type=TradeOrderIntakeReceiptRejected,
+    ) != _transport_timestamp_ns(
+        document["received_at"],
+        label="received_at",
+        error_type=TradeOrderIntakeReceiptRejected,
     ):
         raise TradeOrderIntakeReceiptRejected(
             "proof.created must equal receipt received_at"
@@ -548,21 +563,35 @@ def create_trade_order_intake_receipt(
         raise TradeOrderIntakeReceiptRejected(
             "Order Delivery recipient does not match intake receiver"
         )
-    received_ns = _timestamp_ns(received_at, label="received_at")
-    created_ns = _timestamp_ns(
-        delivery_document["created_at"], label="delivery.created_at"
+    received_ns = _transport_timestamp_ns(
+        received_at,
+        label="received_at",
+        error_type=TradeOrderIntakeReceiptRejected,
     )
-    expiry_ns = _timestamp_ns(
-        delivery_document["not_after"], label="delivery.not_after"
+    created_ns = _transport_timestamp_ns(
+        delivery_document["created_at"],
+        label="delivery.created_at",
+        error_type=TradeOrderIntakeReceiptRejected,
+    )
+    expiry_ns = _transport_timestamp_ns(
+        delivery_document["not_after"],
+        label="delivery.not_after",
+        error_type=TradeOrderIntakeReceiptRejected,
     )
     skew_ns = int(
-        _bounded_seconds(
+        _transport_bounded_seconds(
             clock_skew_seconds,
             label="clock_skew_seconds",
+            error_type=TradeOrderIntakeReceiptRejected,
         )
         * 1_000_000_000
     )
-    if received_ns < created_ns or received_ns > expiry_ns + skew_ns:
+    if not within_clock_skewed_lifetime(
+        received_ns,
+        created_ns=created_ns,
+        expiry_ns=expiry_ns,
+        skew_ns=skew_ns,
+    ):
         raise TradeOrderIntakeReceiptRejected(
             "received_at must be within the signed Delivery lifetime"
         )
@@ -641,23 +670,35 @@ def verify_trade_order_intake_receipt(
             raise TradeOrderIntakeReceiptRejected(
                 "Order Delivery recipient does not match intake receiver"
             )
-        received_ns = _timestamp_ns(
-            receipt_document["received_at"], label="received_at"
+        received_ns = _transport_timestamp_ns(
+            receipt_document["received_at"],
+            label="received_at",
+            error_type=TradeOrderIntakeReceiptRejected,
         )
-        created_ns = _timestamp_ns(
-            delivery_document["created_at"], label="delivery.created_at"
+        created_ns = _transport_timestamp_ns(
+            delivery_document["created_at"],
+            label="delivery.created_at",
+            error_type=TradeOrderIntakeReceiptRejected,
         )
-        expiry_ns = _timestamp_ns(
-            delivery_document["not_after"], label="delivery.not_after"
+        expiry_ns = _transport_timestamp_ns(
+            delivery_document["not_after"],
+            label="delivery.not_after",
+            error_type=TradeOrderIntakeReceiptRejected,
         )
         skew_ns = int(
-            _bounded_seconds(
+            _transport_bounded_seconds(
                 clock_skew_seconds,
                 label="clock_skew_seconds",
+                error_type=TradeOrderIntakeReceiptRejected,
             )
             * 1_000_000_000
         )
-        if received_ns < created_ns or received_ns > expiry_ns + skew_ns:
+        if not within_clock_skewed_lifetime(
+            received_ns,
+            created_ns=created_ns,
+            expiry_ns=expiry_ns,
+            skew_ns=skew_ns,
+        ):
             raise TradeOrderIntakeReceiptRejected(
                 "received_at is outside the signed Delivery lifetime"
             )

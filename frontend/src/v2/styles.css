@@ -1508,6 +1508,14 @@ select option {
 .trade-execution-column { margin-top: 14px; }
 .trade-execution-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
 .trade-execution-row strong { min-width: 0; overflow-wrap: anywhere; }
+.trade-receipt-review { min-width: 0; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.trade-receipt-review > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 30px; cursor: pointer; color: var(--fg-secondary); font-size: 11px; }
+.trade-receipt-review > summary strong { font-size: 11px; }
+.trade-review-form, .trade-review-state { display: grid; justify-items: start; gap: 7px; min-width: 0; margin-top: 8px; }
+.trade-review-form label { display: grid; gap: 4px; width: 100%; min-width: 0; color: var(--fg-secondary); font-size: 11px; font-weight: 600; }
+.trade-review-form input, .trade-review-form select { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--bg-panel); color: var(--fg-primary); font: inherit; }
+.trade-review-state > .trade-execution-row { width: 100%; }
+.trade-review-conflict-digests { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 20px; overflow-wrap: anywhere; }
 .trade-readiness-blockers { display: grid; gap: 6px; margin: 0; padding-left: 18px; color: var(--fg-secondary); font-size: 12px; }
 .commerce-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .commerce-head-actions, .commerce-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }

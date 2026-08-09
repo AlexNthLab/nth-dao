@@ -13,10 +13,12 @@ from nth_dao.trade_rules.agreement_order import (
     ORDER_ID_PREFIX,
     TradeOrder,
 )
+from nth_dao.trade_rules.execution_adapter import TradeExecutionAdapterPolicy
 from nth_dao.trade_rules.execution_receipt import (
     EXECUTION_RECEIPT_ID_PREFIX,
     TradeExecutionReceipt,
 )
+from nth_dao.trade_rules.negotiation import RuleResolutionPolicy
 from nth_dao.trade_rules.receipt_review import (
     RECEIPT_REVIEW_DECISIONS,
     RECEIPT_REVIEW_ID_PREFIX,
@@ -576,13 +578,37 @@ class TradeReceiptReviewCoordinator:
                 "Receipt Review reconciliation is busy"
             ) from exc
 
-    def record(
+    def _record(
         self,
         review: TradeReceiptReview | dict[str, Any],
         *,
         receipt: TradeExecutionReceipt | dict[str, Any],
         order: TradeOrder | dict[str, Any],
+        verifier_policy: RuleResolutionPolicy | None = None,
+        adapter_policy: TradeExecutionAdapterPolicy | None = None,
+        observed_at_ms: int | None = None,
+        allow_legacy_without_policy_snapshots: bool = False,
     ) -> TradeReceiptReviewAuditResult:
+        if not isinstance(allow_legacy_without_policy_snapshots, bool):
+            raise TypeError(
+                "allow_legacy_without_policy_snapshots must be boolean"
+            )
+        if allow_legacy_without_policy_snapshots and (
+            verifier_policy is not None or adapter_policy is not None
+        ):
+            raise TradeReceiptReviewAuditError(
+                "legacy Receipt Review records must omit policy snapshots"
+            )
+        if not allow_legacy_without_policy_snapshots and (
+            verifier_policy is None or adapter_policy is None
+        ):
+            raise TradeReceiptReviewAuditError(
+                "Receipt Review policy snapshots are required"
+            )
+        if not allow_legacy_without_policy_snapshots and observed_at_ms is None:
+            raise TradeReceiptReviewAuditError(
+                "Receipt Review first observation time is required"
+            )
         verified = (
             TradeReceiptReview.from_json(
                 review.canonical_bytes,
@@ -617,12 +643,32 @@ class TradeReceiptReviewCoordinator:
             receipt=verified_receipt,
             order=verified_order,
         )
-        _record, prepared_created = self.audit_outbox.prepare(
-            verified,
-            receipt=verified_receipt,
-            order=verified_order,
-            now_ms=self._reviewed_at_ms(verified),
+        observation_ms = (
+            self._reviewed_at_ms(verified)
+            if allow_legacy_without_policy_snapshots and observed_at_ms is None
+            else observed_at_ms
         )
+        assert observation_ms is not None
+        if allow_legacy_without_policy_snapshots:
+            _prepared_record, prepared_created = (
+                self.audit_outbox.prepare_legacy(
+                    verified,
+                    receipt=verified_receipt,
+                    order=verified_order,
+                    now_ms=observation_ms,
+                )
+            )
+        else:
+            assert verifier_policy is not None
+            assert adapter_policy is not None
+            _prepared_record, prepared_created = self.audit_outbox.prepare(
+                verified,
+                receipt=verified_receipt,
+                order=verified_order,
+                now_ms=observation_ms,
+                verifier_policy=verifier_policy,
+                adapter_policy=adapter_policy,
+            )
         result = self._process(
             digest,
             prepared_created=prepared_created,
@@ -632,6 +678,58 @@ class TradeReceiptReviewCoordinator:
                 "review has contradictory signed candidates"
             )
         return result
+
+    def record(
+        self,
+        review: TradeReceiptReview | dict[str, Any],
+        *,
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+        verifier_policy: RuleResolutionPolicy,
+        adapter_policy: TradeExecutionAdapterPolicy,
+        observed_at_ms: int,
+    ) -> TradeReceiptReviewAuditResult:
+        """Publish a v2 Review with exact immutable policy snapshots."""
+
+        return self._record(
+            review,
+            receipt=receipt,
+            order=order,
+            verifier_policy=verifier_policy,
+            adapter_policy=adapter_policy,
+            observed_at_ms=observed_at_ms,
+        )
+
+    def record_legacy(
+        self,
+        review: TradeReceiptReview | dict[str, Any],
+        *,
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+        observed_at_ms: int | None = None,
+    ) -> TradeReceiptReviewAuditResult:
+        """Record a pre-v2 Review during explicit migration or recovery."""
+
+        return self._record(
+            review,
+            receipt=receipt,
+            order=order,
+            observed_at_ms=observed_at_ms,
+            allow_legacy_without_policy_snapshots=True,
+        )
+
+    def policy_snapshots(
+        self,
+        review_digest: str,
+    ) -> tuple[RuleResolutionPolicy, TradeExecutionAdapterPolicy] | None:
+        """Return immutable policy bytes retained with a signed Review."""
+
+        return self.audit_outbox.get_policy_snapshots(review_digest)
+
+    def observed_at_ms(self, review_digest: str) -> int:
+        """Return the durable first v2 observation time for one Review."""
+
+        return self.audit_outbox.observed_at_ms(review_digest)
 
     def reconcile(
         self,

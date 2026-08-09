@@ -178,6 +178,44 @@
     "sender_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
     "status": "retained-verified"
   },
+  "execution_receipt_acknowledgement_clock_skew": {
+    "audit_event_id": "8888888888888888888888888888888888888888888888888888888888888888",
+    "delivery_digest": "sha256:92e044373ee5c5be869fa65a0025c4d971dfbb9ce0f60a1d55eff5efb59989da",
+    "kind": "nth.dao.trade.execution-receipt-acknowledgement",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "proof": {
+      "created": "2026-08-01T01:56:01Z",
+      "proof_purpose": "tradeExecutionReceiptAcknowledgement",
+      "proof_value": "n0qoDX4qHW8zZL40QyzcHOl3psbIGWDUcXTmstL5jJpm-vjcbBB3GvSXaW8525g6MWJCQGrV_U1pRUGtdZwmBA",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    "protocol_version": "1",
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "received_at": "2026-08-01T01:56:01Z",
+    "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "sender_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "status": "retained-verified"
+  },
+  "execution_receipt_acknowledgement_clock_skew_digest": "sha256:9c94849ac89218f0f8ac54f0e0f88d1f5cb5756cb31464d83588724b09c3aae2",
+  "execution_receipt_acknowledgement_clock_skew_verification_cases": [
+    {
+      "at": "2026-08-01T01:56:01Z",
+      "audit_event_id": "8888888888888888888888888888888888888888888888888888888888888888",
+      "case": "receiver-clock-behind-at-lower-bound",
+      "clock_skew_seconds": 300,
+      "expected_valid": true,
+      "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    {
+      "at": "2026-08-01T01:56:01Z",
+      "audit_event_id": "8888888888888888888888888888888888888888888888888888888888888888",
+      "case": "receiver-clock-behind-beyond-lower-bound",
+      "clock_skew_seconds": 299,
+      "expected_valid": false,
+      "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    }
+  ],
   "execution_receipt_acknowledgement_digest": "sha256:37734e607e383b8b7aea4a62c341e05f9bada47e6a60f6afc296042964dd46b3",
   "execution_receipt_acknowledgement_verification_cases": [
     {
@@ -1710,7 +1748,7 @@
         "proof": {
           "created": "2026-08-01T02:02:00Z",
           "proof_purpose": "tradeReceiptReview",
-          "proof_value": "PkQ14wrCPWInUoT2D6fo_cY9wK1B_ZRNJUf8OuDSXRgAatso6xrQRYp0jkzXdO0Nxtv0ZtvWuAjdgA0c0DB3Dw",
+          "proof_value": "yKSe7zxK5szglp5e8cANr0yEdwiTvd06oGsu2BTTiyYo3FdkZUSSRB_jAK_dTXO59N3arjxUqCUJxSulT-nTAA",
           "type": "Ed25519Signature2020",
           "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
         },
@@ -1723,10 +1761,111 @@
         "reviewed_at": "2026-08-01T02:02:00Z",
         "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
         "reviewer_role": "taker",
-        "verifier_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4"
+        "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
       },
       "expected_valid": false,
       "target": "receipt_review"
+    },
+    {
+      "case": "receipt-review-delivery-retarget",
+      "document": {
+        "adapter_policy": {
+          "accepted_adapter_digests": [
+            "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19"
+          ],
+          "allowed_execution_modes": [
+            "declarative"
+          ],
+          "allowed_permissions": [],
+          "kind": "nth.dao.trade.execution-adapter-policy",
+          "protocol_version": "1"
+        },
+        "created_at": "2026-08-01T02:02:01Z",
+        "delivery_id": "nth:trade:receipt-review-delivery:3456789abcdef0123456789abcdef012",
+        "kind": "nth.dao.trade.receipt-review-delivery",
+        "nonce": "3456789abcdef0123456789abcdef012",
+        "not_after": "2026-08-01T02:12:01Z",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "proof": {
+          "created": "2026-08-01T02:02:01Z",
+          "proof_purpose": "tradeReceiptReviewDelivery",
+          "proof_value": "-z0v2LKEwwtAVVqDWLHtx4io7B9yRNbgjcFcKyVdHEbyBj6ZrofRAXdAQqkjoYrcJHun6zs8tyZjdN6P5GsFBA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "recipient_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "review": {
+          "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+          "decision": "accepted",
+          "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+          "kind": "nth.dao.trade.receipt-review",
+          "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+          "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+          "proof": {
+            "created": "2026-08-01T02:02:00Z",
+            "proof_purpose": "tradeReceiptReview",
+            "proof_value": "yKSe7zxK5szglp5e8cANr0yEdwiTvd06oGsu2BTTiyYo3FdkZUSSRB_jAK_dTXO59N3arjxUqCUJxSulT-nTAA",
+            "type": "Ed25519Signature2020",
+            "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+          },
+          "protocol_version": "1",
+          "reason_codes": [],
+          "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+          "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+          "reviewed_at": "2026-08-01T02:02:00Z",
+          "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+          "reviewer_role": "taker",
+          "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+        },
+        "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
+        "sender_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "verifier_policy": {
+          "accepted_package_digests": [],
+          "accepted_publishers": [
+            "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+          ],
+          "allowed_execution_modes": [
+            "declarative"
+          ],
+          "allowed_permissions": [],
+          "approved_executable_digests": [],
+          "available_capabilities": [],
+          "kind": "nth.dao.trade.rule-resolution-policy",
+          "max_depth": 32,
+          "max_packages": 256,
+          "max_resource_bytes": 67108864,
+          "protocol_version": "1"
+        }
+      },
+      "expected_valid": false,
+      "target": "receipt_review_delivery"
+    },
+    {
+      "case": "receipt-review-acknowledgement-event-tamper",
+      "document": {
+        "audit_event_id": "6666666666666666666666666666666666666666666666666666666666666666",
+        "delivery_digest": "sha256:8707b104cb6aeade476dd5c17638c4d5c3b9398b7f1aa49607250cdc1b9760c6",
+        "kind": "nth.dao.trade.receipt-review-acknowledgement",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "proof": {
+          "created": "2026-08-01T02:03:00Z",
+          "proof_purpose": "tradeReceiptReviewAcknowledgement",
+          "proof_value": "ti75pc9zhRxuB9q8ayDwRuC4oFfsctL5ax4ZNmHRgVrybD3GXL_skSRkaqeUxZ3oTfTgOpHLDkhak73pkUKeDQ",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "received_at": "2026-08-01T02:03:00Z",
+        "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
+        "sender_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "status": "review-retained-verified"
+      },
+      "expected_valid": false,
+      "target": "receipt_review_acknowledgement"
     },
     {
       "case": "receipt-review-audit-binding-tamper",
@@ -1737,7 +1876,7 @@
         "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
         "protocol_version": "1",
         "receipt_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+        "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
         "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
         "reviewed_at": "2026-08-01T02:02:00Z",
         "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
@@ -2562,6 +2701,43 @@
     "sender_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
     "status": "retained-accepted"
   },
+  "order_intake_receipt_clock_skew": {
+    "audit_event_id": "7777777777777777777777777777777777777777777777777777777777777777",
+    "delivery_digest": "sha256:6b8017a95d8d9a6e28502e2f9a42156b223bb7193d644d9325d0c66cb5d87adb",
+    "kind": "nth.dao.trade.order-intake-receipt",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "proof": {
+      "created": "2026-08-01T00:55:01Z",
+      "proof_purpose": "tradeOrderIntakeReceipt",
+      "proof_value": "QLi4GXYIo5Fdw1Y4WNw2jBME6HrczpB0tCS4Y_WXzKORpxfN0xMLjpWbMz5RkZ5sTA_UlmjaGTCXZ1hLz7QjDg",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    "protocol_version": "1",
+    "received_at": "2026-08-01T00:55:01Z",
+    "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "sender_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "status": "retained-accepted"
+  },
+  "order_intake_receipt_clock_skew_digest": "sha256:63222b5a420d683267016812fce5d8ccd9e4203ac1e1979c1bfb8cf9cb86eef8",
+  "order_intake_receipt_clock_skew_verification_cases": [
+    {
+      "at": "2026-08-01T00:55:01Z",
+      "audit_event_id": "7777777777777777777777777777777777777777777777777777777777777777",
+      "case": "receiver-clock-behind-at-lower-bound",
+      "clock_skew_seconds": 300,
+      "expected_valid": true,
+      "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    {
+      "at": "2026-08-01T00:55:01Z",
+      "audit_event_id": "7777777777777777777777777777777777777777777777777777777777777777",
+      "case": "receiver-clock-behind-beyond-lower-bound",
+      "clock_skew_seconds": 299,
+      "expected_valid": false,
+      "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    }
+  ],
   "order_intake_receipt_digest": "sha256:e7dcf1aff0c1edc8956d9ae49a9561bb87bf9d92d1a2f5b29c19192300c186c7",
   "proposal": {
     "canonical_chain_digests": [
@@ -2767,7 +2943,7 @@
     "proof": {
       "created": "2026-08-01T02:02:00Z",
       "proof_purpose": "tradeReceiptReview",
-      "proof_value": "PkQ14wrCPWInUoT2D6fo_cY9wK1B_ZRNJUf8OuDSXRgAatso6xrQRYp0jkzXdO0Nxtv0ZtvWuAjdgA0c0DB3Dw",
+      "proof_value": "yKSe7zxK5szglp5e8cANr0yEdwiTvd06oGsu2BTTiyYo3FdkZUSSRB_jAK_dTXO59N3arjxUqCUJxSulT-nTAA",
       "type": "Ed25519Signature2020",
       "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
     },
@@ -2778,8 +2954,94 @@
     "reviewed_at": "2026-08-01T02:02:00Z",
     "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
     "reviewer_role": "taker",
-    "verifier_policy_digest": "sha256:a36de5ed1968bee5c0af16f32379fe460ee67acea9e1f6230d5c6035aea8eba4"
+    "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
   },
+  "receipt_review_acknowledgement": {
+    "audit_event_id": "5555555555555555555555555555555555555555555555555555555555555555",
+    "delivery_digest": "sha256:8707b104cb6aeade476dd5c17638c4d5c3b9398b7f1aa49607250cdc1b9760c6",
+    "kind": "nth.dao.trade.receipt-review-acknowledgement",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "proof": {
+      "created": "2026-08-01T02:03:00Z",
+      "proof_purpose": "tradeReceiptReviewAcknowledgement",
+      "proof_value": "ti75pc9zhRxuB9q8ayDwRuC4oFfsctL5ax4ZNmHRgVrybD3GXL_skSRkaqeUxZ3oTfTgOpHLDkhak73pkUKeDQ",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    "protocol_version": "1",
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "received_at": "2026-08-01T02:03:00Z",
+    "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
+    "sender_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "status": "review-retained-verified"
+  },
+  "receipt_review_acknowledgement_clock_skew": {
+    "audit_event_id": "9999999999999999999999999999999999999999999999999999999999999999",
+    "delivery_digest": "sha256:8707b104cb6aeade476dd5c17638c4d5c3b9398b7f1aa49607250cdc1b9760c6",
+    "kind": "nth.dao.trade.receipt-review-acknowledgement",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "proof": {
+      "created": "2026-08-01T01:57:01Z",
+      "proof_purpose": "tradeReceiptReviewAcknowledgement",
+      "proof_value": "ZHMLeRwckZwfXAoByO7fwRAbXCKUtSGAFKmaz2PxyRnzYteVk0JujXgRFU3ZY9ZVy_sOfzFHNqomOgPx_9pzDQ",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    "protocol_version": "1",
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "received_at": "2026-08-01T01:57:01Z",
+    "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
+    "sender_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "status": "review-retained-verified"
+  },
+  "receipt_review_acknowledgement_clock_skew_digest": "sha256:ad42bfaa878da9e545b581d6563bbefa89e85c27466c5acffb61feeec4406187",
+  "receipt_review_acknowledgement_clock_skew_verification_cases": [
+    {
+      "at": "2026-08-01T01:57:01Z",
+      "audit_event_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "case": "receiver-clock-behind-at-lower-bound",
+      "clock_skew_seconds": 300,
+      "expected_valid": true,
+      "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    {
+      "at": "2026-08-01T01:57:01Z",
+      "audit_event_id": "9999999999999999999999999999999999999999999999999999999999999999",
+      "case": "receiver-clock-behind-beyond-lower-bound",
+      "clock_skew_seconds": 299,
+      "expected_valid": false,
+      "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    }
+  ],
+  "receipt_review_acknowledgement_digest": "sha256:1867802d9288a30118648e6a20aedb4bfeeff5f0854b1d42e45cb6cd77db07a2",
+  "receipt_review_acknowledgement_verification_cases": [
+    {
+      "at": "2026-08-01T02:03:00Z",
+      "audit_event_id": "5555555555555555555555555555555555555555555555555555555555555555",
+      "case": "valid-delivery-binding",
+      "clock_skew_seconds": 300,
+      "expected_valid": true,
+      "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    {
+      "at": "2026-08-01T02:03:00Z",
+      "audit_event_id": "5555555555555555555555555555555555555555555555555555555555555555",
+      "case": "wrong-receiver",
+      "clock_skew_seconds": 300,
+      "expected_valid": false,
+      "receiver_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    {
+      "at": "2026-08-01T02:03:00Z",
+      "audit_event_id": "6666666666666666666666666666666666666666666666666666666666666666",
+      "case": "wrong-audit-event",
+      "clock_skew_seconds": 300,
+      "expected_valid": false,
+      "receiver_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    }
+  ],
   "receipt_review_audit": {
     "event_type": "trade.receipt.reviewed",
     "payload": {
@@ -2789,7 +3051,7 @@
       "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
       "protocol_version": "1",
       "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
-      "review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+      "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
       "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
       "reviewed_at": "2026-08-01T02:02:00Z",
       "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
@@ -2800,12 +3062,12 @@
     "event_type": "trade.receipt.review.conflicted",
     "payload": {
       "candidate_decision": "disputed",
-      "candidate_review_digest": "sha256:db7a749de3e67178ce8b93579f39744fbb738ed7e5d79cb1919a14f61ea0982b",
+      "candidate_review_digest": "sha256:5c3fb297b757c9aabe968a758ee94ea5a4365d3256fddb270f1a0571da4357cc",
       "candidate_reviewed_at": "2026-08-01T02:03:00Z",
       "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
       "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
       "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
-      "primary_review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+      "primary_review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
       "protocol_version": "1",
       "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
       "retention_complete": true,
@@ -2814,7 +3076,113 @@
       "reviewer_role": "taker"
     }
   },
-  "receipt_review_digest": "sha256:9bd4d19e867c865098e5df8754ca1e0a00829b5f1ffb425aaae5942377e1d6fd",
+  "receipt_review_delivery": {
+    "adapter_policy": {
+      "accepted_adapter_digests": [
+        "sha256:67ec0b47a68bc84b1f87f0615e815afff54585cd6cba2ae641801005f51f3e19"
+      ],
+      "allowed_execution_modes": [
+        "declarative"
+      ],
+      "allowed_permissions": [],
+      "kind": "nth.dao.trade.execution-adapter-policy",
+      "protocol_version": "1"
+    },
+    "created_at": "2026-08-01T02:02:01Z",
+    "delivery_id": "nth:trade:receipt-review-delivery:3456789abcdef0123456789abcdef012",
+    "kind": "nth.dao.trade.receipt-review-delivery",
+    "nonce": "3456789abcdef0123456789abcdef012",
+    "not_after": "2026-08-01T02:12:01Z",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "proof": {
+      "created": "2026-08-01T02:02:01Z",
+      "proof_purpose": "tradeReceiptReviewDelivery",
+      "proof_value": "-z0v2LKEwwtAVVqDWLHtx4io7B9yRNbgjcFcKyVdHEbyBj6ZrofRAXdAQqkjoYrcJHun6zs8tyZjdN6P5GsFBA",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    "protocol_version": "1",
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "recipient_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "review": {
+      "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+      "decision": "accepted",
+      "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+      "kind": "nth.dao.trade.receipt-review",
+      "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+      "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+      "proof": {
+        "created": "2026-08-01T02:02:00Z",
+        "proof_purpose": "tradeReceiptReview",
+        "proof_value": "yKSe7zxK5szglp5e8cANr0yEdwiTvd06oGsu2BTTiyYo3FdkZUSSRB_jAK_dTXO59N3arjxUqCUJxSulT-nTAA",
+        "type": "Ed25519Signature2020",
+        "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+      },
+      "protocol_version": "1",
+      "reason_codes": [],
+      "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+      "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+      "reviewed_at": "2026-08-01T02:02:00Z",
+      "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+      "reviewer_role": "taker",
+      "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+    },
+    "review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
+    "sender_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "verifier_policy": {
+      "accepted_package_digests": [],
+      "accepted_publishers": [
+        "did:key:z6MkqwsAyjUpH4KJ6v6fnfBTX4Vqaow2ArAwW3dGLep4VQ4N"
+      ],
+      "allowed_execution_modes": [
+        "declarative"
+      ],
+      "allowed_permissions": [],
+      "approved_executable_digests": [],
+      "available_capabilities": [],
+      "kind": "nth.dao.trade.rule-resolution-policy",
+      "max_depth": 32,
+      "max_packages": 256,
+      "max_resource_bytes": 67108864,
+      "protocol_version": "1"
+    }
+  },
+  "receipt_review_delivery_digest": "sha256:8707b104cb6aeade476dd5c17638c4d5c3b9398b7f1aa49607250cdc1b9760c6",
+  "receipt_review_delivery_verification_cases": [
+    {
+      "at": "2026-08-01T02:03:00Z",
+      "case": "valid-recipient-and-window",
+      "clock_skew_seconds": 300,
+      "expected_valid": true,
+      "max_ttl_seconds": 600,
+      "recipient_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    {
+      "at": "2026-08-01T02:03:00Z",
+      "case": "wrong-recipient",
+      "clock_skew_seconds": 300,
+      "expected_valid": false,
+      "max_ttl_seconds": 600,
+      "recipient_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    {
+      "at": "2026-08-01T02:03:00Z",
+      "case": "ttl-policy-exceeded",
+      "clock_skew_seconds": 300,
+      "expected_valid": false,
+      "max_ttl_seconds": 599,
+      "recipient_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    {
+      "at": "2026-08-01T02:17:02Z",
+      "case": "expired-after-clock-skew",
+      "clock_skew_seconds": 300,
+      "expected_valid": false,
+      "max_ttl_seconds": 600,
+      "recipient_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    }
+  ],
+  "receipt_review_digest": "sha256:fb6a91eb263f3d19f848cbc1e15950da487d8e0522330b3eccc26d9e59af7794",
   "rule_package": {
     "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
     "manifest": {

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 import hashlib
-import math
 import re
 import secrets
 from typing import Any
@@ -32,7 +31,16 @@ from nth_dao.trade_rules.signing import (
     encode_ed25519_signature,
     signed_document_input,
     verification_method_for_did,
-    verify_ed25519_did_signature,
+)
+from nth_dao.trade_rules.transport_common import (
+    bounded_seconds as _bounded_seconds,
+    now_ns as _now_ns,
+    opposite_party as _opposite_party,
+    reject as _raise,
+    timestamp_ns as _timestamp_ns,
+    validate_transport_proof,
+    verify_transport_signature as _verify_signature,
+    within_clock_skewed_lifetime,
 )
 
 EXECUTION_RECEIPT_DELIVERY_KIND = (
@@ -60,19 +68,6 @@ _ACKNOWLEDGEMENT_DOMAIN = (
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVENT_ID = re.compile(r"^[0-9a-f]{64}$")
 _NONCE = re.compile(r"^(?:[0-9a-f]{2}){16,64}$")
-_TIMESTAMP = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
-    r"(?:\.(\d{1,9}))?Z$"
-)
-_PROOF_FIELDS = frozenset(
-    {
-        "type",
-        "created",
-        "verification_method",
-        "proof_purpose",
-        "proof_value",
-    }
-)
 _DELIVERY_FIELDS = frozenset(
     {
         "kind",
@@ -114,105 +109,12 @@ class TradeExecutionReceiptAcknowledgementRejected(ValueError):
     """A receiver acknowledgement is malformed, unsigned, or unbound."""
 
 
-def _raise(error_type: type[ValueError], message: str) -> None:
-    raise error_type(message)
-
-
-def _timestamp_ns(
-    value: Any,
-    *,
-    label: str,
-    error_type: type[ValueError],
-) -> int:
-    if not isinstance(value, str) or len(value) > 35:
-        _raise(error_type, f"{label} must be a UTC RFC3339 timestamp")
-    match = _TIMESTAMP.fullmatch(value)
-    if match is None:
-        _raise(error_type, f"{label} must be a UTC RFC3339 timestamp")
-    try:
-        base = datetime.strptime(
-            match.group(1), "%Y-%m-%dT%H:%M:%S"
-        ).replace(tzinfo=timezone.utc)
-    except ValueError as exc:
-        raise error_type(f"{label} is not a real timestamp") from exc
-    nanos = int((match.group(2) or "").ljust(9, "0") or "0")
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    delta = base - epoch
-    return (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
-        + nanos
-    )
-
-
-def _datetime_ns(
-    value: datetime,
-    *,
-    error_type: type[ValueError],
-) -> int:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        _raise(error_type, "now must be timezone-aware")
-    moment = value.astimezone(timezone.utc)
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    delta = moment - epoch
-    return (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
-        + delta.microseconds * 1_000
-    )
-
-
-def _now_ns(
-    value: datetime | None,
-    *,
-    error_type: type[ValueError],
-) -> int:
-    return _datetime_ns(
-        value or datetime.now(timezone.utc),
-        error_type=error_type,
-    )
-
-
-def _bounded_seconds(
-    value: Any,
-    *,
-    label: str,
-    error_type: type[ValueError],
-) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        _raise(
-            error_type,
-            f"{label} must be a finite non-negative number",
-        )
-    return float(value)
-
-
 def _verified_order(order: TradeOrder | dict[str, Any]) -> TradeOrder:
     return (
         TradeOrder.from_json(order.canonical_bytes)
         if isinstance(order, TradeOrder)
         else TradeOrder.from_dict(order)
     )
-
-
-def _opposite_party(
-    order_document: dict[str, Any],
-    sender_did: str,
-    *,
-    error_type: type[ValueError],
-) -> str:
-    if sender_did == order_document["maker_did"]:
-        return order_document["taker_did"]
-    if sender_did == order_document["taker_did"]:
-        return order_document["maker_did"]
-    _raise(error_type, "sender_did is not a party to the signed Order")
 
 
 def _validate_proof(
@@ -223,53 +125,14 @@ def _validate_proof(
     created_at: str,
     error_type: type[ValueError],
 ) -> None:
-    if not isinstance(proof, dict) or set(proof) != _PROOF_FIELDS:
-        _raise(error_type, "proof has missing or unknown fields")
-    if proof["type"] != EXECUTION_RECEIPT_TRANSPORT_PROOF_TYPE:
-        _raise(error_type, "proof type is invalid")
-    if proof["verification_method"] != verification_method_for_did(
-        signer_did
-    ):
-        _raise(
-            error_type,
-            "proof verification_method does not match signer",
-        )
-    if proof["proof_purpose"] != purpose:
-        _raise(error_type, "proof purpose is invalid")
-    if not isinstance(proof["proof_value"], str):
-        _raise(error_type, "proof value is invalid")
-    proof_ns = _timestamp_ns(
-        proof["created"],
-        label="proof.created",
+    validate_transport_proof(
+        proof,
+        signer_did=signer_did,
+        purpose=purpose,
+        created_at=created_at,
+        proof_type=EXECUTION_RECEIPT_TRANSPORT_PROOF_TYPE,
         error_type=error_type,
     )
-    created_ns = _timestamp_ns(
-        created_at,
-        label="created_at",
-        error_type=error_type,
-    )
-    if proof_ns != created_ns:
-        _raise(error_type, "proof.created must equal created_at")
-
-
-def _verify_signature(
-    document: dict[str, Any],
-    *,
-    signer_field: str,
-    domain: bytes,
-    error_type: type[ValueError],
-) -> None:
-    try:
-        signing_input = signed_document_input(domain, document)
-    except TradeProofError as exc:
-        raise error_type(str(exc)) from exc
-    ok, reason = verify_ed25519_did_signature(
-        publisher_did=document[signer_field],
-        proof_value=document["proof"]["proof_value"],
-        signing_input=signing_input,
-    )
-    if not ok:
-        _raise(error_type, reason)
 
 
 def _validate_delivery_static(
@@ -799,7 +662,12 @@ def create_trade_execution_receipt_acknowledgement(
         )
         * 1_000_000_000
     )
-    if received_ns < created_ns or received_ns > expiry_ns + skew_ns:
+    if not within_clock_skewed_lifetime(
+        received_ns,
+        created_ns=created_ns,
+        expiry_ns=expiry_ns,
+        skew_ns=skew_ns,
+    ):
         _raise(
             error_type,
             "received_at must be within signed delivery lifetime",
@@ -932,7 +800,12 @@ def verify_trade_execution_receipt_acknowledgement(
             )
             * 1_000_000_000
         )
-        if received_ns < created_ns or received_ns > expiry_ns + skew_ns:
+        if not within_clock_skewed_lifetime(
+            received_ns,
+            created_ns=created_ns,
+            expiry_ns=expiry_ns,
+            skew_ns=skew_ns,
+        ):
             _raise(
                 error_type,
                 "received_at is outside signed delivery lifetime",

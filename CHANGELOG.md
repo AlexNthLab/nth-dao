@@ -117,6 +117,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Receipt Review write-ahead audit records that recover normal and conflicting
   Spine projections after restart without object resubmission, plus explicit
   idempotent `trade.receipt.review.conflicted` events.
+- Signed Receipt Review Delivery/Acknowledgement federation with exact reviewer
+  policy snapshots, destination and TTL binding, receiver-side policy replay,
+  durable restart-safe sender dispatch, expiry-only renewal history, bounded
+  public intake, deterministic positive/negative vectors, and an Orders UI
+  workbench that labels Reviews and peer ACKs as claims rather than facts.
+- Receipt Review audit outbox v3 retains the exact Rule and Adapter Policy
+  snapshots used at signing or intake, rejects tampering on every read, safely
+  upgrades digest-compatible v1/v2 records, and stores an immutable first local
+  observation time separately from mutable workflow timestamps so delivery is
+  reproducible across process restarts and later local policy rotation.
+- Receipt Review ACKs now bind the durable first receiver observation time,
+  reject retries aimed at a different peer, account for crash residue in all
+  outbox capacity projections, and expose retained conflict digests in the UI.
 - Canonical Trade Execution Adapter Policy v1 objects with a public wire
   schema and digest shared by Receipt Review and conformance implementations.
 
@@ -136,6 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   evidence can be completed after capacity increases, self-referential markers
   are not reported complete, and partial Receipt/Order digest binding is
   rejected.
+- Order, Execution Receipt, and Receipt Review acknowledgements now apply the
+  configured clock-skew allowance symmetrically at both edges of a signed
+  delivery lifetime, so a receiver clock slightly behind the sender no longer
+  causes an otherwise valid durable intake to fail.
 
 ## [0.10.0b1] - 2026-06-07 - Beta release: signed mandates, A2A server, hardened collaboration runtime
 

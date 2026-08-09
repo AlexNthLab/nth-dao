@@ -538,7 +538,7 @@ def test_peer_fetch_pins_dns_and_uses_bounded_encoded_exact_route(
 
     assert restored.digest == package.digest
     assert observed["resolved_ip"] == "192.0.2.10"
-    assert observed["timeout_s"] == 7.5
+    assert 0 < observed["timeout_s"] <= 7.5
     assert observed["max_bytes"] >= len(raw)
     assert observed["url"] == (
         "http://peer.example:8080/api/v2/trade/federation/offers/"

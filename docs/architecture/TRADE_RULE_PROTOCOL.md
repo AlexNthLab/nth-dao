@@ -616,11 +616,21 @@ A Receipt Review remains a signed counterparty claim. It proves neither that
 delivery objectively occurred nor that goods, rights, or funds changed hands.
 It does not close a dispute or grant reputation by itself. Local publication
 first prepares a bounded write-ahead record containing the exact signed Review,
-Receipt, and Order bytes. It then stores the Review in a conflict-retaining CAS
-and projects one exact, idempotent `trade.receipt.reviewed` event into the
-signed Spine. Startup or operator reconciliation can repair an interrupted
-projection from the outbox without requiring the caller to resubmit any of
-those objects.
+Receipt, Order, reviewer Rule Policy, and Adapter Policy bytes. The policy
+snapshots are content-bound to the Review digests and reviewer policy in the
+Order, so a later local policy rotation cannot change or strand first delivery.
+It then stores the Review in a conflict-retaining CAS and projects one exact,
+idempotent `trade.receipt.reviewed` event into the signed Spine. Startup or
+operator reconciliation can repair an interrupted projection from the outbox
+without requiring the caller to resubmit any of those objects. The local audit
+outbox v3 stores `first_observed_at_ms` independently from mutable creation and
+workflow-update timestamps. Normal publication must supply that local
+observation explicitly and never derives it from the Review author's clock.
+Legacy v1 outbox records are upgraded only when both currently available policy
+bytes match the signed Review and Order bindings exactly. Legacy v2 records
+remain readable and upgrade without changing their inferred observation time.
+Creating a v1 record is available only through the explicitly named legacy
+migration methods.
 
 Contradictory signed Reviews sharing one semantic Review ID are retained as
 equivocation. They never replace the first `trade.receipt.reviewed` event.
@@ -631,6 +641,31 @@ marker-only conflict can be completed after configured capacity is increased.
 Retention is complete only when the primary and marker digests are distinct
 and both candidates are actually present. A conflict event proves that
 inconsistent signed claims exist; it does not establish which claim is true.
+
+Receipt Review federation uses its own signed v1 Delivery and Acknowledgement
+envelopes. The Delivery is signed by the reviewer and binds the exact Order,
+Receipt, Review, reviewer policy snapshot, Adapter policy snapshot, destination,
+nonce, and short validity window. The reviewer policy must byte-match that
+party's policy inside the accepted Order; a receiver never substitutes its own
+policy for the reviewer's signed claim. Before sending, the sender performs the
+same fresh challenge and DNS-pinned peer-DID check used by Execution Receipt
+delivery. The executor node must already retain the Order and Receipt, then
+independently replays the embedded Review under those signed policy snapshots
+before writing it through the normal conflict-retaining Review CAS and Spine
+coordinator.
+
+Only after CAS retention and the exact local `trade.receipt.reviewed` anchor
+does the executor sign a `TradeReceiptReviewAcknowledgement`. The ACK binds the
+Delivery, Review, Receipt, Order, receiver DID, and remote Spine event ID. The
+reviewer persists Delivery state before network I/O and persists a verified ACK
+before its local `trade.receipt.review-acknowledged` projection. Startup and
+operator reconciliation repair interrupted ACK anchoring or pending cleanup;
+only an expired Delivery may be renewed, and prior Delivery digests remain in
+generation history. A Review ACK means only that the peer claims it retained
+and replayed the signed Review. It proves neither the Review's truth nor
+delivery quality, payment, settlement, filesystem state, or legal acceptance.
+The ACK `received_at` is the receiver's durable first v2 observation time, not
+the Review author's earlier `reviewed_at`; exact Delivery replays reuse it.
 
 Trade Execution Adapter Policy v1 is a canonical protocol value with kind,
 protocol version, accepted Adapter digests, execution modes, and permissions.
@@ -770,6 +805,10 @@ The reviewed protocol kernel currently contains:
   storage, write-ahead restart recovery, and idempotent
   `trade.receipt.reviewed` / `trade.receipt.review.conflicted` Spine
   projections;
+- destination-bound Receipt Review delivery with signed reviewer policy
+  snapshots, mandatory executor replay, receiver-signed ACK, durable sender
+  outbox, restart reconciliation, expiry-only renewal history, and explicit
+  claim-not-truth UI semantics;
 - bounded package-store reconciliation with explicit cleanup;
 - authenticated, paginated local Trade Skill catalog inspection with strict
   frontend response validation, metadata-only resource projection, and
@@ -786,7 +825,8 @@ The reviewed protocol kernel currently contains:
   non-trust/non-acceptance semantics;
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Proposal Delivery v1, Execution Receipt v1,
-  Execution Receipt Delivery/Acknowledgement v1, Receipt Review v1, and the
+  Execution Receipt Delivery/Acknowledgement v1, Receipt Review v1, Receipt
+  Review Delivery/Acknowledgement v1, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
   Rule Recognition, Recognition Policy, and Receipt Review audit payloads;
 - focused tests.

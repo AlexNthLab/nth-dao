@@ -54,6 +54,12 @@ from nth_dao.trade_rules.receipt_review_audit import (
     receipt_review_conflict_audit_payload,
     receipt_review_audit_payload,
 )
+from nth_dao.trade_rules.receipt_review_transport import (
+    create_trade_receipt_review_acknowledgement,
+    create_trade_receipt_review_delivery,
+    trade_receipt_review_acknowledgement_digest,
+    trade_receipt_review_delivery_digest,
+)
 from nth_dao.trade_rules.receipt_review_store import (
     TradeReceiptReviewConflictStatus,
 )
@@ -155,6 +161,14 @@ EXECUTION_ADAPTER_POLICY_SCHEMA_PATH = (
 RECEIPT_REVIEW_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-receipt-review.schema.json"
+)
+RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-receipt-review-delivery.schema.json"
+)
+RECEIPT_REVIEW_ACKNOWLEDGEMENT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-receipt-review-acknowledgement.schema.json"
 )
 RECEIPT_REVIEW_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -406,6 +420,13 @@ def generate_vectors() -> dict[str, Any]:
             received_at="2026-08-01T01:05:00Z",
             audit_event_id="1" * 64,
         )
+        order_intake_receipt_clock_skew = create_trade_order_intake_receipt(
+            taker,
+            delivery=order_delivery,
+            received_at="2026-08-01T00:55:01Z",
+            audit_event_id="7" * 64,
+            clock_skew_seconds=300,
+        )
         order_intake_acknowledgement = TradeOrderAcknowledgement(
             order_digest=trade_order_digest(order),
             target_url="https://taker.example",
@@ -435,6 +456,9 @@ def generate_vectors() -> dict[str, Any]:
         execution_input = b'{"order":"deliver"}'
         verifier_policy = RuleResolutionPolicy(
             accepted_package_digests={package_digest}
+        )
+        reviewer_policy = RuleResolutionPolicy(
+            accepted_publishers={rule_publisher.as_did()}
         )
         adapter_policy = TradeExecutionAdapterPolicy(
             accepted_adapter_digests={adapter.digest},
@@ -505,12 +529,22 @@ def generate_vectors() -> dict[str, Any]:
                 audit_event_id="3" * 64,
             )
         )
+        execution_receipt_acknowledgement_clock_skew = (
+            create_trade_execution_receipt_acknowledgement(
+                taker,
+                delivery=execution_receipt_delivery,
+                order=order,
+                received_at="2026-08-01T01:56:01Z",
+                audit_event_id="8" * 64,
+                clock_skew_seconds=300,
+            )
+        )
         receipt_review = create_trade_receipt_review(
             taker,
             receipt=execution_receipt,
             order=order,
             package_resolver=package_store,
-            verifier_policy=verifier_policy,
+            verifier_policy=reviewer_policy,
             adapter_resolver=_AdapterResolver(adapter, adapter_artifact),
             adapter_policy=adapter_policy,
             content_resolver=MappingTradeExecutionContentResolver(
@@ -521,12 +555,45 @@ def generate_vectors() -> dict[str, Any]:
             reviewed_at="2026-08-01T02:02:00Z",
             now=_utc("2026-08-01T02:02:00Z"),
         )
+        receipt_review_delivery = create_trade_receipt_review_delivery(
+            taker,
+            review=receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            verifier_policy=reviewer_policy,
+            adapter_policy=adapter_policy,
+            created_at="2026-08-01T02:02:01Z",
+            not_after="2026-08-01T02:12:01Z",
+            nonce="3456789abcdef0123456789abcdef012",
+            now=_utc("2026-08-01T02:02:01Z"),
+        )
+        receipt_review_acknowledgement = (
+            create_trade_receipt_review_acknowledgement(
+                maker,
+                delivery=receipt_review_delivery,
+                receipt=execution_receipt,
+                order=order,
+                received_at="2026-08-01T02:03:00Z",
+                audit_event_id="5" * 64,
+            )
+        )
+        receipt_review_acknowledgement_clock_skew = (
+            create_trade_receipt_review_acknowledgement(
+                maker,
+                delivery=receipt_review_delivery,
+                receipt=execution_receipt,
+                order=order,
+                received_at="2026-08-01T01:57:01Z",
+                audit_event_id="9" * 64,
+                clock_skew_seconds=300,
+            )
+        )
         conflicting_receipt_review = create_trade_receipt_review(
             taker,
             receipt=execution_receipt,
             order=order,
             package_resolver=package_store,
-            verifier_policy=verifier_policy,
+            verifier_policy=reviewer_policy,
             adapter_resolver=_AdapterResolver(adapter, adapter_artifact),
             adapter_policy=adapter_policy,
             content_resolver=MappingTradeExecutionContentResolver(
@@ -638,6 +705,12 @@ def generate_vectors() -> dict[str, Any]:
         receipt_review_tamper = receipt_review.to_dict()
         receipt_review_tamper["decision"] = "disputed"
         receipt_review_tamper["reason_codes"] = ["result.mismatch"]
+        receipt_review_delivery_tamper = receipt_review_delivery.to_dict()
+        receipt_review_delivery_tamper["recipient_did"] = taker.as_did()
+        receipt_review_acknowledgement_tamper = (
+            receipt_review_acknowledgement.to_dict()
+        )
+        receipt_review_acknowledgement_tamper["audit_event_id"] = "6" * 64
         receipt_review_audit = receipt_review_audit_payload(
             receipt_review,
             receipt=execution_receipt,
@@ -750,6 +823,32 @@ def generate_vectors() -> dict[str, Any]:
         "order_intake_receipt_digest": trade_order_intake_receipt_digest(
             order_intake_receipt
         ),
+        "order_intake_receipt_clock_skew": (
+            order_intake_receipt_clock_skew.to_dict()
+        ),
+        "order_intake_receipt_clock_skew_digest": (
+            trade_order_intake_receipt_digest(
+                order_intake_receipt_clock_skew
+            )
+        ),
+        "order_intake_receipt_clock_skew_verification_cases": [
+            {
+                "case": "receiver-clock-behind-at-lower-bound",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "7" * 64,
+                "at": "2026-08-01T00:55:01Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "receiver-clock-behind-beyond-lower-bound",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "7" * 64,
+                "at": "2026-08-01T00:55:01Z",
+                "clock_skew_seconds": 299,
+                "expected_valid": False,
+            },
+        ],
         "order_delivery_verification_cases": [
             {
                 "case": "valid-recipient-and-window",
@@ -867,6 +966,32 @@ def generate_vectors() -> dict[str, Any]:
                 execution_receipt_acknowledgement
             )
         ),
+        "execution_receipt_acknowledgement_clock_skew": (
+            execution_receipt_acknowledgement_clock_skew.to_dict()
+        ),
+        "execution_receipt_acknowledgement_clock_skew_digest": (
+            trade_execution_receipt_acknowledgement_digest(
+                execution_receipt_acknowledgement_clock_skew
+            )
+        ),
+        "execution_receipt_acknowledgement_clock_skew_verification_cases": [
+            {
+                "case": "receiver-clock-behind-at-lower-bound",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "8" * 64,
+                "at": "2026-08-01T01:56:01Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "receiver-clock-behind-beyond-lower-bound",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "8" * 64,
+                "at": "2026-08-01T01:56:01Z",
+                "clock_skew_seconds": 299,
+                "expected_valid": False,
+            },
+        ],
         "execution_receipt_acknowledgement_verification_cases": [
             {
                 "case": "valid-delivery-binding",
@@ -903,6 +1028,106 @@ def generate_vectors() -> dict[str, Any]:
         ],
         "receipt_review": receipt_review.to_dict(),
         "receipt_review_digest": receipt_review_digest(receipt_review),
+        "receipt_review_delivery": receipt_review_delivery.to_dict(),
+        "receipt_review_delivery_digest": trade_receipt_review_delivery_digest(
+            receipt_review_delivery,
+            receipt=execution_receipt,
+            order=order,
+        ),
+        "receipt_review_delivery_verification_cases": [
+            {
+                "case": "valid-recipient-and-window",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T02:03:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-recipient",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:03:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "ttl-policy-exceeded",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T02:03:00Z",
+                "max_ttl_seconds": 599,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "expired-after-clock-skew",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T02:17:02Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
+        "receipt_review_acknowledgement": (
+            receipt_review_acknowledgement.to_dict()
+        ),
+        "receipt_review_acknowledgement_digest": (
+            trade_receipt_review_acknowledgement_digest(
+                receipt_review_acknowledgement
+            )
+        ),
+        "receipt_review_acknowledgement_clock_skew": (
+            receipt_review_acknowledgement_clock_skew.to_dict()
+        ),
+        "receipt_review_acknowledgement_clock_skew_digest": (
+            trade_receipt_review_acknowledgement_digest(
+                receipt_review_acknowledgement_clock_skew
+            )
+        ),
+        "receipt_review_acknowledgement_clock_skew_verification_cases": [
+            {
+                "case": "receiver-clock-behind-at-lower-bound",
+                "receiver_did": maker.as_did(),
+                "audit_event_id": "9" * 64,
+                "at": "2026-08-01T01:57:01Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "receiver-clock-behind-beyond-lower-bound",
+                "receiver_did": maker.as_did(),
+                "audit_event_id": "9" * 64,
+                "at": "2026-08-01T01:57:01Z",
+                "clock_skew_seconds": 299,
+                "expected_valid": False,
+            },
+        ],
+        "receipt_review_acknowledgement_verification_cases": [
+            {
+                "case": "valid-delivery-binding",
+                "receiver_did": maker.as_did(),
+                "audit_event_id": "5" * 64,
+                "at": "2026-08-01T02:03:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-receiver",
+                "receiver_did": taker.as_did(),
+                "audit_event_id": "5" * 64,
+                "at": "2026-08-01T02:03:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+            {
+                "case": "wrong-audit-event",
+                "receiver_did": maker.as_did(),
+                "audit_event_id": "6" * 64,
+                "at": "2026-08-01T02:03:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
         "expected_execution_readiness": (
             execution_receipt.to_dict()["readiness"]
         ),
@@ -1050,6 +1275,18 @@ def generate_vectors() -> dict[str, Any]:
                 "document": receipt_review_tamper,
             },
             {
+                "case": "receipt-review-delivery-retarget",
+                "target": "receipt_review_delivery",
+                "expected_valid": False,
+                "document": receipt_review_delivery_tamper,
+            },
+            {
+                "case": "receipt-review-acknowledgement-event-tamper",
+                "target": "receipt_review_acknowledgement",
+                "expected_valid": False,
+                "document": receipt_review_acknowledgement_tamper,
+            },
+            {
                 "case": "receipt-review-audit-binding-tamper",
                 "target": "receipt_review_audit_binding",
                 "expected_valid": False,
@@ -1122,7 +1359,9 @@ __all__ = [
     "PROPOSAL_DELIVERY_SCHEMA_PATH",
     "PROPOSAL_INTAKE_RECEIPT_SCHEMA_PATH",
     "RECEIPT_REVIEW_AUDIT_SCHEMA_PATH",
+    "RECEIPT_REVIEW_ACKNOWLEDGEMENT_SCHEMA_PATH",
     "RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH",
+    "RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH",
     "RECEIPT_REVIEW_SCHEMA_PATH",
     "RULE_PACKAGE_BUNDLE_SCHEMA_PATH",
     "VECTORS_PATH",
