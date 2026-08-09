@@ -667,6 +667,49 @@ delivery quality, payment, settlement, filesystem state, or legal acceptance.
 The ACK `received_at` is the receiver's durable first v2 observation time, not
 the Review author's earlier `reviewed_at`; exact Delivery replays reuse it.
 
+### Dispute statement kernel
+
+A `disputed` Trade Receipt Review is the signed opening fact for a dispute; the
+protocol does not create a second, redundant open-dispute signature. Later
+party claims use `TradeDisputeStatement` v1. Each statement binds the exact
+Order, Execution Receipt, disputed Review candidate, author DID and Order role,
+creation time, reason codes, and bounded content-addressed references. Its
+stable case ID is derived from the Review's semantic `review_id`, so conflicting
+signed Review candidates remain in one case; `review_digest` still pins the
+exact candidate answered by a statement. The statement ID is content-derived
+from the statement body. Parent statement digests form an
+append-only DAG so offline peers can issue concurrent claims without a central
+sequence allocator. A `response` must be signed by the Receipt executor;
+`evidence` and `remedy-proposal` statements may be signed by either Order party.
+
+Responses and remedy proposals carry a distinct typed `claim` reference;
+supporting `evidence` remains a separate sorted list. Each claim or evidence
+item is limited to 16 MiB of declared content and one statement may declare at
+most 64 MiB of evidence. These are declarations, not fetched inline bytes.
+
+An optional `rule_action` selects a Rule ID, exact Package digest, hook name,
+and hook version. The Rule ID and Package digest must already occur in the
+signed Order bindings. Creating or publicly verifying a statement with this
+selector requires an exact-digest Package resolver and an exact matching hook
+contract. Offline transport may use the explicitly distinct
+`UnresolvedTradeDisputeStatement` type, which still verifies the statement
+signature and Order/Receipt/Review bindings but cannot be mistaken for a fully
+resolved statement. Converting it to `TradeDisputeStatement` requires the
+exact-digest resolver. Resolvers return only immutable `RulePackage` values
+created by the package verifier/store; raw mappings and duck-typed objects are
+rejected at this trust boundary.
+The selector is non-executing: a receiver must still apply local recognition
+and Adapter policy and obtain any separate authority required before execution.
+
+The signature proves authorship and binding, not truth. Evidence digests prove
+only which bytes were referenced, not that those bytes support a claim. A
+standalone statement also does not prove that every parent exists, that the DAG
+is complete or acyclic, or that a remedy was accepted. Those checks belong to
+the future dispute store/intake layer. No statement settles a dispute, changes
+reputation, transfers an asset, or authorizes funds. JSON Schema validates wire
+shape; the protocol validator remains mandatory for signatures, identifiers,
+roles, chronology, resource bounds, and artifact bindings.
+
 Trade Execution Adapter Policy v1 is a canonical protocol value with kind,
 protocol version, accepted Adapter digests, execution modes, and permissions.
 Its digest is computed over that exact canonical representation. Receipt

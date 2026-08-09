@@ -72,6 +72,11 @@ from nth_dao.trade_rules.execution_content import (
     MappingTradeExecutionContentResolver,
 )
 from nth_dao.trade_rules.canonical import trade_canonical_json
+from nth_dao.trade_rules.dispute_statement import (
+    TRADE_DISPUTE_STATEMENT_SIGNING_DOMAIN,
+    create_trade_dispute_statement,
+    trade_dispute_statement_digest,
+)
 from nth_dao.trade_rules.manifest import (
     manifest_body,
     sign_manifest,
@@ -100,6 +105,7 @@ from nth_dao.trade_rules.package_store import RulePackageStore
 from nth_dao.trade_rules.package_transport import build_rule_package_bundle
 from nth_dao.trade_rules.package_binding import sign_offer_package_binding
 from nth_dao.trade_rules.store import OfferStore
+from nth_dao.trade_rules.signing import signed_document_input
 
 VECTORS_PATH = Path(__file__).with_name("vectors") / "agreement-v1.json"
 PROPOSAL_SCHEMA_PATH = (
@@ -177,6 +183,10 @@ RECEIPT_REVIEW_AUDIT_SCHEMA_PATH = (
 RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-receipt-review-conflict-audit-payload.schema.json"
+)
+TRADE_DISPUTE_STATEMENT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement.schema.json"
 )
 RULE_PACKAGE_BUNDLE_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -605,6 +615,89 @@ def generate_vectors() -> dict[str, Any]:
             reviewed_at="2026-08-01T02:03:00Z",
             now=_utc("2026-08-01T02:03:00Z"),
         )
+        alternate_disputed_receipt_review = create_trade_receipt_review(
+            taker,
+            receipt=execution_receipt,
+            order=order,
+            package_resolver=package_store,
+            verifier_policy=reviewer_policy,
+            adapter_resolver=_AdapterResolver(adapter, adapter_artifact),
+            adapter_policy=adapter_policy,
+            content_resolver=MappingTradeExecutionContentResolver(
+                execution_content
+            ),
+            schema_validator=JsonSchema202012Validator(),
+            decision="disputed",
+            reason_codes=["result.incomplete"],
+            reviewed_at="2026-08-01T02:03:00Z",
+            now=_utc("2026-08-01T02:03:00Z"),
+        )
+        execution_result_reference = execution_receipt.to_dict()["result"]
+        dispute_statement = create_trade_dispute_statement(
+            maker,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim={
+                "claim_type": "receipt-result-assertion",
+                "media_type": execution_result_reference["media_type"],
+                "digest": execution_result_reference["digest"],
+                "size": execution_result_reference["size_bytes"],
+                "schema_digest": output_schema_digest,
+            },
+            evidence=[{
+                "purpose": "execution-result",
+                "media_type": execution_result_reference["media_type"],
+                "digest": execution_result_reference["digest"],
+                "size": execution_result_reference["size_bytes"],
+            }],
+            rule_action={
+                "rule_id": manifest.rule_id,
+                "digest": package_digest,
+                "hook": "fulfillment.deliver",
+                "hook_version": "1",
+            },
+            package_resolver=package_store,
+            created_at="2026-08-01T02:04:00Z",
+            now=_utc("2026-08-01T02:04:00Z"),
+        )
+        future_dispute_statement = create_trade_dispute_statement(
+            maker,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim={
+                "claim_type": "receipt-result-assertion",
+                "media_type": execution_result_reference["media_type"],
+                "digest": execution_result_reference["digest"],
+                "size": execution_result_reference["size_bytes"],
+                "schema_digest": output_schema_digest,
+            },
+            created_at="2026-08-01T02:10:00Z",
+            now=_utc("2026-08-01T02:10:00Z"),
+            clock_skew_seconds=0,
+        )
+        rebound_dispute_statement = create_trade_dispute_statement(
+            maker,
+            review=alternate_disputed_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim={
+                "claim_type": "receipt-result-assertion",
+                "media_type": execution_result_reference["media_type"],
+                "digest": execution_result_reference["digest"],
+                "size": execution_result_reference["size_bytes"],
+                "schema_digest": output_schema_digest,
+            },
+            created_at="2026-08-01T02:04:00Z",
+            now=_utc("2026-08-01T02:04:00Z"),
+        )
         omitted_rules_body = proposal.to_dict()
         omitted_rules_body.pop("proof")
         omitted_rules_body["rule_bindings"] = []
@@ -705,6 +798,8 @@ def generate_vectors() -> dict[str, Any]:
         receipt_review_tamper = receipt_review.to_dict()
         receipt_review_tamper["decision"] = "disputed"
         receipt_review_tamper["reason_codes"] = ["result.mismatch"]
+        dispute_statement_tamper = dispute_statement.to_dict()
+        dispute_statement_tamper["proof"]["proof_value"] = "A" * 86
         receipt_review_delivery_tamper = receipt_review_delivery.to_dict()
         receipt_review_delivery_tamper["recipient_did"] = taker.as_did()
         receipt_review_acknowledgement_tamper = (
@@ -1028,6 +1123,68 @@ def generate_vectors() -> dict[str, Any]:
         ],
         "receipt_review": receipt_review.to_dict(),
         "receipt_review_digest": receipt_review_digest(receipt_review),
+        "disputed_receipt_review": conflicting_receipt_review.to_dict(),
+        "disputed_receipt_review_digest": receipt_review_digest(
+            conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        ),
+        "trade_dispute_statement": dispute_statement.to_dict(),
+        "trade_dispute_statement_canonical_hex": (
+            dispute_statement.canonical_bytes.hex()
+        ),
+        "trade_dispute_statement_signing_input_hex": signed_document_input(
+            TRADE_DISPUTE_STATEMENT_SIGNING_DOMAIN,
+            dispute_statement.to_dict(),
+        ).hex(),
+        "trade_dispute_statement_digest": trade_dispute_statement_digest(
+            dispute_statement,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        ),
+        "trade_dispute_statement_verification_cases": [
+            {
+                "case": "observed-at-created-time",
+                "at": "2026-08-01T02:04:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "observer-clock-behind-at-lower-bound",
+                "at": "2026-08-01T01:59:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": True,
+            },
+            {
+                "case": "observer-clock-behind-beyond-lower-bound",
+                "at": "2026-08-01T01:58:59Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+            },
+        ],
+        "trade_dispute_statement_signed_negative_cases": [
+            {
+                "case": "signed-future-created-at",
+                "document": future_dispute_statement.to_dict(),
+                "signed_review": conflicting_receipt_review.to_dict(),
+                "verification_review": conflicting_receipt_review.to_dict(),
+                "at": "2026-08-01T02:04:00Z",
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+                "expected_reason": "too far in the future",
+            },
+            {
+                "case": "signed-review-rebinding",
+                "document": rebound_dispute_statement.to_dict(),
+                "signed_review": alternate_disputed_receipt_review.to_dict(),
+                "verification_review": conflicting_receipt_review.to_dict(),
+                "at": "2026-08-01T02:04:00Z",
+                "clock_skew_seconds": 300,
+                "expected_valid": False,
+                "expected_reason": "review_digest binding mismatch",
+            },
+        ],
         "receipt_review_delivery": receipt_review_delivery.to_dict(),
         "receipt_review_delivery_digest": trade_receipt_review_delivery_digest(
             receipt_review_delivery,
@@ -1275,6 +1432,12 @@ def generate_vectors() -> dict[str, Any]:
                 "document": receipt_review_tamper,
             },
             {
+                "case": "trade-dispute-statement-signature-tamper",
+                "target": "trade_dispute_statement",
+                "expected_valid": False,
+                "document": dispute_statement_tamper,
+            },
+            {
                 "case": "receipt-review-delivery-retarget",
                 "target": "receipt_review_delivery",
                 "expected_valid": False,
@@ -1364,6 +1527,7 @@ __all__ = [
     "RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH",
     "RECEIPT_REVIEW_SCHEMA_PATH",
     "RULE_PACKAGE_BUNDLE_SCHEMA_PATH",
+    "TRADE_DISPUTE_STATEMENT_SCHEMA_PATH",
     "VECTORS_PATH",
     "generate_vectors",
     "write_vectors",

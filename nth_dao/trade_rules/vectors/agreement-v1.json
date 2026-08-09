@@ -51,6 +51,32 @@
     "kind": "nth.dao.trade.execution-adapter-policy",
     "protocol_version": "1"
   },
+  "disputed_receipt_review": {
+    "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+    "decision": "disputed",
+    "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+    "kind": "nth.dao.trade.receipt-review",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+    "proof": {
+      "created": "2026-08-01T02:03:00Z",
+      "proof_purpose": "tradeReceiptReview",
+      "proof_value": "O945Yl5v_H_szM8x9vbrXw-7WSOPTB_FXG34w70Pw94W0-5hmpk0ftt2bifsDIH2z9YyHiiOb05AYEhSvkFLBQ",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+    },
+    "protocol_version": "1",
+    "reason_codes": [
+      "result.mismatch"
+    ],
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+    "reviewed_at": "2026-08-01T02:03:00Z",
+    "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+    "reviewer_role": "taker",
+    "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+  },
+  "disputed_receipt_review_digest": "sha256:5c3fb297b757c9aabe968a758ee94ea5a4365d3256fddb270f1a0571da4357cc",
   "execution_adapter": {
     "adapter_id": "org.nthdao.reference/declarative",
     "adapter_version": "1.0.0",
@@ -1767,6 +1793,57 @@
       "target": "receipt_review"
     },
     {
+      "case": "trade-dispute-statement-signature-tamper",
+      "document": {
+        "author_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "author_role": "maker",
+        "claim": {
+          "claim_type": "receipt-result-assertion",
+          "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+          "media_type": "application/json",
+          "schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "size": 22
+        },
+        "created_at": "2026-08-01T02:04:00Z",
+        "dispute_id": "nth-trade-dispute-sha256:0fb573cd6d8d87960032ecdc395eec5153d60139ebaf2c11ea893c3348aa84fb",
+        "evidence": [
+          {
+            "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+            "media_type": "application/json",
+            "purpose": "execution-result",
+            "size": 22
+          }
+        ],
+        "kind": "nth.dao.trade.dispute-statement",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "parent_statement_digests": [],
+        "proof": {
+          "created": "2026-08-01T02:04:00Z",
+          "proof_purpose": "tradeDisputeStatement",
+          "proof_value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "executor.contests-review"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_digest": "sha256:5c3fb297b757c9aabe968a758ee94ea5a4365d3256fddb270f1a0571da4357cc",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "rule_action": {
+          "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+          "hook": "fulfillment.deliver",
+          "hook_version": "1",
+          "rule_id": "org.nthdao.reference.delivery"
+        },
+        "statement_id": "nth-trade-dispute-statement-sha256:e2145921140d52835980f0a02fdccb8e5caac01c7f3825101a7ff92fc92bbd00",
+        "statement_type": "response"
+      },
+      "expected_valid": false,
+      "target": "trade_dispute_statement"
+    },
+    {
       "case": "receipt-review-delivery-retarget",
       "document": {
         "adapter_policy": {
@@ -3357,6 +3434,259 @@
     ]
   },
   "schema_version": 1,
+  "trade_dispute_statement": {
+    "author_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+    "author_role": "maker",
+    "claim": {
+      "claim_type": "receipt-result-assertion",
+      "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+      "media_type": "application/json",
+      "schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+      "size": 22
+    },
+    "created_at": "2026-08-01T02:04:00Z",
+    "dispute_id": "nth-trade-dispute-sha256:0fb573cd6d8d87960032ecdc395eec5153d60139ebaf2c11ea893c3348aa84fb",
+    "evidence": [
+      {
+        "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+        "media_type": "application/json",
+        "purpose": "execution-result",
+        "size": 22
+      }
+    ],
+    "kind": "nth.dao.trade.dispute-statement",
+    "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+    "parent_statement_digests": [],
+    "proof": {
+      "created": "2026-08-01T02:04:00Z",
+      "proof_purpose": "tradeDisputeStatement",
+      "proof_value": "Sg_Fv8_G1ZDFRxRAjsW08WfW6qVpp_io27BKlQ_C6TcCSfdtbOH0qBe_OLw_UCdic9pRS1B-FoghGnpbwCk_DQ",
+      "type": "Ed25519Signature2020",
+      "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+    },
+    "protocol_version": "1",
+    "reason_codes": [
+      "executor.contests-review"
+    ],
+    "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+    "review_digest": "sha256:5c3fb297b757c9aabe968a758ee94ea5a4365d3256fddb270f1a0571da4357cc",
+    "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+    "rule_action": {
+      "digest": "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381",
+      "hook": "fulfillment.deliver",
+      "hook_version": "1",
+      "rule_id": "org.nthdao.reference.delivery"
+    },
+    "statement_id": "nth-trade-dispute-statement-sha256:e2145921140d52835980f0a02fdccb8e5caac01c7f3825101a7ff92fc92bbd00",
+    "statement_type": "response"
+  },
+  "trade_dispute_statement_canonical_hex": "7b22617574686f725f646964223a226469643a6b65793a7a364d6b716d6f6941314478594d425741714b5370443959426a394b4546506e34555669526b3541454e647543466862222c22617574686f725f726f6c65223a226d616b6572222c22636c61696d223a7b22636c61696d5f74797065223a22726563656970742d726573756c742d617373657274696f6e222c22646967657374223a227368613235363a64303736356637336364356431646633396265333533643533386561376334376130313764363661386264303031646334373037323430646262373165353863222c226d656469615f74797065223a226170706c69636174696f6e2f6a736f6e222c22736368656d615f646967657374223a227368613235363a62633661343366386338303935643162343034356331326164636637303363663664356463386139353137356131386536393966616234346338656363363933222c2273697a65223a32327d2c22637265617465645f6174223a22323032362d30382d30315430323a30343a30305a222c22646973707574655f6964223a226e74682d74726164652d646973707574652d7368613235363a30666235373363643664386438373936303033326563646333393565656335313533643630313339656261663263313165613839336333333438616138346662222c2265766964656e6365223a5b7b22646967657374223a227368613235363a64303736356637336364356431646633396265333533643533386561376334376130313764363661386264303031646334373037323430646262373165353863222c226d656469615f74797065223a226170706c69636174696f6e2f6a736f6e222c22707572706f7365223a22657865637574696f6e2d726573756c74222c2273697a65223a32327d5d2c226b696e64223a226e74682e64616f2e74726164652e646973707574652d73746174656d656e74222c226f726465725f646967657374223a227368613235363a37343334663133393137636239633337373533643165363337616661316665333235383138336362396234316336393730343435323439303837393765626561222c22706172656e745f73746174656d656e745f64696765737473223a5b5d2c2270726f6f66223a7b2263726561746564223a22323032362d30382d30315430323a30343a30305a222c2270726f6f665f707572706f7365223a2274726164654469737075746553746174656d656e74222c2270726f6f665f76616c7565223a2253675f4676385f47315a4446527852416a7357303857665736715670705f696f3237424b6c515f433654634353666474624f48307142655f4f4c775f55436469633970525331422d466f6768476e706277436b5f4451222c2274797065223a22456432353531395369676e617475726532303230222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b716d6f6941314478594d425741714b5370443959426a394b4546506e34555669526b3541454e647543466862237a364d6b716d6f6941314478594d425741714b5370443959426a394b4546506e34555669526b3541454e647543466862227d2c2270726f746f636f6c5f76657273696f6e223a2231222c22726561736f6e5f636f646573223a5b226578656375746f722e636f6e74657374732d726576696577225d2c22726563656970745f646967657374223a227368613235363a33663363303338333431373165656538613931326338353566386161653962336531373230396230363562316463313933336263613033326432663433333138222c227265766965775f646967657374223a227368613235363a35633366623239376237353763396161626539363861373538656539346561356134333635643332353666646462323730663161303537316461343335376363222c227265766965775f6964223a226e74682d74726164652d7265766965772d7368613235363a65306264393466386632616233356137613935666135336435396262323931336431373733306161653266383231643264626263643132356139306564373064222c2272756c655f616374696f6e223a7b22646967657374223a227368613235363a30306365353661666633643764303861383737383539383761373065663038373536326564666264663630373962656337346538326437663438303262333831222c22686f6f6b223a2266756c66696c6c6d656e742e64656c69766572222c22686f6f6b5f76657273696f6e223a2231222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652e64656c6976657279227d2c2273746174656d656e745f6964223a226e74682d74726164652d646973707574652d73746174656d656e742d7368613235363a65323134353932313134306435323833353938306630613032666463636238653563616163303163376633383235313031613766663932666339326262643030222c2273746174656d656e745f74797065223a22726573706f6e7365227d",
+  "trade_dispute_statement_digest": "sha256:e2854b34d0fe85dbfd39e6318ff78cc267fbfb7f9817e8fcc95e0d3a64af8adc",
+  "trade_dispute_statement_signed_negative_cases": [
+    {
+      "at": "2026-08-01T02:04:00Z",
+      "case": "signed-future-created-at",
+      "clock_skew_seconds": 0,
+      "document": {
+        "author_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "author_role": "maker",
+        "claim": {
+          "claim_type": "receipt-result-assertion",
+          "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+          "media_type": "application/json",
+          "schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "size": 22
+        },
+        "created_at": "2026-08-01T02:10:00Z",
+        "dispute_id": "nth-trade-dispute-sha256:0fb573cd6d8d87960032ecdc395eec5153d60139ebaf2c11ea893c3348aa84fb",
+        "evidence": [],
+        "kind": "nth.dao.trade.dispute-statement",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "parent_statement_digests": [],
+        "proof": {
+          "created": "2026-08-01T02:10:00Z",
+          "proof_purpose": "tradeDisputeStatement",
+          "proof_value": "1eKPF5MxHSJm2EZIKJyvKYySQy17jORMzH94BHfGzy-X3FWImUIbSQnn4Je6dCWHf5GCiJtWnJ6HlRZHQzRkBg",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "executor.contests-review"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_digest": "sha256:5c3fb297b757c9aabe968a758ee94ea5a4365d3256fddb270f1a0571da4357cc",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "rule_action": null,
+        "statement_id": "nth-trade-dispute-statement-sha256:8b424a9b139a345908fd001b3ae6852a8bae6c4a7549ac61333e9980ba668556",
+        "statement_type": "response"
+      },
+      "expected_reason": "too far in the future",
+      "expected_valid": false,
+      "signed_review": {
+        "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+        "decision": "disputed",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "kind": "nth.dao.trade.receipt-review",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "proof": {
+          "created": "2026-08-01T02:03:00Z",
+          "proof_purpose": "tradeReceiptReview",
+          "proof_value": "O945Yl5v_H_szM8x9vbrXw-7WSOPTB_FXG34w70Pw94W0-5hmpk0ftt2bifsDIH2z9YyHiiOb05AYEhSvkFLBQ",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "result.mismatch"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "reviewed_at": "2026-08-01T02:03:00Z",
+        "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "reviewer_role": "taker",
+        "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+      },
+      "verification_review": {
+        "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+        "decision": "disputed",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "kind": "nth.dao.trade.receipt-review",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "proof": {
+          "created": "2026-08-01T02:03:00Z",
+          "proof_purpose": "tradeReceiptReview",
+          "proof_value": "O945Yl5v_H_szM8x9vbrXw-7WSOPTB_FXG34w70Pw94W0-5hmpk0ftt2bifsDIH2z9YyHiiOb05AYEhSvkFLBQ",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "result.mismatch"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "reviewed_at": "2026-08-01T02:03:00Z",
+        "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "reviewer_role": "taker",
+        "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+      }
+    },
+    {
+      "at": "2026-08-01T02:04:00Z",
+      "case": "signed-review-rebinding",
+      "clock_skew_seconds": 300,
+      "document": {
+        "author_did": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb",
+        "author_role": "maker",
+        "claim": {
+          "claim_type": "receipt-result-assertion",
+          "digest": "sha256:d0765f73cd5d1df39be353d538ea7c47a017d66a8bd001dc4707240dbb71e58c",
+          "media_type": "application/json",
+          "schema_digest": "sha256:bc6a43f8c8095d1b4045c12adcf703cf6d5dc8a95175a18e699fab44c8ecc693",
+          "size": 22
+        },
+        "created_at": "2026-08-01T02:04:00Z",
+        "dispute_id": "nth-trade-dispute-sha256:0fb573cd6d8d87960032ecdc395eec5153d60139ebaf2c11ea893c3348aa84fb",
+        "evidence": [],
+        "kind": "nth.dao.trade.dispute-statement",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "parent_statement_digests": [],
+        "proof": {
+          "created": "2026-08-01T02:04:00Z",
+          "proof_purpose": "tradeDisputeStatement",
+          "proof_value": "OFsh4bwUWeQVQrTz0jK8aAndZGv_LvJhJSN6VCV7Ap0xYF2i3pvLE9glTx1ZcD5g_Py_Kp_64WVZOnIBhQpsCA",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb#z6MkqmoiA1DxYMBWAqKSpD9YBj9KEFPn4UViRk5AENduCFhb"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "executor.contests-review"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_digest": "sha256:70a84479d294669a8f42f540c3efc415e759a40ba0c9eb9597b73ff62334bc87",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "rule_action": null,
+        "statement_id": "nth-trade-dispute-statement-sha256:b39bdfd4f4a0d588ffa438ef15b97a8e4a192c9dda1d01ea17611d630ece9457",
+        "statement_type": "response"
+      },
+      "expected_reason": "review_digest binding mismatch",
+      "expected_valid": false,
+      "signed_review": {
+        "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+        "decision": "disputed",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "kind": "nth.dao.trade.receipt-review",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "proof": {
+          "created": "2026-08-01T02:03:00Z",
+          "proof_purpose": "tradeReceiptReview",
+          "proof_value": "kE6u0bPTN3F2JNELYX22wdcYIUXer7aZbLJ7McNZFnAga_LHZHoU18Im8o12HnI35cDbczqKdPxEtOxMtSTzDw",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "result.incomplete"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "reviewed_at": "2026-08-01T02:03:00Z",
+        "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "reviewer_role": "taker",
+        "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+      },
+      "verification_review": {
+        "adapter_policy_digest": "sha256:22ab9bd80fcc67d4db753f5d6a151da44b1883ff51ed07713ce3bf6c2395d3b3",
+        "decision": "disputed",
+        "execution_id": "nth-trade-execution-sha256:b6faf0fcab896d65f2856b1f42bb16db0ab59dc7c4bbd73db2aab8ca847ac7fb",
+        "kind": "nth.dao.trade.receipt-review",
+        "order_digest": "sha256:7434f13917cb9c37753d1e637afa1fe3258183cb9b41c697044524908797ebea",
+        "order_id": "nth-trade-order-sha256:81abab91b0050a8e9591d2d0e1a98949e2abfbc94c2acc1d0480b8c9a31a9ad5",
+        "proof": {
+          "created": "2026-08-01T02:03:00Z",
+          "proof_purpose": "tradeReceiptReview",
+          "proof_value": "O945Yl5v_H_szM8x9vbrXw-7WSOPTB_FXG34w70Pw94W0-5hmpk0ftt2bifsDIH2z9YyHiiOb05AYEhSvkFLBQ",
+          "type": "Ed25519Signature2020",
+          "verification_method": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup#z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup"
+        },
+        "protocol_version": "1",
+        "reason_codes": [
+          "result.mismatch"
+        ],
+        "receipt_digest": "sha256:3f3c03834171eee8a912c855f8aae9b3e17209b065b1dc1933bca032d2f43318",
+        "review_id": "nth-trade-review-sha256:e0bd94f8f2ab35a7a95fa53d59bb2913d17730aae2f821d2dbbcd125a90ed70d",
+        "reviewed_at": "2026-08-01T02:03:00Z",
+        "reviewer_did": "did:key:z6MknzKxotsMLrcVzDz1N1ChUPadVWbzUoXA4bs4surRJDup",
+        "reviewer_role": "taker",
+        "verifier_policy_digest": "sha256:5e225ff7dcdf11139e6510ac8bb201255b2ac0198651bd4b464f77c573191934"
+      }
+    }
+  ],
+  "trade_dispute_statement_signing_input_hex": "6e74682d64616f2f74726164652d646973707574652d73746174656d656e742f7631007b22617574686f725f646964223a226469643a6b65793a7a364d6b716d6f6941314478594d425741714b5370443959426a394b4546506e34555669526b3541454e647543466862222c22617574686f725f726f6c65223a226d616b6572222c22636c61696d223a7b22636c61696d5f74797065223a22726563656970742d726573756c742d617373657274696f6e222c22646967657374223a227368613235363a64303736356637336364356431646633396265333533643533386561376334376130313764363661386264303031646334373037323430646262373165353863222c226d656469615f74797065223a226170706c69636174696f6e2f6a736f6e222c22736368656d615f646967657374223a227368613235363a62633661343366386338303935643162343034356331326164636637303363663664356463386139353137356131386536393966616234346338656363363933222c2273697a65223a32327d2c22637265617465645f6174223a22323032362d30382d30315430323a30343a30305a222c22646973707574655f6964223a226e74682d74726164652d646973707574652d7368613235363a30666235373363643664386438373936303033326563646333393565656335313533643630313339656261663263313165613839336333333438616138346662222c2265766964656e6365223a5b7b22646967657374223a227368613235363a64303736356637336364356431646633396265333533643533386561376334376130313764363661386264303031646334373037323430646262373165353863222c226d656469615f74797065223a226170706c69636174696f6e2f6a736f6e222c22707572706f7365223a22657865637574696f6e2d726573756c74222c2273697a65223a32327d5d2c226b696e64223a226e74682e64616f2e74726164652e646973707574652d73746174656d656e74222c226f726465725f646967657374223a227368613235363a37343334663133393137636239633337373533643165363337616661316665333235383138336362396234316336393730343435323439303837393765626561222c22706172656e745f73746174656d656e745f64696765737473223a5b5d2c2270726f6f66223a7b2263726561746564223a22323032362d30382d30315430323a30343a30305a222c2270726f6f665f707572706f7365223a2274726164654469737075746553746174656d656e74222c2274797065223a22456432353531395369676e617475726532303230222c22766572696669636174696f6e5f6d6574686f64223a226469643a6b65793a7a364d6b716d6f6941314478594d425741714b5370443959426a394b4546506e34555669526b3541454e647543466862237a364d6b716d6f6941314478594d425741714b5370443959426a394b4546506e34555669526b3541454e647543466862227d2c2270726f746f636f6c5f76657273696f6e223a2231222c22726561736f6e5f636f646573223a5b226578656375746f722e636f6e74657374732d726576696577225d2c22726563656970745f646967657374223a227368613235363a33663363303338333431373165656538613931326338353566386161653962336531373230396230363562316463313933336263613033326432663433333138222c227265766965775f646967657374223a227368613235363a35633366623239376237353763396161626539363861373538656539346561356134333635643332353666646462323730663161303537316461343335376363222c227265766965775f6964223a226e74682d74726164652d7265766965772d7368613235363a65306264393466386632616233356137613935666135336435396262323931336431373733306161653266383231643264626263643132356139306564373064222c2272756c655f616374696f6e223a7b22646967657374223a227368613235363a30306365353661666633643764303861383737383539383761373065663038373536326564666264663630373962656337346538326437663438303262333831222c22686f6f6b223a2266756c66696c6c6d656e742e64656c69766572222c22686f6f6b5f76657273696f6e223a2231222c2272756c655f6964223a226f72672e6e746864616f2e7265666572656e63652e64656c6976657279227d2c2273746174656d656e745f6964223a226e74682d74726164652d646973707574652d73746174656d656e742d7368613235363a65323134353932313134306435323833353938306630613032666463636238653563616163303163376633383235313031613766663932666339326262643030222c2273746174656d656e745f74797065223a22726573706f6e7365227d",
+  "trade_dispute_statement_verification_cases": [
+    {
+      "at": "2026-08-01T02:04:00Z",
+      "case": "observed-at-created-time",
+      "clock_skew_seconds": 300,
+      "expected_valid": true
+    },
+    {
+      "at": "2026-08-01T01:59:00Z",
+      "case": "observer-clock-behind-at-lower-bound",
+      "clock_skew_seconds": 300,
+      "expected_valid": true
+    },
+    {
+      "at": "2026-08-01T01:58:59Z",
+      "case": "observer-clock-behind-beyond-lower-bound",
+      "clock_skew_seconds": 300,
+      "expected_valid": false
+    }
+  ],
   "verifier_policy": {
     "accepted_package_digests": [
       "sha256:00ce56aff3d7d08a87785987a70ef087562edfbdf6079bec74e82d7f4802b381"

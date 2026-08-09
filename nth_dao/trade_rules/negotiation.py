@@ -41,7 +41,13 @@ class RuleNegotiationError(ValueError):
 
 
 class RulePackageResolver(Protocol):
-    """Minimal resolver contract for local, Git, or federated package sources."""
+    """Resolve exact digests to cryptographically verified packages.
+
+    Implementations must return ``RulePackage`` values produced by
+    ``build_rule_package`` or ``RulePackageStore``. Transport adapters must
+    verify manifests and immutable resource bytes before crossing this
+    boundary; raw mappings and duck-typed package objects are not accepted.
+    """
 
     def load(self, digest: str) -> RulePackage | None: ...
 

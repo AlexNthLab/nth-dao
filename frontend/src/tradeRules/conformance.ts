@@ -9,6 +9,8 @@ export const TRADE_RULE_MANIFEST_DOMAIN = "NTH-TRADE-RULE-MANIFEST-V1";
 export const TRADE_OFFER_DOMAIN = "NTH-TRADE-OFFER-V2";
 export const TRADE_RULE_RECOGNITION_DOMAIN =
   "nth-dao/trade-rule-recognition/v1";
+export const TRADE_DISPUTE_STATEMENT_DOMAIN =
+  "nth-dao/trade-dispute-statement/v1";
 
 type JsonObject = { [key: string]: JsonValue };
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
@@ -234,6 +236,61 @@ const PROOF_FIELDS = [
   "proof_purpose",
   "proof_value",
 ] as const;
+
+const DISPUTE_STATEMENT_FIELDS = [
+  "kind",
+  "protocol_version",
+  "statement_id",
+  "dispute_id",
+  "order_digest",
+  "receipt_digest",
+  "review_digest",
+  "review_id",
+  "author_did",
+  "author_role",
+  "statement_type",
+  "parent_statement_digests",
+  "reason_codes",
+  "claim",
+  "evidence",
+  "rule_action",
+  "created_at",
+  "proof",
+] as const;
+const DISPUTE_CLAIM_FIELDS = [
+  "claim_type",
+  "media_type",
+  "digest",
+  "size",
+  "schema_digest",
+] as const;
+const DISPUTE_EVIDENCE_FIELDS = [
+  "purpose",
+  "media_type",
+  "digest",
+  "size",
+] as const;
+const DISPUTE_RULE_ACTION_FIELDS = [
+  "rule_id",
+  "digest",
+  "hook",
+  "hook_version",
+] as const;
+const DISPUTE_PACKAGE_FIELDS = ["digest", "manifest", "resources"] as const;
+const DISPUTE_PACKAGE_RESOURCE_FIELDS = ["bytes_hex", "digest"] as const;
+const DISPUTE_TIMESTAMP =
+  /^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{6}))?Z$/;
+const DISPUTE_STATEMENT_ID =
+  /^nth-trade-dispute-statement-sha256:[0-9a-f]{64}$/;
+const DISPUTE_ID = /^nth-trade-dispute-sha256:[0-9a-f]{64}$/;
+const DISPUTE_REVIEW_ID = /^nth-trade-review-sha256:[0-9a-f]{64}$/;
+const DISPUTE_REASON = /^[a-z][a-z0-9._:-]{0,127}$/;
+const DISPUTE_TOKEN = /^[a-z][a-z0-9._:/-]{0,127}$/;
+const DISPUTE_HOOK = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
+const DISPUTE_HOOK_VERSION = /^[a-z0-9][a-z0-9._:/-]{0,31}$/;
+const DISPUTE_MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+const MAX_DISPUTE_CONTENT_BYTES = 16 * 1024 * 1024;
+const MAX_DISPUTE_TOTAL_EVIDENCE_BYTES = 64 * 1024 * 1024;
 
 function token(value: unknown, label: string, maximum: number): string {
   const text = boundedString(value, label, 1, maximum);
@@ -482,6 +539,13 @@ export function recognitionSigningInput(
   return manifestSigningInput(recognition, domain);
 }
 
+export function disputeStatementSigningInput(
+  statement: unknown,
+  domain = TRADE_DISPUTE_STATEMENT_DOMAIN
+): Uint8Array {
+  return manifestSigningInput(statement, domain);
+}
+
 export function validateRuleRecognitionAuditPayload(
   value: unknown
 ): Record<string, unknown> {
@@ -714,6 +778,500 @@ export async function verifyRuleRecognitionSignature(
     );
   } catch {
     return false;
+  }
+}
+
+export async function verifyTradeDisputeStatementSignature(
+  statement: unknown,
+  subtle: SubtleCrypto = globalThis.crypto.subtle,
+  domain = TRADE_DISPUTE_STATEMENT_DOMAIN
+): Promise<boolean> {
+  try {
+    const document = asObject(
+      JSON.parse(new TextDecoder().decode(tradeCanonicalBytes(statement))),
+      "trade dispute statement"
+    );
+    const proof = asObject(document.proof, "proof");
+    if (
+      document.kind !== "nth.dao.trade.dispute-statement" ||
+      document.protocol_version !== "1" ||
+      proof.type !== "Ed25519Signature2020" ||
+      proof.proof_purpose !== "tradeDisputeStatement" ||
+      proof.created !== document.created_at ||
+      typeof document.author_did !== "string" ||
+      typeof proof.verification_method !== "string" ||
+      proof.verification_method !==
+        `${document.author_did}#${document.author_did.slice("did:key:".length)}` ||
+      typeof proof.proof_value !== "string"
+    ) {
+      return false;
+    }
+    const keyBytes = decodeDidKey(document.author_did);
+    const signature = decodeBase64Url(proof.proof_value);
+    const key = await subtle.importKey(
+      "raw",
+      asArrayBuffer(keyBytes),
+      { name: "Ed25519" },
+      false,
+      ["verify"]
+    );
+    return await subtle.verify(
+      { name: "Ed25519" },
+      key,
+      asArrayBuffer(signature),
+      asArrayBuffer(disputeStatementSigningInput(document, domain))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export type TradeDisputeStatementVerificationContext = {
+  /** These artifacts must first pass their own protocol validators. */
+  order: unknown;
+  receipt: unknown;
+  review: unknown;
+  observedAt: string;
+  clockSkewSeconds?: number;
+  resolvedRulePackage?: unknown;
+};
+
+export type TradeDisputeStatementVerificationResult = {
+  valid: boolean;
+  reason: string;
+};
+
+function disputeTimestampMicros(value: unknown, label: string): bigint {
+  const text = boundedString(value, label, 1, 35);
+  const match = DISPUTE_TIMESTAMP.exec(text);
+  if (!match || match[2] === "000000") {
+    throw new Error(`${label} must be a canonical UTC RFC3339 timestamp`);
+  }
+  const base = match[1] ?? "";
+  if (Number(base.slice(0, 4)) < 1) {
+    throw new Error(`${label} is not a real timestamp`);
+  }
+  const date = new Date(`${base}Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 19) !== base) {
+    throw new Error(`${label} is not a real timestamp`);
+  }
+  const micros = BigInt(match[2] ?? "0");
+  return BigInt(date.getTime()) * 1_000n + micros;
+}
+
+function disputeSize(value: unknown, label: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_DISPUTE_CONTENT_BYTES
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+
+function sortedUniqueStrings(
+  value: unknown,
+  label: string,
+  limit: number,
+  validator: RegExp
+): string[] {
+  const items = asArray(value, label);
+  if (
+    items.length > limit ||
+    items.some((item) => typeof item !== "string" || !validator.test(item))
+  ) {
+    throw new Error(`${label} must be bounded, sorted, and unique`);
+  }
+  const strings = items as string[];
+  const sorted = [...new Set(strings)].sort();
+  if (
+    sorted.length !== strings.length ||
+    strings.some((item, index) => item !== sorted[index])
+  ) {
+    throw new Error(`${label} must be bounded, sorted, and unique`);
+  }
+  return strings;
+}
+
+type DisputeContentBinding = {
+  digest: string;
+  mediaType: string;
+  size: number;
+};
+
+function validateDisputeClaim(
+  value: unknown,
+  statementType: string
+): DisputeContentBinding | null {
+  if (value === null) {
+    if (statementType !== "evidence") {
+      throw new Error("response and remedy statements require a typed claim");
+    }
+    return null;
+  }
+  if (statementType === "evidence") {
+    throw new Error("evidence statements cannot contain a claim");
+  }
+  const claim = exactObject(value, DISPUTE_CLAIM_FIELDS, "claim");
+  const claimType = boundedString(claim.claim_type, "claim.claim_type", 1, 128);
+  if (!DISPUTE_TOKEN.test(claimType)) throw new Error("claim.claim_type is invalid");
+  const mediaType = boundedString(claim.media_type, "claim.media_type", 1, 127);
+  if (!DISPUTE_MEDIA_TYPE.test(mediaType)) {
+    throw new Error("claim.media_type is invalid");
+  }
+  const claimDigest = digest(claim.digest, "claim.digest");
+  const size = disputeSize(claim.size, "claim.size");
+  if (claim.schema_digest !== null) digest(claim.schema_digest, "claim.schema_digest");
+  return { digest: claimDigest, mediaType, size };
+}
+
+type DisputeEvidenceBinding = DisputeContentBinding & { purpose: string };
+
+function compareEvidence(
+  left: DisputeEvidenceBinding,
+  right: DisputeEvidenceBinding
+): number {
+  for (const pair of [
+    [left.purpose, right.purpose],
+    [left.digest, right.digest],
+    [left.mediaType, right.mediaType],
+  ] as const) {
+    if (pair[0] < pair[1]) return -1;
+    if (pair[0] > pair[1]) return 1;
+  }
+  return left.size - right.size;
+}
+
+function validateDisputeEvidence(value: unknown): DisputeEvidenceBinding[] {
+  const items = asArray(value, "evidence");
+  if (items.length > 32) throw new Error("evidence must be a bounded list");
+  const bindings = items.map((raw, index) => {
+    const item = exactObject(raw, DISPUTE_EVIDENCE_FIELDS, `evidence[${index}]`);
+    const purpose = boundedString(
+      item.purpose,
+      `evidence[${index}].purpose`,
+      1,
+      128
+    );
+    if (!DISPUTE_TOKEN.test(purpose)) {
+      throw new Error(`evidence[${index}].purpose is invalid`);
+    }
+    const mediaType = boundedString(
+      item.media_type,
+      `evidence[${index}].media_type`,
+      1,
+      127
+    );
+    if (!DISPUTE_MEDIA_TYPE.test(mediaType)) {
+      throw new Error(`evidence[${index}].media_type is invalid`);
+    }
+    return {
+      purpose,
+      digest: digest(item.digest, `evidence[${index}].digest`),
+      mediaType,
+      size: disputeSize(item.size, `evidence[${index}].size`),
+    };
+  });
+  const sorted = [...bindings].sort(compareEvidence);
+  if (
+    bindings.some((item, index) => compareEvidence(item, sorted[index]!) !== 0) ||
+    bindings.some(
+      (item, index) => index > 0 && compareEvidence(item, bindings[index - 1]!) === 0
+    )
+  ) {
+    throw new Error("evidence must be sorted and contain no duplicate entries");
+  }
+  const metadata = new Map<string, string>();
+  let totalSize = 0;
+  for (const item of bindings) {
+    totalSize += item.size;
+    if (totalSize > MAX_DISPUTE_TOTAL_EVIDENCE_BYTES) {
+      throw new Error("declared dispute evidence exceeds its total byte limit");
+    }
+    const current = `${item.mediaType}\0${item.size}`;
+    const previous = metadata.get(item.digest);
+    if (previous !== undefined && previous !== current) {
+      throw new Error("one evidence digest cannot declare conflicting metadata");
+    }
+    metadata.set(item.digest, current);
+  }
+  return bindings;
+}
+
+function validateTradeDisputeStatementShape(
+  value: unknown
+): Record<string, unknown> {
+  const document = exactObject(
+    JSON.parse(new TextDecoder().decode(tradeCanonicalBytes(value))),
+    DISPUTE_STATEMENT_FIELDS,
+    "trade dispute statement"
+  );
+  if (
+    document.kind !== "nth.dao.trade.dispute-statement" ||
+    document.protocol_version !== "1"
+  ) {
+    throw new Error("unsupported trade dispute statement protocol");
+  }
+  if (typeof document.statement_id !== "string" || !DISPUTE_STATEMENT_ID.test(document.statement_id)) {
+    throw new Error("statement_id is invalid");
+  }
+  if (typeof document.dispute_id !== "string" || !DISPUTE_ID.test(document.dispute_id)) {
+    throw new Error("dispute_id is invalid");
+  }
+  for (const field of ["order_digest", "receipt_digest", "review_digest"] as const) {
+    digest(document[field], field);
+  }
+  if (typeof document.review_id !== "string" || !DISPUTE_REVIEW_ID.test(document.review_id)) {
+    throw new Error("review_id is invalid");
+  }
+  if (typeof document.author_did !== "string") throw new Error("author_did is invalid");
+  decodeDidKey(document.author_did);
+  if (document.author_role !== "maker" && document.author_role !== "taker") {
+    throw new Error("author_role is invalid");
+  }
+  if (
+    document.statement_type !== "response" &&
+    document.statement_type !== "evidence" &&
+    document.statement_type !== "remedy-proposal"
+  ) {
+    throw new Error("statement_type is invalid");
+  }
+  sortedUniqueStrings(
+    document.parent_statement_digests,
+    "parent_statement_digests",
+    64,
+    DIGEST
+  );
+  const reasons = sortedUniqueStrings(
+    document.reason_codes,
+    "reason_codes",
+    32,
+    DISPUTE_REASON
+  );
+  const claim = validateDisputeClaim(document.claim, document.statement_type);
+  const evidence = validateDisputeEvidence(document.evidence);
+  if (document.statement_type === "evidence" && evidence.length === 0) {
+    throw new Error("evidence statements require at least one evidence reference");
+  }
+  if (document.statement_type !== "evidence" && reasons.length === 0) {
+    throw new Error("response and remedy statements require a reason code");
+  }
+  if (claim !== null) {
+    for (const item of evidence) {
+      if (
+        item.digest === claim.digest &&
+        (item.mediaType !== claim.mediaType || item.size !== claim.size)
+      ) {
+        throw new Error("claim and evidence metadata conflict for one digest");
+      }
+    }
+  }
+  if (document.rule_action !== null) {
+    const action = exactObject(
+      document.rule_action,
+      DISPUTE_RULE_ACTION_FIELDS,
+      "rule_action"
+    );
+    if (typeof action.rule_id !== "string" || !RULE_ID.test(action.rule_id)) {
+      throw new Error("rule_action.rule_id is invalid");
+    }
+    digest(action.digest, "rule_action.digest");
+    if (typeof action.hook !== "string" || !DISPUTE_HOOK.test(action.hook)) {
+      throw new Error("rule_action.hook is invalid");
+    }
+    if (
+      typeof action.hook_version !== "string" ||
+      !DISPUTE_HOOK_VERSION.test(action.hook_version)
+    ) {
+      throw new Error("rule_action.hook_version is invalid");
+    }
+  }
+  disputeTimestampMicros(document.created_at, "created_at");
+  const proof = exactObject(document.proof, PROOF_FIELDS, "proof");
+  if (
+    proof.type !== "Ed25519Signature2020" ||
+    proof.proof_purpose !== "tradeDisputeStatement" ||
+    proof.created !== document.created_at ||
+    proof.verification_method !==
+      `${document.author_did}#${document.author_did.slice("did:key:".length)}` ||
+    typeof proof.proof_value !== "string"
+  ) {
+    throw new Error("trade dispute statement proof is invalid");
+  }
+  decodeBase64Url(proof.proof_value);
+  return document;
+}
+
+async function sha256Digest(
+  value: unknown,
+  subtle: SubtleCrypto
+): Promise<string> {
+  const hash = new Uint8Array(
+    await subtle.digest("SHA-256", asArrayBuffer(tradeCanonicalBytes(value)))
+  );
+  return `sha256:${Array.from(hash, (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("")}`;
+}
+
+async function validateResolvedDisputePackage(
+  value: unknown,
+  action: Record<string, unknown>,
+  subtle: SubtleCrypto
+): Promise<void> {
+  const rulePackage = exactObject(value, DISPUTE_PACKAGE_FIELDS, "resolved Rule Package");
+  if (rulePackage.digest !== action.digest) {
+    throw new Error("rule_action package digest mismatch");
+  }
+  const manifest = asObject(rulePackage.manifest, "resolved Rule Package manifest");
+  if (!(await verifyManifestSignature(manifest, subtle))) {
+    throw new Error("rule_action package manifest signature is invalid");
+  }
+  if ((await sha256Digest(manifest, subtle)) !== action.digest) {
+    throw new Error("rule_action package manifest digest mismatch");
+  }
+  if (manifest.rule_id !== action.rule_id) {
+    throw new Error("rule_action rule_id does not match the resolved package");
+  }
+  const declarations = asArray(manifest.resources, "resolved Rule Package manifest.resources");
+  const declared = new Map<string, number>();
+  for (const [index, raw] of declarations.entries()) {
+    const item = asObject(raw, `resolved Rule Package manifest.resources[${index}]`);
+    const resourceDigest = digest(item.digest, `manifest.resources[${index}].digest`);
+    const size = item.size;
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) {
+      throw new Error(`manifest.resources[${index}].size is invalid`);
+    }
+    const previous = declared.get(resourceDigest);
+    if (previous !== undefined && previous !== size) {
+      throw new Error("resolved Rule Package declares conflicting resource sizes");
+    }
+    declared.set(resourceDigest, size);
+  }
+  const supplied = new Set<string>();
+  for (const [index, raw] of asArray(rulePackage.resources, "resolved Rule Package resources").entries()) {
+    const item = exactObject(raw, DISPUTE_PACKAGE_RESOURCE_FIELDS, `resources[${index}]`);
+    const resourceDigest = digest(item.digest, `resources[${index}].digest`);
+    if (supplied.has(resourceDigest)) throw new Error("resolved Rule Package repeats a resource");
+    if (typeof item.bytes_hex !== "string" || !/^(?:[0-9a-f]{2})*$/.test(item.bytes_hex)) {
+      throw new Error(`resources[${index}].bytes_hex is invalid`);
+    }
+    const payload = Uint8Array.from(
+      item.bytes_hex.match(/.{2}/g) ?? [],
+      (pair) => Number.parseInt(pair, 16)
+    );
+    const hash = new Uint8Array(await subtle.digest("SHA-256", asArrayBuffer(payload)));
+    const actual = `sha256:${Array.from(hash, (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("")}`;
+    if (actual !== resourceDigest || declared.get(resourceDigest) !== payload.byteLength) {
+      throw new Error("resolved Rule Package resource bytes do not match the manifest");
+    }
+    supplied.add(resourceDigest);
+  }
+  if (supplied.size !== declared.size || [...declared.keys()].some((key) => !supplied.has(key))) {
+    throw new Error("resolved Rule Package resources are incomplete");
+  }
+  const hooks = asArray(manifest.hook_contracts, "resolved Rule Package hook_contracts");
+  if (
+    !hooks.some((raw) => {
+      const hook = asObject(raw, "resolved Rule Package hook contract");
+      return hook.name === action.hook && hook.version === action.hook_version;
+    })
+  ) {
+    throw new Error("rule_action hook name/version is absent from the package");
+  }
+}
+
+export async function verifyTradeDisputeStatement(
+  statement: unknown,
+  context: TradeDisputeStatementVerificationContext,
+  subtle: SubtleCrypto = globalThis.crypto.subtle
+): Promise<TradeDisputeStatementVerificationResult> {
+  try {
+    const document = validateTradeDisputeStatementShape(statement);
+    if (!(await verifyTradeDisputeStatementSignature(document, subtle))) {
+      throw new Error("trade dispute statement signature is invalid");
+    }
+    const binding = { ...document };
+    delete binding.statement_id;
+    delete binding.proof;
+    const expectedStatementId =
+      "nth-trade-dispute-statement-sha256:" +
+      (await sha256Digest(binding, subtle)).slice("sha256:".length);
+    if (document.statement_id !== expectedStatementId) {
+      throw new Error("statement_id does not match the statement binding");
+    }
+
+    const order = asObject(context.order, "verified Order");
+    const receipt = asObject(context.receipt, "verified Execution Receipt");
+    const review = asObject(context.review, "verified Receipt Review");
+    const expectedDisputeId =
+      "nth-trade-dispute-sha256:" +
+      (await sha256Digest({ review_id: review.review_id }, subtle)).slice("sha256:".length);
+    const bindings = [
+      ["dispute_id", expectedDisputeId],
+      ["order_digest", await sha256Digest(order, subtle)],
+      ["receipt_digest", await sha256Digest(receipt, subtle)],
+      ["review_digest", await sha256Digest(review, subtle)],
+      ["review_id", review.review_id],
+    ] as const;
+    for (const [field, expected] of bindings) {
+      if (document[field] !== expected) {
+        throw new Error(`trade dispute statement ${field} binding mismatch`);
+      }
+    }
+    if (review.decision !== "disputed") {
+      throw new Error("trade dispute statements require a disputed Receipt Review");
+    }
+    const role = document.author_role as "maker" | "taker";
+    if (document.author_did !== order[`${role}_did`]) {
+      throw new Error("author_did does not match author_role in the signed Order");
+    }
+    if (document.statement_type === "response" && role !== receipt.executor_role) {
+      throw new Error("a response must be signed by the Receipt executor");
+    }
+    if (
+      disputeTimestampMicros(document.created_at, "created_at") <
+      disputeTimestampMicros(review.reviewed_at, "review.reviewed_at")
+    ) {
+      throw new Error("trade dispute statement predates the disputed Review");
+    }
+    const skew = context.clockSkewSeconds ?? 300;
+    if (!Number.isFinite(skew) || skew < 0 || skew * 1_000_000 > Number.MAX_SAFE_INTEGER) {
+      throw new Error("clockSkewSeconds must be a finite non-negative number");
+    }
+    const observed = disputeTimestampMicros(context.observedAt, "observedAt");
+    const created = disputeTimestampMicros(document.created_at, "created_at");
+    if (created > observed + BigInt(Math.round(skew * 1_000_000))) {
+      throw new Error("trade dispute statement is too far in the future");
+    }
+
+    if (document.rule_action !== null) {
+      const action = asObject(document.rule_action, "rule_action");
+      const signedBindings = asArray(order.rule_bindings, "Order rule_bindings");
+      const bound = signedBindings.some((raw) => {
+        const item = asObject(raw, "Order rule binding");
+        return item.rule_id === action.rule_id && item.digest === action.digest;
+      });
+      if (!bound) throw new Error("rule_action is outside the signed Order rule bindings");
+      if (context.resolvedRulePackage === undefined) {
+        throw new Error("rule_action requires an exact-digest resolved Rule Package");
+      }
+      await validateResolvedDisputePackage(
+        context.resolvedRulePackage,
+        action,
+        subtle
+      );
+    }
+    return { valid: true, reason: "ok" };
+  } catch (error) {
+    return {
+      valid: false,
+      reason: error instanceof Error ? error.message : "invalid trade dispute statement",
+    };
   }
 }
 

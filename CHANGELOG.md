@@ -130,6 +130,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Receipt Review ACKs now bind the durable first receiver observation time,
   reject retries aimed at a different peer, account for crash residue in all
   outbox capacity projections, and expose retained conflict digests in the UI.
+- Signed, content-addressed Trade Dispute Statement v1 claims bound to one
+  disputed Receipt Review case, exact Review candidate, Execution Receipt, and
+  accepted Order. The bounded append-only DAG format separates typed response
+  or remedy claims from supporting evidence, caps declared content, and supports
+  exact Package/hook-version selectors that fail closed without a resolver. A
+  distinct unresolved transport type prevents callers from treating an
+  unresolved Rule dependency as a fully verified statement. The WebCrypto
+  conformance implementation checks semantic artifact/role/time/resource
+  bindings in addition to source signatures. A strict schema and deterministic
+  positive, clock-boundary, signature-tamper,
+  correctly signed future-time, and Review-rebinding vectors are included.
+  Statements do not prove a claim true, resolve a dispute, authorize settlement,
+  or execute a Rule hook.
 - Canonical Trade Execution Adapter Policy v1 objects with a public wire
   schema and digest shared by Receipt Review and conformance implementations.
 

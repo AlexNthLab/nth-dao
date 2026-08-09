@@ -21,6 +21,8 @@ import urllib.request
 from urllib.parse import urlsplit
 
 import pytest
+
+import nth_dao.trade_rules.dispute_statement as dispute_statement_module
 import uvicorn
 import nth_dao.trade_rules as trade_rules_api
 import nth_dao.trade_rules.order_dispatch as order_dispatch_api
@@ -128,6 +130,18 @@ from nth_dao.trade_rules import (
     verify_execution_receipt_order_binding,
     verify_execution_receipt_under_policy,
 )
+from nth_dao.trade_rules.dispute_statement import (
+    MAX_TRADE_DISPUTE_CONTENT_BYTES,
+    MAX_TRADE_DISPUTE_EVIDENCE,
+    MAX_TRADE_DISPUTE_TOTAL_EVIDENCE_BYTES,
+    TradeDisputeStatement,
+    TradeDisputeStatementRejected,
+    UnresolvedTradeDisputeStatement,
+    create_trade_dispute_statement,
+    trade_dispute_id,
+    trade_dispute_statement_digest,
+    verify_trade_dispute_statement,
+)
 from nth_dao.trade_rules.execution_receipt import (
     _create_trade_execution_receipt,
 )
@@ -212,6 +226,7 @@ from nth_dao.trade_rules.agreement_conformance import (
     RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH,
     RECEIPT_REVIEW_DELIVERY_SCHEMA_PATH,
     RECEIPT_REVIEW_SCHEMA_PATH,
+    TRADE_DISPUTE_STATEMENT_SCHEMA_PATH,
     RULE_PACKAGE_BUNDLE_SCHEMA_PATH,
     ORDER_AUDIT_SCHEMA_PATH,
     ORDER_DELIVERY_SCHEMA_PATH,
@@ -293,6 +308,36 @@ class _ContentResolver:
         if payload is not None and len(payload) > max_bytes:
             raise ValueError("content exceeds max_bytes")
         return payload
+
+
+class _StaticRulePackageResolver:
+    def __init__(self, package):
+        self._package = package
+        self.loads = 0
+
+    def load(self, digest):
+        self.loads += 1
+        return self._package if digest == self._package.digest else None
+
+
+class _FailingRulePackageResolver:
+    def load(self, _digest):
+        raise RuntimeError("sensitive resolver failure at C:\\operator-home")
+
+
+class _DuckTypedRulePackageResolver:
+    def __init__(self, package):
+        self._package = package
+
+    def load(self, _digest):
+        class PackageLike:
+            pass
+
+        value = PackageLike()
+        value.digest = self._package.digest
+        value.manifest = self._package.manifest
+        value.resources = self._package.resources
+        return value
 
 
 def _utc(value: str) -> datetime:
@@ -3166,6 +3211,82 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
     assert receipt_review_digest(receipt_review) == (
         stored["receipt_review_digest"]
     )
+    disputed_receipt_review = TradeReceiptReview.from_dict(
+        stored["disputed_receipt_review"],
+        receipt=execution_receipt,
+        order=order,
+    )
+    assert receipt_review_digest(
+        disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    ) == stored["disputed_receipt_review_digest"]
+    unresolved_dispute_statement = UnresolvedTradeDisputeStatement.from_dict(
+        stored["trade_dispute_statement"],
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    )
+    package_vector = stored["rule_package"]
+    dispute_package = trade_rules_api.build_rule_package(
+        package_vector["manifest"],
+        {
+            item["digest"]: bytes.fromhex(item["bytes_hex"])
+            for item in package_vector["resources"]
+        },
+    )
+    dispute_package_resolver = _StaticRulePackageResolver(dispute_package)
+    dispute_statement = unresolved_dispute_statement.resolve(
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+        package_resolver=dispute_package_resolver,
+    )
+    assert trade_dispute_statement_digest(
+        dispute_statement,
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    ) == stored["trade_dispute_statement_digest"]
+    for case in stored["trade_dispute_statement_verification_cases"]:
+        ok, _reason = verify_trade_dispute_statement(
+            dispute_statement,
+            review=disputed_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            package_resolver=dispute_package_resolver,
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
+    for case in stored["trade_dispute_statement_signed_negative_cases"]:
+        signed_review = TradeReceiptReview.from_dict(
+            case["signed_review"],
+            receipt=execution_receipt,
+            order=order,
+        )
+        verification_review = TradeReceiptReview.from_dict(
+            case["verification_review"],
+            receipt=execution_receipt,
+            order=order,
+        )
+        signed_statement = TradeDisputeStatement.from_dict(
+            case["document"],
+            review=signed_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        assert signed_statement.canonical_bytes
+        ok, reason = verify_trade_dispute_statement(
+            case["document"],
+            review=verification_review,
+            receipt=execution_receipt,
+            order=order,
+            at=_utc(case["at"]),
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
+        assert case["expected_reason"] in reason, case["case"]
     receipt_review_delivery = TradeReceiptReviewDelivery.from_dict(
         stored["receipt_review_delivery"],
         receipt=execution_receipt,
@@ -3356,6 +3477,14 @@ def test_negative_agreement_vectors_fail_closed():
             receipt=stored["execution_receipt"],
             order=stored["order"],
         ),
+        "trade_dispute_statement": lambda document: (
+            TradeDisputeStatement.from_dict(
+                document,
+                review=stored["disputed_receipt_review"],
+                receipt=stored["execution_receipt"],
+                order=stored["order"],
+            )
+        ),
         "receipt_review_delivery": lambda document: (
             TradeReceiptReviewDelivery.from_dict(
                 document,
@@ -3404,11 +3533,12 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeExecutionReceiptDeliveryRejected,
                 TradeExecutionReceiptAcknowledgementRejected,
                 TradeExecutionAdapterRejected,
-                    TradeExecutionAuditError,
-                    TradeReceiptReviewRejected,
-                    TradeReceiptReviewDeliveryRejected,
-                    TradeReceiptReviewAcknowledgementRejected,
-                    TradeReceiptReviewAuditError,
+                TradeExecutionAuditError,
+                TradeReceiptReviewRejected,
+                TradeReceiptReviewDeliveryRejected,
+                TradeReceiptReviewAcknowledgementRejected,
+                TradeReceiptReviewAuditError,
+                TradeDisputeStatementRejected,
                 RulePackageBundleRejected,
             )
         ):
@@ -3479,6 +3609,9 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
         RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH.read_text(
             encoding="utf-8"
         )
+    )
+    trade_dispute_statement = json.loads(
+        TRADE_DISPUTE_STATEMENT_SCHEMA_PATH.read_text(encoding="utf-8")
     )
     rule_package_bundle = json.loads(
         RULE_PACKAGE_BUNDLE_SCHEMA_PATH.read_text(encoding="utf-8")
@@ -3637,6 +3770,61 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert receipt_review_conflict_audit["properties"][
         "candidate_review_digest"
     ]["$ref"].endswith("/digest")
+    assert trade_dispute_statement["additionalProperties"] is False
+    assert trade_dispute_statement["properties"]["kind"]["const"] == (
+        "nth.dao.trade.dispute-statement"
+    )
+    assert trade_dispute_statement["$defs"]["proof"]["properties"][
+        "proof_purpose"
+    ]["const"] == "tradeDisputeStatement"
+
+
+def test_trade_dispute_statement_schema_validates_public_vector():
+    jsonschema = pytest.importorskip("jsonschema")
+    stored = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+    schema = json.loads(
+        TRADE_DISPUTE_STATEMENT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    validator = jsonschema.validators.validator_for(schema)
+    validator.check_schema(schema)
+    validator(schema).validate(stored["trade_dispute_statement"])
+    for case in stored["trade_dispute_statement_signed_negative_cases"]:
+        validator(schema).validate(case["document"])
+
+    minimal_rule_id = copy.deepcopy(stored["trade_dispute_statement"])
+    minimal_rule_id["rule_action"]["rule_id"] = "a.b"
+    validator(schema).validate(minimal_rule_id)
+
+    unknown = copy.deepcopy(stored["trade_dispute_statement"])
+    unknown["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        validator(schema).validate(unknown)
+
+    empty_response = copy.deepcopy(stored["trade_dispute_statement"])
+    empty_response["reason_codes"] = []
+    with pytest.raises(jsonschema.ValidationError):
+        validator(schema).validate(empty_response)
+
+    missing_claim = copy.deepcopy(stored["trade_dispute_statement"])
+    missing_claim["claim"] = None
+    with pytest.raises(jsonschema.ValidationError):
+        validator(schema).validate(missing_claim)
+
+    evidence_with_claim = copy.deepcopy(stored["trade_dispute_statement"])
+    evidence_with_claim["statement_type"] = "evidence"
+    evidence_with_claim["reason_codes"] = []
+    with pytest.raises(jsonschema.ValidationError):
+        validator(schema).validate(evidence_with_claim)
+
+    evidence_statement = copy.deepcopy(stored["trade_dispute_statement"])
+    evidence_statement["statement_type"] = "evidence"
+    evidence_statement["reason_codes"] = []
+    evidence_statement["claim"] = None
+    validator(schema).validate(evidence_statement)
+
+    remedy_statement = copy.deepcopy(stored["trade_dispute_statement"])
+    remedy_statement["statement_type"] = "remedy-proposal"
+    validator(schema).validate(remedy_statement)
 
 
 def test_proposal_transport_schemas_resolve_and_validate_public_vectors():
@@ -12747,6 +12935,863 @@ def _receipt_review(context, order, receipt, **changes):
     return create_trade_receipt_review(
         identity,
         **arguments,
+    )
+
+
+def _disputed_receipt_review(context, order, receipt):
+    return _receipt_review(
+        context,
+        order,
+        receipt,
+        decision="disputed",
+        reason_codes=["result.mismatch"],
+    )
+
+
+def _dispute_claim(**changes):
+    claim = {
+        "claim_type": "receipt-result-assertion",
+        "media_type": "application/json",
+        "digest": "sha256:" + ("c" * 64),
+        "size": 1,
+        "schema_digest": None,
+    }
+    claim.update(changes)
+    return claim
+
+
+def test_trade_dispute_statement_round_trip_is_deterministic(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_type": "response",
+        "reason_codes": ["executor.contests-review"],
+        "claim": _dispute_claim(),
+        "rule_action": {
+            **rule_binding,
+            "hook": "fulfillment.deliver",
+            "hook_version": "1",
+        },
+        "package_resolver": context["package_store"],
+        "created_at": "2026-09-01T00:03:00Z",
+        "now": _utc("2026-09-01T00:03:00Z"),
+    }
+
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        **arguments,
+    )
+    retry = create_trade_dispute_statement(
+        context["maker"],
+        **arguments,
+    )
+    assert statement.canonical_bytes == retry.canonical_bytes
+    assert statement.dispute_id == trade_dispute_id(review.review_id)
+    assert statement.statement_id.startswith(
+        "nth-trade-dispute-statement-sha256:"
+    )
+    assert verify_trade_dispute_statement(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        at=_utc("2026-09-01T00:03:00Z"),
+    ) == (True, "ok")
+    assert verify_trade_dispute_statement(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=_FailingRulePackageResolver(),
+        at=_utc("2026-09-01T00:03:00Z"),
+    ) == (False, "rule_action package resolution failed")
+    assert trade_dispute_statement_digest(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ).startswith("sha256:")
+
+
+def test_trade_dispute_rule_resolver_is_single_pass_and_type_strict(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    package = context["package_store"].load(rule_binding["digest"])
+    assert package is not None
+    resolver = _StaticRulePackageResolver(package)
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_type": "response",
+        "reason_codes": ["executor.contests-review"],
+        "claim": _dispute_claim(),
+        "rule_action": {
+            **rule_binding,
+            "hook": "fulfillment.deliver",
+            "hook_version": "1",
+        },
+        "package_resolver": resolver,
+        "created_at": "2026-09-01T00:03:00Z",
+        "now": _utc("2026-09-01T00:03:00Z"),
+    }
+
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        **arguments,
+    )
+    assert resolver.loads == 1
+
+    parsed = TradeDisputeStatement.from_dict(
+        statement.to_dict(),
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=resolver,
+    )
+    assert parsed.canonical_bytes == statement.canonical_bytes
+    assert resolver.loads == 2
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="verified RulePackage",
+    ):
+        TradeDisputeStatement.from_dict(
+            statement.to_dict(),
+            review=review,
+            receipt=receipt,
+            order=order,
+            package_resolver=_DuckTypedRulePackageResolver(package),
+        )
+
+
+def test_trade_dispute_id_groups_signed_review_equivocation(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    first_review = _receipt_review(
+        context,
+        order,
+        receipt,
+        decision="disputed",
+        reason_codes=["result.mismatch"],
+    )
+    second_review = _receipt_review(
+        context,
+        order,
+        receipt,
+        decision="disputed",
+        reason_codes=["result.incomplete"],
+    )
+
+    first = create_trade_dispute_statement(
+        context["maker"],
+        review=first_review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        created_at="2026-09-01T00:03:00Z",
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+    second = create_trade_dispute_statement(
+        context["maker"],
+        review=second_review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        created_at="2026-09-01T00:03:00Z",
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+
+    assert first_review.review_id == second_review.review_id
+    assert receipt_review_digest(first_review) != receipt_review_digest(
+        second_review
+    )
+    assert first.dispute_id == second.dispute_id
+    assert first.statement_id != second.statement_id
+
+
+def test_trade_dispute_statement_rejects_wrong_author_and_review_state(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    disputed = _disputed_receipt_review(context, order, receipt)
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="not an Order party",
+    ):
+        create_trade_dispute_statement(
+            AgentIdentity.generate(label="outsider"),
+            review=disputed,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["outsider.claim"],
+            claim=_dispute_claim(),
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="response must be signed by the Receipt executor",
+    ):
+        create_trade_dispute_statement(
+            context["taker"],
+            review=disputed,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["reviewer.self-response"],
+            claim=_dispute_claim(),
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+
+    accepted = _receipt_review(context, order, receipt)
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="require a disputed Receipt Review",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=accepted,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+
+
+def test_trade_dispute_statement_never_signs_before_preflight(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    calls = []
+    original_sign = AgentIdentity.sign
+
+    def counted_sign(identity, payload):
+        calls.append(identity.as_did())
+        return original_sign(identity, payload)
+
+    monkeypatch.setattr(AgentIdentity, "sign", counted_sign)
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_type": "response",
+        "reason_codes": ["executor.contests-review"],
+        "claim": _dispute_claim(),
+        "created_at": "2026-09-01T00:03:00Z",
+        "now": _utc("2026-09-01T00:03:00Z"),
+    }
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="response must be signed by the Receipt executor",
+    ):
+        create_trade_dispute_statement(context["taker"], **arguments)
+    assert calls == []
+
+    binding = order.to_dict()["rule_bindings"][0]
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="package resolution failed",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            rule_action={
+                **binding,
+                "hook": "fulfillment.deliver",
+                "hook_version": "1",
+            },
+            package_resolver=_FailingRulePackageResolver(),
+            **arguments,
+        )
+    assert calls == []
+
+    package = context["package_store"].load(binding["digest"])
+    assert package is not None
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="verified RulePackage",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            rule_action={
+                **binding,
+                "hook": "fulfillment.deliver",
+                "hook_version": "1",
+            },
+            package_resolver=_DuckTypedRulePackageResolver(package),
+            **arguments,
+        )
+    assert calls == []
+
+    create_trade_dispute_statement(context["maker"], **arguments)
+    assert calls == [context["maker"].as_did()]
+
+
+def test_trade_dispute_statement_rejects_unbound_rule_and_empty_evidence(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="outside the signed Order rule bindings",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            rule_action={
+                "rule_id": "org.example.outside/dispute",
+                "digest": "sha256:" + ("f" * 64),
+                "hook": "dispute.response",
+                "hook_version": "1",
+            },
+            package_resolver=context["package_store"],
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="require at least one evidence reference",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="evidence",
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+
+
+def test_trade_dispute_rule_action_requires_exact_package_hook(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    binding = order.to_dict()["rule_bindings"][0]
+    valid_action = {
+        **binding,
+        "hook": "fulfillment.deliver",
+        "hook_version": "1",
+    }
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_type": "response",
+        "reason_codes": ["executor.contests-review"],
+        "claim": _dispute_claim(),
+        "created_at": "2026-09-01T00:03:00Z",
+        "now": _utc("2026-09-01T00:03:00Z"),
+    }
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="requires an exact-digest package_resolver",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            rule_action=valid_action,
+            **arguments,
+        )
+
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        rule_action=valid_action,
+        package_resolver=context["package_store"],
+        **arguments,
+    )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="requires an exact-digest package_resolver",
+    ):
+        TradeDisputeStatement.from_dict(
+            statement.to_dict(),
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+    unresolved = UnresolvedTradeDisputeStatement.from_dict(
+        statement.to_dict(),
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    assert not isinstance(unresolved, TradeDisputeStatement)
+    assert unresolved.resolve(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+    ) == statement
+    assert verify_trade_dispute_statement(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:03:00Z"),
+    ) == (False, "rule_action requires an exact-digest package_resolver")
+    assert verify_trade_dispute_statement(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        at=_utc("2026-09-01T00:03:00Z"),
+    ) == (True, "ok")
+
+    for field, invalid_value in (
+        ("hook", "dispute.response"),
+        ("hook_version", "2"),
+    ):
+        with pytest.raises(
+            TradeDisputeStatementRejected,
+            match="hook name/version is absent",
+        ):
+            create_trade_dispute_statement(
+                context["maker"],
+                rule_action={**valid_action, field: invalid_value},
+                package_resolver=context["package_store"],
+                **arguments,
+            )
+
+    dispute_statement_module._validate_rule_action({
+        **binding,
+        "hook": "1-fulfillment-hook",
+        "hook_version": "1",
+    })
+
+
+def test_trade_dispute_statement_rejects_tamper_and_future_time(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        created_at="2026-09-01T00:03:00Z",
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+    forged = statement.to_dict()
+    forged["proof"]["proof_value"] = "A" * 86
+
+    assert verify_trade_dispute_statement(
+        forged,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ) == (False, "signature invalid")
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="too far in the future",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            created_at="2026-09-01T00:04:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+            clock_skew_seconds=0,
+        )
+
+
+def test_trade_dispute_verifier_defaults_to_local_observation_time(
+    tmp_path,
+    monkeypatch,
+):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    future = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        created_at="2026-09-01T00:04:00Z",
+        now=_utc("2026-09-01T00:04:00Z"),
+        clock_skew_seconds=0,
+    )
+    real_utc_now = dispute_statement_module._utc_now
+    monkeypatch.setattr(
+        dispute_statement_module,
+        "_utc_now",
+        lambda value: (
+            _utc("2026-09-01T00:03:00Z")
+            if value is None
+            else real_utc_now(value)
+        ),
+    )
+
+    assert verify_trade_dispute_statement(
+        future,
+        review=review,
+        receipt=receipt,
+        order=order,
+        clock_skew_seconds=0,
+    ) == (False, "trade dispute statement is too far in the future")
+
+
+def test_trade_dispute_claim_and_evidence_resource_bounds(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "created_at": "2026-09-01T00:03:00Z",
+        "now": _utc("2026-09-01T00:03:00Z"),
+    }
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="require a typed claim",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            **arguments,
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="cannot contain a claim",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            statement_type="evidence",
+            claim=_dispute_claim(),
+            evidence=[{
+                "purpose": "execution-log",
+                "media_type": "text/plain",
+                "digest": "sha256:" + ("1" * 64),
+                "size": 1,
+            }],
+            **arguments,
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="claim.size is invalid",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(size=MAX_TRADE_DISPUTE_CONTENT_BYTES + 1),
+            **arguments,
+        )
+
+    oversized_evidence = [
+        {
+            "purpose": f"artifact-{index}",
+            "media_type": "application/octet-stream",
+            "digest": "sha256:" + (f"{index + 1:x}" * 64),
+            "size": MAX_TRADE_DISPUTE_CONTENT_BYTES,
+        }
+        for index in range(
+            (MAX_TRADE_DISPUTE_TOTAL_EVIDENCE_BYTES
+             // MAX_TRADE_DISPUTE_CONTENT_BYTES)
+            + 1
+        )
+    ]
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="evidence exceeds its total byte limit",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            evidence=oversized_evidence,
+            **arguments,
+        )
+
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="claim and evidence metadata conflict",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            evidence=[{
+                "purpose": "conflicting-copy",
+                "media_type": "text/plain",
+                "digest": _dispute_claim()["digest"],
+                "size": 2,
+            }],
+            **arguments,
+        )
+
+
+def test_trade_dispute_statement_bounds_and_normalizes_evidence(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    first = {
+        "purpose": "z-log",
+        "media_type": "text/plain",
+        "digest": "sha256:" + ("1" * 64),
+        "size": 2,
+    }
+    second = {
+        "purpose": "a-output",
+        "media_type": "application/json",
+        "digest": "sha256:" + ("2" * 64),
+        "size": 1,
+    }
+
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        evidence=[first, second],
+        created_at="2026-09-01T00:03:00Z",
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+
+    assert [item["purpose"] for item in statement.to_dict()["evidence"]] == [
+        "a-output",
+        "z-log",
+    ]
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="contain no duplicate",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            evidence=[first, first],
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match=r"evidence\[0\]\.size is invalid",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            evidence=[{**first, "size": "2"}],
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="evidence exceeds its item limit",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            evidence=(first for _ in range(MAX_TRADE_DISPUTE_EVIDENCE + 1)),
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="cannot declare conflicting metadata",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes=["executor.contests-review"],
+            claim=_dispute_claim(),
+            evidence=[first, {**first, "purpose": "other-log", "size": 3}],
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match="reason_codes must be a collection",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            reason_codes="x",
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementRejected,
+        match=r"parent_statement_digests\[1\] must be",
+    ):
+        create_trade_dispute_statement(
+            context["maker"],
+            review=review,
+            receipt=receipt,
+            order=order,
+            statement_type="response",
+            parent_statement_digests=["sha256:" + ("3" * 64), 1],
+            reason_codes=["executor.contests-review"],
+            created_at="2026-09-01T00:03:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+
+
+def test_trade_dispute_evidence_and_remedy_round_trip(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    observed = _utc("2026-09-01T00:03:00Z")
+    evidence_statement = create_trade_dispute_statement(
+        context["taker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="evidence",
+        evidence=[{
+            "purpose": "review-analysis",
+            "media_type": "application/json",
+            "digest": "sha256:" + ("d" * 64),
+            "size": 128,
+        }],
+        created_at="2026-09-01T00:03:00Z",
+        now=observed,
+    )
+    evidence_digest = trade_dispute_statement_digest(
+        evidence_statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    assert evidence_statement.to_dict()["author_role"] == "taker"
+    assert evidence_statement.to_dict()["claim"] is None
+    assert TradeDisputeStatement.from_json(
+        evidence_statement.canonical_bytes,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ) == evidence_statement
+    assert verify_trade_dispute_statement(
+        evidence_statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=observed,
+    ) == (True, "ok")
+
+    remedy_statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="remedy-proposal",
+        parent_statement_digests=[evidence_digest],
+        reason_codes=["executor.offers-remedy"],
+        claim=_dispute_claim(
+            claim_type="remedy-proposal",
+            digest="sha256:" + ("e" * 64),
+            size=256,
+        ),
+        created_at="2026-09-01T00:04:00Z",
+        now=_utc("2026-09-01T00:04:00Z"),
+    )
+    remedy_document = remedy_statement.to_dict()
+    assert remedy_document["author_role"] == "maker"
+    assert remedy_document["parent_statement_digests"] == [evidence_digest]
+    assert remedy_document["claim"]["claim_type"] == "remedy-proposal"
+    assert TradeDisputeStatement.from_json(
+        remedy_statement.canonical_bytes,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ) == remedy_statement
+    assert verify_trade_dispute_statement(
+        remedy_statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:04:00Z"),
+    ) == (True, "ok")
+
+
+def test_trade_dispute_statement_is_public_trade_rule_api():
+    assert trade_rules_api.TradeDisputeStatement is TradeDisputeStatement
+    assert trade_rules_api.UnresolvedTradeDisputeStatement is (
+        UnresolvedTradeDisputeStatement
+    )
+    assert trade_rules_api.create_trade_dispute_statement is (
+        create_trade_dispute_statement
+    )
+    assert trade_rules_api.verify_trade_dispute_statement is (
+        verify_trade_dispute_statement
     )
 
 

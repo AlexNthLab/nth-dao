@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-dispute-statement-v1.json",
+  "title": "NTH DAO Trade Dispute Statement v1",
+  "$comment": "The protocol validator must additionally verify the signature, content-derived identifiers, disputed Receipt Review and Order bindings, party role, response-author role, chronology, and exact signed-Order rule package/hook binding. Parent existence, DAG completeness, and truth of claims are not established by this document alone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "protocol_version",
+    "statement_id",
+    "dispute_id",
+    "order_digest",
+    "receipt_digest",
+    "review_digest",
+    "review_id",
+    "author_did",
+    "author_role",
+    "statement_type",
+    "parent_statement_digests",
+    "reason_codes",
+    "claim",
+    "evidence",
+    "rule_action",
+    "created_at",
+    "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.dispute-statement"},
+    "protocol_version": {"const": "1"},
+    "statement_id": {
+      "type": "string",
+      "pattern": "^nth-trade-dispute-statement-sha256:[0-9a-f]{64}$"
+    },
+    "dispute_id": {
+      "type": "string",
+      "pattern": "^nth-trade-dispute-sha256:[0-9a-f]{64}$"
+    },
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "review_digest": {"$ref": "#/$defs/digest"},
+    "review_id": {
+      "type": "string",
+      "pattern": "^nth-trade-review-sha256:[0-9a-f]{64}$"
+    },
+    "author_did": {"$ref": "#/$defs/did"},
+    "author_role": {"enum": ["maker", "taker"]},
+    "statement_type": {
+      "enum": ["response", "evidence", "remedy-proposal"]
+    },
+    "parent_statement_digests": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/digest"}
+    },
+    "reason_codes": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9._:-]{0,127}$"
+      }
+    },
+    "claim": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/claim"}
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "rule_action": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/ruleAction"}
+      ]
+    },
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "proof": {"$ref": "#/$defs/proof"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"statement_type": {"const": "evidence"}},
+        "required": ["statement_type"]
+      },
+      "then": {
+        "properties": {
+          "claim": {"type": "null"},
+          "evidence": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "statement_type": {"enum": ["response", "remedy-proposal"]}
+        },
+        "required": ["statement_type"]
+      },
+      "then": {
+        "properties": {
+          "reason_codes": {"minItems": 1},
+          "claim": {"$ref": "#/$defs/claim"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.(?!000000)\\d{6})?Z$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["purpose", "media_type", "digest", "size"],
+      "properties": {
+        "purpose": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._:/-]{0,127}$"
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 127,
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"
+        },
+        "digest": {"$ref": "#/$defs/digest"},
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_type",
+        "media_type",
+        "digest",
+        "size",
+        "schema_digest"
+      ],
+      "properties": {
+        "claim_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._:/-]{0,127}$"
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 127,
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"
+        },
+        "digest": {"$ref": "#/$defs/digest"},
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "schema_digest": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/digest"}
+          ]
+        }
+      }
+    },
+    "ruleAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "digest", "hook", "hook_version"],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:/[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?)?$"
+        },
+        "digest": {"$ref": "#/$defs/digest"},
+        "hook": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._:/-]{0,127}$"
+        },
+        "hook_version": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._:/-]{0,31}$"
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "created",
+        "verification_method",
+        "proof_purpose",
+        "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "Ed25519Signature2020"},
+        "created": {"$ref": "#/$defs/timestamp"},
+        "verification_method": {
+          "type": "string",
+          "maxLength": 300,
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+#z[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "proof_purpose": {"const": "tradeDisputeStatement"},
+        "proof_value": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  }
+}

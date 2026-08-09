@@ -105,6 +105,24 @@ chronology, TTL, and destination checks. A valid ACK is a signed peer retention
 claim, not evidence that the Review is true or that delivery, payment, or
 settlement occurred.
 
+The same Agreement v1 vector now includes a disputed Receipt Review and a
+deterministic Trade Dispute Statement v1 response. Ports must reproduce its
+content-derived case and statement identifiers, domain-separated signature,
+Order/Receipt/Review bindings, executor response role, typed claim, bounded
+evidence references, and exact Package/hook-version selector. In addition to a
+signature-tamper case, correctly signed future-time and Review-rebinding cases
+must fail for semantic reasons. The TypeScript/WebCrypto suite independently
+reproduces the Python canonical and signing bytes, verifies the Python Ed25519
+signatures, and demonstrates that source attribution is separate from semantic
+validity. Its full statement verifier also checks content-derived IDs,
+Order/Receipt/Review digests, party/executor roles, chronology, declared
+evidence budgets, and the exact signed Rule Package resources and hook. The
+Order, Receipt, and Review supplied as context must independently pass their
+own protocol validators; this statement suite binds those artifacts but does
+not replace their policy validation. Passing these vectors does not establish
+parent-DAG completeness,
+claim or evidence truth, dispute resolution, or settlement authority.
+
 Recognition Policy v1 has a separate deterministic vector in the same
 directory. It covers a node-signed genesis, a successor signed by a delegated
 controller, byte-exact canonical JSON and domain-separated signing input, and
