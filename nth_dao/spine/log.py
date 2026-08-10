@@ -1,15 +1,17 @@
-"""签名 hash 链事件日志 —— per-DAO 单写者的统一事实源(Phase 1)。
+"""Signed append-only hash-chain log for one DAO node.
 
-append-only;内存维护链头(``head_seq`` + ``head_hash``),每次 append 用本节点
-identity 签名并链回前一条;落盘 jsonl(每行一个事件)。``verify_chain`` 整段重放:
-seq 单调、prev_hash 逐条对上、每条签名有效 → 任何历史篡改都暴露(fail-closed)。
+Each event is signed by the local identity and linked to the previous event.
+The JSONL log has one canonical event per line. Full verification checks
+sequence continuity, previous hashes, and every author signature.
 
-**单写者约定**:一个日志文件由一个节点进程独占写入(类比 git 索引)。跨节点是
-联邦 / 合并(后续 Phase),不是多进程共享同一文件。进程内并发用锁串行化。
+One node process owns a log as its writer. Federation merges independent
+logs; it does not make multiple processes write the same file concurrently.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -18,15 +20,32 @@ from typing import Iterator, Optional, Tuple, Union
 from nth_dao.execution_receipt import now_ms
 from nth_dao.identity import AgentIdentity
 from nth_dao.spine.event import GENESIS_PREV, SpineEvent, sign_event, verify_event
-from nth_dao.util.io import InterProcessLock
+from nth_dao.util.io import InterProcessLock, atomic_write_bytes
 
 MAX_SPINE_LINE_BYTES = 2 * 1024 * 1024
 MAX_SPINE_APPEND_BATCH = 1_000
 DEFAULT_SPINE_LOCK_TIMEOUT_SECONDS = 30.0
+SPINE_APPEND_INTENT_VERSION = 1
+MAX_SPINE_APPEND_INTENT_BYTES = MAX_SPINE_LINE_BYTES + 1_024
+
+logger = logging.getLogger(__name__)
+
+
+class SpineAppendOutcomeUnknown(OSError):
+    """An append may be durable and must be reconciled before retrying."""
+
+    def __init__(self, event: SpineEvent, cause: OSError) -> None:
+        self.event = event
+        self.event_id = event.event_id
+        super().__init__(
+            "spine append outcome is unknown for event "
+            f"{self.event_id}; call reconcile_append(event_id) before retrying: "
+            f"{cause}"
+        )
 
 
 class SignedEventLog:
-    """append-only 签名 hash 链日志。落盘 jsonl,内存维护链头。"""
+    """Append-only signed JSONL hash chain with an in-memory head."""
 
     def __init__(
         self,
@@ -36,6 +55,9 @@ class SignedEventLog:
         lock_timeout: float = DEFAULT_SPINE_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self._path = Path(path)
+        self._pending_path = self._path.with_name(
+            self._path.name + ".append.pending"
+        )
         self._identity = identity
         self._lock = threading.Lock()
         if (
@@ -51,17 +73,181 @@ class SignedEventLog:
         self._load_head()
 
     def _load_head(self) -> None:
-        last: Optional[SpineEvent] = None
         try:
-            for event in self.read_all():
-                last = event
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                self._recover_pending_append_unlocked()
+                events: list[SpineEvent] = []
+                if self._path.exists():
+                    for line_number, raw in self._raw_lines():
+                        if not raw.endswith(b"\n"):
+                            raise ValueError(
+                                f"line {line_number}: incomplete final record"
+                            )
+                        if raw.strip():
+                            events.append(self._decode_line(raw, line_number))
+        except TimeoutError:
+            raise
         except (OSError, TypeError, ValueError) as exc:
             raise ValueError(
                 f"spine log at {self._path} is corrupt and cannot be opened "
                 f"for diagnosis or appending: {exc}"
             ) from exc
+        last = events[-1] if events else None
         self._head_hash = last.content_hash if last is not None else GENESIS_PREV
         self._head_seq = last.seq if last is not None else -1
+
+    @staticmethod
+    def _encode_event(event: SpineEvent) -> bytes:
+        return json.dumps(
+            event.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+
+    def _write_append_intent_unlocked(
+        self,
+        *,
+        base_size: int,
+        line: bytes,
+    ) -> None:
+        document = {
+            "version": SPINE_APPEND_INTENT_VERSION,
+            "base_size": base_size,
+            "line": line.decode("ascii"),
+            "line_sha256": hashlib.sha256(line).hexdigest(),
+        }
+        encoded = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        if len(encoded) > MAX_SPINE_APPEND_INTENT_BYTES:
+            raise ValueError("spine append intent exceeds byte limit")
+        atomic_write_bytes(self._pending_path, encoded)
+
+    def _read_append_intent_unlocked(self) -> tuple[int, bytes] | None:
+        try:
+            raw = self._pending_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        if not 1 <= len(raw) <= MAX_SPINE_APPEND_INTENT_BYTES:
+            raise ValueError("spine append intent exceeds byte limit")
+        try:
+            document = json.loads(raw.decode("ascii"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("spine append intent is unparseable") from exc
+        if not isinstance(document, dict) or set(document) != {
+            "version",
+            "base_size",
+            "line",
+            "line_sha256",
+        }:
+            raise ValueError("spine append intent structure is invalid")
+        base_size = document["base_size"]
+        line_text = document["line"]
+        line_digest = document["line_sha256"]
+        if (
+            document["version"] != SPINE_APPEND_INTENT_VERSION
+            or isinstance(base_size, bool)
+            or not isinstance(base_size, int)
+            or base_size < 0
+            or not isinstance(line_text, str)
+            or not isinstance(line_digest, str)
+        ):
+            raise ValueError("spine append intent fields are invalid")
+        try:
+            line = line_text.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("spine append intent line is not ASCII") from exc
+        if (
+            not 1 <= len(line) <= MAX_SPINE_LINE_BYTES
+            or "\n" in line_text
+            or "\r" in line_text
+            or hashlib.sha256(line).hexdigest() != line_digest
+        ):
+            raise ValueError("spine append intent line is invalid")
+        return base_size, line
+
+    def _clear_append_intent_unlocked(self) -> None:
+        self._pending_path.unlink(missing_ok=True)
+        if os.name != "nt":
+            parent_fd = os.open(self._pending_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+
+    def _write_record_unlocked(self, record: bytes) -> None:
+        with self._path.open("ab") as stream:
+            stream.write(record)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _recover_pending_append_unlocked(self) -> None:
+        intent = self._read_append_intent_unlocked()
+        if intent is None:
+            return
+        base_size, line = intent
+        current_size = self._path.stat().st_size if self._path.exists() else 0
+        if current_size < base_size:
+            raise ValueError("spine append intent base exceeds log size")
+        if base_size:
+            with self._path.open("rb") as stream:
+                stream.seek(base_size - 1)
+                if stream.read(1) != b"\n":
+                    raise ValueError("spine append intent base is not line-aligned")
+        ok, reason, prefix_events = self._verified_events_unlocked(
+            stop_offset=base_size
+        )
+        if not ok:
+            raise ValueError(f"spine append intent prefix is corrupt: {reason}")
+        event = self._decode_line(line, len(prefix_events) + 1)
+        if self._encode_event(event) != line:
+            raise ValueError("spine append intent event is not canonical")
+        expected_prev = (
+            prefix_events[-1].content_hash if prefix_events else GENESIS_PREV
+        )
+        expected_seq = prefix_events[-1].seq + 1 if prefix_events else 0
+        valid, verify_reason = verify_event(event)
+        if (
+            event.seq != expected_seq
+            or event.prev_hash != expected_prev
+            or event.author_did != self._identity.as_did()
+            or not valid
+        ):
+            raise ValueError(
+                "spine append intent event is unauthorized or does not extend "
+                f"the verified prefix: {verify_reason}"
+            )
+
+        record = line + b"\n"
+        available = current_size - base_size
+        existing_suffix = b""
+        if available:
+            with self._path.open("rb") as stream:
+                stream.seek(base_size)
+                existing_suffix = stream.read(min(available, len(record)))
+        if existing_suffix != record[: len(existing_suffix)]:
+            raise ValueError("spine append tail conflicts with signed intent")
+        if available < len(record):
+            if current_size:
+                with self._path.open("r+b") as stream:
+                    stream.truncate(base_size)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            self._write_record_unlocked(record)
+
+        ok, reason, events = self._verified_events_unlocked()
+        if not ok:
+            raise ValueError(f"recovered spine append is corrupt: {reason}")
+        if event.seq >= len(events) or events[event.seq] != event:
+            raise ValueError("recovered spine append does not match signed intent")
+        self._clear_append_intent_unlocked()
 
     def _decode_line(self, raw: bytes, line_number: int) -> SpineEvent:
         if len(raw) > MAX_SPINE_LINE_BYTES:
@@ -77,30 +263,56 @@ class SignedEventLog:
                 f"line {line_number}: invalid event structure ({exc})"
             ) from exc
 
-    def _raw_lines(self) -> Iterator[tuple[int, bytes]]:
+    def _raw_lines(
+        self,
+        *,
+        stop_offset: int | None = None,
+    ) -> Iterator[tuple[int, bytes]]:
         with self._path.open("rb") as stream:
+            if stop_offset == 0:
+                return
             line_number = 0
+            consumed = 0
             while True:
                 raw = stream.readline(MAX_SPINE_LINE_BYTES + 1)
                 if not raw:
+                    if stop_offset is not None and consumed != stop_offset:
+                        raise ValueError("spine append intent base exceeds log size")
                     return
                 line_number += 1
                 if len(raw) > MAX_SPINE_LINE_BYTES:
                     raise ValueError(
                         f"line {line_number}: event exceeds byte limit"
                     )
+                consumed += len(raw)
+                if stop_offset is not None and consumed > stop_offset:
+                    raise ValueError(
+                        "spine append intent base is not line-aligned"
+                    )
                 yield line_number, raw
+                if stop_offset is not None and consumed == stop_offset:
+                    return
 
     def _verified_events_unlocked(
         self,
+        *,
+        stop_offset: int | None = None,
     ) -> tuple[bool, str, tuple[SpineEvent, ...]]:
         if not self._path.exists():
+            if stop_offset not in {None, 0}:
+                return False, "spine append intent base exceeds log size", ()
             return True, "ok", ()
         expected_prev = GENESIS_PREV
         expected_seq = 0
         events: list[SpineEvent] = []
         try:
-            for line_number, raw in self._raw_lines():
+            for line_number, raw in self._raw_lines(stop_offset=stop_offset):
+                if not raw.endswith(b"\n"):
+                    return (
+                        False,
+                        f"line {line_number}: incomplete final record",
+                        tuple(events),
+                    )
                 if not raw.strip():
                     continue
                 event = self._decode_line(raw, line_number)
@@ -137,7 +349,7 @@ class SignedEventLog:
         return ok, reason, events[-1] if events else None
 
     def read_all(self) -> Iterator[SpineEvent]:
-        """按落盘顺序产出全部事件(不校验,校验走 verify_chain)。"""
+        """Yield stored events in order without verifying the full chain."""
         if not self._path.exists():
             return
         for line_number, raw in self._raw_lines():
@@ -151,6 +363,12 @@ class SignedEventLog:
     @property
     def head_seq(self) -> int:
         return self._head_seq
+
+    @property
+    def signer_did(self) -> str:
+        """Return the DID authorized to append through this log instance."""
+
+        return self._identity.as_did()
 
     def storage_token(self) -> tuple[int, int, int, int, int]:
         """Return a cheap invalidation token for the on-disk log snapshot."""
@@ -177,6 +395,7 @@ class SignedEventLog:
                 self._path,
                 timeout=self._lock_timeout,
             ):
+                self._recover_pending_append_unlocked()
                 ok, reason, events = self._verified_events_unlocked()
                 if not ok:
                     raise ValueError(
@@ -187,12 +406,19 @@ class SignedEventLog:
     def append(
         self, event_type: str, payload: dict, *, ts_ms: Optional[int] = None,
     ) -> SpineEvent:
-        """Sign and append one event with thread and process serialization."""
+        """Sign and append one non-idempotent event.
+
+        If this raises :class:`SpineAppendOutcomeUnknown`, callers must invoke
+        :meth:`reconcile_append` with the exception's ``event_id`` before they
+        consider issuing a new append. Business writes with semantic keys
+        should use :meth:`append_unique` instead.
+        """
         with self._lock:
             with InterProcessLock(
                 self._path,
                 timeout=self._lock_timeout,
             ):
+                self._recover_pending_append_unlocked()
                 # A second process may have advanced the chain since this
                 # instance was constructed.
                 ok, reason, events = self._verified_events_unlocked()
@@ -228,21 +454,72 @@ class SignedEventLog:
             identity=self._identity,
             ts_ms=ts_ms if ts_ms is not None else now_ms(),
         )
-        line = json.dumps(
-            event.to_dict(),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("ascii")
+        line = self._encode_event(event)
         if len(line) > MAX_SPINE_LINE_BYTES:
             raise ValueError("spine event exceeds line byte limit")
-        with self._path.open("ab") as stream:
-            stream.write(line + b"\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        base_size = self._path.stat().st_size if self._path.exists() else 0
+        try:
+            self._write_append_intent_unlocked(base_size=base_size, line=line)
+        except OSError as exc:
+            try:
+                persisted_intent = self._read_append_intent_unlocked()
+            except (OSError, ValueError):
+                raise SpineAppendOutcomeUnknown(event, exc) from exc
+            if persisted_intent is not None:
+                raise SpineAppendOutcomeUnknown(event, exc) from exc
+            raise
+        try:
+            self._write_record_unlocked(line + b"\n")
+        except OSError as exc:
+            raise SpineAppendOutcomeUnknown(event, exc) from exc
+        try:
+            self._clear_append_intent_unlocked()
+        except OSError as exc:
+            logger.warning(
+                "spine event %s is durable but append intent cleanup failed: %s",
+                event.event_id,
+                exc,
+            )
         self._head_hash = event.content_hash
         self._head_seq = event.seq
         return event
+
+    def reconcile_append(self, event_id: str) -> Optional[SpineEvent]:
+        """Recover pending I/O and return the exact committed event, if any.
+
+        ``None`` means recovery completed and that event ID is absent, so the
+        caller may safely decide whether to issue a new append.
+        """
+
+        if (
+            not isinstance(event_id, str)
+            or len(event_id) != 64
+            or any(character not in "0123456789abcdef" for character in event_id)
+        ):
+            raise ValueError("event_id must be 64 lowercase hexadecimal characters")
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                self._recover_pending_append_unlocked()
+                ok, reason, events = self._verified_events_unlocked()
+                if not ok:
+                    raise ValueError(
+                        f"spine log at {self._path} is corrupt and cannot "
+                        f"reconcile an append: {reason}"
+                    )
+                matches = tuple(
+                    event for event in events if event.event_id == event_id
+                )
+                if len(matches) > 1:
+                    raise ValueError("spine contains duplicate event IDs")
+                last = events[-1] if events else None
+                self._head_hash = (
+                    last.content_hash if last is not None else GENESIS_PREV
+                )
+                self._head_seq = last.seq if last is not None else -1
+                return matches[0] if matches else None
 
     def verified_snapshot(self) -> tuple[SpineEvent, ...]:
         """Return one lock-consistent, signature-verified event snapshot."""
@@ -252,6 +529,7 @@ class SignedEventLog:
                 self._path,
                 timeout=self._lock_timeout,
             ):
+                self._recover_pending_append_unlocked()
                 ok, reason, events = self._verified_events_unlocked()
                 if not ok:
                     raise ValueError(
@@ -329,6 +607,7 @@ class SignedEventLog:
                 self._path,
                 timeout=self._lock_timeout,
             ):
+                self._recover_pending_append_unlocked()
                 ok, reason, events = self._verified_events_unlocked()
                 if not ok:
                     raise ValueError(
@@ -404,11 +683,19 @@ class SignedEventLog:
                 )
 
     def verify_chain(self) -> Tuple[bool, str]:
-        """整段重放校验:seq 从 0 单调、prev_hash 逐条链上、每条签名有效。
+        """Verify sequence, links, structure, and signatures fail-closed.
 
-        **必须 fail-closed**:对损坏行(非法 JSON / 结构不合法 / 缺字段)返回
-        ``(False, reason)``,绝不抛异常 —— 篡改恰会制造这种坏行,完整性校验崩溃
-        等于漏过篡改。故这里自己防御式解析,不走严格的 ``read_all``。
+        Corrupt JSON or malformed event rows return ``(False, reason)``.
+        Integrity verification must not crash and accidentally hide tampering.
         """
-        ok, reason, _last = self._scan_verified()
-        return ok, reason
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                try:
+                    self._recover_pending_append_unlocked()
+                except (OSError, TypeError, ValueError) as exc:
+                    return False, str(exc)
+                ok, reason, _events = self._verified_events_unlocked()
+                return ok, reason

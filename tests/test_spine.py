@@ -1,8 +1,9 @@
-"""Spine(统一签名因果日志)Phase 1 测试:链接、持久化、防篡改、签名、投影。"""
+"""Spine chaining, persistence, tamper detection, signature, and projection tests."""
 from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,12 @@ import pytest
 pytest.importorskip("nacl")
 
 from nth_dao.identity import AgentIdentity
+import nth_dao.spine.log as spine_log_module
 from nth_dao.spine import (
     GENESIS_PREV,
     Projection,
     SignedEventLog,
+    SpineAppendOutcomeUnknown,
     replay,
     sign_event,
     verify_event,
@@ -83,7 +86,7 @@ def test_persistence_reloads_head_and_continues(tmp_path: Path) -> None:
     log = SignedEventLog(p, ident)
     log.append("t", {"n": 1})
     log.append("t", {"n": 2})
-    # 新实例同路径:应重载链头,继续链(不从 0 重开)。
+    # A new instance reloads the head and continues the existing chain.
     log2 = SignedEventLog(p, ident)
     assert log2.head_seq == 1
     e = log2.append("t", {"n": 3})
@@ -93,13 +96,269 @@ def test_persistence_reloads_head_and_continues(tmp_path: Path) -> None:
     assert ok, why
 
 
+def test_spine_constructor_preserves_lock_timeout_diagnosis(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class _BusyLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            raise TimeoutError("simulated spine contention")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(spine_log_module, "InterProcessLock", _BusyLock)
+    with pytest.raises(TimeoutError, match="simulated spine contention"):
+        SignedEventLog(tmp_path / "events.jsonl", _id())
+
+
+def test_spine_recovers_exact_signed_partial_append(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "events.jsonl"
+    identity = _id()
+    log = SignedEventLog(path, identity)
+    first = log.append("test.first", {"id": "one"})
+
+    def write_partial_then_fail(record: bytes) -> None:
+        with path.open("ab") as stream:
+            stream.write(record[: len(record) // 2])
+            stream.flush()
+            os.fsync(stream.fileno())
+        raise OSError("simulated interrupted append")
+
+    monkeypatch.setattr(log, "_write_record_unlocked", write_partial_then_fail)
+    with pytest.raises(OSError, match="interrupted append"):
+        log.append("test.recovered", {"id": "two"}, ts_ms=2)
+    pending_path = path.with_name(path.name + ".append.pending")
+    assert pending_path.is_file()
+
+    recovered = SignedEventLog(path, identity)
+    events = recovered.verified_snapshot()
+    assert [event.type for event in events] == ["test.first", "test.recovered"]
+    assert events[0] == first
+    assert events[1].prev_hash == first.content_hash
+    assert not pending_path.exists()
+
+
+def test_spine_reconciles_durable_record_without_duplicate_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    real_write = log._write_record_unlocked
+
+    def write_then_report_failure(record: bytes) -> None:
+        real_write(record)
+        raise OSError("simulated fsync outcome ambiguity")
+
+    monkeypatch.setattr(
+        log,
+        "_write_record_unlocked",
+        write_then_report_failure,
+    )
+    with pytest.raises(SpineAppendOutcomeUnknown) as caught:
+        log.append("test.ambiguous", {"id": "one"}, ts_ms=1)
+    monkeypatch.setattr(log, "_write_record_unlocked", real_write)
+
+    resolved = log.reconcile_append(caught.value.event_id)
+
+    assert resolved == caught.value.event
+    assert log.verified_snapshot() == (resolved,)
+    assert log.head_seq == 0
+
+
+def test_spine_reconciles_durable_intent_without_duplicate_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    real_write_intent = log._write_append_intent_unlocked
+
+    def write_intent_then_report_failure(*, base_size: int, line: bytes) -> None:
+        real_write_intent(base_size=base_size, line=line)
+        raise OSError("simulated directory fsync ambiguity")
+
+    monkeypatch.setattr(
+        log,
+        "_write_append_intent_unlocked",
+        write_intent_then_report_failure,
+    )
+    with pytest.raises(SpineAppendOutcomeUnknown) as caught:
+        log.append("test.ambiguous-intent", {"id": "one"}, ts_ms=1)
+    monkeypatch.setattr(
+        log,
+        "_write_append_intent_unlocked",
+        real_write_intent,
+    )
+
+    resolved = log.reconcile_append(caught.value.event_id)
+
+    assert resolved == caught.value.event
+    assert log.verified_snapshot() == (resolved,)
+
+
+def test_spine_plain_intent_failure_is_safe_to_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    real_write_intent = log._write_append_intent_unlocked
+
+    def fail_before_intent(**_kwargs) -> None:
+        raise OSError("simulated pre-intent failure")
+
+    monkeypatch.setattr(
+        log,
+        "_write_append_intent_unlocked",
+        fail_before_intent,
+    )
+    with pytest.raises(OSError, match="pre-intent failure") as caught:
+        log.append("test.safe-retry", {"id": "one"}, ts_ms=1)
+    assert not isinstance(caught.value, SpineAppendOutcomeUnknown)
+    monkeypatch.setattr(
+        log,
+        "_write_append_intent_unlocked",
+        real_write_intent,
+    )
+
+    appended = log.append("test.safe-retry", {"id": "one"}, ts_ms=1)
+
+    assert log.verified_snapshot() == (appended,)
+
+
+def test_append_unique_retry_after_unknown_outcome_is_duplicate_safe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    payload = {"execution_id": "exec-1", "receipt_digest": "digest-1"}
+    real_write = log._write_record_unlocked
+
+    def write_partial_then_fail(record: bytes) -> None:
+        with path.open("ab") as stream:
+            stream.write(record[: len(record) // 2])
+            stream.flush()
+            os.fsync(stream.fileno())
+        raise OSError("simulated interrupted unique append")
+
+    monkeypatch.setattr(log, "_write_record_unlocked", write_partial_then_fail)
+    with pytest.raises(SpineAppendOutcomeUnknown):
+        log.append_unique(
+            "trade.execution.recorded",
+            payload,
+            unique_payload_fields=("execution_id", "receipt_digest"),
+            ts_ms=1,
+        )
+    monkeypatch.setattr(log, "_write_record_unlocked", real_write)
+
+    recovered, created = log.append_unique(
+        "trade.execution.recorded",
+        payload,
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=2,
+    )
+
+    assert created is False
+    assert recovered.ts_ms == 1
+    assert log.verified_snapshot() == (recovered,)
+
+
+def test_spine_recovery_rejects_tail_not_matching_signed_intent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    identity = _id()
+    log = SignedEventLog(path, identity)
+    log.append("test.first", {"id": "one"})
+
+    def write_partial_then_fail(record: bytes) -> None:
+        with path.open("ab") as stream:
+            stream.write(record[: len(record) // 2])
+            stream.flush()
+            os.fsync(stream.fileno())
+        raise OSError("simulated interrupted append")
+
+    monkeypatch.setattr(log, "_write_record_unlocked", write_partial_then_fail)
+    with pytest.raises(OSError):
+        log.append("test.must-not-recover", {"id": "two"}, ts_ms=2)
+    raw = path.read_bytes()
+    path.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+
+    with pytest.raises(ValueError, match="tail conflicts with signed intent"):
+        SignedEventLog(path, identity)
+    assert path.with_name(path.name + ".append.pending").exists()
+
+
+def test_spine_rejects_incomplete_tail_without_signed_intent(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    identity = _id()
+    log = SignedEventLog(path, identity)
+    log.append("test.first", {"id": "one"})
+    with path.open("ab") as stream:
+        stream.write(b'{"seq":1')
+
+    with pytest.raises(ValueError, match="incomplete final record"):
+        SignedEventLog(path, identity)
+
+
+def test_spine_recovers_durable_append_after_intent_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    identity = _id()
+    log = SignedEventLog(path, identity)
+
+    def fail_cleanup() -> None:
+        raise OSError("simulated pending cleanup failure")
+
+    monkeypatch.setattr(log, "_clear_append_intent_unlocked", fail_cleanup)
+    appended = log.append("test.durable", {"id": "one"}, ts_ms=1)
+    pending_path = path.with_name(path.name + ".append.pending")
+    assert pending_path.exists()
+
+    recovered = SignedEventLog(path, identity)
+    assert recovered.verified_snapshot() == (appended,)
+    assert not pending_path.exists()
+
+
+def test_spine_rejects_pending_event_signed_by_another_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    owner = _id()
+    attacker = _id()
+    log = SignedEventLog(path, owner)
+    forged = sign_event(
+        seq=0,
+        prev_hash=GENESIS_PREV,
+        event_type="test.forged",
+        payload={"id": "forged"},
+        identity=attacker,
+        ts_ms=1,
+    )
+    log._write_append_intent_unlocked(
+        base_size=0,
+        line=log._encode_event(forged),
+    )
+
+    with pytest.raises(ValueError, match="unauthorized"):
+        SignedEventLog(path, owner)
+
+
 def test_tamper_payload_breaks_verification(tmp_path: Path) -> None:
     p = tmp_path / "events.jsonl"
     log = SignedEventLog(p, _id())
     log.append("t", {"amount": 5})
     log.append("t", {"amount": 6})
     first = json.loads(p.read_text(encoding="utf-8").splitlines()[0])
-    first["payload"]["amount"] = 9999   # 篡改历史 payload,不改 content_hash
+    first["payload"]["amount"] = 9999  # Tamper without updating content_hash.
     _rewrite_line(p, 0, first)
     ok, why = SignedEventLog(p, _id()).verify_chain()
     assert not ok
@@ -112,7 +371,7 @@ def test_tamper_prev_hash_breaks_chain(tmp_path: Path) -> None:
     log.append("t", {"n": 1})
     log.append("t", {"n": 2})
     second = json.loads(p.read_text(encoding="utf-8").splitlines()[1])
-    second["prev_hash"] = "1" * 64   # 断链
+    second["prev_hash"] = "1" * 64  # Break the chain.
     _rewrite_line(p, 1, second)
     ok, why = SignedEventLog(p, _id()).verify_chain()
     assert not ok
@@ -306,33 +565,33 @@ def test_spine_rejects_oversized_line_without_unbounded_read(
 
 
 def test_corrupt_line_fails_closed_not_crash(tmp_path: Path) -> None:
-    # 对抗审查发现:损坏行(非法 JSON / 结构坏)必须返回 False,不能抛异常。
-    # 用**已构造的 handle** 校验(模拟"在跑的进程持有日志句柄,文件被静默篡改")。
+    # Corrupt rows must return False rather than crash verification.
+    # Keep the original handle to simulate silent tampering while it is open.
     p = tmp_path / "events.jsonl"
     log = SignedEventLog(p, _id())
     log.append("t", {"n": 1})
     log.append("t", {"n": 2})
     line0 = p.read_text(encoding="utf-8").splitlines()[0]
 
-    # ① 第二行换成非法 JSON → verify_chain 返回 False(不抛)。
+    # Invalid JSON returns False without raising.
     p.write_text(line0 + "\n{not json]\n", encoding="utf-8")
     ok, why = log.verify_chain()
     assert not ok and "unparseable" in why
 
-    # ② 结构坏:payload 不是 dict(JSON 合法但 from_dict 失败)→ 仍 False。
+    # Structurally invalid JSON also returns False.
     _rewrite_line(p, 1, {"seq": 1, "prev_hash": "0" * 64, "type": "t",
                          "payload": "notdict", "author_did": "did:key:zX",
                          "ts_ms": 1, "content_hash": "", "sig": ""})
     ok2, _ = log.verify_chain()
     assert not ok2
 
-    # ③ 构造写入者拒绝打开损坏日志(清晰错误,不裸崩)。
+    # A new writer refuses to open a corrupt log with a clear error.
     with pytest.raises(ValueError, match="corrupt"):
         SignedEventLog(p, _id())
 
 
 def test_event_authored_by_other_did_verifies(tmp_path: Path) -> None:
-    # 事件用作者 DID 的公钥校验(非日志持有者),跨主体可验。
+    # Verification uses the author's DID, not the local log owner's key.
     author = _id()
     e = sign_event(
         seq=0, prev_hash=GENESIS_PREV, event_type="t",
@@ -341,7 +600,7 @@ def test_event_authored_by_other_did_verifies(tmp_path: Path) -> None:
     ok, why = verify_event(e)
     assert ok, why
     assert e.author_did == author.as_did()
-    # 篡改签名 → 失败。
+    # A modified signature fails verification.
     e.sig = e.sig[:-2] + ("aa" if not e.sig.endswith("aa") else "bb")
     ok2, _ = verify_event(e)
     assert not ok2

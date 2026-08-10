@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-dispute-statement-audit-payload-v1.json",
+  "title": "NTH DAO Trade Dispute Statement Retained Spine Payload v1",
+  "$comment": "Exact payload-to-Statement and chronology checks require the protocol validator. The anchor records retention of a signed claim, not truth or adjudication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version", "statement_id", "statement_digest", "dispute_id",
+    "order_digest", "receipt_digest", "review_digest", "review_id",
+    "author_did", "author_role", "statement_type", "created_at",
+    "assertion_status"
+  ],
+  "properties": {
+    "protocol_version": {"const": "1"},
+    "statement_id": {
+      "type": "string",
+      "pattern": "^nth-trade-dispute-statement-sha256:[0-9a-f]{64}$"
+    },
+    "statement_digest": {"$ref": "#/$defs/digest"},
+    "dispute_id": {
+      "type": "string",
+      "pattern": "^nth-trade-dispute-sha256:[0-9a-f]{64}$"
+    },
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "review_digest": {"$ref": "#/$defs/digest"},
+    "review_id": {
+      "type": "string",
+      "pattern": "^nth-trade-review-sha256:[0-9a-f]{64}$"
+    },
+    "author_did": {"$ref": "#/$defs/did"},
+    "author_role": {"enum": ["maker", "taker"]},
+    "statement_type": {"enum": ["response", "evidence", "remedy-proposal"]},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "assertion_status": {"const": "signed-claim-not-adjudicated"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.(?!000000)\\d{6})?Z$"
+    }
+  }
+}

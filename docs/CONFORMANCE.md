@@ -120,8 +120,31 @@ evidence budgets, and the exact signed Rule Package resources and hook. The
 Order, Receipt, and Review supplied as context must independently pass their
 own protocol validators; this statement suite binds those artifacts but does
 not replace their policy validation. Passing these vectors does not establish
-parent-DAG completeness,
-claim or evidence truth, dispute resolution, or settlement authority.
+parent-DAG completeness, claim or evidence truth, dispute resolution, or
+settlement authority.
+
+The TypeScript reference API enforces that boundary at runtime. Callers must
+construct a frozen `VerifiedTradeDisputeArtifacts` bundle with
+`createVerifiedTradeDisputeArtifacts()` and provide independent Order,
+Execution Receipt, and Receipt Review validators. A structurally identical raw
+object is rejected. This prevents a comment or type assertion from silently
+standing in for protocol validation.
+
+Agreement v1 also includes destination-bound Trade Dispute Statement Delivery,
+receiver-signed Acknowledgement, and claim-not-fact Spine payload vectors. The
+Delivery cases cover the intended recipient, exact artifact bindings, TTL,
+future creation, retargeting, and signature mutation. The ACK cases bind the
+exact Delivery digest, first durable receiver observation, receiver DID, and
+remote audit event. Implementations must run semantic signature, role,
+destination, chronology, and digest validation after JSON Schema validation.
+The vector fixes both canonical envelope bytes and the complete
+domain-separated signing input, so ports need not infer a Python-private
+prefix. Transport-policy inputs are limited to 86,400 seconds in both
+implementations; the shared cases include over-limit TTL, over-limit clock
+skew, and an overflow-scale numeric input.
+The status `retained-claim-not-adjudicated` is deliberately narrow: passing
+these vectors proves wire compatibility, not evidence truth, adjudication,
+payment, settlement, or execution authority.
 
 Recognition Policy v1 has a separate deterministic vector in the same
 directory. It covers a node-signed genesis, a successor signed by a delegated

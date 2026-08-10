@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-dispute-statement-acknowledgement-v1.json",
+  "title": "NTH DAO Trade Dispute Statement Acknowledgement v1",
+  "$comment": "Signature, exact Delivery bindings, and receipt chronology require the protocol validator. The audit_event_id is only a signed reference; proving the remote Spine event exists requires separate peer evidence. This is not an adjudication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind", "protocol_version", "delivery_id", "delivery_digest",
+    "order_digest", "receipt_digest", "review_digest", "statement_digest",
+    "sender_did", "receiver_did", "received_at", "audit_event_id",
+    "status", "proof"
+  ],
+  "properties": {
+    "kind": {"const": "nth.dao.trade.dispute-statement-acknowledgement"},
+    "protocol_version": {"const": "1"},
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^nth:trade:dispute-statement-delivery:sha256:[0-9a-f]{64}$"
+    },
+    "delivery_digest": {"$ref": "#/$defs/digest"},
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "review_digest": {"$ref": "#/$defs/digest"},
+    "statement_digest": {"$ref": "#/$defs/digest"},
+    "sender_did": {"$ref": "#/$defs/did"},
+    "receiver_did": {"$ref": "#/$defs/did"},
+    "received_at": {"$ref": "#/$defs/timestamp"},
+    "audit_event_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"const": "retained-claim-not-adjudicated"},
+    "proof": {"$ref": "#/$defs/proof"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type", "created", "verification_method", "proof_purpose", "proof_value"
+      ],
+      "properties": {
+        "type": {"const": "Ed25519Signature2020"},
+        "created": {"$ref": "#/$defs/timestamp"},
+        "verification_method": {
+          "type": "string",
+          "maxLength": 300,
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+#z[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "proof_purpose": {"const": "tradeDisputeStatementAcknowledgement"},
+        "proof_value": {
+          "type": "string",
+          "minLength": 86,
+          "maxLength": 86,
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  }
+}

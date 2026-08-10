@@ -95,16 +95,21 @@ def bounded_seconds(
     *,
     label: str,
     error_type: type[ValueError],
+    maximum: float | None = None,
 ) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(value)
         or value < 0
+        or (maximum is not None and value > maximum)
     ):
+        maximum_message = (
+            f" not greater than {maximum:g}" if maximum is not None else ""
+        )
         reject(
             error_type,
-            f"{label} must be a finite non-negative number",
+            f"{label} must be a finite non-negative number{maximum_message}",
         )
     return float(value)
 

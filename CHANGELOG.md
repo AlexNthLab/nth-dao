@@ -143,6 +143,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   correctly signed future-time, and Review-rebinding vectors are included.
   Statements do not prove a claim true, resolve a dispute, authorize settlement,
   or execute a Rule hook.
+- Bounded, cross-process Trade Dispute Statement CAS retention with strict
+  content-address validation, crash-residue tolerance, deterministic paging,
+  exact-context re-verification, and explicit reconciliation diagnostics.
+  Idempotent `trade.dispute.statement.retained` Spine anchors bind the complete
+  signed claim digest and are permanently labelled
+  `signed-claim-not-adjudicated`; failed Spine writes remain recoverable from
+  the retained statement without weakening time or Rule Package validation.
+- Destination-bound Trade Dispute Statement Delivery and receiver-signed
+  Acknowledgement v1 envelopes, with exact Order/Receipt/Review/Statement
+  bindings, bounded TTL and nonce, deterministic positive and tamper vectors,
+  and an explicit `retained-claim-not-adjudicated` status. Receiver intake
+  rejects matching Spine anchors signed by any DID other than the receiver.
+- Restart-safe, bounded Trade Dispute Statement intake journal with exact first
+  observation time, observed-to-anchored-to-acknowledged recovery, typed
+  canonical artifacts, SQLite cross-process serialization, and fail-closed
+  journal integrity checks. Intake persists before Package resolution and may
+  resume an exact previously observed Delivery after transport expiry.
+- Dispute intake first-observation time is now a receiver-signed canonical
+  attestation bound to the exact Delivery digest and recipient. Unsigned legacy
+  rows fail closed; acknowledged rows can move to a verified archive and are
+  purgeable only after the maximum transport window and explicit retention.
+  Both hot and archive storage have restart-enforced record and byte ceilings;
+  authenticated new deliveries run bounded purge-then-archive maintenance, and
+  noncanonical Observation bytes are rejected on every journal read.
+- Spine append uses a signed, chain-bound write-ahead intent. Exact crash tails
+  recover without accepting arbitrary truncation; missing, foreign-signed, or
+  byte-conflicting intents remain corrupt. Ambiguous I/O raises a typed outcome
+  containing the exact event ID, and `reconcile_append` recovers or disproves
+  that event before retry. Dispute Statement and transport clock-skew policy
+  values are capped consistently at 86,400 seconds in Python and TypeScript.
+- TypeScript dispute verifiers require an immutable artifact bundle minted only
+  after the constructor internally validates the signed Offer, Proposal,
+  Acceptance, Order, Execution Receipt, and Receipt Review. Callers cannot
+  supply replacement validators. Store paging caches verified content-addressed
+  headers while retaining per-file digest checks and full validation of every
+  selected statement.
 - Canonical Trade Execution Adapter Policy v1 objects with a public wire
   schema and digest shared by Receipt Review and conformance implementations.
 

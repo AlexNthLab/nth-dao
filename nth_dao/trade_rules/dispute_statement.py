@@ -55,6 +55,7 @@ MAX_TRADE_DISPUTE_EVIDENCE = 32
 MAX_TRADE_DISPUTE_STATEMENT_BYTES = 256 * 1024
 MAX_TRADE_DISPUTE_CONTENT_BYTES = 16 * 1024 * 1024
 MAX_TRADE_DISPUTE_TOTAL_EVIDENCE_BYTES = 64 * 1024 * 1024
+MAX_TRADE_DISPUTE_CLOCK_SKEW_SECONDS = 86_400
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DISPUTE_ID = re.compile(
@@ -205,8 +206,9 @@ def _clock_skew(value: Any) -> float:
         or not isinstance(value, (int, float))
         or not math.isfinite(value)
         or value < 0
+        or value > MAX_TRADE_DISPUTE_CLOCK_SKEW_SECONDS
     ):
-        _reject("clock_skew_seconds must be a finite non-negative number")
+        _reject("clock_skew_seconds must be finite and between 0 and 86400")
     return float(value)
 
 
@@ -677,6 +679,24 @@ class TradeDisputeStatement:
     def to_dict(self) -> dict[str, Any]:
         return parse_trade_json(self._canonical_bytes)
 
+    def assert_observed_at(
+        self,
+        *,
+        at: datetime | None = None,
+        clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS,
+    ) -> None:
+        """Reject a verified statement observed implausibly before creation."""
+
+        observed = _utc_now(at)
+        created = _timestamp(
+            self.to_dict()["created_at"],
+            label="created_at",
+        )
+        if created > observed + timedelta(
+            seconds=_clock_skew(clock_skew_seconds)
+        ):
+            _reject("trade dispute statement is too far in the future")
+
 
 @dataclass(frozen=True, init=False)
 class UnresolvedTradeDisputeStatement:
@@ -940,15 +960,10 @@ def verify_trade_dispute_statement(
                 package_resolver=package_resolver,
             )
         )
-        observed = _utc_now(at)
-        created = _timestamp(
-            verified.to_dict()["created_at"],
-            label="created_at",
+        verified.assert_observed_at(
+            at=at,
+            clock_skew_seconds=clock_skew_seconds,
         )
-        if created > observed + timedelta(
-            seconds=_clock_skew(clock_skew_seconds)
-        ):
-            _reject("trade dispute statement is too far in the future")
     except (
         TradeDisputeStatementRejected,
         TradeCanonicalJSONError,
@@ -992,6 +1007,7 @@ def trade_dispute_statement_digest(
 __all__ = [
     "MAX_TRADE_DISPUTE_EVIDENCE",
     "MAX_TRADE_DISPUTE_CONTENT_BYTES",
+    "MAX_TRADE_DISPUTE_CLOCK_SKEW_SECONDS",
     "MAX_TRADE_DISPUTE_PARENTS",
     "MAX_TRADE_DISPUTE_REASON_CODES",
     "MAX_TRADE_DISPUTE_STATEMENT_BYTES",

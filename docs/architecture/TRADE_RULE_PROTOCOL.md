@@ -704,11 +704,89 @@ and Adapter policy and obtain any separate authority required before execution.
 The signature proves authorship and binding, not truth. Evidence digests prove
 only which bytes were referenced, not that those bytes support a claim. A
 standalone statement also does not prove that every parent exists, that the DAG
-is complete or acyclic, or that a remedy was accepted. Those checks belong to
-the future dispute store/intake layer. No statement settles a dispute, changes
-reputation, transfers an asset, or authorizes funds. JSON Schema validates wire
-shape; the protocol validator remains mandatory for signatures, identifiers,
-roles, chronology, resource bounds, and artifact bindings.
+is complete or acyclic, or that a remedy was accepted.
+
+The local dispute store retains only fully verified canonical statements under
+their complete content digest. It is bounded by statement count and bytes,
+serializes writers across processes, tolerates its own crash-temporary files,
+fails closed on unknown layout entries, and requires the exact signed Order,
+Receipt, Review, and any Rule Package resolver again on object read. Direct
+digest reads verify only the requested object; explicit reconciliation reports
+unrelated corrupt objects without turning them into global read outages. Each
+write rescans only filenames and file sizes before enforcing capacity; it
+does not reparse every retained statement. This keeps the byte boundary correct
+after out-of-band file changes without restoring the earlier full-JSON O(N)
+write path. A successful write means only that this node retained those signed
+claim bytes. Statement pages use snapshot-bound cursors. If a signed statement
+arrives while a caller is walking pages, continuation fails explicitly and the
+caller must restart from page one; a changing collection is never silently
+presented as a complete snapshot. Paging performs a bounded read and complete
+content-digest check for every content-addressed file, but caches the verified
+canonical header instead of reparsing the full JSON collection on each page.
+The selected page is reread and fully protocol-validated while the store lock
+is held. The cache therefore reduces parse and memory cost without making mtime
+or an unsigned index an integrity authority.
+
+The optional Spine projection emits `trade.dispute.statement.retained` after
+the CAS write. Its exact payload binds the statement and labels it
+`signed-claim-not-adjudicated`. The event signature, payload, and observation
+time are independently verifiable. Intake additionally requires that the
+Spine event signer is the local Delivery receiver; an older matching anchor
+from another DID is rejected rather than reused. Spine failure leaves a recoverable CAS
+statement; exact-digest reconciliation can add the missing idempotent anchor
+later. The anchor time is the time that retention was audited, not necessarily
+the first time any process saw the statement.
+
+Federation uses a destination-bound `TradeDisputeStatementDelivery` v1 signed
+by the statement author. It embeds the exact signed statement and binds its
+Order, Receipt, Review, statement digest, opposing Order party, nonce, creation
+time, and short expiry. The receiver verifies the envelope before durable
+observation, then resolves the statement against the exact Package, writes the
+content-addressed statement, emits the claim-not-fact Spine anchor, and signs a
+`TradeDisputeStatementAcknowledgement`. The ACK binds the complete Delivery,
+all four artifact digests, the receiver, the receiver's first durable
+observation time, and the remote Spine event ID. It asserts only
+`retained-claim-not-adjudicated`. The event ID is a signed reference, not proof
+that the remote event is available; that requires separate Spine evidence.
+
+The domain-separated signing inputs use the exact ASCII prefixes
+`nth-dao/trade-dispute-statement-delivery/v1` and
+`nth-dao/trade-dispute-statement-acknowledgement/v1`. Agreement v1 publishes
+the canonical bytes and complete signing-input bytes for both envelopes.
+
+The intake journal is a bounded, cross-process SQLite state machine. It stores
+the canonical Delivery before Package resolution, advances through observed,
+anchored, and acknowledged states, and preserves a receiver-signed first
+observation attestation across restart. The attestation binds the exact
+Delivery digest, Delivery ID, recipient DID, and timestamp; an unsigned local
+row cannot manufacture a timely first observation. Exact replay can therefore
+resume after the network envelope expires without pretending that a late first
+delivery was timely. Unsigned non-empty legacy journals and tampered or
+schema-incompatible rows fail closed.
+
+Acknowledged hot rows may be atomically moved to a verified archive so the
+bounded intake table can continue accepting work. Archive reads preserve exact
+ACK replay and all signed bindings. Purge is explicit, bounded, returns every
+removed Delivery digest to the caller, and is ineligible until the later of
+archive time, first observation, or signed Delivery expiry plus the protocol's
+maximum clock skew, followed by the configured retention period. Observed and
+anchored rows cannot be archived or purged. This is a programmatic protocol
+boundary; public HTTP dispatch, maintenance scheduling, rate limiting, and peer
+admission policy still belong to the later federation service layer.
+
+The Spine writer uses a signed write-ahead append intent. Recovery accepts only
+an exact byte prefix of the intended canonical event extending a fully verified
+chain prefix and authored by the configured log signer. A partial tail without
+that intent, a foreign signer, or conflicting bytes remains a hard integrity
+failure. Dispute Delivery TTL and receiver clock-skew policy inputs are capped
+at 86,400 seconds in both Python and TypeScript before nanosecond conversion.
+
+Parent retrieval, DAG completeness/cycle checks, governance admission, and
+adjudication remain future work. No statement, Delivery, ACK, journal row, or
+retention anchor settles a dispute, changes reputation, transfers an asset, or
+authorizes funds. JSON Schema validates wire shape; the protocol validator
+remains mandatory for signatures, identifiers, roles, chronology, resource
+bounds, destination, and artifact bindings.
 
 Trade Execution Adapter Policy v1 is a canonical protocol value with kind,
 protocol version, accepted Adapter digests, execution modes, and permissions.

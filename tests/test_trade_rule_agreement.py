@@ -142,6 +142,12 @@ from nth_dao.trade_rules.dispute_statement import (
     trade_dispute_statement_digest,
     verify_trade_dispute_statement,
 )
+from nth_dao.trade_rules.dispute_statement_transport import (
+    TradeDisputeStatementAcknowledgement,
+    TradeDisputeStatementAcknowledgementRejected,
+    TradeDisputeStatementDelivery,
+    TradeDisputeStatementDeliveryRejected,
+)
 from nth_dao.trade_rules.execution_receipt import (
     _create_trade_execution_receipt,
 )
@@ -3485,6 +3491,17 @@ def test_negative_agreement_vectors_fail_closed():
                 order=stored["order"],
             )
         ),
+        "trade_dispute_statement_delivery": lambda document: (
+            TradeDisputeStatementDelivery.from_dict(
+                document,
+                review=stored["disputed_receipt_review"],
+                receipt=stored["execution_receipt"],
+                order=stored["order"],
+            )
+        ),
+        "trade_dispute_statement_acknowledgement": (
+            TradeDisputeStatementAcknowledgement.from_dict
+        ),
         "receipt_review_delivery": lambda document: (
             TradeReceiptReviewDelivery.from_dict(
                 document,
@@ -3539,6 +3556,8 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeReceiptReviewAcknowledgementRejected,
                 TradeReceiptReviewAuditError,
                 TradeDisputeStatementRejected,
+                TradeDisputeStatementDeliveryRejected,
+                TradeDisputeStatementAcknowledgementRejected,
                 RulePackageBundleRejected,
             )
         ):
@@ -13436,6 +13455,58 @@ def test_trade_dispute_statement_rejects_tamper_and_future_time(tmp_path):
             now=_utc("2026-09-01T00:03:00Z"),
             clock_skew_seconds=0,
         )
+
+
+def test_trade_dispute_statement_bounds_clock_skew(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_type": "response",
+        "reason_codes": ["executor.contests-review"],
+        "claim": _dispute_claim(),
+        "created_at": "2026-09-01T00:03:00Z",
+        "now": _utc("2026-09-01T00:03:00Z"),
+    }
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        clock_skew_seconds=86_400,
+        **arguments,
+    )
+    assert verify_trade_dispute_statement(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:03:00Z"),
+        clock_skew_seconds=86_400,
+    ) == (True, "ok")
+
+    for invalid in (86_400.000_001, 1e300):
+        assert verify_trade_dispute_statement(
+            statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            at=_utc("2026-09-01T00:03:00Z"),
+            clock_skew_seconds=invalid,
+        ) == (
+            False,
+            "clock_skew_seconds must be finite and between 0 and 86400",
+        )
+        with pytest.raises(
+            TradeDisputeStatementRejected,
+            match="clock_skew_seconds must be finite and between 0 and 86400",
+        ):
+            create_trade_dispute_statement(
+                context["maker"],
+                clock_skew_seconds=invalid,
+                **arguments,
+            )
 
 
 def test_trade_dispute_verifier_defaults_to_local_observation_time(

@@ -77,6 +77,18 @@ from nth_dao.trade_rules.dispute_statement import (
     create_trade_dispute_statement,
     trade_dispute_statement_digest,
 )
+from nth_dao.trade_rules.dispute_statement_audit import (
+    EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
+    trade_dispute_statement_audit_payload,
+)
+from nth_dao.trade_rules.dispute_statement_transport import (
+    DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SIGNING_DOMAIN,
+    DISPUTE_STATEMENT_DELIVERY_SIGNING_DOMAIN,
+    create_trade_dispute_statement_acknowledgement,
+    create_trade_dispute_statement_delivery,
+    trade_dispute_statement_acknowledgement_digest,
+    trade_dispute_statement_delivery_digest,
+)
 from nth_dao.trade_rules.manifest import (
     manifest_body,
     sign_manifest,
@@ -187,6 +199,18 @@ RECEIPT_REVIEW_CONFLICT_AUDIT_SCHEMA_PATH = (
 TRADE_DISPUTE_STATEMENT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-dispute-statement.schema.json"
+)
+DISPUTE_STATEMENT_DELIVERY_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement-delivery.schema.json"
+)
+DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement-acknowledgement.schema.json"
+)
+DISPUTE_STATEMENT_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement-audit-payload.schema.json"
 )
 RULE_PACKAGE_BUNDLE_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -663,6 +687,61 @@ def generate_vectors() -> dict[str, Any]:
             created_at="2026-08-01T02:04:00Z",
             now=_utc("2026-08-01T02:04:00Z"),
         )
+        dispute_statement_delivery = (
+            create_trade_dispute_statement_delivery(
+                maker,
+                statement=dispute_statement,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                package_resolver=package_store,
+                created_at="2026-08-01T02:05:00Z",
+                not_after="2026-08-01T02:15:00Z",
+                nonce="45" * 16,
+                now=_utc("2026-08-01T02:05:00Z"),
+            )
+        )
+        dispute_statement_acknowledgement = (
+            create_trade_dispute_statement_acknowledgement(
+                taker,
+                delivery=dispute_statement_delivery,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                received_at="2026-08-01T02:06:00Z",
+                audit_event_id="a" * 64,
+            )
+        )
+        overlong_dispute_statement_delivery = (
+            create_trade_dispute_statement_delivery(
+                maker,
+                statement=dispute_statement,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                package_resolver=package_store,
+                created_at="2026-08-01T02:05:00Z",
+                not_after="2026-08-02T02:05:00Z",
+                nonce="46" * 16,
+                now=_utc("2026-08-01T02:05:00Z"),
+                max_ttl_seconds=86_400,
+            )
+        )
+        overlong_dispute_statement_acknowledgement = (
+            create_trade_dispute_statement_acknowledgement(
+                taker,
+                delivery=overlong_dispute_statement_delivery,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                received_at="2026-08-01T02:06:00Z",
+                audit_event_id="b" * 64,
+                max_ttl_seconds=86_400,
+            )
+        )
+        dispute_statement_audit = trade_dispute_statement_audit_payload(
+            dispute_statement
+        )
         future_dispute_statement = create_trade_dispute_statement(
             maker,
             review=conflicting_receipt_review,
@@ -800,6 +879,28 @@ def generate_vectors() -> dict[str, Any]:
         receipt_review_tamper["reason_codes"] = ["result.mismatch"]
         dispute_statement_tamper = dispute_statement.to_dict()
         dispute_statement_tamper["proof"]["proof_value"] = "A" * 86
+        dispute_statement_delivery_retarget = (
+            dispute_statement_delivery.to_dict()
+        )
+        dispute_statement_delivery_retarget["recipient_did"] = maker.as_did()
+        dispute_statement_delivery_signature_tamper = (
+            dispute_statement_delivery.to_dict()
+        )
+        dispute_statement_delivery_signature_tamper["proof"][
+            "proof_value"
+        ] = "A" * 86
+        dispute_statement_acknowledgement_status_tamper = (
+            dispute_statement_acknowledgement.to_dict()
+        )
+        dispute_statement_acknowledgement_status_tamper["status"] = (
+            "claim-accepted-as-truth"
+        )
+        dispute_statement_acknowledgement_signature_tamper = (
+            dispute_statement_acknowledgement.to_dict()
+        )
+        dispute_statement_acknowledgement_signature_tamper["proof"][
+            "proof_value"
+        ] = "A" * 86
         receipt_review_delivery_tamper = receipt_review_delivery.to_dict()
         receipt_review_delivery_tamper["recipient_did"] = taker.as_did()
         receipt_review_acknowledgement_tamper = (
@@ -1185,6 +1286,125 @@ def generate_vectors() -> dict[str, Any]:
                 "expected_reason": "review_digest binding mismatch",
             },
         ],
+        "trade_dispute_statement_delivery": (
+            dispute_statement_delivery.to_dict()
+        ),
+        "trade_dispute_statement_delivery_canonical_hex": (
+            dispute_statement_delivery.canonical_bytes.hex()
+        ),
+        "trade_dispute_statement_delivery_signing_input_hex": (
+            signed_document_input(
+                DISPUTE_STATEMENT_DELIVERY_SIGNING_DOMAIN,
+                dispute_statement_delivery.to_dict(),
+            ).hex()
+        ),
+        "trade_dispute_statement_delivery_digest": (
+            trade_dispute_statement_delivery_digest(
+                dispute_statement_delivery,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+            )
+        ),
+        "trade_dispute_statement_delivery_verification_cases": [
+            {
+                "case": "valid-recipient-and-window",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:06:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 0,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-recipient",
+                "recipient_did": maker.as_did(),
+                "at": "2026-08-01T02:06:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+            {
+                "case": "expired-after-window",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:16:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+            {
+                "case": "created-in-future",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:04:59Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+            {
+                "case": "ttl-policy-setting-over-maximum",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:06:00Z",
+                "max_ttl_seconds": 86_401,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+            {
+                "case": "clock-skew-setting-over-maximum",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:06:00Z",
+                "max_ttl_seconds": 600,
+                "clock_skew_seconds": 86_401,
+                "expected_valid": False,
+            },
+            {
+                "case": "ttl-policy-setting-overflow-scale",
+                "recipient_did": taker.as_did(),
+                "at": "2026-08-01T02:06:00Z",
+                "max_ttl_seconds": 1e300,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+        ],
+        "trade_dispute_statement_acknowledgement": (
+            dispute_statement_acknowledgement.to_dict()
+        ),
+        "trade_dispute_statement_acknowledgement_canonical_hex": (
+            dispute_statement_acknowledgement.canonical_bytes.hex()
+        ),
+        "trade_dispute_statement_acknowledgement_signing_input_hex": (
+            signed_document_input(
+                DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SIGNING_DOMAIN,
+                dispute_statement_acknowledgement.to_dict(),
+            ).hex()
+        ),
+        "trade_dispute_statement_acknowledgement_digest": (
+            trade_dispute_statement_acknowledgement_digest(
+                dispute_statement_acknowledgement
+            )
+        ),
+        "trade_dispute_statement_overlong_delivery": (
+            overlong_dispute_statement_delivery.to_dict()
+        ),
+        "trade_dispute_statement_overlong_acknowledgement": (
+            overlong_dispute_statement_acknowledgement.to_dict()
+        ),
+        "trade_dispute_statement_acknowledgement_verification_cases": [
+            {
+                "case": "valid-delivery-binding",
+                "at": "2026-08-01T02:07:00Z",
+                "clock_skew_seconds": 0,
+                "expected_valid": True,
+            },
+            {
+                "case": "observed-before-delivery",
+                "at": "2026-08-01T02:04:59Z",
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+        ],
+        "trade_dispute_statement_audit": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
+            "payload": dispute_statement_audit,
+        },
         "receipt_review_delivery": receipt_review_delivery.to_dict(),
         "receipt_review_delivery_digest": trade_receipt_review_delivery_digest(
             receipt_review_delivery,
@@ -1438,6 +1658,32 @@ def generate_vectors() -> dict[str, Any]:
                 "document": dispute_statement_tamper,
             },
             {
+                "case": "trade-dispute-statement-delivery-retarget",
+                "target": "trade_dispute_statement_delivery",
+                "expected_valid": False,
+                "document": dispute_statement_delivery_retarget,
+            },
+            {
+                "case": "trade-dispute-statement-delivery-signature-tamper",
+                "target": "trade_dispute_statement_delivery",
+                "expected_valid": False,
+                "document": dispute_statement_delivery_signature_tamper,
+            },
+            {
+                "case": "trade-dispute-statement-ack-status-tamper",
+                "target": "trade_dispute_statement_acknowledgement",
+                "expected_valid": False,
+                "document": dispute_statement_acknowledgement_status_tamper,
+            },
+            {
+                "case": "trade-dispute-statement-ack-signature-tamper",
+                "target": "trade_dispute_statement_acknowledgement",
+                "expected_valid": False,
+                "document": (
+                    dispute_statement_acknowledgement_signature_tamper
+                ),
+            },
+            {
                 "case": "receipt-review-delivery-retarget",
                 "target": "receipt_review_delivery",
                 "expected_valid": False,
@@ -1507,6 +1753,9 @@ def write_vectors(path: str | Path = VECTORS_PATH) -> Path:
 
 __all__ = [
     "ACCEPTANCE_SCHEMA_PATH",
+    "DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SCHEMA_PATH",
+    "DISPUTE_STATEMENT_AUDIT_SCHEMA_PATH",
+    "DISPUTE_STATEMENT_DELIVERY_SCHEMA_PATH",
     "EXECUTION_RECEIPT_SCHEMA_PATH",
     "EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH",
     "EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH",

@@ -1,16 +1,8 @@
-"""签名因果事件 —— Nth DAO 统一日志 spine 的最小单元(Phase 1)。
+"""Signed causal event, the smallest unit in the NTH DAO event spine.
 
-每条事件不可变,通过 ``prev_hash`` 链回前一条 → 形成防篡改 hash 链;
-``content_hash`` 是对签名核心字段的 SHA-256(内容寻址,即事件 id);``sig`` 是
-作者 DID 用 Ed25519 对 **32 字节哈希摘要** 的签名(与 ``execution_receipt`` 同一
-签名约定,跨子系统字节一致)。
-
-完全沿用本仓库既有原语:``canonical_json``(线格式)、``identity``(签名)、
-``b64u``(签名编码)、``did_key``(DID↔公钥)—— 不引入外来风格。
-
-信封模型(对齐 execution_receipt):``content_hash``/``sig`` 是信封外字段,不在
-签名核心内;核心被 ``content_hash`` 覆盖,``content_hash`` 被 ``sig`` 绑定。改核心
-→ 哈希变;改哈希 → 签名失效。
+``prev_hash`` creates the chain. ``content_hash`` is the SHA-256 address of
+the canonical event core, and ``sig`` is the author's Ed25519 signature over
+that 32-byte digest.
 """
 from __future__ import annotations
 
@@ -23,7 +15,7 @@ from nth_dao.b64u import b64u_decode, b64u_encode
 from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity
 
-# 创世事件的 prev_hash:64 个 0(没有前驱)。
+# The genesis event has no predecessor.
 GENESIS_PREV = "0" * 64
 MAX_SPINE_PAYLOAD_BYTES = 1024 * 1024
 _HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -43,13 +35,13 @@ _EVENT_FIELDS = frozenset(
 
 
 def event_content_hash(core: Dict[str, Any]) -> str:
-    """对签名核心做 canonical_json → SHA-256 → 小写 hex(= 事件内容地址 / id)。"""
+    """Return the lowercase SHA-256 address of a canonical event core."""
     return hashlib.sha256(canonical_json(core)).hexdigest()
 
 
 @dataclass
 class SpineEvent:
-    """一条签名因果事件。``core()`` 是被签名覆盖的字段集合。"""
+    """A signed causal event whose ``core()`` is hash protected."""
 
     seq: int
     prev_hash: str
@@ -142,7 +134,7 @@ def sign_event(
     identity: AgentIdentity,
     ts_ms: int,
 ) -> SpineEvent:
-    """构造并用 ``identity`` 签名一条事件。作者 DID = ``identity.as_did()``。"""
+    """Construct and sign one event with ``identity`` as its author."""
     if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
         raise ValueError("spine event seq must be a non-negative integer")
     if (
@@ -186,7 +178,7 @@ def sign_event(
 
 
 def verify_event(event: SpineEvent) -> Tuple[bool, str]:
-    """校验单条事件:重算 content_hash 一致 + 作者 DID 签名有效。fail-closed。"""
+    """Verify one event's content hash and author signature fail-closed."""
     if not isinstance(event, SpineEvent):
         return False, "event has the wrong type"
     try:
