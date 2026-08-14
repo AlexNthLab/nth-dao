@@ -154,6 +154,18 @@ from nth_dao.trade_rules.dispute_statement_transport import (
     create_trade_dispute_statement_delivery,
     verify_trade_dispute_statement_acknowledgement,
 )
+from nth_dao.trade_rules.dispute_statement_retrieval import (
+    TradeDisputeStatementFetchRequest,
+    TradeDisputeStatementFetchRequestRejected,
+    TradeDisputeStatementFetchResponse,
+    TradeDisputeStatementFetchResponseRejected,
+    create_trade_dispute_statement_fetch_request,
+    create_trade_dispute_statement_fetch_response,
+    trade_dispute_statement_fetch_request_digest,
+    trade_dispute_statement_fetch_response_digest,
+    verify_trade_dispute_statement_fetch_request,
+    verify_trade_dispute_statement_fetch_response,
+)
 from nth_dao.trade_rules.dispute_statement_intake import (
     TradeDisputeStatementIntakeJournal,
 )
@@ -233,6 +245,9 @@ from nth_dao.trade_rules.receipt_review_audit import (
 from nth_dao.trade_rules.store import OfferStore
 from nth_dao.trade_rules.agreement_conformance import (
     ACCEPTANCE_SCHEMA_PATH,
+    DISPUTE_STATEMENT_FETCH_AUDIT_SCHEMA_PATH,
+    DISPUTE_STATEMENT_FETCH_REQUEST_SCHEMA_PATH,
+    DISPUTE_STATEMENT_FETCH_RESPONSE_SCHEMA_PATH,
     EXECUTION_AUDIT_SCHEMA_PATH,
     EXECUTION_ADAPTER_SCHEMA_PATH,
     EXECUTION_ADAPTER_POLICY_SCHEMA_PATH,
@@ -3311,6 +3326,63 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
         )
         assert ok is case["expected_valid"], case["case"]
         assert case["expected_reason"] in reason, case["case"]
+    fetch_request = TradeDisputeStatementFetchRequest.from_dict(
+        stored["trade_dispute_statement_fetch_request"],
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    )
+    assert trade_dispute_statement_fetch_request_digest(
+        fetch_request,
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    ) == stored["trade_dispute_statement_fetch_request_digest"]
+    for case in stored[
+        "trade_dispute_statement_fetch_request_verification_cases"
+    ]:
+        ok, _reason = verify_trade_dispute_statement_fetch_request(
+            fetch_request,
+            review=disputed_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            responder_did=case["responder_did"],
+            at=_utc(case["at"]),
+            max_ttl_seconds=case["max_ttl_seconds"],
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
+    fetch_response = TradeDisputeStatementFetchResponse.from_dict(
+        stored["trade_dispute_statement_fetch_response"],
+        request=fetch_request,
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    )
+    assert fetch_response.statement.canonical_bytes == (
+        unresolved_dispute_statement.canonical_bytes
+    )
+    assert trade_dispute_statement_fetch_response_digest(
+        fetch_response,
+        request=fetch_request,
+        review=disputed_receipt_review,
+        receipt=execution_receipt,
+        order=order,
+    ) == stored["trade_dispute_statement_fetch_response_digest"]
+    for case in stored[
+        "trade_dispute_statement_fetch_response_verification_cases"
+    ]:
+        ok, _reason = verify_trade_dispute_statement_fetch_response(
+            fetch_response,
+            request=fetch_request,
+            review=disputed_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            at=_utc(case["at"]),
+            max_ttl_seconds=case["max_ttl_seconds"],
+            clock_skew_seconds=case["clock_skew_seconds"],
+        )
+        assert ok is case["expected_valid"], case["case"]
     failure_audit = stored["trade_dispute_statement_creation_failure_audit"]
     assert failure_audit["event_type"] == (
         trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED
@@ -3603,6 +3675,23 @@ def test_negative_agreement_vectors_fail_closed():
         "trade_dispute_statement_acknowledgement": (
             TradeDisputeStatementAcknowledgement.from_dict
         ),
+        "trade_dispute_statement_fetch_request": lambda document: (
+            TradeDisputeStatementFetchRequest.from_dict(
+                document,
+                review=stored["disputed_receipt_review"],
+                receipt=stored["execution_receipt"],
+                order=stored["order"],
+            )
+        ),
+        "trade_dispute_statement_fetch_response": lambda document: (
+            TradeDisputeStatementFetchResponse.from_dict(
+                document,
+                request=stored["trade_dispute_statement_fetch_request"],
+                review=stored["disputed_receipt_review"],
+                receipt=stored["execution_receipt"],
+                order=stored["order"],
+            )
+        ),
         "receipt_review_delivery": lambda document: (
             TradeReceiptReviewDelivery.from_dict(
                 document,
@@ -3659,6 +3748,8 @@ def test_negative_agreement_vectors_fail_closed():
                 TradeDisputeStatementRejected,
                 TradeDisputeStatementDeliveryRejected,
                 TradeDisputeStatementAcknowledgementRejected,
+                TradeDisputeStatementFetchRequestRejected,
+                TradeDisputeStatementFetchResponseRejected,
                 RulePackageBundleRejected,
             )
         ):
@@ -3732,6 +3823,15 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     )
     trade_dispute_statement = json.loads(
         TRADE_DISPUTE_STATEMENT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    dispute_statement_fetch_request = json.loads(
+        DISPUTE_STATEMENT_FETCH_REQUEST_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    dispute_statement_fetch_response = json.loads(
+        DISPUTE_STATEMENT_FETCH_RESPONSE_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    dispute_statement_fetch_audit = json.loads(
+        DISPUTE_STATEMENT_FETCH_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
     )
     rule_package_bundle = json.loads(
         RULE_PACKAGE_BUNDLE_SCHEMA_PATH.read_text(encoding="utf-8")
@@ -3897,6 +3997,21 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert trade_dispute_statement["$defs"]["proof"]["properties"][
         "proof_purpose"
     ]["const"] == "tradeDisputeStatement"
+    assert dispute_statement_fetch_request["properties"]["kind"]["const"] == (
+        "nth.dao.trade.dispute-statement-fetch-request"
+    )
+    assert dispute_statement_fetch_request["$defs"]["proof"]["properties"][
+        "proof_purpose"
+    ]["const"] == "tradeDisputeStatementFetchRequest"
+    assert dispute_statement_fetch_response["properties"]["statement"]["$ref"] == (
+        trade_dispute_statement["$id"]
+    )
+    assert dispute_statement_fetch_response["$defs"]["proof"]["properties"][
+        "proof_purpose"
+    ]["const"] == "tradeDisputeStatementFetchResponse"
+    assert dispute_statement_fetch_audit["properties"]["status"]["const"] == (
+        "served"
+    )
 
 
 def test_trade_dispute_statement_schema_validates_public_vector():
@@ -3945,6 +4060,65 @@ def test_trade_dispute_statement_schema_validates_public_vector():
     remedy_statement = copy.deepcopy(stored["trade_dispute_statement"])
     remedy_statement["statement_type"] = "remedy-proposal"
     validator(schema).validate(remedy_statement)
+
+
+def test_dispute_statement_fetch_schemas_validate_public_vectors():
+    jsonschema = pytest.importorskip("jsonschema")
+    referencing = pytest.importorskip("referencing")
+    stored = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+    statement_schema = json.loads(
+        TRADE_DISPUTE_STATEMENT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    request_schema = json.loads(
+        DISPUTE_STATEMENT_FETCH_REQUEST_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    response_schema = json.loads(
+        DISPUTE_STATEMENT_FETCH_RESPONSE_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    audit_schema = json.loads(
+        DISPUTE_STATEMENT_FETCH_AUDIT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    request_validator = jsonschema.validators.validator_for(request_schema)
+    response_validator = jsonschema.validators.validator_for(response_schema)
+    audit_validator = jsonschema.validators.validator_for(audit_schema)
+    request_validator.check_schema(request_schema)
+    response_validator.check_schema(response_schema)
+    audit_validator.check_schema(audit_schema)
+    request_validator(request_schema).validate(
+        stored["trade_dispute_statement_fetch_request"]
+    )
+    registry = referencing.Registry().with_resource(
+        statement_schema["$id"],
+        referencing.Resource.from_contents(statement_schema),
+    )
+    response_validator(response_schema, registry=registry).validate(
+        stored["trade_dispute_statement_fetch_response"]
+    )
+    audit_validator(audit_schema).validate(
+        stored["trade_dispute_statement_fetch_audit"]["payload"]
+    )
+
+    malformed_request = copy.deepcopy(
+        stored["trade_dispute_statement_fetch_request"]
+    )
+    malformed_request["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        request_validator(request_schema).validate(malformed_request)
+
+    malformed_response = copy.deepcopy(
+        stored["trade_dispute_statement_fetch_response"]
+    )
+    malformed_response["statement"]["unexpected"] = True
+    with pytest.raises(jsonschema.ValidationError):
+        response_validator(response_schema, registry=registry).validate(
+            malformed_response
+        )
+    malformed_audit = copy.deepcopy(
+        stored["trade_dispute_statement_fetch_audit"]["payload"]
+    )
+    malformed_audit["status"] = "settled"
+    with pytest.raises(jsonschema.ValidationError):
+        audit_validator(audit_schema).validate(malformed_audit)
 
 
 def test_proposal_transport_schemas_resolve_and_validate_public_vectors():
@@ -15069,6 +15243,368 @@ def _dispute_claim(**changes):
     return claim
 
 
+def _dispute_statement_fetch_fixture(tmp_path):
+    context = _setup(tmp_path)
+    order = _order(context)
+    receipt = _execution_receipt(context, order)
+    review = _disputed_receipt_review(context, order, receipt)
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        rule_action={
+            **rule_binding,
+            "hook": "fulfillment.deliver",
+            "hook_version": "1",
+        },
+        package_resolver=context["package_store"],
+        created_at="2026-09-01T00:03:00Z",
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+    statement_digest = trade_dispute_statement_digest(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    request = create_trade_dispute_statement_fetch_request(
+        context["taker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=statement_digest,
+        responder_did=context["maker"].as_did(),
+        created_at="2026-09-01T00:04:00Z",
+        not_after="2026-09-01T00:09:00Z",
+        nonce="cd" * 16,
+        now=_utc("2026-09-01T00:04:00Z"),
+    )
+    response = create_trade_dispute_statement_fetch_response(
+        context["maker"],
+        request=request,
+        statement=statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        served_at="2026-09-01T00:05:00Z",
+        now=_utc("2026-09-01T00:05:00Z"),
+    )
+    return context, order, receipt, review, statement, request, response
+
+
+def test_dispute_statement_fetch_protocol_round_trip_is_destination_bound(tmp_path):
+    context, order, receipt, review, statement, request, response = (
+        _dispute_statement_fetch_fixture(tmp_path)
+    )
+
+    assert TradeDisputeStatementFetchRequest.from_json(
+        request.canonical_bytes,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ) == request
+    assert verify_trade_dispute_statement_fetch_request(
+        request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        responder_did=context["maker"].as_did(),
+        at=_utc("2026-09-01T00:05:00Z"),
+    ) == (True, "ok")
+    assert trade_dispute_statement_fetch_request_digest(
+        request,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ).startswith("sha256:")
+
+    parsed_response = TradeDisputeStatementFetchResponse.from_json(
+        response.canonical_bytes,
+        request=request,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    assert parsed_response == response
+    assert parsed_response.statement.canonical_bytes == statement.canonical_bytes
+    assert verify_trade_dispute_statement_fetch_response(
+        response,
+        request=request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:05:00Z"),
+    ) == (True, "ok")
+    assert trade_dispute_statement_fetch_response_digest(
+        response,
+        request=request,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ).startswith("sha256:")
+
+
+def test_dispute_statement_fetch_request_rejects_outsider_and_wrong_destination(
+    tmp_path,
+):
+    context, order, receipt, review, statement, _request, _response = (
+        _dispute_statement_fetch_fixture(tmp_path)
+    )
+    statement_digest = trade_dispute_statement_digest(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    outsider = AgentIdentity.generate()
+    common = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_digest": statement_digest,
+        "created_at": "2026-09-01T00:04:00Z",
+        "not_after": "2026-09-01T00:09:00Z",
+        "nonce": "ef" * 16,
+        "now": _utc("2026-09-01T00:04:00Z"),
+    }
+
+    with pytest.raises(
+        TradeDisputeStatementFetchRequestRejected,
+        match="requester_did is not a party",
+    ):
+        create_trade_dispute_statement_fetch_request(
+            outsider,
+            responder_did=context["maker"].as_did(),
+            **common,
+        )
+    with pytest.raises(
+        TradeDisputeStatementFetchRequestRejected,
+        match="responder_did is not the opposing Order party",
+    ):
+        create_trade_dispute_statement_fetch_request(
+            context["taker"],
+            responder_did=outsider.as_did(),
+            **common,
+        )
+
+
+def test_dispute_statement_fetch_rejects_signature_tamper_and_request_rebinding(
+    tmp_path,
+):
+    context, order, receipt, review, statement, request, response = (
+        _dispute_statement_fetch_fixture(tmp_path)
+    )
+    request_tamper = request.to_dict()
+    request_tamper["proof"]["proof_value"] = (
+        "B" + request_tamper["proof"]["proof_value"][1:]
+    )
+    assert not verify_trade_dispute_statement_fetch_request(
+        request_tamper,
+        review=review,
+        receipt=receipt,
+        order=order,
+        responder_did=context["maker"].as_did(),
+        at=_utc("2026-09-01T00:05:00Z"),
+    )[0]
+
+    response_tamper = response.to_dict()
+    response_tamper["proof"]["proof_value"] = (
+        "B" + response_tamper["proof"]["proof_value"][1:]
+    )
+    assert not verify_trade_dispute_statement_fetch_response(
+        response_tamper,
+        request=request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:05:00Z"),
+    )[0]
+
+    rebound_request = create_trade_dispute_statement_fetch_request(
+        context["taker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=trade_dispute_statement_digest(
+            statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+        ),
+        responder_did=context["maker"].as_did(),
+        created_at="2026-09-01T00:04:00Z",
+        not_after="2026-09-01T00:09:00Z",
+        nonce="ab" * 16,
+        now=_utc("2026-09-01T00:04:00Z"),
+    )
+    ok, reason = verify_trade_dispute_statement_fetch_response(
+        response,
+        request=rebound_request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:05:00Z"),
+    )
+    assert not ok
+    assert "does not match request" in reason
+
+
+def test_dispute_statement_fetch_response_rejects_wrong_signer_and_bad_time(tmp_path):
+    context, order, receipt, review, statement, request, response = (
+        _dispute_statement_fetch_fixture(tmp_path)
+    )
+
+    with pytest.raises(
+        TradeDisputeStatementFetchResponseRejected,
+        match="response signer does not match requested responder_did",
+    ):
+        create_trade_dispute_statement_fetch_response(
+            context["taker"],
+            request=request,
+            statement=statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            served_at="2026-09-01T00:05:00Z",
+            now=_utc("2026-09-01T00:05:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementFetchResponseRejected,
+        match="served outside request lifetime",
+    ):
+        create_trade_dispute_statement_fetch_response(
+            context["maker"],
+            request=request,
+            statement=statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            served_at="2026-08-31T23:55:00Z",
+            now=_utc("2026-09-01T00:05:00Z"),
+        )
+    with pytest.raises(
+        TradeDisputeStatementFetchResponseRejected,
+        match="served too far in the future",
+    ):
+        create_trade_dispute_statement_fetch_response(
+            context["maker"],
+            request=request,
+            statement=statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            served_at="2026-09-01T00:09:00Z",
+            now=_utc("2026-09-01T00:03:00Z"),
+        )
+    ok, reason = verify_trade_dispute_statement_fetch_response(
+        response,
+        request=request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=_utc("2026-09-01T00:20:00Z"),
+    )
+    assert not ok
+    assert "outside its signed lifetime" in reason
+
+
+def test_dispute_statement_fetch_bounds_shape_and_has_no_verifier_bypass(tmp_path):
+    context, order, receipt, review, _statement, request, _response = (
+        _dispute_statement_fetch_fixture(tmp_path)
+    )
+    request_signature = inspect.signature(
+        verify_trade_dispute_statement_fetch_request
+    )
+    assert request_signature.parameters["responder_did"].default is (
+        inspect.Parameter.empty
+    )
+    assert "verify_signature" not in inspect.signature(
+        verify_trade_dispute_statement_fetch_response
+    ).parameters
+
+    unknown_request = request.to_dict()
+    unknown_request["unexpected"] = True
+    with pytest.raises(
+        TradeDisputeStatementFetchRequestRejected,
+        match="missing or unknown fields",
+    ):
+        TradeDisputeStatementFetchRequest.from_dict(
+            unknown_request,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+
+    request_document = request.to_dict()
+    request_arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "statement_digest": request_document["statement_digest"],
+        "responder_did": context["maker"].as_did(),
+        "created_at": "2026-09-01T00:04:00Z",
+        "now": _utc("2026-09-01T00:04:00Z"),
+    }
+    with pytest.raises(
+        TradeDisputeStatementFetchRequestRejected,
+        match="nonce must be",
+    ):
+        create_trade_dispute_statement_fetch_request(
+            context["taker"],
+            not_after="2026-09-01T00:09:00Z",
+            nonce="AB" * 16,
+            **request_arguments,
+        )
+    with pytest.raises(
+        TradeDisputeStatementFetchRequestRejected,
+        match="lifetime exceeds max_ttl_seconds",
+    ):
+        create_trade_dispute_statement_fetch_request(
+            context["taker"],
+            not_after="2026-09-01T00:09:01Z",
+            nonce="12" * 16,
+            **request_arguments,
+        )
+
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    wrong_statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(digest="sha256:" + ("d" * 64)),
+        rule_action={
+            **rule_binding,
+            "hook": "fulfillment.deliver",
+            "hook_version": "1",
+        },
+        package_resolver=context["package_store"],
+        created_at="2026-09-01T00:03:00Z",
+        now=_utc("2026-09-01T00:03:00Z"),
+    )
+    with pytest.raises(
+        TradeDisputeStatementFetchResponseRejected,
+        match="does not match requested statement_digest",
+    ):
+        create_trade_dispute_statement_fetch_response(
+            context["maker"],
+            request=request,
+            statement=wrong_statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            served_at="2026-09-01T00:05:00Z",
+            now=_utc("2026-09-01T00:05:00Z"),
+        )
+
+
 def test_trade_dispute_statement_round_trip_is_deterministic(tmp_path):
     context = _setup(tmp_path)
     order = _order(context)
@@ -15957,6 +16493,27 @@ def test_trade_dispute_statement_is_public_trade_rule_api():
     )
     assert trade_rules_api.verify_trade_dispute_statement is (
         verify_trade_dispute_statement
+    )
+
+
+def test_dispute_statement_fetch_protocol_is_public_trade_rule_api():
+    assert trade_rules_api.TradeDisputeStatementFetchRequest is (
+        TradeDisputeStatementFetchRequest
+    )
+    assert trade_rules_api.TradeDisputeStatementFetchResponse is (
+        TradeDisputeStatementFetchResponse
+    )
+    assert trade_rules_api.create_trade_dispute_statement_fetch_request is (
+        create_trade_dispute_statement_fetch_request
+    )
+    assert trade_rules_api.create_trade_dispute_statement_fetch_response is (
+        create_trade_dispute_statement_fetch_response
+    )
+    assert trade_rules_api.verify_trade_dispute_statement_fetch_request is (
+        verify_trade_dispute_statement_fetch_request
+    )
+    assert trade_rules_api.verify_trade_dispute_statement_fetch_response is (
+        verify_trade_dispute_statement_fetch_response
     )
 
 

@@ -23,6 +23,8 @@ TRANSPORT_PROOF_FIELDS = frozenset(
         "proof_value",
     }
 )
+MIN_TRANSPORT_TIMESTAMP_NS = -(2**63)
+MAX_TRANSPORT_TIMESTAMP_NS = 2**63 - 1
 _TIMESTAMP = re.compile(
     r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?:\.(\d{1,9}))?Z$"
@@ -53,10 +55,13 @@ def timestamp_ns(
     nanos = int((match.group(2) or "").ljust(9, "0") or "0")
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     delta = base - epoch
-    return (
+    result = (
         (delta.days * 86_400 + delta.seconds) * 1_000_000_000
         + nanos
     )
+    if not MIN_TRANSPORT_TIMESTAMP_NS <= result <= MAX_TRANSPORT_TIMESTAMP_NS:
+        reject(error_type, f"{label} is outside the signed 64-bit nanosecond range")
+    return result
 
 
 def datetime_ns(
@@ -73,10 +78,13 @@ def datetime_ns(
     moment = value.astimezone(timezone.utc)
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     delta = moment - epoch
-    return (
+    result = (
         (delta.days * 86_400 + delta.seconds) * 1_000_000_000
         + delta.microseconds * 1_000
     )
+    if not MIN_TRANSPORT_TIMESTAMP_NS <= result <= MAX_TRANSPORT_TIMESTAMP_NS:
+        reject(error_type, "now is outside the signed 64-bit nanosecond range")
+    return result
 
 
 def now_ns(
@@ -205,6 +213,8 @@ def verify_transport_signature(
 
 
 __all__ = [
+    "MAX_TRANSPORT_TIMESTAMP_NS",
+    "MIN_TRANSPORT_TIMESTAMP_NS",
     "TRANSPORT_PROOF_FIELDS",
     "bounded_seconds",
     "datetime_ns",

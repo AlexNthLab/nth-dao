@@ -822,13 +822,41 @@ that intent, a foreign signer, or conflicting bytes remains a hard integrity
 failure. Dispute Delivery TTL and receiver clock-skew policy inputs are capped
 at 86,400 seconds in both Python and TypeScript before nanosecond conversion.
 
-Automatic cross-node parent retrieval, governance admission, and adjudication
-remain future work. Local DAG completeness, chronology, and non-DAG detection
-are now explicit derived checks, but no Statement, Delivery, ACK, journal row, or
-retention anchor settles a dispute, changes reputation, transfers an asset, or
-authorizes funds. JSON Schema validates wire shape; the protocol validator
-remains mandatory for signatures, identifiers, roles, chronology, resource
-bounds, destination, and artifact bindings.
+The signed bilateral Fetch Request/Response v1 wire kernel can authorize one
+Order party to request one exact Statement digest from the opposing party. The
+Request binds the Order, Receipt, disputed Review, dispute, destination, nonce,
+and short lifetime. The responder-signed Response binds the complete signed
+Request digest and embeds the original author-signed Statement. The bounded
+SQLite Fetch journal atomically consumes `(requester_did, nonce)`, retains
+nanosecond-precise chronology, and separates reservation from an expiring
+single-owner processing lease. Failed lookup establishes a durable retry floor;
+global and per-DID record/pending quotas isolate authenticated storage use. One
+exact signed Response is retained for idempotent replay with content-rebinding,
+byte-accounting, schema-constraint, and lease-owner checks. The response is
+returned only after a recoverable `trade.dispute.statement.fetch.served` Spine
+projection binds the Request, Response, Statement, parties, and `served_at`.
+A completed but unanchored response remains repairable and cannot be purged.
+Other cleanup becomes eligible only after signed expiry plus configured clock
+skew. Journal records must be resolved against the signed Order/Receipt/Review
+again before use. Public HTTP exposure, body limits, network rate limiting,
+peer admission, automatic cross-node parent retrieval/import, governance
+admission, and adjudication remain future work. The responder coordinator
+performs context replay, freshness and destination admission before nonce
+reservation, then permits only the lease owner to retrieve, sign, persist, and
+audit the response. Transport timestamps are restricted to the signed 64-bit
+nanosecond range used by the durable SQLite state; out-of-range RFC3339 values
+fail at the protocol boundary rather than during persistence. The coordinator
+may coalesce verification of byte-identical immutable signed inputs in a
+bounded in-memory cache. Destination and lifetime checks still run for every
+observation. Verified audit reuse is bound to the Spine storage token, so any
+on-disk change or cross-process append invalidates the cached snapshot and
+forces chain and event verification again. Local DAG completeness,
+chronology, and non-DAG detection are explicit derived checks, but no Statement,
+Delivery, ACK, Fetch document, journal row, or retention anchor settles a
+dispute, changes reputation, transfers an asset, or authorizes funds. JSON
+Schema validates wire shape; the protocol validator remains mandatory for
+signatures, identifiers, roles, chronology, resource bounds, destination,
+replay handling, and artifact bindings.
 
 Trade Execution Adapter Policy v1 is a canonical protocol value with kind,
 protocol version, accepted Adapter digests, execution modes, and permissions.
@@ -979,6 +1007,14 @@ The reviewed protocol kernel currently contains:
   adjudicate truth; the operator response returns both signed transport
   documents so the browser can independently verify Delivery content
   addressing, both Ed25519 signatures, ACK digest, and exact response binding;
+- a destination-bound, short-lived Dispute Statement Fetch Request/Response v1
+  protocol kernel for one exact missing Statement digest, with bilateral Order
+  authorization, complete signed-request binding, responder provenance, and
+  embedded author-signature replay, plus a bounded atomic SQLite nonce/response
+  journal, single-owner processing lease, per-DID quotas, durable retry floor,
+  and recoverable signed Spine disclosure audit in the
+  verify-reserve-claim-lookup-sign-complete-anchor responder
+  coordinator; this is not yet a network fetch service;
 - bounded package-store reconciliation with explicit cleanup;
 - authenticated, paginated local Trade Skill catalog inspection with strict
   frontend response validation, metadata-only resource projection, and
@@ -996,8 +1032,9 @@ The reviewed protocol kernel currently contains:
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Proposal Delivery v1, Execution Receipt v1,
   Execution Receipt Delivery/Acknowledgement v1, Receipt Review v1, Receipt
-  Review Delivery/Acknowledgement v1, Dispute Statement creation reservation
-  and creation-failure audit payloads, first-page/graph snapshot binding,
+  Review Delivery/Acknowledgement v1, Dispute Statement Fetch
+  Request/Response v1, Dispute Statement creation reservation and
+  creation-failure audit payloads, first-page/graph snapshot binding,
   cross-Review parent-context token separation, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
   Rule Recognition, Recognition Policy, and Receipt Review audit payloads;
@@ -1033,8 +1070,9 @@ cases. Page and graph tokens must match only when they describe the same exact
 statement inventory, graph-affecting parent context, and effective
 microsecond-resolution clock-skew policy.
 
-Globally convergent latest-revision proofs, Acceptance federation, inventory
-or asset reservation, fulfillment, payment, global Receipt/Review propagation,
+Globally convergent latest-revision proofs, Acceptance federation, persistent
+Fetch replay admission and automatic missing-parent import, inventory or asset
+reservation, fulfillment, payment, global Receipt/Review propagation,
 delegation, and sandboxed
 executable Adapters remain separate, independently reviewed slices. Durable
 remote retention preserves the complete chain disclosed by one signed,

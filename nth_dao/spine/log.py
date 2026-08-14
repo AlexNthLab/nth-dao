@@ -24,6 +24,9 @@ from nth_dao.util.io import InterProcessLock, atomic_write_bytes
 
 MAX_SPINE_LINE_BYTES = 2 * 1024 * 1024
 MAX_SPINE_APPEND_BATCH = 1_000
+MAX_SPINE_VERIFIED_CACHE_BYTES = 16 * 1024 * 1024
+MAX_SPINE_VERIFIED_CACHE_EVENTS = 10_000
+MAX_SPINE_SEMANTIC_INDEX_SHAPES = 64
 DEFAULT_SPINE_LOCK_TIMEOUT_SECONDS = 30.0
 SPINE_APPEND_INTENT_VERSION = 1
 MAX_SPINE_APPEND_INTENT_BYTES = MAX_SPINE_LINE_BYTES + 1_024
@@ -69,6 +72,13 @@ class SignedEventLog:
         self._lock_timeout = float(lock_timeout)
         self._head_hash = GENESIS_PREV
         self._head_seq = -1
+        self._verified_cache_token: tuple[int, int, int, int, int] | None = None
+        self._verified_cache_events: tuple[SpineEvent, ...] = ()
+        self._verified_cache_by_id: dict[str, SpineEvent] = {}
+        self._semantic_cache: dict[
+            tuple[str, tuple[str, ...]],
+            dict[tuple[str, str], set[tuple[str, int]]],
+        ] = {}
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._load_head()
 
@@ -248,6 +258,7 @@ class SignedEventLog:
         if event.seq >= len(events) or events[event.seq] != event:
             raise ValueError("recovered spine append does not match signed intent")
         self._clear_append_intent_unlocked()
+        self._remember_verified_unlocked(events)
 
     def _decode_line(self, raw: bytes, line_number: int) -> SpineEvent:
         if len(raw) > MAX_SPINE_LINE_BYTES:
@@ -342,10 +353,88 @@ class SignedEventLog:
             return False, str(exc), tuple(events)
         return True, "ok", tuple(events)
 
+    def _remember_verified_unlocked(
+        self,
+        events: tuple[SpineEvent, ...],
+    ) -> None:
+        token = self.storage_token()
+        if (
+            len(events) > MAX_SPINE_VERIFIED_CACHE_EVENTS
+            or token[2] > MAX_SPINE_VERIFIED_CACHE_BYTES
+        ):
+            self._verified_cache_events = ()
+            self._verified_cache_by_id = {}
+            self._semantic_cache.clear()
+            self._verified_cache_token = None
+            return
+        previous = self._verified_cache_events
+        if len(events) >= len(previous) and events[: len(previous)] == previous:
+            appended = events[len(previous) :]
+            for event in appended:
+                self._verified_cache_by_id[event.event_id] = event
+            for (event_type, fields), owners in self._semantic_cache.items():
+                for event in appended:
+                    if event.type != event_type:
+                        continue
+                    for field in fields:
+                        value = event.payload.get(field)
+                        if isinstance(value, str) and value:
+                            owners.setdefault((field, value), set()).add(
+                                ("existing", event.seq)
+                            )
+        else:
+            self._verified_cache_by_id = {
+                event.event_id: event for event in events
+            }
+            self._semantic_cache.clear()
+        self._verified_cache_events = events
+        self._verified_cache_token = token
+
+    def _semantic_owners_unlocked(
+        self,
+        event_type: str,
+        fields: tuple[str, ...],
+        events: tuple[SpineEvent, ...],
+    ) -> dict[tuple[str, str], set[tuple[str, int]]]:
+        cache_key = (event_type, fields)
+        retained = self._semantic_cache.get(cache_key)
+        if retained is None:
+            retained = {}
+            for event in events:
+                if event.type != event_type:
+                    continue
+                for field in fields:
+                    value = event.payload.get(field)
+                    if isinstance(value, str) and value:
+                        retained.setdefault((field, value), set()).add(
+                            ("existing", event.seq)
+                        )
+            if self._verified_cache_token is not None:
+                if len(self._semantic_cache) >= MAX_SPINE_SEMANTIC_INDEX_SHAPES:
+                    self._semantic_cache.pop(next(iter(self._semantic_cache)))
+                self._semantic_cache[cache_key] = retained
+        return {key: set(owners) for key, owners in retained.items()}
+
+    def _verified_events_cached_unlocked(
+        self,
+    ) -> tuple[bool, str, tuple[SpineEvent, ...]]:
+        token = self.storage_token()
+        if self._verified_cache_token == token:
+            return True, "ok", self._verified_cache_events
+        ok, reason, events = self._verified_events_unlocked()
+        if ok:
+            self._remember_verified_unlocked(events)
+        else:
+            self._verified_cache_events = ()
+            self._verified_cache_by_id = {}
+            self._semantic_cache.clear()
+            self._verified_cache_token = None
+        return ok, reason, events
+
     def _scan_verified(
         self,
     ) -> tuple[bool, str, Optional[SpineEvent]]:
-        ok, reason, events = self._verified_events_unlocked()
+        ok, reason, events = self._verified_events_cached_unlocked()
         return ok, reason, events[-1] if events else None
 
     def read_all(self) -> Iterator[SpineEvent]:
@@ -396,7 +485,7 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_unlocked()
+                ok, reason, events = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt: {reason}"
@@ -421,18 +510,20 @@ class SignedEventLog:
                 self._recover_pending_append_unlocked()
                 # A second process may have advanced the chain since this
                 # instance was constructed.
-                ok, reason, events = self._verified_events_unlocked()
+                ok, reason, events = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"appended: {reason}"
                     )
-                return self._append_after_verified(
+                event = self._append_after_verified(
                     event_type,
                     payload,
                     ts_ms=ts_ms,
                     last=events[-1] if events else None,
                 )
+                self._remember_verified_unlocked(events + (event,))
+                return event
 
     def _append_after_verified(
         self,
@@ -442,6 +533,7 @@ class SignedEventLog:
         ts_ms: Optional[int],
         last: Optional[SpineEvent],
     ) -> SpineEvent:
+        self._verified_cache_token = None
         self._head_hash = (
             last.content_hash if last is not None else GENESIS_PREV
         )
@@ -503,23 +595,24 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_unlocked()
+                ok, reason, events = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot "
                         f"reconcile an append: {reason}"
                     )
-                matches = tuple(
-                    event for event in events if event.event_id == event_id
-                )
-                if len(matches) > 1:
-                    raise ValueError("spine contains duplicate event IDs")
                 last = events[-1] if events else None
                 self._head_hash = (
                     last.content_hash if last is not None else GENESIS_PREV
                 )
                 self._head_seq = last.seq if last is not None else -1
-                return matches[0] if matches else None
+                cached = self._verified_cache_by_id.get(event_id)
+                if cached is not None:
+                    return cached
+                return next(
+                    (event for event in events if event.event_id == event_id),
+                    None,
+                )
 
     def verified_snapshot(self) -> tuple[SpineEvent, ...]:
         """Return one lock-consistent, signature-verified event snapshot."""
@@ -530,7 +623,7 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_unlocked()
+                ok, reason, events = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
@@ -608,26 +701,17 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_unlocked()
+                ok, reason, events = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"appended: {reason}"
                     )
-                owners: dict[
-                    tuple[str, str], set[tuple[str, int]]
-                ] = {}
-                existing_by_seq = {event.seq: event for event in events}
-                for event in events:
-                    if event.type != event_type:
-                        continue
-                    for field in unique_payload_fields:
-                        value = event.payload.get(field)
-                        if isinstance(value, str) and value:
-                            owners.setdefault((field, value), set()).add(
-                                ("existing", event.seq)
-                            )
-
+                owners = self._semantic_owners_unlocked(
+                    event_type,
+                    unique_payload_fields,
+                    events,
+                )
                 planned: list[dict] = []
                 resolutions: list[tuple[tuple[str, int], bool]] = []
                 for payload in payloads:
@@ -643,7 +727,7 @@ class SignedEventLog:
                     if matched:
                         owner = next(iter(matched))
                         owner_payload = (
-                            existing_by_seq[owner[1]].payload
+                            events[owner[1]].payload
                             if owner[0] == "existing"
                             else planned[owner[1]]
                         )
@@ -672,9 +756,10 @@ class SignedEventLog:
                     )
                     appended.append(event)
                     last = event
+                self._remember_verified_unlocked(events + tuple(appended))
                 return tuple(
                     (
-                        existing_by_seq[owner[1]]
+                        events[owner[1]]
                         if owner[0] == "existing"
                         else appended[owner[1]],
                         created,

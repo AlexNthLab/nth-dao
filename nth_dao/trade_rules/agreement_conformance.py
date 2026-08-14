@@ -104,6 +104,18 @@ from nth_dao.trade_rules.dispute_statement_transport import (
     trade_dispute_statement_acknowledgement_digest,
     trade_dispute_statement_delivery_digest,
 )
+from nth_dao.trade_rules.dispute_statement_retrieval import (
+    DISPUTE_STATEMENT_FETCH_REQUEST_SIGNING_DOMAIN,
+    DISPUTE_STATEMENT_FETCH_RESPONSE_SIGNING_DOMAIN,
+    create_trade_dispute_statement_fetch_request,
+    create_trade_dispute_statement_fetch_response,
+    trade_dispute_statement_fetch_request_digest,
+    trade_dispute_statement_fetch_response_digest,
+)
+from nth_dao.trade_rules.dispute_statement_fetch_audit import (
+    EVENT_TRADE_DISPUTE_STATEMENT_FETCH_SERVED,
+    trade_dispute_statement_fetch_audit_payload,
+)
 from nth_dao.trade_rules.manifest import (
     manifest_body,
     sign_manifest,
@@ -222,6 +234,18 @@ DISPUTE_STATEMENT_DELIVERY_SCHEMA_PATH = (
 DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
     / "trade-dispute-statement-acknowledgement.schema.json"
+)
+DISPUTE_STATEMENT_FETCH_REQUEST_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement-fetch-request.schema.json"
+)
+DISPUTE_STATEMENT_FETCH_RESPONSE_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement-fetch-response.schema.json"
+)
+DISPUTE_STATEMENT_FETCH_AUDIT_SCHEMA_PATH = (
+    Path(__file__).with_name("schemas")
+    / "trade-dispute-statement-fetch-audit-payload.schema.json"
 )
 DISPUTE_STATEMENT_AUDIT_SCHEMA_PATH = (
     Path(__file__).with_name("schemas")
@@ -727,6 +751,46 @@ def generate_vectors() -> dict[str, Any]:
                 audit_event_id="a" * 64,
             )
         )
+        dispute_statement_fetch_request = (
+            create_trade_dispute_statement_fetch_request(
+                taker,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                statement_digest=trade_dispute_statement_digest(
+                    dispute_statement,
+                    review=conflicting_receipt_review,
+                    receipt=execution_receipt,
+                    order=order,
+                ),
+                responder_did=maker.as_did(),
+                created_at="2026-08-01T02:07:00Z",
+                not_after="2026-08-01T02:12:00Z",
+                nonce="47" * 16,
+                now=_utc("2026-08-01T02:07:00Z"),
+            )
+        )
+        dispute_statement_fetch_response = (
+            create_trade_dispute_statement_fetch_response(
+                maker,
+                request=dispute_statement_fetch_request,
+                statement=dispute_statement,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                served_at="2026-08-01T02:08:00Z",
+                now=_utc("2026-08-01T02:08:00Z"),
+            )
+        )
+        dispute_statement_fetch_audit = (
+            trade_dispute_statement_fetch_audit_payload(
+                dispute_statement_fetch_request,
+                dispute_statement_fetch_response,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+            )
+        )
         dispute_statement_dispatch_record = TradeDisputeStatementDispatchRecord(
             statement_digest=dispute_statement_delivery.to_dict()[
                 "statement_digest"
@@ -1076,6 +1140,18 @@ def generate_vectors() -> dict[str, Any]:
             dispute_statement_acknowledgement.to_dict()
         )
         dispute_statement_acknowledgement_signature_tamper["proof"][
+            "proof_value"
+        ] = "A" * 86
+        dispute_statement_fetch_request_signature_tamper = (
+            dispute_statement_fetch_request.to_dict()
+        )
+        dispute_statement_fetch_request_signature_tamper["proof"][
+            "proof_value"
+        ] = "A" * 86
+        dispute_statement_fetch_response_signature_tamper = (
+            dispute_statement_fetch_response.to_dict()
+        )
+        dispute_statement_fetch_response_signature_tamper["proof"][
             "proof_value"
         ] = "A" * 86
         receipt_review_delivery_tamper = receipt_review_delivery.to_dict()
@@ -1578,6 +1654,93 @@ def generate_vectors() -> dict[str, Any]:
                 "expected_valid": False,
             },
         ],
+        "trade_dispute_statement_fetch_request": (
+            dispute_statement_fetch_request.to_dict()
+        ),
+        "trade_dispute_statement_fetch_request_canonical_hex": (
+            dispute_statement_fetch_request.canonical_bytes.hex()
+        ),
+        "trade_dispute_statement_fetch_request_signing_input_hex": (
+            signed_document_input(
+                DISPUTE_STATEMENT_FETCH_REQUEST_SIGNING_DOMAIN,
+                dispute_statement_fetch_request.to_dict(),
+            ).hex()
+        ),
+        "trade_dispute_statement_fetch_request_digest": (
+            trade_dispute_statement_fetch_request_digest(
+                dispute_statement_fetch_request,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+            )
+        ),
+        "trade_dispute_statement_fetch_request_verification_cases": [
+            {
+                "case": "valid-destination-and-window",
+                "responder_did": maker.as_did(),
+                "at": "2026-08-01T02:08:00Z",
+                "max_ttl_seconds": 300,
+                "clock_skew_seconds": 0,
+                "expected_valid": True,
+            },
+            {
+                "case": "wrong-destination",
+                "responder_did": taker.as_did(),
+                "at": "2026-08-01T02:08:00Z",
+                "max_ttl_seconds": 300,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+            {
+                "case": "expired-request",
+                "responder_did": maker.as_did(),
+                "at": "2026-08-01T02:12:01Z",
+                "max_ttl_seconds": 300,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+        ],
+        "trade_dispute_statement_fetch_response": (
+            dispute_statement_fetch_response.to_dict()
+        ),
+        "trade_dispute_statement_fetch_response_canonical_hex": (
+            dispute_statement_fetch_response.canonical_bytes.hex()
+        ),
+        "trade_dispute_statement_fetch_response_signing_input_hex": (
+            signed_document_input(
+                DISPUTE_STATEMENT_FETCH_RESPONSE_SIGNING_DOMAIN,
+                dispute_statement_fetch_response.to_dict(),
+            ).hex()
+        ),
+        "trade_dispute_statement_fetch_response_digest": (
+            trade_dispute_statement_fetch_response_digest(
+                dispute_statement_fetch_response,
+                request=dispute_statement_fetch_request,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+            )
+        ),
+        "trade_dispute_statement_fetch_response_verification_cases": [
+            {
+                "case": "valid-response-window",
+                "at": "2026-08-01T02:08:00Z",
+                "max_ttl_seconds": 300,
+                "clock_skew_seconds": 0,
+                "expected_valid": True,
+            },
+            {
+                "case": "response-observed-after-request-expiry",
+                "at": "2026-08-01T02:12:01Z",
+                "max_ttl_seconds": 300,
+                "clock_skew_seconds": 0,
+                "expected_valid": False,
+            },
+        ],
+        "trade_dispute_statement_fetch_audit": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_FETCH_SERVED,
+            "payload": dispute_statement_fetch_audit,
+        },
         "trade_dispute_statement_audit": {
             "event_type": EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
             "payload": dispute_statement_audit,
@@ -1946,6 +2109,18 @@ def generate_vectors() -> dict[str, Any]:
                 ),
             },
             {
+                "case": "trade-dispute-statement-fetch-request-signature-tamper",
+                "target": "trade_dispute_statement_fetch_request",
+                "expected_valid": False,
+                "document": dispute_statement_fetch_request_signature_tamper,
+            },
+            {
+                "case": "trade-dispute-statement-fetch-response-signature-tamper",
+                "target": "trade_dispute_statement_fetch_response",
+                "expected_valid": False,
+                "document": dispute_statement_fetch_response_signature_tamper,
+            },
+            {
                 "case": "receipt-review-delivery-retarget",
                 "target": "receipt_review_delivery",
                 "expected_valid": False,
@@ -2018,6 +2193,9 @@ __all__ = [
     "DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SCHEMA_PATH",
     "DISPUTE_STATEMENT_AUDIT_SCHEMA_PATH",
     "DISPUTE_STATEMENT_DELIVERY_SCHEMA_PATH",
+    "DISPUTE_STATEMENT_FETCH_REQUEST_SCHEMA_PATH",
+    "DISPUTE_STATEMENT_FETCH_RESPONSE_SCHEMA_PATH",
+    "DISPUTE_STATEMENT_FETCH_AUDIT_SCHEMA_PATH",
     "EXECUTION_RECEIPT_SCHEMA_PATH",
     "EXECUTION_RECEIPT_ACKNOWLEDGEMENT_SCHEMA_PATH",
     "EXECUTION_RECEIPT_DELIVERY_SCHEMA_PATH",

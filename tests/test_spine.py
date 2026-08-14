@@ -496,7 +496,92 @@ def test_append_unique_many_scans_once_and_prevalidates_conflicts(
             unique_payload_fields=("execution_id", "receipt_digest"),
             ts_ms=2,
         )
+    assert scans == 1
     assert log._path.read_bytes() == before
+
+    appended = log.append_unique_many(
+        "trade.execution.recorded",
+        ({"execution_id": "exec-4", "receipt_digest": "digest-4"},),
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=2,
+    )
+    assert appended[0][1] is True
+    assert scans == 1
+
+
+def test_verified_indexes_rebuild_after_another_writer_advances_log(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    identity = _id()
+    first = SignedEventLog(path, identity)
+    first.append_unique(
+        "trade.execution.recorded",
+        {"execution_id": "exec-1", "receipt_digest": "digest-1"},
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=1,
+    )
+    second = SignedEventLog(path, identity)
+    second.append_unique(
+        "trade.execution.recorded",
+        {"execution_id": "exec-2", "receipt_digest": "digest-2"},
+        unique_payload_fields=("execution_id", "receipt_digest"),
+        ts_ms=2,
+    )
+    original = first._verified_events_unlocked
+    scans = 0
+
+    def counted_scan():
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(first, "_verified_events_unlocked", counted_scan)
+    for _index in range(2):
+        event, created = first.append_unique(
+            "trade.execution.recorded",
+            {"execution_id": "exec-2", "receipt_digest": "digest-2"},
+            unique_payload_fields=("execution_id", "receipt_digest"),
+            ts_ms=3,
+        )
+        assert event.seq == 1
+        assert created is False
+    assert scans == 1
+
+
+def test_verified_cache_is_bounded_and_reconcile_falls_back(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(spine_log_module, "MAX_SPINE_VERIFIED_CACHE_EVENTS", 1)
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    first = log.append("test.first", {"id": "one"})
+    log.append("test.second", {"id": "two"})
+
+    assert log._verified_cache_token is None
+    assert not log._verified_cache_events
+    assert not log._verified_cache_by_id
+    assert log.reconcile_append(first.event_id) == first
+    assert log._verified_cache_token is None
+
+
+def test_semantic_index_shapes_are_bounded(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(spine_log_module, "MAX_SPINE_SEMANTIC_INDEX_SHAPES", 1)
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    log.append_unique(
+        "test.first",
+        {"id": "one"},
+        unique_payload_fields=("id",),
+    )
+    log.append_unique(
+        "test.second",
+        {"id": "two"},
+        unique_payload_fields=("id",),
+    )
+
+    assert len(log._semantic_cache) == 1
+    assert next(iter(log._semantic_cache))[0] == "test.second"
 
 
 def test_cross_process_append_serializes_and_reloads_chain(

@@ -775,7 +775,7 @@ def test_record_batch_uses_constant_store_scans_and_bounded_spine_chunks(
     assert all(result.store_created for result in results)
     assert all(result.anchor_created for result in results)
     assert store_scans == 3
-    assert spine_scans == 3
+    assert spine_scans == 1
 
 
 def test_recognition_proof_import_vectors_and_schema_are_current():

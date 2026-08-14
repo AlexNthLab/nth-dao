@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nthdao.org/schemas/trade-dispute-statement-fetch-audit-payload-v1.json",
+  "title": "NTH DAO Trade Dispute Statement Fetch Audit Payload v1",
+  "$comment": "Closed Spine payload for one responder-signed Statement disclosure. The signed Spine envelope and exact Request/Response bindings require protocol verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version", "request_id", "request_digest", "response_id",
+    "response_digest", "order_digest", "receipt_digest", "review_digest",
+    "statement_digest", "requester_did", "responder_did", "served_at", "status"
+  ],
+  "properties": {
+    "protocol_version": {"const": "1"},
+    "request_id": {
+      "type": "string",
+      "pattern": "^nth:trade:dispute-statement-fetch-request:sha256:[0-9a-f]{64}$"
+    },
+    "request_digest": {"$ref": "#/$defs/digest"},
+    "response_id": {
+      "type": "string",
+      "pattern": "^nth:trade:dispute-statement-fetch-response:sha256:[0-9a-f]{64}$"
+    },
+    "response_digest": {"$ref": "#/$defs/digest"},
+    "order_digest": {"$ref": "#/$defs/digest"},
+    "receipt_digest": {"$ref": "#/$defs/digest"},
+    "review_digest": {"$ref": "#/$defs/digest"},
+    "statement_digest": {"$ref": "#/$defs/digest"},
+    "requester_did": {"$ref": "#/$defs/did"},
+    "responder_did": {"$ref": "#/$defs/did"},
+    "served_at": {"$ref": "#/$defs/timestamp"},
+    "status": {"const": "served"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "did": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "maxLength": 35,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    }
+  }
+}
