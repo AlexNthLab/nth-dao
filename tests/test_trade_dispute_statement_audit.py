@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 
 import pytest
 
@@ -334,6 +335,154 @@ def test_dispute_statement_coordinator_recovers_after_spine_failure(
     assert recovered.store_created is False
     assert recovered.anchor_created is True
     assert len(coordinator.spine.verified_snapshot()) == 1
+
+
+def test_dispute_statement_coordinator_reconciles_review_page(
+    tmp_path,
+    dispute_artifacts,
+    monkeypatch,
+):
+    statement, review, receipt, order, resolver = dispute_artifacts
+    coordinator = _coordinator(tmp_path)
+    real_append = coordinator.spine.append_unique
+
+    monkeypatch.setattr(
+        coordinator.spine,
+        "append_unique",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    with pytest.raises(TradeDisputeStatementAuditError):
+        coordinator.record(
+            statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            package_resolver=resolver,
+            observed_at_ms=1_786_000_000_000,
+        )
+    monkeypatch.setattr(coordinator.spine, "append_unique", real_append)
+
+    recovered = coordinator.reconcile_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=resolver,
+        observed_at_ms=1_786_000_001_000,
+    )
+    verified = coordinator.reconcile_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=resolver,
+        observed_at_ms=1_786_000_002_000,
+    )
+
+    assert recovered.scanned == 1
+    assert recovered.anchored == 1
+    assert recovered.verified_anchored == 0
+    assert recovered.failed == 0
+    assert recovered.has_more is False
+    assert recovered.next_cursor is None
+    assert verified.scanned == 1
+    assert verified.anchored == 0
+    assert verified.verified_anchored == 1
+    assert verified.failed == 0
+    assert len(coordinator.spine.verified_snapshot()) == 1
+
+
+def test_dispute_statement_outbox_recovers_prepare_before_store_failure(
+    tmp_path,
+    dispute_artifacts,
+    monkeypatch,
+):
+    statement, review, receipt, order, resolver = dispute_artifacts
+    coordinator = _coordinator(tmp_path)
+    real_put = coordinator.store.put
+    monkeypatch.setattr(
+        coordinator.store,
+        "put",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected Store outage after outbox prepare")
+        ),
+    )
+
+    with pytest.raises(OSError, match="Store outage"):
+        coordinator.record(
+            statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            package_resolver=resolver,
+            observed_at_ms=1_786_000_000_000,
+        )
+    pending, has_more = coordinator.audit_outbox.pending()
+    assert len(pending) == 1
+    assert has_more is False
+    assert coordinator.spine.verified_snapshot() == ()
+    assert list(coordinator.store.root.glob("*.json")) == []
+
+    monkeypatch.setattr(coordinator.store, "put", real_put)
+    restarted = TradeDisputeStatementAuditCoordinator(
+        store=coordinator.store,
+        spine=coordinator.spine,
+    )
+    recovered = restarted.reconcile(package_resolver=resolver)
+
+    assert recovered.scanned == 1
+    assert recovered.anchored == 1
+    assert recovered.failed == 0
+    assert restarted.audit_outbox.pending()[0] == ()
+    assert len(restarted.spine.verified_snapshot()) == 1
+
+
+def test_dispute_statement_outbox_tamper_never_anchors(
+    tmp_path,
+    dispute_artifacts,
+    monkeypatch,
+):
+    statement, review, receipt, order, resolver = dispute_artifacts
+    coordinator = _coordinator(tmp_path)
+    monkeypatch.setattr(
+        coordinator.store,
+        "put",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    with pytest.raises(OSError):
+        coordinator.record(
+            statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            package_resolver=resolver,
+            observed_at_ms=1_786_000_000_000,
+        )
+    with sqlite3.connect(coordinator.audit_outbox.path) as connection:
+        connection.execute(
+            "UPDATE pending SET statement_bytes = ?",
+            (b'{"tampered":true}',),
+        )
+
+    with pytest.raises(
+        trade_rules_api.TradeDisputeStatementAuditOutboxError,
+        match="byte accounting",
+    ):
+        coordinator.reconcile(package_resolver=resolver)
+
+    assert coordinator.spine.verified_snapshot() == ()
+    with sqlite3.connect(coordinator.audit_outbox.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 1
+
+
+def test_dispute_statement_outbox_rejects_unknown_future_schema(tmp_path):
+    coordinator = _coordinator(tmp_path)
+    with sqlite3.connect(coordinator.audit_outbox.path) as connection:
+        connection.execute("PRAGMA user_version = 999")
+
+    with pytest.raises(
+        trade_rules_api.TradeDisputeStatementAuditOutboxError,
+        match="schema is unsupported",
+    ):
+        trade_rules_api.TradeDisputeStatementAuditOutbox(tmp_path)
 
 
 def test_dispute_statement_coordinator_rejects_future_before_any_write(

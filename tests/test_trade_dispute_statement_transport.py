@@ -43,6 +43,12 @@ from nth_dao.trade_rules.signing import (
 from nth_dao.trade_rules.dispute_statement_audit import (
     TradeDisputeStatementAuditCoordinator,
 )
+from nth_dao.trade_rules.dispute_statement_dispatch import (
+    EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED,
+    TradeDisputeStatementDispatchCoordinator,
+    TradeDisputeStatementDispatchError,
+    TradeDisputeStatementDispatchStore,
+)
 from nth_dao.trade_rules.dispute_statement_intake import (
     DISPUTE_STATEMENT_OBSERVATION_SIGNING_DOMAIN,
     TradeDisputeStatementObservation,
@@ -114,7 +120,14 @@ def transport_artifacts():
     return vectors, order, receipt, review, resolver, maker, taker
 
 
-def _delivery(artifacts, *, nonce="45" * 16):
+def _delivery(
+    artifacts,
+    *,
+    nonce="45" * 16,
+    created_at="2026-08-01T02:05:00Z",
+    not_after="2026-08-01T02:15:00Z",
+    now=datetime(2026, 8, 1, 2, 5, tzinfo=timezone.utc),
+):
     vectors, order, receipt, review, resolver, maker, _taker = artifacts
     from nth_dao.trade_rules.dispute_statement import TradeDisputeStatement
 
@@ -132,10 +145,10 @@ def _delivery(artifacts, *, nonce="45" * 16):
         receipt=receipt,
         order=order,
         package_resolver=resolver,
-        created_at="2026-08-01T02:05:00Z",
-        not_after="2026-08-01T02:15:00Z",
+        created_at=created_at,
+        not_after=not_after,
         nonce=nonce,
-        now=datetime(2026, 8, 1, 2, 5, tzinfo=timezone.utc),
+        now=now,
     )
 
 
@@ -1977,6 +1990,476 @@ def test_dispute_statement_transport_schemas_validate_public_vectors(
             delivery_schema,
             registry=registry,
         ).validate(unknown)
+
+
+def _dispatch_acknowledgement(artifacts, delivery):
+    _vectors, order, receipt, review, _resolver, _maker, taker = artifacts
+    return create_trade_dispute_statement_acknowledgement(
+        taker,
+        delivery=delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        received_at="2026-08-01T02:06:00Z",
+        audit_event_id="6" * 64,
+    )
+
+
+def test_dispute_statement_dispatch_persists_and_anchors_acknowledgement(
+    tmp_path,
+    transport_artifacts,
+):
+    _vectors, order, receipt, review, _resolver, maker, _taker = (
+        transport_artifacts
+    )
+    delivery = _delivery(transport_artifacts)
+    statement_digest = delivery.to_dict()["statement_digest"]
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    moment_ms = int(
+        datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp() * 1_000
+    )
+
+    first = store.prepare(
+        delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example/nth",
+        now_ms=moment_ms,
+    )
+    retry = store.prepare(
+        delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example/nth/",
+        now_ms=moment_ms + 1,
+    )
+    coordinator = TradeDisputeStatementDispatchCoordinator(
+        store,
+        SignedEventLog(tmp_path / "spine.jsonl", maker),
+    )
+    _leased, lease_token = store.acquire_send_lease(statement_digest)
+    retained = coordinator.acknowledge(
+        statement_digest,
+        _dispatch_acknowledgement(transport_artifacts, delivery),
+        remote_event_id="6" * 64,
+        lease_token=lease_token,
+    )
+
+    assert first.statement_digest == statement_digest
+    assert retry.delivery.canonical_bytes == first.delivery.canonical_bytes
+    assert retained.acknowledged is True
+    assert retained.anchor_event_id
+    assert retained.remote_event_id == "6" * 64
+    assert retained.attempts == 0
+    events = coordinator.spine.verified_snapshot()
+    assert len(events) == 1
+    assert events[0].type == EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED
+    assert events[0].payload["statement_digest"] == statement_digest
+
+
+def test_dispute_statement_dispatch_recovers_ack_after_spine_failure(
+    tmp_path,
+    transport_artifacts,
+    monkeypatch,
+):
+    _vectors, order, receipt, review, _resolver, maker, _taker = (
+        transport_artifacts
+    )
+    delivery = _delivery(transport_artifacts, nonce="46" * 16)
+    statement_digest = delivery.to_dict()["statement_digest"]
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    store.prepare(
+        delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(
+            datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        ),
+    )
+    spine_path = tmp_path / "spine.jsonl"
+    coordinator = TradeDisputeStatementDispatchCoordinator(
+        store,
+        SignedEventLog(spine_path, maker),
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "_anchor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected Spine outage")
+        ),
+    )
+    _leased, lease_token = store.acquire_send_lease(statement_digest)
+
+    with pytest.raises(OSError, match="Spine outage"):
+        coordinator.acknowledge(
+            statement_digest,
+            _dispatch_acknowledgement(transport_artifacts, delivery),
+            remote_event_id="6" * 64,
+            lease_token=lease_token,
+        )
+    pending_ack = store.get(statement_digest)
+    assert pending_ack is not None
+    assert pending_ack.acknowledged is True
+    assert pending_ack.anchor_event_id == ""
+
+    restarted = TradeDisputeStatementDispatchCoordinator(
+        TradeDisputeStatementDispatchStore(tmp_path),
+        SignedEventLog(spine_path, maker),
+    )
+    recovered = restarted.recover_acknowledgement(statement_digest)
+
+    assert recovered is not None
+    assert recovered.anchor_event_id
+    assert len(restarted.spine.verified_snapshot()) == 1
+
+
+def test_dispute_statement_dispatch_rejects_target_rebinding(
+    tmp_path,
+    transport_artifacts,
+):
+    _vectors, order, receipt, review, _resolver, _maker, _taker = (
+        transport_artifacts
+    )
+    delivery = _delivery(transport_artifacts, nonce="47" * 16)
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    arguments = {
+        "review": review,
+        "receipt": receipt,
+        "order": order,
+        "now_ms": int(
+            datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        ),
+    }
+    store.prepare(
+        delivery,
+        target_url="https://first.example",
+        **arguments,
+    )
+
+    with pytest.raises(TradeDisputeStatementDispatchError, match="conflicting"):
+        store.prepare(
+            delivery,
+            target_url="https://second.example",
+            **arguments,
+        )
+
+
+def test_dispute_statement_dispatch_renews_only_expired_delivery(
+    tmp_path,
+    transport_artifacts,
+):
+    _vectors, order, receipt, review, _resolver, _maker, _taker = (
+        transport_artifacts
+    )
+    original = _delivery(transport_artifacts, nonce="48" * 16)
+    premature_replacement = _delivery(
+        transport_artifacts,
+        nonce="49" * 16,
+        created_at="2026-08-01T02:06:00Z",
+        not_after="2026-08-01T02:11:00Z",
+        now=datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc),
+    )
+    replacement = _delivery(
+        transport_artifacts,
+        nonce="4a" * 16,
+        created_at="2026-08-01T02:21:00Z",
+        not_after="2026-08-01T02:26:00Z",
+        now=datetime(2026, 8, 1, 2, 21, tzinfo=timezone.utc),
+    )
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    store.prepare(
+        original,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(
+            datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        ),
+    )
+
+    with pytest.raises(
+        TradeDisputeStatementDispatchError,
+        match="not expired",
+    ):
+        store.replace_expired(
+            premature_replacement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            target_url="https://peer.example",
+            now_ms=int(
+                datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+                * 1_000
+            ),
+        )
+
+    renewed = store.replace_expired(
+        replacement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(
+            datetime(2026, 8, 1, 2, 21, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        ),
+    )
+
+    assert renewed.generation == 2
+    assert renewed.attempts == 0
+    assert renewed.superseded_delivery_digests == (
+        trade_dispute_statement_delivery_digest(
+            original,
+            review=review,
+            receipt=receipt,
+            order=order,
+        ),
+    )
+
+
+def test_dispute_statement_dispatch_revalidates_acknowledgement_on_restart(
+    tmp_path,
+    transport_artifacts,
+):
+    _vectors, order, receipt, review, _resolver, _maker, _taker = (
+        transport_artifacts
+    )
+    delivery = _delivery(transport_artifacts, nonce="50" * 16)
+    conflicting_delivery = _delivery(transport_artifacts, nonce="51" * 16)
+    statement_digest = delivery.to_dict()["statement_digest"]
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    store.prepare(
+        delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(
+            datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        ),
+    )
+    acknowledgement = _dispatch_acknowledgement(
+        transport_artifacts,
+        conflicting_delivery,
+    )
+    path = tmp_path / "trade" / "dispute_dispatch_v1" / "dispatch.sqlite3"
+    with sqlite3.connect(path) as connection:
+        current = connection.execute(
+            "SELECT total_bytes FROM dispatches WHERE statement_digest = ?",
+            (statement_digest,),
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE dispatches SET acknowledgement_bytes = ?, "
+            "remote_event_id = ?, observed_at_ms = ?, total_bytes = ? "
+            "WHERE statement_digest = ?",
+            (
+                acknowledgement.canonical_bytes,
+                "6" * 64,
+                int(
+                    datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+                    * 1_000
+                ),
+                current + len(acknowledgement.canonical_bytes),
+                statement_digest,
+            ),
+        )
+
+    restarted = TradeDisputeStatementDispatchStore(tmp_path)
+    with pytest.raises(
+        TradeDisputeStatementDispatchError,
+        match="stored acknowledgement is invalid",
+    ):
+        restarted.get(statement_digest)
+
+
+def test_dispute_statement_dispatch_rejects_unverified_spine_return(
+    tmp_path,
+    transport_artifacts,
+    monkeypatch,
+):
+    _vectors, order, receipt, review, _resolver, maker, _taker = (
+        transport_artifacts
+    )
+    delivery = _delivery(transport_artifacts, nonce="52" * 16)
+    statement_digest = delivery.to_dict()["statement_digest"]
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    store.prepare(
+        delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=int(
+            datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+            * 1_000
+        ),
+    )
+    spine = SignedEventLog(tmp_path / "spine.jsonl", maker)
+    coordinator = TradeDisputeStatementDispatchCoordinator(store, spine)
+    append_unique = spine.append_unique
+
+    def _tampered_append(*args, **kwargs):
+        event, created = append_unique(*args, **kwargs)
+        document = event.to_dict()
+        document["sig"] = ("A" if document["sig"][0] != "A" else "B") + document[
+            "sig"
+        ][1:]
+        return type(event).from_dict(document), created
+
+    monkeypatch.setattr(spine, "append_unique", _tampered_append)
+    _leased, lease_token = store.acquire_send_lease(statement_digest)
+    with pytest.raises(
+        TradeDisputeStatementDispatchError,
+        match="conflicting Statement acknowledgement anchor",
+    ):
+        coordinator.acknowledge(
+            statement_digest,
+            _dispatch_acknowledgement(transport_artifacts, delivery),
+            remote_event_id="6" * 64,
+            lease_token=lease_token,
+        )
+
+    retained = store.get(statement_digest)
+    assert retained is not None
+    assert retained.acknowledged is True
+    assert retained.anchor_event_id == ""
+
+    restarted = TradeDisputeStatementDispatchCoordinator(
+        TradeDisputeStatementDispatchStore(tmp_path),
+        SignedEventLog(tmp_path / "spine.jsonl", maker),
+    )
+    report = restarted.reconcile()
+    recovered = restarted.store.get(statement_digest)
+    assert report.scanned == 1
+    assert report.anchored == 1
+    assert report.failed == 0
+    assert recovered is not None and recovered.anchor_event_id
+
+
+def test_dispute_statement_dispatch_send_lease_is_single_flight_and_recoverable(
+    tmp_path,
+    transport_artifacts,
+):
+    _vectors, order, receipt, review, _resolver, _maker, _taker = (
+        transport_artifacts
+    )
+    delivery = _delivery(transport_artifacts, nonce="53" * 16)
+    statement_digest = delivery.to_dict()["statement_digest"]
+    store = TradeDisputeStatementDispatchStore(tmp_path)
+    base_ms = int(
+        datetime(2026, 8, 1, 2, 6, tzinfo=timezone.utc).timestamp() * 1_000
+    )
+    store.prepare(
+        delivery,
+        review=review,
+        receipt=receipt,
+        order=order,
+        target_url="https://peer.example",
+        now_ms=base_ms,
+    )
+    first_token = "a1" * 16
+    second_token = "b2" * 16
+    leased, retained_token = store.acquire_send_lease(
+        statement_digest,
+        lease_token=first_token,
+        now_ms=base_ms,
+        lease_ms=1_000,
+    )
+
+    assert retained_token == first_token
+    assert leased.lease_expires_at_ms == base_ms + 1_000
+    with pytest.raises(
+        TradeDisputeStatementDispatchError,
+        match="in progress",
+    ):
+        store.acquire_send_lease(
+            statement_digest,
+            lease_token=second_token,
+            now_ms=base_ms + 999,
+            lease_ms=1_000,
+        )
+
+    taken_over, retained_token = store.acquire_send_lease(
+        statement_digest,
+        lease_token=second_token,
+        now_ms=base_ms + 1_000,
+        lease_ms=1_000,
+    )
+    assert retained_token == second_token
+    assert taken_over.lease_expires_at_ms == base_ms + 2_000
+    with pytest.raises(
+        TradeDisputeStatementDispatchError,
+        match="does not own the send lease",
+    ):
+        store.put_acknowledgement(
+            statement_digest,
+            _dispatch_acknowledgement(transport_artifacts, delivery),
+            remote_event_id="6" * 64,
+            lease_token=first_token,
+        )
+
+    store.note_failure(
+        statement_digest,
+        error="new owner failed safely",
+        lease_token=second_token,
+        now_ms=base_ms + 1_001,
+    )
+    released = store.get(statement_digest)
+    assert released is not None
+    assert released.attempts == 1
+    assert released.lease_expires_at_ms == 0
+
+
+def test_dispute_statement_dispatch_migrates_v2_send_state_schema(tmp_path):
+    path = tmp_path / "trade" / "dispute_dispatch_v1" / "dispatch.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE dispatches (
+                statement_digest TEXT PRIMARY KEY,
+                target_url TEXT NOT NULL,
+                delivery_bytes BLOB NOT NULL,
+                review_bytes BLOB NOT NULL,
+                receipt_bytes BLOB NOT NULL,
+                order_bytes BLOB NOT NULL,
+                attempts INTEGER NOT NULL,
+                last_error TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                acknowledgement_bytes BLOB,
+                remote_event_id TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                anchor_event_id TEXT NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                superseded_delivery_digests TEXT NOT NULL DEFAULT '[]'
+            ) WITHOUT ROWID
+            """
+        )
+        connection.execute("PRAGMA user_version = 2")
+
+    TradeDisputeStatementDispatchStore(tmp_path)
+    with sqlite3.connect(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(dispatches)"
+            ).fetchall()
+        }
+
+    assert version == 3
+    assert {"lease_token", "lease_expires_at_ms"} <= columns
 
 
 def test_dispute_statement_federation_is_public_trade_rule_api():

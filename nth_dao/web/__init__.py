@@ -115,10 +115,28 @@ _TRADE_EXECUTION_RECEIPT_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024
 _TRADE_EXECUTION_RECEIPT_DISPATCH_MAX_BODY_BYTES = 16 * 1024
 _TRADE_RECEIPT_REVIEW_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024
 _TRADE_RECEIPT_REVIEW_WRITE_MAX_BODY_BYTES = 32 * 1024
+_TRADE_DISPUTE_STATEMENT_DELIVERY_MAX_BODY_BYTES = 512 * 1024
+_TRADE_DISPUTE_STATEMENT_WRITE_MAX_BODY_BYTES = 256 * 1024
+_TRADE_DISPUTE_BOOT_RECOVERY_BATCH = 100
+_TRADE_DISPUTE_BOOT_RECOVERY_MAX_PASSES = 5
 _RESOURCE_PROFILE_MAX_BODY_BYTES = 256 * 1024
 _TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
 _TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
 _TRADE_EXECUTION_RECOVERY_POLL_SECONDS = 30.0
+_TRADE_DISPUTE_RECOVERY_POLL_SECONDS = 30.0
+_TRADE_DISPUTE_STATEMENT_DELIVERY_PATH = re.compile(
+    r"/api/v2/trade/federation/orders/"
+    r"sha256:[0-9a-f]{64}/execution-receipts/"
+    r"nth-trade-execution-sha256:[0-9a-f]{64}/reviews/"
+    r"nth-trade-review-sha256:[0-9a-f]{64}/dispute-statements"
+)
+_TRADE_DISPUTE_STATEMENT_WRITE_PATH = re.compile(
+    r"/api/v2/trade/orders/"
+    r"sha256:[0-9a-f]{64}/execution-receipts/"
+    r"nth-trade-execution-sha256:[0-9a-f]{64}/reviews/"
+    r"nth-trade-review-sha256:[0-9a-f]{64}/dispute-statements"
+    r"(?:/sha256:[0-9a-f]{64}/deliver)?"
+)
 
 
 class _RequestBodyTooLarge(Exception):
@@ -227,6 +245,17 @@ class _FederationBodyLimitMiddleware:
             )
             is not None
         )
+        is_trade_dispute_statement_delivery = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH.fullmatch(path)
+            is not None
+        )
+        is_trade_dispute_statement_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and _TRADE_DISPUTE_STATEMENT_WRITE_PATH.fullmatch(path) is not None
+        )
         is_trade_receipt_review_write = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
@@ -261,6 +290,8 @@ class _FederationBodyLimitMiddleware:
             or is_trade_execution_receipt_delivery
             or is_trade_execution_receipt_dispatch
             or is_trade_receipt_review_delivery
+            or is_trade_dispute_statement_delivery
+            or is_trade_dispute_statement_write
             or is_trade_receipt_review_write
             or is_trade_proposal_accept
             or is_resource_profile_write
@@ -304,6 +335,12 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_receipt_review_delivery:
             max_body_bytes = _TRADE_RECEIPT_REVIEW_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Receipt Review delivery"
+        elif is_trade_dispute_statement_delivery:
+            max_body_bytes = _TRADE_DISPUTE_STATEMENT_DELIVERY_MAX_BODY_BYTES
+            body_label = "trade Dispute Statement delivery"
+        elif is_trade_dispute_statement_write:
+            max_body_bytes = _TRADE_DISPUTE_STATEMENT_WRITE_MAX_BODY_BYTES
+            body_label = "trade Dispute Statement write"
         elif is_trade_receipt_review_write:
             max_body_bytes = _TRADE_RECEIPT_REVIEW_WRITE_MAX_BODY_BYTES
             body_label = "trade Receipt Review write"
@@ -806,6 +843,11 @@ class WebState:
             TradeExecutionAuditOutbox,
             TradeExecutionReceiptStore,
             TradeExecutionReceiptDispatchStore,
+            TradeDisputeStatementIntakeJournal,
+            TradeDisputeStatementIntakeJournalError,
+            TradeDisputeStatementDispatchError,
+            TradeDisputeStatementDispatchStore,
+            TradeDisputeStatementStore,
             TradeReceiptReviewDispatchStore,
             TradeReceiptReviewStore,
             TradeOrderAuditOutbox,
@@ -828,6 +870,35 @@ class WebState:
             TradeReceiptReviewDispatchStore(workspace)
         )
         self.trade_receipt_review_dispatch: Optional[Any] = None
+        self.trade_dispute_statements = TradeDisputeStatementStore(workspace)
+        self.trade_dispute_statement_audit: Optional[Any] = None
+        try:
+            self.trade_dispute_statement_dispatch_store = (
+                TradeDisputeStatementDispatchStore(workspace)
+            )
+        except (OSError, TradeDisputeStatementDispatchError) as exc:
+            logger.warning(
+                "trade Dispute Statement dispatch store unavailable (%s); "
+                "outbound Statement delivery disabled until repaired",
+                type(exc).__name__,
+            )
+            self.trade_dispute_statement_dispatch_store = None
+        self.trade_dispute_statement_dispatch: Optional[Any] = None
+        self.trade_dispute_statement_projection_lock = threading.RLock()
+        self.trade_dispute_statement_projection_token: Optional[Any] = None
+        self.trade_dispute_statement_projection_events: tuple[Any, ...] = ()
+        self.trade_dispute_statement_recovery_lock = threading.Lock()
+        try:
+            self.trade_dispute_statement_intake_journal = (
+                TradeDisputeStatementIntakeJournal(workspace)
+            )
+        except (OSError, TradeDisputeStatementIntakeJournalError) as exc:
+            logger.warning(
+                "trade Dispute Statement intake journal unavailable (%s); "
+                "federated Statement intake disabled until repaired",
+                type(exc).__name__,
+            )
+            self.trade_dispute_statement_intake_journal = None
         self.trade_execution_health_lock = threading.RLock()
         self.trade_execution_recovery_lock = threading.Lock()
         self.trade_execution_recovery_cursor: Optional[str] = None
@@ -878,6 +949,25 @@ class WebState:
                 / "trade"
                 / "rate_limits"
                 / "receipt_review_delivery_global.json",
+                max_per_window=120,
+                window_seconds=60.0,
+                max_tracked_keys=4,
+            )
+        )
+        self.trade_dispute_statement_delivery_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "dispute_statement_delivery.json",
+            max_per_window=30,
+            window_seconds=60.0,
+        )
+        self.trade_dispute_statement_delivery_global_limiter = (
+            PersistentRateLimiter(
+                Path(workspace)
+                / "trade"
+                / "rate_limits"
+                / "dispute_statement_delivery_global.json",
                 max_per_window=120,
                 window_seconds=60.0,
                 max_tracked_keys=4,
@@ -1245,6 +1335,92 @@ def _advance_trade_execution_recovery(
         lock.release()
 
 
+def _recover_trade_dispute_statement_audits(state: WebState) -> dict[str, Any]:
+    """Replay one bounded set of prepare-before-publish audit records."""
+
+    lock = getattr(state, "trade_dispute_statement_recovery_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        raise RuntimeError("Dispute Statement audit recovery is already running")
+    try:
+        coordinator = state.trade_dispute_statement_audit
+        if state.spine is None or coordinator is None:
+            raise RuntimeError("Dispute Statement audit recovery is unavailable")
+        report = {
+            "scanned": 0,
+            "anchored": 0,
+            "verified_anchored": 0,
+            "failed": 0,
+            "has_more": False,
+        }
+        cursor: str | None = None
+        for _pass in range(_TRADE_DISPUTE_BOOT_RECOVERY_MAX_PASSES):
+            page = coordinator.reconcile(
+                package_resolver=state.trade_rule_packages,
+                limit=_TRADE_DISPUTE_BOOT_RECOVERY_BATCH,
+                after_digest=cursor,
+            )
+            report["scanned"] += page.scanned
+            report["anchored"] += page.anchored
+            report["verified_anchored"] += page.verified_anchored
+            report["failed"] += page.failed
+            report["has_more"] = page.has_more
+            if not page.has_more:
+                break
+            if not page.next_cursor or page.next_cursor == cursor:
+                raise RuntimeError(
+                    "Dispute Statement recovery returned an invalid cursor"
+                )
+            cursor = page.next_cursor
+        return report
+    finally:
+        lock.release()
+
+
+def _recover_trade_dispute_statement_dispatch_acknowledgements(
+    state: WebState,
+) -> dict[str, Any]:
+    """Replay one bounded set of verified remote ACK Spine anchors."""
+
+    lock = getattr(state, "trade_dispute_statement_recovery_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        raise RuntimeError(
+            "Dispute Statement acknowledgement recovery is already running"
+        )
+    try:
+        coordinator = state.trade_dispute_statement_dispatch
+        if state.spine is None or coordinator is None:
+            raise RuntimeError(
+                "Dispute Statement acknowledgement recovery is unavailable"
+            )
+        report = {
+            "scanned": 0,
+            "anchored": 0,
+            "failed": 0,
+            "has_more": False,
+        }
+        cursor: str | None = None
+        for _pass in range(_TRADE_DISPUTE_BOOT_RECOVERY_MAX_PASSES):
+            page = coordinator.reconcile(
+                limit=_TRADE_DISPUTE_BOOT_RECOVERY_BATCH,
+                after_digest=cursor,
+            )
+            report["scanned"] += page.scanned
+            report["anchored"] += page.anchored
+            report["failed"] += page.failed
+            report["has_more"] = page.has_more
+            if not page.has_more:
+                break
+            if not page.next_cursor or page.next_cursor == cursor:
+                raise RuntimeError(
+                    "Dispute Statement acknowledgement recovery returned an "
+                    "invalid cursor"
+                )
+            cursor = page.next_cursor
+        return report
+    finally:
+        lock.release()
+
+
 class _TradeExecutionRecoveryWorker:
     """Lifecycle-owned recovery for crash-interrupted Receipt audit writes."""
 
@@ -1291,6 +1467,78 @@ class _TradeExecutionRecoveryWorker:
                 if report.has_more:
                     continue
                 self._cancel.wait(_TRADE_EXECUTION_RECOVERY_POLL_SECONDS)
+        finally:
+            with self._lock:
+                self._thread = None
+
+
+class _TradeDisputeStatementRecoveryWorker:
+    """Lifecycle-owned repair for retained claims missing a Spine anchor."""
+
+    def __init__(self, state: WebState) -> None:
+        self._state = state
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if (
+            self._state.trade_dispute_statement_audit is None
+            and self._state.trade_dispute_statement_dispatch is None
+        ):
+            return
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._cancel.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="nth-trade-dispute-audit-recovery",
+                daemon=True,
+            )
+            thread = self._thread
+        thread.start()
+
+    def stop(self) -> None:
+        self._cancel.set()
+        with self._lock:
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        try:
+            while not self._cancel.is_set():
+                has_more = False
+                try:
+                    report = _recover_trade_dispute_statement_audits(
+                        self._state
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "trade Dispute Statement audit background recovery "
+                        "failed (%s)",
+                        type(exc).__name__,
+                    )
+                    report = {"has_more": False}
+                has_more = has_more or report["has_more"]
+                try:
+                    dispatch_report = (
+                        _recover_trade_dispute_statement_dispatch_acknowledgements(
+                            self._state
+                        )
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "trade Dispute Statement acknowledgement background "
+                        "recovery failed (%s)",
+                        type(exc).__name__,
+                    )
+                    dispatch_report = {"has_more": False}
+                has_more = has_more or dispatch_report["has_more"]
+                if has_more:
+                    continue
+                self._cancel.wait(_TRADE_DISPUTE_RECOVERY_POLL_SECONDS)
         finally:
             with self._lock:
                 self._thread = None
@@ -1439,6 +1687,7 @@ def create_app(
     mdns_publisher = _MDNSPublisher(state)
     udp_lan_publisher = _UDPLANPublisher(state)
     trade_execution_recovery = _TradeExecutionRecoveryWorker(state)
+    trade_dispute_recovery = _TradeDisputeStatementRecoveryWorker(state)
 
     # Network services are owned by FastAPI lifespan, not create_app().
     # This keeps application construction side-effect free and prevents
@@ -1479,6 +1728,7 @@ def create_app(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent supervisor shutdown failed: %s", exc)
         trade_execution_recovery.stop()
+        trade_dispute_recovery.stop()
         udp_lan_publisher.stop()
         mdns_publisher.stop()
 
@@ -1493,6 +1743,7 @@ def create_app(
             mdns_publisher.start()
             udp_lan_publisher.start()
             trade_execution_recovery.start()
+            trade_dispute_recovery.start()
             if not shutdown_registered:
                 _atexit.register(_shutdown_at_exit)
                 shutdown_registered = True
@@ -1734,6 +1985,19 @@ def create_app(
                 r"/api/v2/trade/federation/orders/"
                 r"sha256:[0-9a-f]{64}/execution-receipts/[^/]+/reviews",
                 request.url.path,
+            )
+            is not None
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # A Dispute Statement is a signed counterparty claim, not an operator
+        # command. The route replays the exact local Order, Receipt, Review,
+        # and Rule Package before bounded retention and a receiver-signed ACK.
+        if (
+            request.method == "POST"
+            and _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH.fullmatch(
+                request.url.path
             )
             is not None
         ):
@@ -4054,6 +4318,8 @@ def _bootstrap(state: WebState) -> None:
         from ..trade_rules import (
             TradeExecutionCoordinator,
             TradeExecutionReceiptDispatchCoordinator,
+            TradeDisputeStatementAuditCoordinator,
+            TradeDisputeStatementDispatchCoordinator,
             TradeReceiptReviewCoordinator,
             TradeReceiptReviewDispatchCoordinator,
             TradeOrderAuditCoordinator,
@@ -4095,6 +4361,64 @@ def _bootstrap(state: WebState) -> None:
                 state.spine,
             )
         )
+        state.trade_dispute_statement_audit = (
+            TradeDisputeStatementAuditCoordinator(
+                store=state.trade_dispute_statements,
+                spine=state.spine,
+            )
+        )
+        if state.trade_dispute_statement_dispatch_store is not None:
+            state.trade_dispute_statement_dispatch = (
+                TradeDisputeStatementDispatchCoordinator(
+                    state.trade_dispute_statement_dispatch_store,
+                    state.spine,
+                )
+            )
+        try:
+            dispute_recovery = _recover_trade_dispute_statement_audits(state)
+            if dispute_recovery["anchored"] or dispute_recovery["failed"]:
+                logger.info(
+                    "trade Dispute Statement audit recovery: scanned=%d "
+                    "anchored=%d verified=%d failed=%d",
+                    dispute_recovery["scanned"],
+                    dispute_recovery["anchored"],
+                    dispute_recovery["verified_anchored"],
+                    dispute_recovery["failed"],
+                )
+            if dispute_recovery["has_more"]:
+                logger.warning(
+                    "trade Dispute Statement audit recovery stopped at the "
+                    "startup work budget; pending records remain"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "trade Dispute Statement audit recovery failed: %s",
+                type(exc).__name__,
+            )
+        try:
+            dispatch_recovery = (
+                _recover_trade_dispute_statement_dispatch_acknowledgements(
+                    state
+                )
+            )
+            if dispatch_recovery["anchored"] or dispatch_recovery["failed"]:
+                logger.info(
+                    "trade Dispute Statement acknowledgement recovery: "
+                    "scanned=%d anchored=%d failed=%d",
+                    dispatch_recovery["scanned"],
+                    dispatch_recovery["anchored"],
+                    dispatch_recovery["failed"],
+                )
+            if dispatch_recovery["has_more"]:
+                logger.warning(
+                    "trade Dispute Statement acknowledgement recovery stopped "
+                    "at the startup work budget"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "trade Dispute Statement acknowledgement recovery failed: %s",
+                type(exc).__name__,
+            )
         try:
             execution_recovery = _advance_trade_execution_recovery(state)
             if execution_recovery.anchored or execution_recovery.blocked:

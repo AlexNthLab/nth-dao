@@ -1909,6 +1909,117 @@ _MARKET_SEARCH_CATEGORIES = {
 _MARKET_SEARCH_INTENTS = {"request", "provide", "exchange"}
 _MARKET_OFFER_CATEGORIES = {"products", "services", "digital-assets", "other"}
 _MARKET_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+_TRADE_DISPUTE_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+
+
+class TradeDisputeStatementCreateConflict(ValueError):
+    """An idempotency key is already bound to another Statement request."""
+
+
+def _reserve_trade_dispute_statement_creation(
+    request: Request,
+    *,
+    body: Dict[str, Any],
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    author_did: str,
+) -> tuple[str, datetime, str, bool]:
+    """Durably bind one retry key before creating signed Statement bytes.
+
+    The reservation is a local, signed Spine event. Its timestamp becomes the
+    logical Statement creation time, so an HTTP retry after a partial Store /
+    Spine failure recreates exactly the same content-addressed Statement.
+    """
+
+    from nth_dao.trade_rules import (
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
+        trade_canonical_json,
+    )
+
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if _TRADE_DISPUTE_IDEMPOTENCY_KEY.fullmatch(idempotency_key) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Idempotency-Key must contain 16..128 ASCII letters, digits, "
+                "'.', ':', '_' or '-'"
+            ),
+        )
+    spine = _state_spine(request)
+    if spine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="signed Spine unavailable for idempotent Statement creation",
+        )
+    operation_id = "sha256:" + hashlib.sha256(
+        (
+            "nth-dao/trade-dispute-statement-create/v1\0"
+            + author_did
+            + "\0"
+            + idempotency_key
+        ).encode("ascii")
+    ).hexdigest()
+    request_material = {
+        "order_digest": order_digest,
+        "execution_id": execution_id,
+        "review_id": review_id,
+        "author_did": author_did,
+        "body": body,
+    }
+    request_digest = "sha256:" + hashlib.sha256(
+        trade_canonical_json(request_material)
+    ).hexdigest()
+    payload = {
+        "protocol_version": "1",
+        "operation_id": operation_id,
+        "request_digest": request_digest,
+        "order_digest": order_digest,
+        "execution_id": execution_id,
+        "review_id": review_id,
+        "author_did": author_did,
+    }
+    reserved_at_ms = int(datetime.now(timezone.utc).timestamp() * 1_000)
+    if reserved_at_ms % 1_000 == 0:
+        reserved_at_ms += 1
+    try:
+        event, created = spine.append_unique(
+            EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
+            payload,
+            unique_payload_fields=("operation_id",),
+            ts_ms=reserved_at_ms,
+        )
+    except ValueError as exc:
+        try:
+            matches = [
+                event
+                for event in spine.verified_snapshot()
+                if event.type == EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED
+                and event.payload.get("operation_id") == operation_id
+            ]
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise RuntimeError(
+                "unable to verify Dispute Statement creation reservation"
+            ) from exc
+        if len(matches) == 1 and matches[0].payload != payload:
+            raise TradeDisputeStatementCreateConflict(
+                "Idempotency-Key is already bound to another Statement request"
+            ) from exc
+        raise RuntimeError(
+            "Dispute Statement creation reservation is invalid"
+        ) from exc
+    if event.author_did != spine.signer_did or event.payload != payload:
+        raise RuntimeError(
+            "Dispute Statement creation reservation is unauthorized or conflicting"
+        )
+    created_moment = datetime.fromtimestamp(
+        event.ts_ms / 1_000,
+        tz=timezone.utc,
+    )
+    created_at = created_moment.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    return operation_id, created_moment, created_at, created
 
 
 class MarketPublishConflict(ValueError):
@@ -8372,6 +8483,66 @@ def _state_trade_receipt_review_delivery_global_limiter(
         return None
 
 
+def _state_trade_dispute_statement_audit(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_audit
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_store(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statements
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_dispatch(request: Request) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_dispatch
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_dispatch_store(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_dispatch_store
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_intake_journal(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_intake_journal
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_delivery_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_delivery_limiter
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_delivery_global_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return (
+            request.app.state.nth
+            .trade_dispute_statement_delivery_global_limiter
+        )
+    except AttributeError:
+        return None
+
+
 def _learned_fed_peer_store(ws: Optional[Path]):
     if ws is None:
         return None
@@ -9456,6 +9627,106 @@ def _post_trade_receipt_review_delivery_to_peer(
         ):
             raise ValueError(
                 "trade peer identity does not match Review recipient_did"
+            )
+        post_timeout = remaining_seconds - (time.monotonic() - started)
+        if post_timeout <= 0:
+            raise TimeoutError("trade peer request deadline exceeded")
+        return _urllib_post_json_pinned_raw(
+            url,
+            resolved_ip,
+            document,
+            timeout_s=post_timeout,
+            max_bytes=256 * 1024,
+        )
+
+    status, raw = _call_operator_trade_peer_with_fallback(
+        normalized,
+        verify_and_post,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        response = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("trade peer returned invalid JSON") from exc
+    if not isinstance(response, dict):
+        raise ValueError("trade peer returned a non-object response")
+    return status, response
+
+
+def _post_trade_dispute_statement_delivery_to_peer(
+    peer_url: str,
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    document: dict[str, Any],
+    *,
+    timeout_seconds: float = 15.0,
+) -> tuple[int, dict[str, Any]]:
+    """Verify the counterparty DID, then POST one signed claim."""
+
+    from .market_federation_poll import _urllib_post_json_pinned_raw
+    from nth_dao.did_key import is_did_key
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+        raise ValueError("order_digest is invalid")
+    if re.fullmatch(
+        r"nth-trade-execution-sha256:[0-9a-f]{64}",
+        execution_id,
+    ) is None:
+        raise ValueError("execution_id is invalid")
+    if re.fullmatch(
+        r"nth-trade-review-sha256:[0-9a-f]{64}",
+        review_id,
+    ) is None:
+        raise ValueError("review_id is invalid")
+    normalized = _normalize_configured_fed_peer(peer_url)
+    recipient_did = document.get("recipient_did")
+    if not isinstance(recipient_did, str) or not is_did_key(recipient_did):
+        raise ValueError("Statement delivery recipient_did is invalid")
+    url = (
+        normalized
+        + f"/api/v2/trade/federation/orders/{order_digest}"
+        + f"/execution-receipts/{execution_id}/reviews/{review_id}"
+        + "/dispute-statements"
+    )
+
+    def verify_and_post(
+        resolved_ip: str,
+        remaining_seconds: float,
+    ) -> tuple[int, bytes]:
+        started = time.monotonic()
+        challenge = secrets.token_hex(32)
+        identity_url = (
+            normalized
+            + "/.well-known/nth-dao/identity.json"
+            + f"?challenge={challenge}"
+        )
+        raw_card = _open_federation_identity_card(
+            identity_url,
+            min(remaining_seconds, 3.0),
+            resolved_ip,
+        )
+        try:
+            card = json.loads(raw_card.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "trade peer returned an invalid identity card"
+            ) from exc
+        metadata, identity_error = _verify_federation_identity_card(
+            normalized,
+            card,
+            expected_challenge=challenge,
+        )
+        if metadata is None:
+            raise ValueError(
+                f"trade peer identity verification failed: {identity_error}"
+            )
+        if not hmac.compare_digest(
+            str(metadata.get("did") or ""),
+            recipient_did,
+        ):
+            raise ValueError(
+                "trade peer identity does not match Statement recipient_did"
             )
         post_timeout = remaining_seconds - (time.monotonic() - started)
         if post_timeout <= 0:
@@ -14383,6 +14654,315 @@ def register_v2_routes(app: FastAPI) -> None:
             "delivery_quality_or_payment_proven": False,
         }
 
+    @app.post(
+        "/api/v2/trade/federation/orders/{order_digest}/"
+        "execution-receipts/{execution_id}/reviews/{review_id}/"
+        "dispute-statements",
+        status_code=202,
+    )
+    async def v2_trade_dispute_statement_receive(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Re-verify and retain one destination-bound signed dispute claim."""
+
+        from nth_dao.trade_rules import (
+            TradeDisputeStatementAuditError,
+            TradeDisputeStatementDelivery,
+            TradeDisputeStatementDeliveryRejected,
+            TradeDisputeStatementIntakeCoordinator,
+            TradeDisputeStatementIntakeJournalCapacity,
+            TradeDisputeStatementIntakeJournalError,
+            TradeDisputeStatementRejected,
+            TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreCapacity,
+            TradeDisputeStatementStoreError,
+            TradeExecutionReceiptStoreBusy,
+            TradeExecutionReceiptStoreError,
+            TradeOrderAuditError,
+            TradeReceiptReviewConflict,
+            TradeReceiptReviewStoreBusy,
+            TradeReceiptReviewStoreError,
+        )
+
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="order_digest must be a lowercase sha256 digest",
+            )
+        if re.fullmatch(
+            r"nth-trade-execution-sha256:[0-9a-f]{64}",
+            execution_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="execution_id is invalid")
+        if re.fullmatch(
+            r"nth-trade-review-sha256:[0-9a-f]{64}",
+            review_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="review_id is invalid")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "trade Dispute Statement delivery requires "
+                    "Content-Type application/json"
+                ),
+            )
+
+        limiter = _state_trade_dispute_statement_delivery_limiter(request)
+        global_limiter = (
+            _state_trade_dispute_statement_delivery_global_limiter(request)
+        )
+        if limiter is None or global_limiter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement rate limiter unavailable",
+            )
+        client_key = (
+            str(request.client.host).strip()
+            if request.client is not None and request.client.host
+            else "anonymous"
+        )
+        try:
+            decision = await run_in_threadpool(limiter.check, client_key)
+            global_decision = await run_in_threadpool(
+                global_limiter.check,
+                "global",
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement budget is unavailable",
+            ) from exc
+        if not decision.allowed or not global_decision.allowed:
+            retry_after = max(
+                1,
+                int(
+                    max(
+                        decision.retry_after_seconds,
+                        global_decision.retry_after_seconds,
+                    )
+                )
+                + 1,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="trade Dispute Statement delivery rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        state = request.app.state.nth
+        order_audit = _state_trade_order_audit(request)
+        receipt_store = getattr(state, "trade_execution_receipts", None)
+        review_store = _state_trade_receipt_review_store(request)
+        statement_audit = _state_trade_dispute_statement_audit(request)
+        intake_journal = _state_trade_dispute_statement_intake_journal(request)
+        identity = _state_node_identity(request)
+        package_store = _state_trade_rule_package_store(request)
+        if (
+            order_audit is None
+            or receipt_store is None
+            or review_store is None
+            or statement_audit is None
+            or intake_journal is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+            or package_store is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "dispute-statement-intake-not-configured",
+                    "message": (
+                        "local signed Order, Receipt, Review, Rule Package, "
+                        "Spine, and identity state are required before "
+                        "Dispute Statement intake"
+                    ),
+                },
+            )
+
+        try:
+            order_view = await run_in_threadpool(
+                order_audit.get_accepted,
+                order_digest,
+            )
+        except (TradeOrderAuditError, OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Order audit integrity failure",
+            ) from exc
+        if order_view is None:
+            raise HTTPException(status_code=404, detail="Trade Order not found")
+        order = order_view.order
+        try:
+            receipt = await run_in_threadpool(
+                receipt_store.get,
+                execution_id,
+                order=order,
+            )
+        except TradeExecutionReceiptStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Execution Receipt store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeExecutionReceiptStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Execution Receipt integrity conflict",
+            ) from exc
+        if receipt is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Trade Execution Receipt not found",
+            )
+        try:
+            review = await run_in_threadpool(
+                review_store.get,
+                review_id,
+                receipt=receipt,
+                order=order,
+            )
+        except TradeReceiptReviewStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Receipt Review has contradictory signed candidates",
+            ) from exc
+        except TradeReceiptReviewStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Receipt Review integrity conflict",
+            ) from exc
+        if review is None:
+            raise HTTPException(status_code=404, detail="Trade Receipt Review not found")
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+
+        raw_body = await request.body()
+        received_at = datetime.now(timezone.utc)
+
+        def _receive_statement() -> Any:
+            delivery = TradeDisputeStatementDelivery.from_json(
+                raw_body,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+            statement_document = delivery.statement.to_dict()
+            if statement_document["review_id"] != review_id:
+                raise TradeDisputeStatementDeliveryRejected(
+                    "Dispute Statement review_id does not match request path"
+                )
+            intake = TradeDisputeStatementIntakeCoordinator(
+                statement_audit,
+                receiver_identity=identity,
+                package_resolver=package_resolver,
+                journal=intake_journal,
+            )
+            return intake.receive(
+                delivery,
+                review=review,
+                receipt=receipt,
+                order=order,
+                at=received_at,
+            )
+
+        try:
+            result = await run_in_threadpool(_receive_statement)
+        except TradeDisputeStatementDeliveryRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TradeDisputeStatementRejected as exc:
+            logger.info(
+                "remote Dispute Statement rejected during signed replay: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "dispute-statement-policy-rejected",
+                    "message": (
+                        "Dispute Statement claim could not be replayed from "
+                        "its signed Order, Receipt, Review, and Rule Package"
+                    ),
+                },
+            ) from exc
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement receiver is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (
+            TradeDisputeStatementStoreCapacity,
+            TradeDisputeStatementIntakeJournalCapacity,
+        ) as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement receiver capacity exceeded",
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement integrity conflict",
+            ) from exc
+        except (
+            TradeDisputeStatementAuditError,
+            TradeDisputeStatementIntakeJournalError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.warning(
+                "trade Dispute Statement durable intake failed: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "dispute-statement-intake-incomplete",
+                    "message": "Dispute Statement acknowledgement is incomplete",
+                    "safe_to_redeliver": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+
+        statement_document = result.audit.statement.to_dict()
+        return {
+            "status": "dispute-statement-retained-verified",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "dispute_id": statement_document["dispute_id"],
+            "statement_id": statement_document["statement_id"],
+            "statement_digest": result.delivery.to_dict()["statement_digest"],
+            "delivery_digest": result.delivery_digest,
+            "statement_store_created": result.audit.store_created,
+            "audit_anchor_created": result.audit.anchor_created,
+            "audit_event_id": result.audit.event.event_id,
+            "acknowledgement": result.acknowledgement.to_dict(),
+            "acknowledgement_digest": result.acknowledgement_digest,
+            "claim_replayed_from_signed_context": True,
+            "claim_adjudicated_or_proven_true": False,
+        }
+
     def _trade_order_audit_view(
         view: Any,
         *,
@@ -16295,6 +16875,773 @@ def register_v2_routes(app: FastAPI) -> None:
             "is_counterparty_claim": True,
             "delivery_quality_or_payment_proven": False,
         }
+
+    async def _load_trade_dispute_review(
+        request: Request,
+        *,
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+    ) -> tuple[Any, Any, Any]:
+        from nth_dao.trade_rules import (
+            TradeReceiptReviewConflict,
+            TradeReceiptReviewStoreBusy,
+            TradeReceiptReviewStoreError,
+        )
+
+        if re.fullmatch(
+            r"nth-trade-review-sha256:[0-9a-f]{64}",
+            review_id,
+        ) is None:
+            raise HTTPException(status_code=400, detail="review_id is invalid")
+        order, receipt = await _load_trade_order_execution_receipt(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+        )
+        store = _state_trade_receipt_review_store(request)
+        if store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review store unavailable",
+            )
+        try:
+            review = await run_in_threadpool(
+                store.get,
+                review_id,
+                receipt=receipt,
+                order=order,
+            )
+        except TradeReceiptReviewStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Receipt Review store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeReceiptReviewConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Receipt Review has contradictory signed candidates",
+            ) from exc
+        except TradeReceiptReviewStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Receipt Review integrity conflict",
+            ) from exc
+        if review is None:
+            raise HTTPException(status_code=404, detail="Trade Receipt Review not found")
+        return order, receipt, review
+
+    @app.get(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews/{review_id}/dispute-statements"
+    )
+    async def v2_trade_dispute_statement_list(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+        limit: int = 100,
+        after: str | None = None,
+    ) -> Dict[str, Any]:
+        """List verified signed claims for one exact disputed Review."""
+
+        from nth_dao.trade_rules import (
+            EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
+            TradeDisputeStatementAuditError,
+            TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreError,
+            validate_trade_dispute_statement_audit_event,
+            validate_trade_dispute_statement_audit_payload,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be in 1..500")
+        if after is not None and re.fullmatch(
+            r"v1:[0-9a-f]{64}:[0-9a-f]{64}",
+            after,
+        ) is None:
+            raise HTTPException(status_code=400, detail="after cursor is invalid")
+        order, receipt, review = await _load_trade_dispute_review(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+            review_id=review_id,
+        )
+        store = _state_trade_dispute_statement_store(request)
+        audit = _state_trade_dispute_statement_audit(request)
+        if store is None or audit is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement runtime unavailable",
+            )
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        try:
+            page = await run_in_threadpool(
+                store.list_for_review,
+                review=review,
+                receipt=receipt,
+                order=order,
+                package_resolver=package_resolver,
+                limit=limit,
+                after=after,
+            )
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement integrity conflict",
+            ) from exc
+        spine = audit.spine
+        projection_state = request.app.state.nth
+
+        def _stable_audit_events() -> tuple[Any, ...]:
+            with projection_state.trade_dispute_statement_projection_lock:
+                current = spine.storage_token()
+                if (
+                    projection_state.trade_dispute_statement_projection_token
+                    == current
+                ):
+                    return (
+                        projection_state
+                        .trade_dispute_statement_projection_events
+                    )
+                token, snapshot = spine.verified_snapshot_with_token()
+                events = tuple(
+                    event
+                    for event in snapshot
+                    if event.type == EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+                )
+                projection_state.trade_dispute_statement_projection_token = token
+                projection_state.trade_dispute_statement_projection_events = events
+                return events
+
+        try:
+            events = await run_in_threadpool(_stable_audit_events)
+            anchors: dict[str, list[Any]] = {}
+            for event in events:
+                if event.author_did != spine.signer_did:
+                    raise TradeDisputeStatementAuditError(
+                        "Trade Dispute Statement Spine author is unauthorized"
+                    )
+                payload = validate_trade_dispute_statement_audit_payload(
+                    event.payload
+                )
+                anchors.setdefault(payload["statement_digest"], []).append(event)
+            projected: list[Dict[str, Any]] = []
+            for digest, statement in zip(
+                page.statement_digests,
+                page.statements,
+                strict=True,
+            ):
+                matching = anchors.get(digest, [])
+                if len(matching) > 1:
+                    raise TradeDisputeStatementAuditError(
+                        "duplicate Trade Dispute Statement Spine anchors"
+                    )
+                audit_event_id = ""
+                audit_status = "retained-pending-audit"
+                if matching:
+                    event = matching[0]
+                    validate_trade_dispute_statement_audit_event(
+                        event,
+                        expected_author_did=spine.signer_did,
+                        statement=statement,
+                        review=review,
+                        receipt=receipt,
+                        order=order,
+                        package_resolver=package_resolver,
+                    )
+                    audit_event_id = event.event_id
+                    audit_status = "anchored"
+                projected.append(
+                    {
+                        "statement_digest": digest,
+                        "statement": statement.to_dict(),
+                        "claim_status": "signed-unadjudicated-claim",
+                        "audit_status": audit_status,
+                        "audit_event_id": audit_event_id,
+                    }
+                )
+        except (
+            OSError,
+            RuntimeError,
+            TradeDisputeStatementAuditError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement audit projection is invalid",
+            ) from exc
+        return {
+            "status": "dispute-statements-listed",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "items": projected,
+            "next_cursor": page.next_cursor,
+            "claims_adjudicated_or_proven_true": False,
+        }
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews/{review_id}/dispute-statements",
+        status_code=201,
+    )
+    async def v2_trade_dispute_statement_create(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+        response: Response,
+    ) -> Dict[str, Any]:
+        """Sign, retain, and audit one local party claim without executing it."""
+
+        from nth_dao.trade_rules import (
+            TradeDisputeStatementAuditError,
+            TradeDisputeStatementRejected,
+            TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreCapacity,
+            TradeDisputeStatementStoreError,
+            create_trade_dispute_statement,
+            trade_dispute_statement_digest,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        allowed = {
+            "statement_type",
+            "parent_statement_digests",
+            "reason_codes",
+            "claim",
+            "evidence",
+            "rule_action",
+        }
+        if (
+            not isinstance(body, dict)
+            or "statement_type" not in body
+            or not set(body).issubset(allowed)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "body requires statement_type and permits only "
+                    "parent_statement_digests, reason_codes, claim, evidence, "
+                    "and rule_action"
+                ),
+            )
+        order, receipt, review = await _load_trade_dispute_review(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+            review_id=review_id,
+        )
+        identity = _state_node_identity(request)
+        coordinator = _state_trade_dispute_statement_audit(request)
+        if (
+            identity is None
+            or not getattr(identity, "can_sign", False)
+            or coordinator is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement signing runtime unavailable",
+            )
+        order_document = order.to_dict()
+        if identity.as_did() not in {
+            order_document["maker_did"],
+            order_document["taker_did"],
+        }:
+            raise HTTPException(
+                status_code=403,
+                detail="only an Order party can sign a Dispute Statement",
+            )
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        try:
+            operation_id, creation_moment, created_at, reservation_created = (
+                _reserve_trade_dispute_statement_creation(
+                    request,
+                    body=body,
+                    order_digest=order_digest,
+                    execution_id=execution_id,
+                    review_id=review_id,
+                    author_did=identity.as_did(),
+                )
+            )
+        except TradeDisputeStatementCreateConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement idempotency reservation failed",
+                headers={"Retry-After": "1"},
+            ) from exc
+        observed_at_ms = int(creation_moment.timestamp() * 1_000)
+
+        def _create_and_record_statement() -> Any:
+            statement = create_trade_dispute_statement(
+                identity,
+                review=review,
+                receipt=receipt,
+                order=order,
+                statement_type=body["statement_type"],
+                parent_statement_digests=body.get(
+                    "parent_statement_digests", ()
+                ),
+                reason_codes=body.get("reason_codes", ()),
+                claim=body.get("claim"),
+                evidence=body.get("evidence", ()),
+                rule_action=body.get("rule_action"),
+                package_resolver=package_resolver,
+                created_at=created_at,
+                now=creation_moment,
+            )
+            return coordinator.record(
+                statement,
+                review=review,
+                receipt=receipt,
+                order=order,
+                package_resolver=package_resolver,
+                observed_at_ms=observed_at_ms,
+            )
+
+        try:
+            result = await run_in_threadpool(_create_and_record_statement)
+        except TradeDisputeStatementRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement capacity exceeded",
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement integrity conflict",
+            ) from exc
+        except (
+            TradeDisputeStatementAuditError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement persistence is incomplete",
+                headers={"Retry-After": "1"},
+            ) from exc
+        digest = trade_dispute_statement_digest(
+            result.statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            package_resolver=package_resolver,
+        )
+        if not result.store_created:
+            response.status_code = 200
+        return {
+            "status": "dispute-statement-signed",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "dispute_id": result.statement.dispute_id,
+            "statement_id": result.statement.statement_id,
+            "statement_digest": digest,
+            "statement": result.statement.to_dict(),
+            "statement_store_created": result.store_created,
+            "audit_anchor_created": result.anchor_created,
+            "audit_event_id": result.event.event_id,
+            "operation_id": operation_id,
+            "reservation_created": reservation_created,
+            "claim_status": "signed-unadjudicated-claim",
+            "claim_adjudicated_or_proven_true": False,
+        }
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews/{review_id}/dispute-statements/"
+        "{statement_digest}/deliver"
+    )
+    async def v2_trade_dispute_statement_deliver(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        statement_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Durably deliver one locally authored signed claim."""
+
+        from nth_dao.trade_rules import (
+            TradeDisputeStatementAcknowledgement,
+            TradeDisputeStatementDeliveryRejected,
+            TradeDisputeStatementDispatchBusy,
+            TradeDisputeStatementDispatchCapacity,
+            TradeDisputeStatementDispatchError,
+            TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreError,
+            create_trade_dispute_statement_delivery,
+            verify_trade_dispute_statement_acknowledgement,
+            verify_trade_dispute_statement_delivery,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", statement_digest) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="statement_digest is invalid",
+            )
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict) or set(body) != {"target_url"}:
+            raise HTTPException(
+                status_code=400,
+                detail="body requires only target_url",
+            )
+        try:
+            target_url = _normalize_configured_fed_peer(body["target_url"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        order, receipt, review = await _load_trade_dispute_review(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+            review_id=review_id,
+        )
+        statement_store = _state_trade_dispute_statement_store(request)
+        dispatch_store = _state_trade_dispute_statement_dispatch_store(request)
+        dispatch = _state_trade_dispute_statement_dispatch(request)
+        identity = _state_node_identity(request)
+        if (
+            statement_store is None
+            or dispatch_store is None
+            or dispatch is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dispatch runtime unavailable",
+            )
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+            statement = await run_in_threadpool(
+                statement_store.get,
+                statement_digest,
+                review=review,
+                receipt=receipt,
+                order=order,
+                package_resolver=package_resolver,
+            )
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement integrity conflict",
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        if statement is None:
+            raise HTTPException(status_code=404, detail="Dispute Statement not found")
+        if statement.to_dict()["author_did"] != identity.as_did():
+            raise HTTPException(
+                status_code=403,
+                detail="only the local Statement author can deliver this claim",
+            )
+
+        def _acknowledged_response(record: Any) -> Dict[str, Any]:
+            acknowledgement = record.acknowledgement.to_dict()
+            return {
+                "status": "dispute-statement-delivered",
+                "order_digest": order_digest,
+                "execution_id": execution_id,
+                "review_id": review_id,
+                "statement_digest": statement_digest,
+                "delivery_digest": record.delivery_digest,
+                "acknowledgement": acknowledgement,
+                "acknowledgement_digest": record.acknowledgement_digest,
+                "remote_audit_event_id": record.remote_event_id,
+                "remote_received_at": acknowledgement["received_at"],
+                "generation": record.generation,
+                "attempts": record.attempts,
+                "acknowledgement_persisted": True,
+                "claim_adjudicated_or_proven_true": False,
+            }
+
+        try:
+            existing_ack = await run_in_threadpool(
+                dispatch.recover_acknowledgement,
+                statement_digest,
+            )
+            if existing_ack is not None:
+                if existing_ack.target_url != target_url:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Dispute Statement was acknowledged by a different "
+                            "peer target"
+                        ),
+                    )
+                return _acknowledged_response(existing_ack)
+            pending = await run_in_threadpool(
+                dispatch_store.get,
+                statement_digest,
+            )
+        except TradeDisputeStatementDispatchBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dispatch is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementDispatchError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dispatch recovery failed",
+                headers={"Retry-After": "1"},
+            ) from exc
+
+        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        now_ms = int(moment.timestamp() * 1_000)
+        created_at = moment.isoformat().replace("+00:00", "Z")
+        try:
+            if pending is not None:
+                if pending.target_url != target_url:
+                    raise TradeDisputeStatementDispatchError(
+                        "pending dispatch targets a different peer"
+                    )
+                ok, reason = verify_trade_dispute_statement_delivery(
+                    pending.delivery,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    recipient_did=pending.delivery.to_dict()["recipient_did"],
+                    at=moment,
+                )
+                if ok:
+                    delivery = pending.delivery
+                elif "expired" in reason:
+                    replacement = create_trade_dispute_statement_delivery(
+                        identity,
+                        statement=statement,
+                        review=review,
+                        receipt=receipt,
+                        order=order,
+                        package_resolver=package_resolver,
+                        created_at=created_at,
+                        not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                        now=moment,
+                    )
+                    pending = await run_in_threadpool(
+                        dispatch_store.replace_expired,
+                        replacement,
+                        review=review,
+                        receipt=receipt,
+                        order=order,
+                        target_url=target_url,
+                        now_ms=now_ms,
+                    )
+                    delivery = pending.delivery
+                else:
+                    raise TradeDisputeStatementDispatchError(
+                        f"pending delivery is not usable: {reason}"
+                    )
+            else:
+                delivery = create_trade_dispute_statement_delivery(
+                    identity,
+                    statement=statement,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    package_resolver=package_resolver,
+                    created_at=created_at,
+                    not_after=(moment + timedelta(minutes=5)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    now=moment,
+                )
+                pending = await run_in_threadpool(
+                    dispatch_store.prepare,
+                    delivery,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    target_url=target_url,
+                    now_ms=now_ms,
+                )
+            pending, lease_token = await run_in_threadpool(
+                dispatch_store.acquire_send_lease,
+                statement_digest,
+            )
+            delivery = pending.delivery
+        except TradeDisputeStatementDeliveryRejected as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TradeDisputeStatementDispatchCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement dispatch capacity exceeded",
+            ) from exc
+        except TradeDisputeStatementDispatchBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dispatch is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementDispatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        async def _note_failure(message: str) -> None:
+            try:
+                await run_in_threadpool(
+                    dispatch_store.note_failure,
+                    statement_digest,
+                    error=message,
+                    lease_token=lease_token,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "unable to record failed Dispute Statement dispatch: %s",
+                    type(exc).__name__,
+                )
+
+        try:
+            peer_status, peer_body = await run_in_threadpool(
+                _post_trade_dispute_statement_delivery_to_peer,
+                target_url,
+                order_digest,
+                execution_id,
+                review_id,
+                delivery.to_dict(),
+            )
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+            await _note_failure(f"{type(exc).__name__}: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Dispute Statement is retained locally but peer "
+                    "delivery failed"
+                ),
+            ) from exc
+        if not 200 <= peer_status < 300:
+            await _note_failure(f"peer returned HTTP {peer_status}")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "signed Dispute Statement is retained locally but the peer "
+                    "rejected delivery"
+                ),
+            )
+        try:
+            acknowledgement = TradeDisputeStatementAcknowledgement.from_dict(
+                peer_body["acknowledgement"]
+            )
+            peer_event_id = peer_body["audit_event_id"]
+        except (KeyError, TypeError, ValueError) as exc:
+            await _note_failure("peer returned an invalid acknowledgement")
+            raise HTTPException(
+                status_code=502,
+                detail="peer returned an invalid signed acknowledgement",
+            ) from exc
+        acknowledgement_ok, _acknowledgement_reason = (
+            verify_trade_dispute_statement_acknowledgement(
+                acknowledgement,
+                delivery=delivery,
+                review=review,
+                receipt=receipt,
+                order=order,
+                at=datetime.now(timezone.utc),
+            )
+        )
+        acknowledgement_document = acknowledgement.to_dict()
+        if (
+            not acknowledgement_ok
+            or not isinstance(peer_event_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", peer_event_id) is None
+            or acknowledgement_document["audit_event_id"] != peer_event_id
+        ):
+            await _note_failure(
+                "peer returned an invalid acknowledgement binding"
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="peer returned an invalid signed acknowledgement",
+            )
+        try:
+            retained = await run_in_threadpool(
+                dispatch.acknowledge,
+                statement_digest,
+                acknowledgement,
+                remote_event_id=peer_event_id,
+                lease_token=lease_token,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            try:
+                await run_in_threadpool(
+                    dispatch_store.release_send_lease,
+                    statement_digest,
+                    lease_token=lease_token,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote acknowledgement verified but local persistence "
+                    "is incomplete"
+                ),
+                headers={"Retry-After": "1"},
+            ) from exc
+        return _acknowledged_response(retained)
 
     @app.post(
         "/api/v2/trade/orders/{order_digest}/execution-receipts/"

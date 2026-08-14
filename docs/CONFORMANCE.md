@@ -145,6 +145,11 @@ skew, and an overflow-scale numeric input.
 The status `retained-claim-not-adjudicated` is deliberately narrow: passing
 these vectors proves wire compatibility, not evidence truth, adjudication,
 payment, settlement, or execution authority.
+Agreement v1 also fixes the sender-side
+`trade.dispute.statement-acknowledged` Spine payload, including Delivery
+generation and superseded Delivery digests. This event proves only that the
+sender retained a verified receiver ACK; it does not prove the referenced
+remote Spine event is retrievable or that the claim is true.
 
 Recognition Policy v1 has a separate deterministic vector in the same
 directory. It covers a node-signed genesis, a successor signed by a delegated

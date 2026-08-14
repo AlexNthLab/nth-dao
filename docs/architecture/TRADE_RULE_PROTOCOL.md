@@ -749,6 +749,17 @@ observation time, and the remote Spine event ID. It asserts only
 `retained-claim-not-adjudicated`. The event ID is a signed reference, not proof
 that the remote event is available; that requires separate Spine evidence.
 
+The sender persists the signed Delivery before network I/O and uses a bounded,
+crash-recoverable SQLite send lease so concurrent operator retries cannot issue
+duplicate outbound requests. Expired envelopes may be replaced only after the
+stored generation is cryptographically verified as expired; every superseded
+Delivery digest remains in the local generation history. A verified remote ACK
+is persisted before the sender emits
+`trade.dispute.statement-acknowledged`. That local event binds the Statement,
+current Delivery, ACK, receiver, remote event reference, generation, and all
+superseded Delivery digests. Startup and lifecycle recovery can idempotently
+complete a missing local anchor without sending the claim again.
+
 The domain-separated signing inputs use the exact ASCII prefixes
 `nth-dao/trade-dispute-statement-delivery/v1` and
 `nth-dao/trade-dispute-statement-acknowledgement/v1`. Agreement v1 publishes

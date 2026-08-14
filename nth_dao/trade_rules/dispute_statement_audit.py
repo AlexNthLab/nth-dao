@@ -22,6 +22,9 @@ from nth_dao.trade_rules.dispute_statement import (
 from nth_dao.trade_rules.dispute_statement_store import (
     TradeDisputeStatementStore,
 )
+from nth_dao.trade_rules.dispute_statement_outbox import (
+    TradeDisputeStatementAuditOutbox,
+)
 from nth_dao.trade_rules.execution_receipt import TradeExecutionReceipt
 from nth_dao.trade_rules.negotiation import RulePackageResolver
 from nth_dao.trade_rules.receipt_review import (
@@ -30,6 +33,9 @@ from nth_dao.trade_rules.receipt_review import (
 )
 
 EVENT_TRADE_DISPUTE_STATEMENT_RETAINED = "trade.dispute.statement.retained"
+EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED = (
+    "trade.dispute.statement.create.reserved"
+)
 TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION = "1"
 TRADE_DISPUTE_STATEMENT_ASSERTION_STATUS = "signed-claim-not-adjudicated"
 MAX_TRADE_DISPUTE_AUDIT_OBSERVED_AT_MS = 253_402_300_799_999
@@ -70,6 +76,18 @@ class TradeDisputeStatementAuditResult:
     event: SpineEvent
     store_created: bool
     anchor_created: bool
+
+
+@dataclass(frozen=True)
+class TradeDisputeStatementAuditReconciliation:
+    """One bounded pass over retained claims for an exact Review."""
+
+    scanned: int
+    anchored: int
+    verified_anchored: int
+    failed: int
+    next_cursor: str | None
+    has_more: bool
 
 
 def _canonical_timestamp(value: Any) -> None:
@@ -232,6 +250,41 @@ def _verified_statement(
     )
 
 
+def _verified_context(
+    *,
+    review: TradeReceiptReview | dict[str, Any],
+    receipt: TradeExecutionReceipt | dict[str, Any],
+    order: TradeOrder | dict[str, Any],
+) -> tuple[TradeReceiptReview, TradeExecutionReceipt, TradeOrder]:
+    verified_order = (
+        TradeOrder.from_json(order.canonical_bytes)
+        if isinstance(order, TradeOrder)
+        else TradeOrder.from_dict(order)
+    )
+    verified_receipt = (
+        TradeExecutionReceipt.from_json(
+            receipt.canonical_bytes,
+            order=verified_order,
+        )
+        if isinstance(receipt, TradeExecutionReceipt)
+        else TradeExecutionReceipt.from_dict(receipt, order=verified_order)
+    )
+    verified_review = (
+        TradeReceiptReview.from_json(
+            review.canonical_bytes,
+            receipt=verified_receipt,
+            order=verified_order,
+        )
+        if isinstance(review, TradeReceiptReview)
+        else TradeReceiptReview.from_dict(
+            review,
+            receipt=verified_receipt,
+            order=verified_order,
+        )
+    )
+    return verified_review, verified_receipt, verified_order
+
+
 def _assert_payload_binding(
     value: Any,
     *,
@@ -307,6 +360,7 @@ class TradeDisputeStatementAuditCoordinator:
         *,
         store: TradeDisputeStatementStore,
         spine: SignedEventLog,
+        audit_outbox: TradeDisputeStatementAuditOutbox | None = None,
     ) -> None:
         if not isinstance(store, TradeDisputeStatementStore):
             raise TypeError("store must be a TradeDisputeStatementStore")
@@ -314,8 +368,19 @@ class TradeDisputeStatementAuditCoordinator:
             raise TypeError("spine must be a SignedEventLog")
         if not is_did_key(spine.signer_did):
             raise ValueError("Spine signer must expose an Ed25519 did:key")
+        if audit_outbox is None:
+            audit_outbox = TradeDisputeStatementAuditOutbox(
+                store.workspace_root
+            )
+        if not isinstance(audit_outbox, TradeDisputeStatementAuditOutbox):
+            raise TypeError(
+                "audit_outbox must be a TradeDisputeStatementAuditOutbox"
+            )
+        if audit_outbox.workspace_root != store.workspace_root:
+            raise ValueError("audit outbox and Statement Store must share a workspace")
         self.store = store
         self.spine = spine
+        self.audit_outbox = audit_outbox
 
     def _anchor(
         self,
@@ -380,11 +445,34 @@ class TradeDisputeStatementAuditCoordinator:
         """Store and anchor one claim, remaining retryable after Spine failure."""
 
         moment, observed = _observation(observed_at_ms)
-        verified, store_created = self.store.put(
-            statement,
+        verified_review, verified_receipt, verified_order = _verified_context(
             review=review,
             receipt=receipt,
             order=order,
+        )
+        verified = _verified_statement(
+            statement,
+            review=verified_review,
+            receipt=verified_receipt,
+            order=verified_order,
+            package_resolver=package_resolver,
+        )
+        verified.assert_observed_at(
+            at=observed,
+            clock_skew_seconds=clock_skew_seconds,
+        )
+        pending, _prepared_created = self.audit_outbox.prepare(
+            verified,
+            review=verified_review,
+            receipt=verified_receipt,
+            order=verified_order,
+            observed_at_ms=moment,
+        )
+        verified, store_created = self.store.put(
+            verified,
+            review=verified_review,
+            receipt=verified_receipt,
+            order=verified_order,
             package_resolver=package_resolver,
             at=observed,
             clock_skew_seconds=clock_skew_seconds,
@@ -394,11 +482,66 @@ class TradeDisputeStatementAuditCoordinator:
             observed_at_ms=moment,
             clock_skew_seconds=clock_skew_seconds,
         )
+        self.audit_outbox.complete(pending)
         return TradeDisputeStatementAuditResult(
             statement=verified,
             event=event,
             store_created=store_created,
             anchor_created=anchor_created,
+        )
+
+    def reconcile(
+        self,
+        *,
+        package_resolver: RulePackageResolver | None = None,
+        limit: int = 100,
+        after_digest: str | None = None,
+        clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS,
+    ) -> TradeDisputeStatementAuditReconciliation:
+        """Replay one bounded page of durable prepare-before-publish records."""
+
+        records, has_more = self.audit_outbox.pending(
+            limit=limit,
+            after_digest=after_digest,
+        )
+        anchored = 0
+        verified_anchored = 0
+        failed = 0
+        for record in records:
+            try:
+                statement, review, receipt, order = record.resolve(
+                    package_resolver=package_resolver,
+                )
+                _moment, observed = _observation(record.observed_at_ms)
+                self.store.put(
+                    statement,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    package_resolver=package_resolver,
+                    at=observed,
+                    clock_skew_seconds=clock_skew_seconds,
+                )
+                _event, created = self._anchor(
+                    statement,
+                    observed_at_ms=record.observed_at_ms,
+                    clock_skew_seconds=clock_skew_seconds,
+                )
+                self.audit_outbox.complete(record)
+                if created:
+                    anchored += 1
+                else:
+                    verified_anchored += 1
+            except (OSError, RuntimeError, TypeError, ValueError):
+                failed += 1
+        next_cursor = records[-1].statement_digest if has_more and records else None
+        return TradeDisputeStatementAuditReconciliation(
+            scanned=len(records),
+            anchored=anchored,
+            verified_anchored=verified_anchored,
+            failed=failed,
+            next_cursor=next_cursor,
+            has_more=has_more,
         )
 
     def reconcile_one(
@@ -442,14 +585,98 @@ class TradeDisputeStatementAuditCoordinator:
             anchor_created=anchor_created,
         )
 
+    def reconcile_review(
+        self,
+        *,
+        review: TradeReceiptReview | dict[str, Any],
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+        package_resolver: RulePackageResolver | None = None,
+        limit: int = 100,
+        after: str | None = None,
+        observed_at_ms: int | None = None,
+        clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS,
+    ) -> TradeDisputeStatementAuditReconciliation:
+        """Repair missing Spine anchors for one exact signed Review page."""
+
+        page = self.store.list_for_review(
+            review=review,
+            receipt=receipt,
+            order=order,
+            package_resolver=package_resolver,
+            limit=limit,
+            after=after,
+        )
+        events = self.spine.verified_snapshot()
+        anchors: dict[str, list[SpineEvent]] = {}
+        for event in events:
+            if event.type != EVENT_TRADE_DISPUTE_STATEMENT_RETAINED:
+                continue
+            payload = validate_trade_dispute_statement_audit_payload(event.payload)
+            anchors.setdefault(payload["statement_digest"], []).append(event)
+
+        anchored = 0
+        verified_anchored = 0
+        failed = 0
+        for statement_digest, statement in zip(
+            page.statement_digests,
+            page.statements,
+            strict=True,
+        ):
+            matching = anchors.get(statement_digest, ())
+            try:
+                if len(matching) > 1:
+                    raise TradeDisputeStatementAuditError(
+                        "duplicate Trade Dispute Statement Spine anchors"
+                    )
+                if matching:
+                    validate_trade_dispute_statement_audit_event(
+                        matching[0],
+                        expected_author_did=self.spine.signer_did,
+                        statement=statement,
+                        review=review,
+                        receipt=receipt,
+                        order=order,
+                        package_resolver=package_resolver,
+                        clock_skew_seconds=clock_skew_seconds,
+                    )
+                    verified_anchored += 1
+                    continue
+                _event, created = self._anchor(
+                    statement,
+                    observed_at_ms=_observation(observed_at_ms)[0],
+                    clock_skew_seconds=clock_skew_seconds,
+                )
+                if created:
+                    anchored += 1
+                else:
+                    verified_anchored += 1
+            except (
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                failed += 1
+        return TradeDisputeStatementAuditReconciliation(
+            scanned=len(page.statements),
+            anchored=anchored,
+            verified_anchored=verified_anchored,
+            failed=failed,
+            next_cursor=page.next_cursor,
+            has_more=page.next_cursor is not None,
+        )
+
 
 __all__ = [
     "EVENT_TRADE_DISPUTE_STATEMENT_RETAINED",
+    "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED",
     "MAX_TRADE_DISPUTE_AUDIT_OBSERVED_AT_MS",
     "TRADE_DISPUTE_STATEMENT_ASSERTION_STATUS",
     "TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION",
     "TradeDisputeStatementAuditError",
     "TradeDisputeStatementAuditCoordinator",
+    "TradeDisputeStatementAuditReconciliation",
     "TradeDisputeStatementAuditResult",
     "trade_dispute_statement_audit_payload",
     "validate_trade_dispute_statement_audit_binding",

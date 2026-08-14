@@ -81,6 +81,11 @@ from nth_dao.trade_rules.dispute_statement_audit import (
     EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
     trade_dispute_statement_audit_payload,
 )
+from nth_dao.trade_rules.dispute_statement_dispatch import (
+    EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED,
+    TradeDisputeStatementDispatchRecord,
+    dispute_statement_acknowledgement_audit_payload,
+)
 from nth_dao.trade_rules.dispute_statement_transport import (
     DISPUTE_STATEMENT_ACKNOWLEDGEMENT_SIGNING_DOMAIN,
     DISPUTE_STATEMENT_DELIVERY_SIGNING_DOMAIN,
@@ -711,6 +716,30 @@ def generate_vectors() -> dict[str, Any]:
                 received_at="2026-08-01T02:06:00Z",
                 audit_event_id="a" * 64,
             )
+        )
+        dispute_statement_dispatch_record = TradeDisputeStatementDispatchRecord(
+            statement_digest=dispute_statement_delivery.to_dict()[
+                "statement_digest"
+            ],
+            target_url="https://peer.example/nth-dao",
+            delivery=dispute_statement_delivery,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            attempts=0,
+            last_error="",
+            created_at_ms=int(
+                _utc("2026-08-01T02:05:00Z").timestamp() * 1_000
+            ),
+            updated_at_ms=int(
+                _utc("2026-08-01T02:06:00Z").timestamp() * 1_000
+            ),
+            generation=1,
+            acknowledgement=dispute_statement_acknowledgement,
+            remote_event_id="a" * 64,
+            observed_at_ms=int(
+                _utc("2026-08-01T02:06:00Z").timestamp() * 1_000
+            ),
         )
         overlong_dispute_statement_delivery = (
             create_trade_dispute_statement_delivery(
@@ -1404,6 +1433,12 @@ def generate_vectors() -> dict[str, Any]:
         "trade_dispute_statement_audit": {
             "event_type": EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
             "payload": dispute_statement_audit,
+        },
+        "trade_dispute_statement_acknowledgement_audit": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED,
+            "payload": dispute_statement_acknowledgement_audit_payload(
+                dispute_statement_dispatch_record
+            ),
         },
         "receipt_review_delivery": receipt_review_delivery.to_dict(),
         "receipt_review_delivery_digest": trade_receipt_review_delivery_digest(

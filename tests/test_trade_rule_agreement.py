@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
 import multiprocessing
 import os
@@ -147,6 +148,15 @@ from nth_dao.trade_rules.dispute_statement_transport import (
     TradeDisputeStatementAcknowledgementRejected,
     TradeDisputeStatementDelivery,
     TradeDisputeStatementDeliveryRejected,
+    create_trade_dispute_statement_acknowledgement,
+    create_trade_dispute_statement_delivery,
+    verify_trade_dispute_statement_acknowledgement,
+)
+from nth_dao.trade_rules.dispute_statement_intake import (
+    TradeDisputeStatementIntakeJournal,
+)
+from nth_dao.trade_rules.dispute_statement_dispatch import (
+    EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED,
 )
 from nth_dao.trade_rules.execution_receipt import (
     _create_trade_execution_receipt,
@@ -8119,6 +8129,1664 @@ def test_public_receipt_review_budget_precedes_runtime_disclosure(tmp_path):
     )
 
     assert response.status_code == 429
+
+
+def _live_dispute_statement_delivery(tmp_path, app, *, receiver_role="taker"):
+    assert receiver_role in {"maker", "taker"}
+    context = _setup(
+        tmp_path / "fixtures",
+        **{receiver_role: app.state.nth.node_identity},
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    _retain_order_and_receipt(app, context, order, receipt)
+    _configure_live_execution_receiver(app, context)
+    moment = datetime.now(timezone.utc)
+    if moment.microsecond == 0:
+        moment = moment.replace(microsecond=1)
+    reviewed_at = moment.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    review = create_trade_receipt_review(
+        context["taker"],
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        verifier_policy=context["taker_policy"],
+        adapter_resolver=context["adapter_resolver"],
+        adapter_policy=context["adapter_policy"],
+        content_resolver=context["content_resolver"],
+        schema_validator=context["schema_validator"],
+        decision="disputed",
+        reason_codes=["result.mismatch"],
+        reviewed_at=reviewed_at,
+        now=moment,
+    )
+    app.state.nth.trade_receipt_review_coordinator.record(
+        review,
+        receipt=receipt,
+        order=order,
+        verifier_policy=context["taker_policy"],
+        adapter_policy=context["adapter_policy"],
+        observed_at_ms=int(moment.timestamp() * 1_000),
+    )
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        rule_action={
+            **rule_binding,
+            "hook": "fulfillment.deliver",
+            "hook_version": "1",
+        },
+        package_resolver=context["package_store"],
+        created_at=reviewed_at,
+        now=moment,
+    )
+    delivery = create_trade_dispute_statement_delivery(
+        context["maker"],
+        statement=statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        created_at=reviewed_at,
+        not_after=(moment + timedelta(minutes=5)).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z"),
+        now=moment,
+    )
+    path = (
+        f"/api/v2/trade/federation/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    return context, order, receipt, review, delivery, path
+
+
+def test_public_dispute_statement_replays_context_and_returns_stable_ack(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, _review, delivery, path = (
+        _live_dispute_statement_delivery(tmp_path, app)
+    )
+    client = TestClient(app)
+
+    first = client.post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    replay = client.post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert first.status_code == 202, first.text
+    assert replay.status_code == 202, replay.text
+    assert first.json()["status"] == "dispute-statement-retained-verified"
+    assert first.json()["statement_store_created"] is True
+    assert replay.json()["statement_store_created"] is False
+    assert replay.json()["acknowledgement"] == first.json()["acknowledgement"]
+    acknowledgement = TradeDisputeStatementAcknowledgement.from_dict(
+        first.json()["acknowledgement"]
+    )
+    assert verify_trade_dispute_statement_acknowledgement(
+        acknowledgement,
+        delivery=delivery,
+        review=_review,
+        receipt=receipt,
+        order=order,
+    ) == (True, "ok")
+    assert first.json()["claim_adjudicated_or_proven_true"] is False
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_public_dispute_statement_rejects_path_mismatch_and_wrong_node(tmp_path):
+    app = create_app(tmp_path / "target", require_console_auth=True)
+    _context, _order_value, _receipt, _review, delivery, path = (
+        _live_dispute_statement_delivery(tmp_path / "target-fixture", app)
+    )
+    client = TestClient(app)
+    wrong_review_path = path.replace(
+        delivery.statement.to_dict()["review_id"],
+        "nth-trade-review-sha256:" + ("f" * 64),
+    )
+
+    missing_bound_review = client.post(
+        wrong_review_path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert missing_bound_review.status_code == 404
+
+    wrong_app = create_app(tmp_path / "wrong-node", require_console_auth=True)
+    (
+        _wrong_context,
+        _wrong_order,
+        _wrong_receipt,
+        _wrong_review,
+        wrong_delivery,
+        wrong_path,
+    ) = _live_dispute_statement_delivery(
+        tmp_path / "wrong-fixture",
+        wrong_app,
+        receiver_role="maker",
+    )
+    wrong_target = TestClient(wrong_app).post(
+        wrong_path,
+        content=wrong_delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert wrong_target.status_code == 400
+    assert "recipient" in wrong_target.json()["detail"]
+
+
+def test_public_dispute_statement_enforces_capacity_and_preparse_limit(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, _order, _receipt, _review, delivery, path = (
+        _live_dispute_statement_delivery(tmp_path, app)
+    )
+    app.state.nth.trade_dispute_statement_intake_journal = (
+        TradeDisputeStatementIntakeJournal(
+            app.state.nth.workspace,
+            max_bytes=1,
+        )
+    )
+    client = TestClient(app)
+
+    capacity = client.post(
+        path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    oversized = client.post(
+        path,
+        content=b"{" + (b"x" * (512 * 1024)) + b"}",
+        headers={"Content-Type": "application/json"},
+    )
+    malformed = client.post(
+        path,
+        content=b"{",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert capacity.status_code == 507, capacity.text
+    assert oversized.status_code == 413, oversized.text
+    assert "512 KiB" in oversized.json()["detail"]
+    assert malformed.status_code == 400, malformed.text
+
+
+def test_corrupt_dispute_statement_journal_disables_only_federated_intake(
+    tmp_path,
+):
+    workspace = tmp_path / "node"
+    journal_path = workspace / "trade" / "dispute_statement_intake_v1.sqlite3"
+    journal_path.parent.mkdir(parents=True)
+    journal_path.write_bytes(b"not-a-sqlite-database")
+
+    app = create_app(workspace, require_console_auth=True)
+
+    assert app.state.nth.trade_dispute_statement_intake_journal is None
+    assert app.state.nth.trade_dispute_statement_audit is not None
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+    response = TestClient(app).post(
+        "/api/v2/trade/federation/orders/sha256:"
+        + ("1" * 64)
+        + "/execution-receipts/nth-trade-execution-sha256:"
+        + ("2" * 64)
+        + "/reviews/nth-trade-review-sha256:"
+        + ("3" * 64)
+        + "/dispute-statements",
+        json={},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == (
+        "dispute-statement-intake-not-configured"
+    )
+
+
+def test_unsupported_dispute_dispatch_schema_disables_only_outbound_delivery(
+    tmp_path,
+):
+    workspace = tmp_path / "node"
+    dispatch_path = (
+        workspace
+        / "trade"
+        / "dispute_dispatch_v1"
+        / "dispatch.sqlite3"
+    )
+    dispatch_path.parent.mkdir(parents=True)
+    with sqlite3.connect(dispatch_path) as connection:
+        connection.execute("PRAGMA user_version = 999")
+
+    app = create_app(workspace, require_console_auth=True)
+
+    assert app.state.nth.trade_dispute_statement_dispatch_store is None
+    assert app.state.nth.trade_dispute_statement_dispatch is None
+    assert app.state.nth.trade_dispute_statement_audit is not None
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+    response = TestClient(app).get(
+        "/api/state",
+        params={"agent_id": "admin"},
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_public_dispute_statement_budget_precedes_context_disclosure(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    per_client = RateLimiter(max_per_window=1, window_seconds=60)
+    global_limiter = RateLimiter(max_per_window=1, window_seconds=60)
+    per_client.check("testclient")
+    global_limiter.check("global")
+    app.state.nth.trade_dispute_statement_delivery_limiter = per_client
+    app.state.nth.trade_dispute_statement_delivery_global_limiter = global_limiter
+
+    response = TestClient(app).post(
+        "/api/v2/trade/federation/orders/sha256:"
+        + ("1" * 64)
+        + "/execution-receipts/nth-trade-execution-sha256:"
+        + ("2" * 64)
+        + "/reviews/nth-trade-review-sha256:"
+        + ("3" * 64)
+        + "/dispute-statements",
+        json={},
+    )
+
+    assert response.status_code == 429
+
+
+def test_operator_creates_and_lists_signed_dispute_statement(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    source = delivery.statement.to_dict()
+    body = {
+        field: source[field]
+        for field in (
+            "statement_type",
+            "parent_statement_digests",
+            "reason_codes",
+            "claim",
+            "evidence",
+            "rule_action",
+        )
+    }
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    auth = {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+        "Idempotency-Key": "dispute-create-test-0001",
+    }
+    client = TestClient(app)
+
+    created = client.post(path, json=body, headers=auth)
+    listed = client.get(path, headers=auth)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["status"] == "dispute-statement-signed"
+    assert created.json()["statement"]["author_did"] == (
+        app.state.nth.node_identity.as_did()
+    )
+    assert created.json()["statement_store_created"] is True
+    assert created.json()["audit_anchor_created"] is True
+    assert created.json()["claim_adjudicated_or_proven_true"] is False
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["status"] == "dispute-statements-listed"
+    assert listed.json()["claims_adjudicated_or_proven_true"] is False
+    assert len(listed.json()["items"]) == 1
+    assert listed.json()["items"][0]["statement_digest"] == (
+        created.json()["statement_digest"]
+    )
+    assert listed.json()["items"][0]["claim_status"] == (
+        "signed-unadjudicated-claim"
+    )
+    assert listed.json()["items"][0]["audit_status"] == "anchored"
+    assert listed.json()["items"][0]["audit_event_id"] == (
+        created.json()["audit_event_id"]
+    )
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def _operator_dispute_statement_request(
+    app,
+    order,
+    receipt,
+    review,
+    delivery,
+    *,
+    idempotency_key,
+):
+    source = delivery.statement.to_dict()
+    body = {
+        field: source[field]
+        for field in (
+            "statement_type",
+            "parent_statement_digests",
+            "reason_codes",
+            "claim",
+            "evidence",
+            "rule_action",
+        )
+    }
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    headers = {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+        "Idempotency-Key": idempotency_key,
+    }
+    return path, body, headers
+
+
+def test_operator_dispute_statement_retry_is_content_idempotent(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-retry-0001",
+    )
+    client = TestClient(app)
+
+    first = client.post(path, json=body, headers=headers)
+    retry = client.post(path, json=body, headers=headers)
+    page = app.state.nth.trade_dispute_statements.list_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        limit=100,
+    )
+
+    assert first.status_code == 201, first.text
+    assert retry.status_code == 200, retry.text
+    assert first.json()["statement_id"] == retry.json()["statement_id"]
+    assert first.json()["statement_digest"] == retry.json()["statement_digest"]
+    assert first.json()["operation_id"] == retry.json()["operation_id"]
+    assert first.json()["reservation_created"] is True
+    assert retry.json()["reservation_created"] is False
+    assert retry.json()["statement_store_created"] is False
+    assert len(page.statements) == 1
+
+
+def test_operator_dispute_statement_requires_idempotency_key_without_writes(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-required-0001",
+    )
+    headers.pop("Idempotency-Key")
+    before = tuple(app.state.nth.spine.verified_snapshot())
+
+    response = TestClient(app).post(path, json=body, headers=headers)
+    page = app.state.nth.trade_dispute_statements.list_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        limit=100,
+    )
+
+    assert response.status_code == 400, response.text
+    assert "Idempotency-Key" in response.json()["detail"]
+    assert tuple(app.state.nth.spine.verified_snapshot()) == before
+    assert page.statements == ()
+
+
+def test_operator_dispute_statement_retry_survives_app_restart(tmp_path):
+    workspace = tmp_path / "node"
+    app = create_app(workspace, require_console_auth=True)
+    persistent_package_store = app.state.nth.trade_rule_packages
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    package = _context["package_store"].load(_context["package_digest"])
+    assert package is not None
+    persistent_package_store.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    app.state.nth.trade_rule_packages = persistent_package_store
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-restart-0001",
+    )
+    first = TestClient(app).post(path, json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    restarted = create_app(workspace, require_console_auth=True)
+    restarted_headers = {
+        "Authorization": f"Bearer {restarted.state.nth_console_token}",
+        "Idempotency-Key": "dispute-create-restart-0001",
+    }
+    retry = TestClient(restarted).post(
+        path,
+        json=body,
+        headers=restarted_headers,
+    )
+
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["statement_id"] == first.json()["statement_id"]
+    assert retry.json()["statement_digest"] == first.json()["statement_digest"]
+    assert retry.json()["operation_id"] == first.json()["operation_id"]
+    assert retry.json()["reservation_created"] is False
+    assert retry.json()["statement_store_created"] is False
+    assert restarted.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_operator_dispute_statement_retry_recovers_store_then_spine_failure(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-recover-0001",
+    )
+    coordinator = app.state.nth.trade_dispute_statement_audit
+    real_anchor = coordinator._anchor
+    failed_once = False
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise RuntimeError("injected Spine failure after Store commit")
+        return real_anchor(*args, **kwargs)
+
+    coordinator._anchor = fail_once
+    client = TestClient(app)
+
+    failed = client.post(path, json=body, headers=headers)
+    recovered = client.post(path, json=body, headers=headers)
+    page = app.state.nth.trade_dispute_statements.list_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        limit=100,
+    )
+
+    assert failed.status_code == 503, failed.text
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["statement_store_created"] is False
+    assert recovered.json()["audit_anchor_created"] is True
+    assert len(page.statements) == 1
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_dispute_statement_startup_recovers_store_then_spine_failure(tmp_path):
+    workspace = tmp_path / "node"
+    app = create_app(workspace, require_console_auth=True)
+    persistent_package_store = app.state.nth.trade_rule_packages
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    persistent_package_store.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    app.state.nth.trade_rule_packages = persistent_package_store
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-startup-recovery-0001",
+    )
+    coordinator = app.state.nth.trade_dispute_statement_audit
+    real_anchor = coordinator._anchor
+
+    def fail_anchor(*_args, **_kwargs):
+        raise RuntimeError("injected crash before retained anchor")
+
+    coordinator._anchor = fail_anchor
+    failed = TestClient(app).post(path, json=body, headers=headers)
+    coordinator._anchor = real_anchor
+    assert failed.status_code == 503, failed.text
+    assert not any(
+        event.type == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+        for event in app.state.nth.spine.verified_snapshot()
+    )
+
+    restarted = create_app(workspace, require_console_auth=True)
+    anchors = [
+        event
+        for event in restarted.state.nth.spine.verified_snapshot()
+        if event.type == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+    ]
+
+    assert len(anchors) == 1
+    assert restarted.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_dispute_statement_runtime_worker_recovers_partial_write(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "node"
+    app = create_app(workspace, require_console_auth=True)
+    persistent_package_store = app.state.nth.trade_rule_packages
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    persistent_package_store.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    app.state.nth.trade_rule_packages = persistent_package_store
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-runtime-recovery-0001",
+    )
+    coordinator = app.state.nth.trade_dispute_statement_audit
+    real_anchor = coordinator._anchor
+    coordinator._anchor = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("injected transient anchor failure")
+    )
+    monkeypatch.setattr(
+        "nth_dao.web._TRADE_DISPUTE_RECOVERY_POLL_SECONDS",
+        0.01,
+    )
+
+    with TestClient(app) as client:
+        failed = client.post(path, json=body, headers=headers)
+        assert failed.status_code == 503, failed.text
+        coordinator._anchor = real_anchor
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if any(
+                event.type
+                == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+                for event in app.state.nth.spine.verified_snapshot()
+            ):
+                break
+            time.sleep(0.01)
+
+    anchors = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+    ]
+    assert len(anchors) == 1
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_operator_dispute_statement_idempotency_key_reuse_conflicts(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-conflict-0001",
+    )
+    client = TestClient(app)
+
+    first = client.post(path, json=body, headers=headers)
+    conflict = client.post(
+        path,
+        json={**body, "reason_codes": ["different.claim"]},
+        headers=headers,
+    )
+
+    assert first.status_code == 201, first.text
+    assert conflict.status_code == 409, conflict.text
+    assert "Idempotency-Key" in conflict.json()["detail"]
+
+
+def test_operator_dispute_statement_concurrent_retry_creates_once(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-concurrent-0001",
+    )
+
+    def create_once(_index):
+        return TestClient(app).post(path, json=body, headers=headers)
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        responses = list(executor.map(create_once, range(6)))
+    page = app.state.nth.trade_dispute_statements.list_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        limit=100,
+    )
+
+    assert sorted(response.status_code for response in responses) == [
+        200,
+        200,
+        200,
+        200,
+        200,
+        201,
+    ]
+    assert len({response.json()["statement_id"] for response in responses}) == 1
+    assert len(page.statements) == 1
+
+
+def test_operator_dispute_statement_write_is_bounded_and_console_only(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    source = delivery.statement.to_dict()
+    body = {
+        field: source[field]
+        for field in (
+            "statement_type",
+            "parent_statement_digests",
+            "reason_codes",
+            "claim",
+            "evidence",
+            "rule_action",
+        )
+    }
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    auth = {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+        "Idempotency-Key": "dispute-create-test-0002",
+    }
+    client = TestClient(app)
+
+    anonymous = client.post(path, json=body)
+    unknown = client.post(path, json={**body, "execute": True}, headers=auth)
+    oversized = client.post(
+        path,
+        content=b"{" + (b"x" * (256 * 1024)) + b"}",
+        headers={**auth, "Content-Type": "application/json"},
+    )
+    invalid_cursor = client.get(path + "?after=bad", headers=auth)
+
+    assert anonymous.status_code == 401
+    assert unknown.status_code == 400
+    assert oversized.status_code == 413
+    assert "256 KiB" in oversized.json()["detail"]
+    assert invalid_cursor.status_code == 400
+    assert not app.state.nth.trade_dispute_statements.root.exists()
+
+
+def test_operator_dispute_statement_requires_local_order_party(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    source = delivery.statement.to_dict()
+    body = {
+        field: source[field]
+        for field in (
+            "statement_type",
+            "parent_statement_digests",
+            "reason_codes",
+            "claim",
+            "evidence",
+            "rule_action",
+        )
+    }
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    app.state.nth.node_identity = AgentIdentity.generate()
+
+    response = TestClient(app).post(
+        path,
+        json=body,
+        headers={
+            "Authorization": f"Bearer {app.state.nth_console_token}",
+            "Idempotency-Key": "dispute-create-test-0003",
+        },
+    )
+
+    assert response.status_code == 403
+    assert not app.state.nth.trade_dispute_statements.root.exists()
+
+
+def test_operator_lists_retained_dispute_statement_as_pending_until_anchored(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    statement = delivery.statement.resolve(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+    )
+    app.state.nth.trade_dispute_statements.put(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+    )
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+
+    client = TestClient(app)
+    response = client.get(
+        path,
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["items"]) == 1
+    assert response.json()["items"][0]["audit_status"] == (
+        "retained-pending-audit"
+    )
+    assert response.json()["items"][0]["audit_event_id"] == ""
+    app.state.nth.trade_dispute_statement_audit.record(
+        statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        observed_at_ms=int(datetime.now(timezone.utc).timestamp() * 1_000),
+    )
+    anchored = client.get(
+        path,
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+    assert anchored.status_code == 200, anchored.text
+    assert anchored.json()["items"][0]["audit_status"] == "anchored"
+    assert anchored.json()["items"][0]["audit_event_id"]
+
+
+def test_dispute_statement_projection_uses_atomic_verified_snapshot_and_cache(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, _delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    spine = app.state.nth.spine
+    real_snapshot = spine.verified_snapshot_with_token
+    calls = 0
+
+    def snapshot_once():
+        nonlocal calls
+        if any(
+            frame.function == "_stable_audit_events"
+            for frame in inspect.stack()
+        ):
+            calls += 1
+        return real_snapshot()
+
+    monkeypatch.setattr(spine, "verified_snapshot_with_token", snapshot_once)
+    monkeypatch.setattr(
+        spine,
+        "read_all",
+        lambda: (_ for _ in ()).throw(AssertionError("racy read_all used")),
+    )
+    monkeypatch.setattr(
+        spine,
+        "verify_chain",
+        lambda: (_ for _ in ()).throw(AssertionError("double verify used")),
+    )
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    client = TestClient(app)
+
+    first = client.get(path, headers=headers)
+    cached = client.get(path, headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert cached.status_code == 200, cached.text
+    assert calls == 1
+
+
+def test_dispute_statement_projection_rejects_corrupt_spine_chain(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, _delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    spine = app.state.nth.spine
+    order_view = app.state.nth.trade_order_audit.get_accepted(
+        trade_order_digest(order)
+    )
+    assert order_view is not None
+    spine.append("test.dispute.projection", {"value": "original"})
+    lines = spine._path.read_bytes().splitlines()
+    document = json.loads(lines[-1])
+    document["payload"]["value"] = "tampered"
+    lines[-1] = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    spine._path.write_bytes(b"\n".join(lines) + b"\n")
+    app.state.nth.trade_order_audit.get_accepted = lambda _digest: order_view
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+
+    response = TestClient(app).get(
+        path,
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "trade Dispute Statement audit projection is invalid"
+    )
+
+
+def test_dispute_statement_projection_invalidates_cache_after_concurrent_append(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, _delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    spine = app.state.nth.spine
+    real_snapshot = spine.verified_snapshot_with_token
+    injected = False
+
+    def snapshot_then_append():
+        nonlocal injected
+        token, events = real_snapshot()
+        if not injected and any(
+            frame.function == "_stable_audit_events"
+            for frame in inspect.stack()
+        ):
+            injected = True
+            spine.append(
+                trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
+                {"statement_digest": "sha256:" + ("2" * 64)},
+            )
+        return token, events
+
+    monkeypatch.setattr(
+        spine,
+        "verified_snapshot_with_token",
+        snapshot_then_append,
+    )
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    client = TestClient(app)
+
+    first = client.get(path, headers=headers)
+    second = client.get(path, headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409
+    assert injected is True
+
+
+def test_operator_dispute_statement_list_rejects_malformed_typed_audit_event(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, _delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    app.state.nth.spine.append(
+        trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
+        {"statement_digest": "sha256:" + ("1" * 64)},
+    )
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+
+    response = TestClient(app).get(
+        path,
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "trade Dispute Statement audit projection is invalid"
+    )
+
+
+def _create_operator_dispute_statement_for_dispatch(
+    app,
+    order,
+    receipt,
+    review,
+    delivery,
+    *,
+    idempotency_key,
+):
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key=idempotency_key,
+    )
+    response = TestClient(app).post(path, json=body, headers=headers)
+    assert response.status_code == 201, response.text
+    return path, headers, response.json()
+
+
+def test_operator_delivers_dispute_statement_once_and_reuses_durable_ack(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, headers, created = _create_operator_dispute_statement_for_dispatch(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-dispatch-once-0001",
+    )
+    network_calls = 0
+
+    def receive(
+        peer_url,
+        sent_order_digest,
+        sent_execution_id,
+        sent_review_id,
+        document,
+        *,
+        timeout_seconds=15.0,
+    ):
+        nonlocal network_calls
+        network_calls += 1
+        assert peer_url == "http://peer.example"
+        assert sent_order_digest == trade_order_digest(order)
+        assert sent_execution_id == receipt.execution_id
+        assert sent_review_id == review.review_id
+        assert timeout_seconds == 15.0
+        signed_delivery = TradeDisputeStatementDelivery.from_dict(
+            document,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        acknowledgement = create_trade_dispute_statement_acknowledgement(
+            context["taker"],
+            delivery=signed_delivery,
+            review=review,
+            receipt=receipt,
+            order=order,
+            received_at=document["created_at"],
+            audit_event_id="7" * 64,
+        )
+        return 202, {
+            "acknowledgement": acknowledgement.to_dict(),
+            "audit_event_id": "7" * 64,
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        receive,
+    )
+    target = f"{path}/{created['statement_digest']}/deliver"
+    client = TestClient(app)
+
+    first = client.post(
+        target,
+        json={"target_url": "http://peer.example/"},
+        headers=headers,
+    )
+    retry = client.post(
+        target,
+        json={"target_url": "http://peer.example"},
+        headers=headers,
+    )
+
+    assert first.status_code == 200, first.text
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["acknowledgement"] == first.json()["acknowledgement"]
+    assert first.json()["claim_adjudicated_or_proven_true"] is False
+    assert network_calls == 1
+    retained = app.state.nth.trade_dispute_statement_dispatch_store.get(
+        created["statement_digest"]
+    )
+    assert retained is not None
+    assert retained.acknowledged is True
+    assert retained.anchor_event_id
+    assert any(
+        event.type == EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED
+        for event in app.state.nth.spine.verified_snapshot()
+    )
+
+
+def test_operator_dispute_statement_delivery_is_single_flight(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, headers, created = _create_operator_dispute_statement_for_dispatch(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-dispatch-single-flight-0001",
+    )
+    target = f"{path}/{created['statement_digest']}/deliver"
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected first network failure")
+        ),
+    )
+    retained = TestClient(app).post(
+        target,
+        json={"target_url": "http://peer.example"},
+        headers=headers,
+    )
+    assert retained.status_code == 502, retained.text
+
+    entered = threading.Event()
+    release = threading.Event()
+    network_calls = 0
+    network_lock = threading.Lock()
+
+    def blocking_receive(*args, **_kwargs):
+        nonlocal network_calls
+        with network_lock:
+            network_calls += 1
+        document = args[4]
+        signed_delivery = TradeDisputeStatementDelivery.from_dict(
+            document,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        entered.set()
+        assert release.wait(timeout=10)
+        acknowledgement = create_trade_dispute_statement_acknowledgement(
+            context["taker"],
+            delivery=signed_delivery,
+            review=review,
+            receipt=receipt,
+            order=order,
+            received_at=document["created_at"],
+            audit_event_id="9" * 64,
+        )
+        return 202, {
+            "acknowledgement": acknowledgement.to_dict(),
+            "audit_event_id": "9" * 64,
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        blocking_receive,
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            active = executor.submit(
+                TestClient(app).post,
+                target,
+                json={"target_url": "http://peer.example"},
+                headers=headers,
+            )
+            assert entered.wait(timeout=10)
+            competing = TestClient(app).post(
+                target,
+                json={"target_url": "http://peer.example"},
+                headers=headers,
+            )
+            assert competing.status_code == 503, competing.text
+            assert competing.headers["Retry-After"] == "1"
+            release.set()
+            completed = active.result(timeout=20)
+    finally:
+        release.set()
+
+    assert completed.status_code == 200, completed.text
+    assert network_calls == 1
+
+
+def test_operator_rejects_misbound_dispute_statement_ack_and_releases_lease(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, headers, created = _create_operator_dispute_statement_for_dispatch(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-dispatch-misbound-ack-0001",
+    )
+
+    def receive(*args, **_kwargs):
+        document = args[4]
+        signed_delivery = TradeDisputeStatementDelivery.from_dict(
+            document,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        acknowledgement = create_trade_dispute_statement_acknowledgement(
+            context["taker"],
+            delivery=signed_delivery,
+            review=review,
+            receipt=receipt,
+            order=order,
+            received_at=document["created_at"],
+            audit_event_id="b" * 64,
+        )
+        return 202, {
+            "acknowledgement": acknowledgement.to_dict(),
+            "audit_event_id": "c" * 64,
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        receive,
+    )
+    response = TestClient(app).post(
+        f"{path}/{created['statement_digest']}/deliver",
+        json={"target_url": "http://peer.example"},
+        headers=headers,
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"] == (
+        "peer returned an invalid signed acknowledgement"
+    )
+    retained = app.state.nth.trade_dispute_statement_dispatch_store.get(
+        created["statement_digest"]
+    )
+    assert retained is not None
+    assert retained.acknowledged is False
+    assert retained.attempts == 1
+    assert retained.lease_expires_at_ms == 0
+
+
+def test_dispute_statement_dispatch_restart_anchors_retained_remote_ack(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "node"
+    app = create_app(workspace, require_console_auth=True)
+    persistent_packages = app.state.nth.trade_rule_packages
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    package = context["package_store"].load(context["package_digest"])
+    assert package is not None
+    persistent_packages.install(
+        package.manifest,
+        package.resources,
+        source="local",
+    )
+    app.state.nth.trade_rule_packages = persistent_packages
+    path, headers, created = _create_operator_dispute_statement_for_dispatch(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-dispatch-restart-0001",
+    )
+    network_calls = 0
+
+    def receive(*_args, **_kwargs):
+        nonlocal network_calls
+        network_calls += 1
+        document = _args[4]
+        signed_delivery = TradeDisputeStatementDelivery.from_dict(
+            document,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        acknowledgement = create_trade_dispute_statement_acknowledgement(
+            context["taker"],
+            delivery=signed_delivery,
+            review=review,
+            receipt=receipt,
+            order=order,
+            received_at=document["created_at"],
+            audit_event_id="8" * 64,
+        )
+        return 202, {
+            "acknowledgement": acknowledgement.to_dict(),
+            "audit_event_id": "8" * 64,
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        receive,
+    )
+    monkeypatch.setattr(
+        app.state.nth.trade_dispute_statement_dispatch,
+        "_anchor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected local Spine outage")
+        ),
+    )
+    target = f"{path}/{created['statement_digest']}/deliver"
+    failed = TestClient(app).post(
+        target,
+        json={"target_url": "http://peer.example"},
+        headers=headers,
+    )
+
+    assert failed.status_code == 503, failed.text
+    retained = app.state.nth.trade_dispute_statement_dispatch_store.get(
+        created["statement_digest"]
+    )
+    assert retained is not None and retained.acknowledged
+    assert retained.anchor_event_id == ""
+    assert network_calls == 1
+
+    restarted = create_app(workspace, require_console_auth=True)
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("retained acknowledgement must prevent network replay")
+        ),
+    )
+    retry = TestClient(restarted).post(
+        target,
+        json={"target_url": "http://peer.example"},
+        headers={
+            "Authorization": f"Bearer {restarted.state.nth_console_token}"
+        },
+    )
+
+    assert retry.status_code == 200, retry.text
+    recovered = restarted.state.nth.trade_dispute_statement_dispatch_store.get(
+        created["statement_digest"]
+    )
+    assert recovered is not None and recovered.anchor_event_id
+    assert restarted.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_dispute_statement_runtime_worker_anchors_retained_remote_ack(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, headers, created = _create_operator_dispute_statement_for_dispatch(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-dispatch-worker-0001",
+    )
+
+    def receive(*args, **_kwargs):
+        document = args[4]
+        signed_delivery = TradeDisputeStatementDelivery.from_dict(
+            document,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        acknowledgement = create_trade_dispute_statement_acknowledgement(
+            context["taker"],
+            delivery=signed_delivery,
+            review=review,
+            receipt=receipt,
+            order=order,
+            received_at=document["created_at"],
+            audit_event_id="a" * 64,
+        )
+        return 202, {
+            "acknowledgement": acknowledgement.to_dict(),
+            "audit_event_id": "a" * 64,
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        receive,
+    )
+    coordinator = app.state.nth.trade_dispute_statement_dispatch
+    real_anchor = coordinator._anchor
+    coordinator._anchor = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        OSError("injected transient dispatch anchor outage")
+    )
+    monkeypatch.setattr(
+        "nth_dao.web._TRADE_DISPUTE_RECOVERY_POLL_SECONDS",
+        0.01,
+    )
+    target = f"{path}/{created['statement_digest']}/deliver"
+
+    with TestClient(app) as client:
+        failed = client.post(
+            target,
+            json={"target_url": "http://peer.example"},
+            headers=headers,
+        )
+        assert failed.status_code == 503, failed.text
+        coordinator._anchor = real_anchor
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            retained = app.state.nth.trade_dispute_statement_dispatch_store.get(
+                created["statement_digest"]
+            )
+            if retained is not None and retained.anchor_event_id:
+                break
+            time.sleep(0.01)
+
+    retained = app.state.nth.trade_dispute_statement_dispatch_store.get(
+        created["statement_digest"]
+    )
+    assert retained is not None and retained.anchor_event_id
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_two_nodes_federate_dispute_statement_and_retain_both_sides(
+    tmp_path,
+    monkeypatch,
+):
+    source = create_app(tmp_path / "source", require_console_auth=True)
+    destination = create_app(
+        tmp_path / "destination",
+        require_console_auth=True,
+    )
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=source.state.nth.node_identity,
+        taker=destination.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    for app in (source, destination):
+        _retain_order_and_receipt(app, context, order, receipt)
+        _configure_live_execution_receiver(app, context)
+    moment = datetime.now(timezone.utc)
+    if moment.microsecond == 0:
+        moment = moment.replace(microsecond=1)
+    reviewed_at = moment.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    review = create_trade_receipt_review(
+        context["taker"],
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        verifier_policy=context["taker_policy"],
+        adapter_resolver=context["adapter_resolver"],
+        adapter_policy=context["adapter_policy"],
+        content_resolver=context["content_resolver"],
+        schema_validator=context["schema_validator"],
+        decision="disputed",
+        reason_codes=["result.mismatch"],
+        reviewed_at=reviewed_at,
+        now=moment,
+    )
+    for app in (source, destination):
+        app.state.nth.trade_receipt_review_coordinator.record(
+            review,
+            receipt=receipt,
+            order=order,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+            observed_at_ms=int(moment.timestamp() * 1_000),
+        )
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    path = (
+        f"/api/v2/trade/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/"
+        f"{review.review_id}/dispute-statements"
+    )
+    created = TestClient(source).post(
+        path,
+        json={
+            "statement_type": "response",
+            "parent_statement_digests": [],
+            "reason_codes": ["executor.contests-review"],
+            "claim": _dispute_claim(),
+            "evidence": [],
+            "rule_action": {
+                **rule_binding,
+                "hook": "fulfillment.deliver",
+                "hook_version": "1",
+            },
+        },
+        headers={
+            "Authorization": f"Bearer {source.state.nth_console_token}",
+            "Idempotency-Key": "dispute-two-node-0001",
+        },
+    )
+    assert created.status_code == 201, created.text
+    destination_client = TestClient(destination)
+    forwarded = 0
+
+    def forward(
+        _peer_url,
+        sent_order_digest,
+        sent_execution_id,
+        sent_review_id,
+        document,
+        **_kwargs,
+    ):
+        nonlocal forwarded
+        forwarded += 1
+        response = destination_client.post(
+            f"/api/v2/trade/federation/orders/{sent_order_digest}"
+            f"/execution-receipts/{sent_execution_id}/reviews/"
+            f"{sent_review_id}/dispute-statements",
+            json=document,
+        )
+        return response.status_code, response.json()
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_delivery_to_peer",
+        forward,
+    )
+    result = TestClient(source).post(
+        f"{path}/{created.json()['statement_digest']}/deliver",
+        json={"target_url": "http://destination.example"},
+        headers={
+            "Authorization": f"Bearer {source.state.nth_console_token}"
+        },
+    )
+
+    assert result.status_code == 200, result.text
+    assert result.json()["claim_adjudicated_or_proven_true"] is False
+    assert forwarded == 1
+    page = destination.state.nth.trade_dispute_statements.list_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        limit=100,
+    )
+    assert len(page.statements) == 1
+    assert source.state.nth.spine.verify_chain() == (True, "ok")
+    assert destination.state.nth.spine.verify_chain() == (True, "ok")
 
 
 def test_operator_delivers_execution_receipt_and_persists_peer_ack(
