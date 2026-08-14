@@ -51,6 +51,7 @@ import { useToast } from "./Toast";
 import { MarketPublishForm, type MarketPublication } from "./MarketPublishForm";
 import { MarketFederationPanel } from "./MarketFederationPanel";
 import { ResourceProfilesPanel } from "./ResourceProfilesPanel";
+import { DisputeWorkbench } from "./DisputeWorkbench";
 
 type Scope = "discover" | "purchases" | "offers" | "proposals" | "agreements" | "skills";
 
@@ -1720,6 +1721,18 @@ function ReceiptReviewPanel({
               ? "Retry signed Review"
               : "Deliver signed Review"}</button>}
     </div>}
+    {value?.status === "reviewed"
+      && value.review?.decision === "disputed"
+      && value.review_digest
+      && <DisputeWorkbench
+        orderDigest={orderDigest}
+        receipt={receipt}
+        reviewId={value.review_id}
+        reviewDigest={value.review_digest}
+        localRole={localRole}
+        reviewerDid={value.review.reviewer_did}
+        peerUrl={peerUrl}
+      />}
     {actionMessage && <span className={actionError ? "trade-proposal-warning" : "muted"} role="status">{actionMessage}</span>}
   </details>;
 }

@@ -930,6 +930,204 @@ export interface TradeReceiptReviewDeliveryResult {
   delivery_quality_or_payment_proven: false;
 }
 
+export interface TradeDisputeContentReference {
+  media_type: string;
+  digest: string;
+  size: number;
+}
+
+export interface TradeDisputeClaimReference extends TradeDisputeContentReference {
+  claim_type: string;
+  schema_digest: string | null;
+}
+
+export interface TradeDisputeEvidenceReference extends TradeDisputeContentReference {
+  purpose: string;
+}
+
+export interface TradeDisputeRuleAction {
+  rule_id: string;
+  digest: string;
+  hook: string;
+  hook_version: string;
+}
+
+export interface TradeDisputeStatementDocument {
+  kind: string;
+  protocol_version: string;
+  statement_id: string;
+  dispute_id: string;
+  order_digest: string;
+  receipt_digest: string;
+  review_digest: string;
+  review_id: string;
+  author_did: string;
+  author_role: "maker" | "taker";
+  statement_type: "response" | "evidence" | "remedy-proposal";
+  parent_statement_digests: string[];
+  reason_codes: string[];
+  claim: TradeDisputeClaimReference | null;
+  evidence: TradeDisputeEvidenceReference[];
+  rule_action: TradeDisputeRuleAction | null;
+  created_at: string;
+  proof: Record<string, unknown>;
+}
+
+export interface TradeDisputeStatementItem {
+  statement_digest: string;
+  statement: TradeDisputeStatementDocument;
+  claim_status: "signed-unadjudicated-claim";
+  audit_status: "anchored" | "retained-pending-audit";
+  audit_event_id: string;
+}
+
+export interface TradeDisputeStatementPage {
+  status: "dispute-statements-listed";
+  order_digest: string;
+  execution_id: string;
+  review_id: string;
+  items: TradeDisputeStatementItem[];
+  snapshot_token: string;
+  next_cursor: string | null;
+  graph_endpoint: string;
+  claims_adjudicated_or_proven_true: false;
+}
+
+export interface TradeDisputeGraphNode {
+  statement_digest: string;
+  parent_statement_digests: string[];
+  ancestry_status: "complete" | "incomplete" | "invalid";
+  depth: number | null;
+}
+
+export interface TradeDisputeGraphIssue {
+  statement_digest: string;
+  parent_digest: string;
+  reason: string;
+}
+
+export interface TradeDisputeGraphProjection {
+  snapshot_token: string;
+  graph_status: "complete" | "incomplete" | "invalid";
+  review_digest: string;
+  dispute_id: string;
+  statement_count: number;
+  root_digests: string[];
+  root_count: number;
+  tip_digests: string[];
+  tip_count: number;
+  topological_digests: string[];
+  topological_count: number;
+  unresolved_parent_digests: string[];
+  unresolved_parent_count: number;
+  non_dag_digests: string[];
+  non_dag_count: number;
+  issues: TradeDisputeGraphIssue[];
+  issue_count: number;
+  nodes: TradeDisputeGraphNode[];
+  node_count: number;
+  items_truncated: boolean;
+  adjudicated_or_proven_true: false;
+}
+
+export interface TradeDisputeGraphResult {
+  status: "dispute-statement-graph-projected";
+  order_digest: string;
+  execution_id: string;
+  review_id: string;
+  graph: TradeDisputeGraphProjection;
+  claims_adjudicated_or_proven_true: false;
+}
+
+export interface CreateTradeDisputeStatementInput {
+  statement_type: "response" | "evidence" | "remedy-proposal";
+  parent_statement_digests: string[];
+  reason_codes: string[];
+  claim: TradeDisputeClaimReference | null;
+  evidence: TradeDisputeEvidenceReference[];
+  rule_action?: TradeDisputeRuleAction | null;
+}
+
+export interface TradeDisputeStatementCreateResult {
+  status: "dispute-statement-signed";
+  order_digest: string;
+  execution_id: string;
+  review_id: string;
+  dispute_id: string;
+  statement_id: string;
+  statement_digest: string;
+  statement: TradeDisputeStatementDocument;
+  statement_store_created: boolean;
+  audit_anchor_created: boolean;
+  audit_event_id: string;
+  operation_id: string;
+  reservation_created: boolean;
+  claim_status: "signed-unadjudicated-claim";
+  claim_adjudicated_or_proven_true: false;
+}
+
+export interface TradeDisputeStatementDeliveryResult {
+  status: "dispute-statement-delivered";
+  order_digest: string;
+  execution_id: string;
+  review_id: string;
+  statement_digest: string;
+  delivery: TradeDisputeStatementDeliveryDocument;
+  delivery_digest: string;
+  acknowledgement: TradeDisputeStatementAcknowledgementDocument;
+  acknowledgement_digest: string;
+  remote_audit_event_id: string;
+  remote_received_at: string;
+  generation: number;
+  attempts: number;
+  acknowledgement_persisted: true;
+  claim_adjudicated_or_proven_true: false;
+}
+
+export interface TradeDisputeTransportProof {
+  type: "Ed25519Signature2020";
+  created: string;
+  verification_method: string;
+  proof_purpose:
+    | "tradeDisputeStatementDelivery"
+    | "tradeDisputeStatementAcknowledgement";
+  proof_value: string;
+}
+
+export interface TradeDisputeStatementDeliveryDocument {
+  kind: "nth.dao.trade.dispute-statement-delivery";
+  protocol_version: "1";
+  delivery_id: string;
+  nonce: string;
+  order_digest: string;
+  receipt_digest: string;
+  review_digest: string;
+  statement_digest: string;
+  sender_did: string;
+  recipient_did: string;
+  created_at: string;
+  not_after: string;
+  statement: TradeDisputeStatementDocument;
+  proof: TradeDisputeTransportProof;
+}
+
+export interface TradeDisputeStatementAcknowledgementDocument {
+  kind: "nth.dao.trade.dispute-statement-acknowledgement";
+  protocol_version: "1";
+  delivery_id: string;
+  delivery_digest: string;
+  order_digest: string;
+  receipt_digest: string;
+  review_digest: string;
+  statement_digest: string;
+  sender_did: string;
+  receiver_did: string;
+  received_at: string;
+  audit_event_id: string;
+  status: "retained-claim-not-adjudicated";
+  proof: TradeDisputeTransportProof;
+}
+
 export interface TradeExecutionHistoryPage {
   status: "available" | "unavailable";
   items: TradeExecutionHistoryItem[];

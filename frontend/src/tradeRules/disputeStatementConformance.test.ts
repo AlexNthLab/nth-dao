@@ -9,6 +9,7 @@ import {
   tradeCanonicalBytes,
   verifyTradeDisputeStatement,
   verifyTradeDisputeStatementAcknowledgement,
+  verifyTradeDisputeStatementAcknowledgementBinding,
   verifyTradeDisputeStatementDelivery,
   verifyTradeDisputeStatementSignature,
 } from "./conformance";
@@ -212,6 +213,21 @@ describe("Trade Dispute Statement v1 cross-implementation conformance", () => {
   });
 
   it("independently verifies receiver ACK bindings, chronology, and signature", async () => {
+    await expect(verifyTradeDisputeStatementAcknowledgementBinding(
+      vectors.trade_dispute_statement_acknowledgement,
+      vectors.trade_dispute_statement_delivery,
+    )).resolves.toEqual({ valid: true, reason: "ok" });
+    const tampered = structuredClone(
+      vectors.trade_dispute_statement_acknowledgement
+    );
+    tampered.statement_digest = `sha256:${"0".repeat(64)}`;
+    const rejected = await verifyTradeDisputeStatementAcknowledgementBinding(
+      tampered,
+      vectors.trade_dispute_statement_delivery,
+    );
+    expect(rejected.valid).toBe(false);
+    expect(rejected.reason).toContain("statement_digest does not match Delivery");
+
     for (const testCase of vectors.trade_dispute_statement_acknowledgement_verification_cases) {
       const result = await verifyTradeDisputeStatementAcknowledgement(
         vectors.trade_dispute_statement_acknowledgement,

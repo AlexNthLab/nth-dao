@@ -21,10 +21,22 @@ from nth_dao.trade_rules.canonical import (
     trade_canonical_json,
 )
 from nth_dao.trade_rules.dispute_statement import (
+    MAX_TRADE_DISPUTE_PARENTS,
     TRADE_DISPUTE_ID_PREFIX,
     TRADE_DISPUTE_STATEMENT_ID_PREFIX,
     TRADE_DISPUTE_STATEMENT_KIND,
     TradeDisputeStatement,
+    TradeDisputeStatementRejected,
+    TradeDisputeStatementResolutionError,
+    TradeDisputeStatementResolverRequired,
+    trade_dispute_id,
+)
+from nth_dao.trade_rules.dispute_graph import (
+    MAX_TRADE_DISPUTE_GRAPH_EDGES,
+    TradeDisputeGraphCapacity,
+    TradeDisputeGraphProjection,
+    project_trade_dispute_graph,
+    trade_dispute_graph_snapshot_token,
 )
 from nth_dao.trade_rules.agreement import DEFAULT_CLOCK_SKEW_SECONDS
 from nth_dao.trade_rules.execution_receipt import TradeExecutionReceipt
@@ -37,6 +49,8 @@ from nth_dao.util.io import InterProcessLock
 
 DEFAULT_MAX_TRADE_DISPUTE_STATEMENTS = 20_000
 DEFAULT_MAX_TRADE_DISPUTE_STORE_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_TRADE_DISPUTE_ANCESTRY_NODES = 2_048
+DEFAULT_MAX_TRADE_DISPUTE_ANCESTRY_EDGES = 32_768
 MAX_TRADE_DISPUTE_PAGE_SIZE = 500
 
 _DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
@@ -62,12 +76,21 @@ class TradeDisputeStatementStoreCapacity(TradeDisputeStatementStoreError):
     """A configured statement-store capacity would be exceeded."""
 
 
+class TradeDisputeStatementDependencyError(TradeDisputeStatementStoreError):
+    """A required verification dependency failed operationally."""
+
+
+class TradeDisputeStatementParentError(TradeDisputeStatementStoreError):
+    """A locally authored statement depends on an unsafe parent chain."""
+
+
 @dataclass(frozen=True)
 class TradeDisputeStatementPage:
     """One deterministic page for a single exact Receipt Review candidate."""
 
     statements: tuple[TradeDisputeStatement, ...]
     statement_digests: tuple[str, ...]
+    snapshot_token: str
     next_cursor: str | None
 
 
@@ -99,6 +122,16 @@ class _IndexedRecord:
     review_digest: str
     statement_id: str
     created_at_micros: int
+    parent_count: int
+    parent_digests: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ReviewIndexSnapshot:
+    matching: tuple[_IndexedRecord, ...]
+    known_review_digests: dict[str, str]
+    snapshot_token: str
+    cursor_snapshot: str
 
 
 def _canonical_timestamp_micros(value: Any) -> int:
@@ -131,6 +164,7 @@ class TradeDisputeStatementStore:
         *,
         max_statements: int = DEFAULT_MAX_TRADE_DISPUTE_STATEMENTS,
         max_bytes: int = DEFAULT_MAX_TRADE_DISPUTE_STORE_BYTES,
+        max_graph_edges: int = MAX_TRADE_DISPUTE_GRAPH_EDGES,
         lock_timeout: float = 10.0,
     ) -> None:
         if (
@@ -146,6 +180,12 @@ class TradeDisputeStatementStore:
         ):
             raise ValueError("max_bytes must be a positive integer")
         if (
+            isinstance(max_graph_edges, bool)
+            or not isinstance(max_graph_edges, int)
+            or max_graph_edges < 1
+        ):
+            raise ValueError("max_graph_edges must be a positive integer")
+        if (
             isinstance(lock_timeout, bool)
             or not isinstance(lock_timeout, (int, float))
             or not math.isfinite(lock_timeout)
@@ -157,6 +197,7 @@ class TradeDisputeStatementStore:
         self.lock_path = self.root / ".locks" / "statements"
         self.max_statements = max_statements
         self.max_bytes = max_bytes
+        self.max_graph_edges = max_graph_edges
         self.lock_timeout = float(lock_timeout)
         self._index_cache: dict[str, _IndexedRecord] = {}
         self._index_cache_lock = threading.RLock()
@@ -348,6 +389,19 @@ class TradeDisputeStatementStore:
             raise TradeDisputeStatementStoreError(
                 "stored dispute statement header is invalid"
             )
+        parents = document.get("parent_statement_digests")
+        if (
+            not isinstance(parents, list)
+            or len(parents) > MAX_TRADE_DISPUTE_PARENTS
+            or any(
+                not isinstance(parent, str) or _DIGEST.fullmatch(parent) is None
+                for parent in parents
+            )
+            or parents != sorted(set(parents))
+        ):
+            raise TradeDisputeStatementStoreError(
+                "stored dispute statement parent header is invalid"
+            )
         created_at_micros = _canonical_timestamp_micros(document.get("created_at"))
         return _StoredRecord(
             path,
@@ -410,12 +464,18 @@ class TradeDisputeStatementStore:
             total += int(metadata.st_size)
         return count, total
 
-    def _records_locked(self) -> tuple[_IndexedRecord, ...]:
+    def _records_locked(
+        self,
+        *,
+        captured_payloads: dict[Path, bytes] | None = None,
+        capture_review_digest: str | None = None,
+    ) -> tuple[_IndexedRecord, ...]:
         if not self.root.exists():
             return ()
         with self._index_cache_lock:
             records: list[_IndexedRecord] = []
             next_cache: dict[str, _IndexedRecord] = {}
+            total_bytes = 0
             for path in sorted(self.root.rglob("*")):
                 relative = path.relative_to(self.root)
                 if relative.parts and relative.parts[0] == ".locks":
@@ -438,7 +498,16 @@ class TradeDisputeStatementStore:
                     raise TradeDisputeStatementStoreError(
                         "dispute-statement store contains an unknown file"
                     )
+                if len(records) >= self.max_statements:
+                    raise TradeDisputeStatementStoreCapacity(
+                        "dispute-statement store exceeds max_statements"
+                    )
                 payload = self._read(path)
+                total_bytes += len(payload)
+                if total_bytes > self.max_bytes:
+                    raise TradeDisputeStatementStoreCapacity(
+                        "dispute-statement store exceeds max_bytes"
+                    )
                 digest_value = self._statement_digest(payload)
                 if digest_value.removeprefix("sha256:") != match.group(1):
                     raise TradeDisputeStatementStoreError(
@@ -453,11 +522,73 @@ class TradeDisputeStatementStore:
                         review_digest=stored.document["review_digest"],
                         statement_id=stored.document["statement_id"],
                         created_at_micros=stored.created_at_micros,
+                        parent_count=len(
+                            stored.document["parent_statement_digests"]
+                        ),
+                        parent_digests=tuple(
+                            stored.document["parent_statement_digests"]
+                        ),
                     )
                 next_cache[path.name] = indexed
+                if (
+                    captured_payloads is not None
+                    and (
+                        capture_review_digest is None
+                        or indexed.review_digest == capture_review_digest
+                    )
+                ):
+                    captured_payloads[path] = payload
                 records.append(indexed)
             self._index_cache = next_cache
             return tuple(records)
+
+    def _review_index_locked(
+        self,
+        *,
+        review_digest: str,
+        dispute_id: str,
+        captured_payloads: dict[Path, bytes] | None = None,
+    ) -> _ReviewIndexSnapshot:
+        """Read one immutable index generation while the store lock is held."""
+
+        indexed = self._records_locked(
+            captured_payloads=captured_payloads,
+            capture_review_digest=review_digest,
+        )
+        matching = sorted(
+            (
+                record
+                for record in indexed
+                if record.review_digest == review_digest
+            ),
+            key=lambda record: (
+                record.created_at_micros,
+                record.statement_id,
+                record.digest,
+            ),
+        )
+        matching_digests = {record.digest for record in matching}
+        known_review_digests = {
+            record.digest: record.review_digest for record in indexed
+        }
+        graph_input_parent_reviews = {
+            parent_digest: known_review_digests[parent_digest]
+            for record in matching
+            for parent_digest in record.parent_digests
+            if parent_digest not in matching_digests
+            and parent_digest in known_review_digests
+        }
+        return _ReviewIndexSnapshot(
+            matching=tuple(matching),
+            known_review_digests=known_review_digests,
+            snapshot_token=trade_dispute_graph_snapshot_token(
+                matching_digests,
+                review_digest=review_digest,
+                dispute_id=dispute_id,
+                known_parent_review_digests=graph_input_parent_reviews,
+            ),
+            cursor_snapshot=self._snapshot_digest(matching),
+        )
 
     @staticmethod
     def _verified_context(
@@ -497,6 +628,28 @@ class TradeDisputeStatementStore:
         )
         return verified_review, verified_receipt, verified_order
 
+    @staticmethod
+    def _from_verified_context(
+        raw: bytes,
+        *,
+        review: TradeReceiptReview,
+        receipt: TradeExecutionReceipt,
+        order: TradeOrder,
+        package_resolver: RulePackageResolver | None,
+    ) -> TradeDisputeStatement:
+        try:
+            return TradeDisputeStatement.from_json(
+                raw,
+                review=review,
+                receipt=receipt,
+                order=order,
+                package_resolver=package_resolver,
+            )
+        except TradeDisputeStatementResolutionError as exc:
+            raise TradeDisputeStatementDependencyError(
+                "trade Dispute Statement dependency is unavailable"
+            ) from exc
+
     @classmethod
     def _verified_statement(
         cls,
@@ -517,7 +670,7 @@ class TradeDisputeStatementStore:
             if isinstance(statement, TradeDisputeStatement)
             else trade_canonical_json(statement)
         )
-        return TradeDisputeStatement.from_json(
+        return cls._from_verified_context(
             raw,
             review=verified_review,
             receipt=verified_receipt,
@@ -581,6 +734,43 @@ class TradeDisputeStatementStore:
         order: TradeOrder | dict[str, Any],
         package_resolver: RulePackageResolver | None = None,
     ) -> TradeDisputeStatement | None:
+        # Public lookup semantics must not depend on whether the store already
+        # exists: reject an invalid digest and invalid verification context
+        # before answering that no matching statement is present.
+        self._path(statement_digest)
+        verified_review, verified_receipt, verified_order = self._verified_context(
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        try:
+            return self._get_for_verified_context(
+                statement_digest,
+                review=verified_review,
+                receipt=verified_receipt,
+                order=verified_order,
+                package_resolver=package_resolver,
+            )
+        except TradeDisputeStatementDependencyError:
+            raise
+        except TradeDisputeStatementResolverRequired:
+            raise
+        except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                "stored dispute statement failed protocol verification"
+            ) from exc
+
+    def _get_for_verified_context(
+        self,
+        statement_digest: str,
+        *,
+        review: TradeReceiptReview,
+        receipt: TradeExecutionReceipt,
+        order: TradeOrder,
+        package_resolver: RulePackageResolver | None,
+    ) -> TradeDisputeStatement | None:
+        """Read one immutable digest and verify it outside the store lock."""
+
         path = self._path(statement_digest)
         if not self.root.exists():
             return None
@@ -596,8 +786,8 @@ class TradeDisputeStatementStore:
             ) from exc
         if record is None:
             return None
-        return self._verified_statement(
-            record.document,
+        return self._from_verified_context(
+            record.payload,
             review=review,
             receipt=receipt,
             order=order,
@@ -644,22 +834,28 @@ class TradeDisputeStatementStore:
                 raise TradeDisputeStatementStoreError(
                     "pagination snapshot changed; restart listing"
                 )
-            return TradeDisputeStatementPage((), (), None)
+            return TradeDisputeStatementPage(
+                (),
+                (),
+                trade_dispute_graph_snapshot_token(
+                    (),
+                    review_digest=review_digest_value,
+                    dispute_id=trade_dispute_id(
+                        verified_review.to_dict()["review_id"]
+                    ),
+                ),
+                None,
+            )
         try:
             with self._acquire():
-                matching = [
-                    record
-                    for record in self._records_locked()
-                    if record.review_digest == review_digest_value
-                ]
-                matching.sort(
-                    key=lambda record: (
-                        record.created_at_micros,
-                        record.statement_id,
-                        record.digest,
-                    )
+                index_snapshot = self._review_index_locked(
+                    review_digest=review_digest_value,
+                    dispute_id=trade_dispute_id(
+                        verified_review.to_dict()["review_id"]
+                    ),
                 )
-                snapshot = self._snapshot_digest(matching)
+                matching = index_snapshot.matching
+                snapshot = index_snapshot.cursor_snapshot
                 if cursor_snapshot is not None and cursor_snapshot != snapshot:
                     raise TradeDisputeStatementStoreError(
                         "pagination snapshot changed; restart listing"
@@ -690,25 +886,423 @@ class TradeDisputeStatementStore:
             raise TradeDisputeStatementStoreBusy(
                 "Trade Dispute Statement store is busy"
             ) from exc
-        statements = tuple(
-            TradeDisputeStatement.from_json(
-                record.payload,
-                review=verified_review,
-                receipt=verified_receipt,
-                order=verified_order,
-                package_resolver=package_resolver,
+        try:
+            statements = tuple(
+                self._from_verified_context(
+                    record.payload,
+                    review=verified_review,
+                    receipt=verified_receipt,
+                    order=verified_order,
+                    package_resolver=package_resolver,
+                )
+                for record in selected
             )
-            for record in selected
-        )
+        except TradeDisputeStatementDependencyError:
+            raise
+        except TradeDisputeStatementResolverRequired:
+            raise
+        except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                "stored dispute statement failed protocol verification"
+            ) from exc
         return TradeDisputeStatementPage(
             statements=statements,
             statement_digests=tuple(record.digest for record in selected),
+            snapshot_token=index_snapshot.snapshot_token,
             next_cursor=(
                 self._encode_page_cursor(snapshot, selected[-1].digest)
                 if has_more and selected
                 else None
             ),
         )
+
+    def graph_for_review(
+        self,
+        *,
+        review: TradeReceiptReview | dict[str, Any],
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+        package_resolver: RulePackageResolver | None = None,
+        pending_statement: TradeDisputeStatement | dict[str, Any] | None = None,
+    ) -> TradeDisputeGraphProjection:
+        """Project one immutable store snapshot for an exact Review.
+
+        ``pending_statement`` is verified but never persisted.  It exists so a
+        local signer can validate the complete ancestry it is about to extend.
+        """
+
+        verified_review, verified_receipt, verified_order = self._verified_context(
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        review_digest_value = receipt_review_digest(
+            verified_review,
+            receipt=verified_receipt,
+            order=verified_order,
+        )
+        try:
+            with self._acquire():
+                captured_payloads: dict[Path, bytes] = {}
+                index_snapshot = self._review_index_locked(
+                    review_digest=review_digest_value,
+                    dispute_id=trade_dispute_id(
+                        verified_review.to_dict()["review_id"]
+                    ),
+                    captured_payloads=captured_payloads,
+                )
+                known_review_digests = index_snapshot.known_review_digests
+                selected_index = index_snapshot.matching
+                selected_edge_count = sum(
+                    record.parent_count for record in selected_index
+                )
+                if selected_edge_count > self.max_graph_edges:
+                    raise TradeDisputeStatementStoreCapacity(
+                        "dispute statement graph exceeds max_edges"
+                    )
+                selected = [
+                    self._record_from_payload(
+                        record.path,
+                        captured_payloads[record.path],
+                    )
+                    for record in selected_index
+                ]
+        except TimeoutError as exc:
+            raise TradeDisputeStatementStoreBusy(
+                "Trade Dispute Statement store is busy"
+            ) from exc
+        try:
+            statements = [
+                self._verified_statement(
+                    record.document,
+                    review=verified_review,
+                    receipt=verified_receipt,
+                    order=verified_order,
+                    package_resolver=package_resolver,
+                )
+                for record in selected
+            ]
+        except TradeDisputeStatementResolverRequired:
+            raise
+        except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                "stored dispute statement failed protocol verification"
+            ) from exc
+        records = [
+            (stored.digest, statement)
+            for stored, statement in zip(selected, statements, strict=True)
+        ]
+        if pending_statement is not None:
+            pending = self._verified_statement(
+                pending_statement,
+                review=verified_review,
+                receipt=verified_receipt,
+                order=verified_order,
+                package_resolver=package_resolver,
+            )
+            pending_digest = self._statement_digest(pending.canonical_bytes)
+            existing = dict(records).get(pending_digest)
+            if existing is not None:
+                if existing.canonical_bytes != pending.canonical_bytes:
+                    raise TradeDisputeStatementStoreError(
+                        "statement digest collision or store corruption"
+                    )
+            else:
+                records.append((pending_digest, pending))
+                pending_parent_count = len(
+                    pending.to_dict()["parent_statement_digests"]
+                )
+                if (
+                    selected_edge_count + pending_parent_count
+                    > self.max_graph_edges
+                ):
+                    raise TradeDisputeStatementStoreCapacity(
+                        "dispute statement graph exceeds max_edges"
+                    )
+        try:
+            return project_trade_dispute_graph(
+                records,
+                known_review_digests=known_review_digests,
+                expected_review_digest=review_digest_value,
+                expected_dispute_id=trade_dispute_id(
+                    verified_review.to_dict()["review_id"]
+                ),
+                max_nodes=(
+                    self.max_statements + int(pending_statement is not None)
+                ),
+                max_edges=self.max_graph_edges,
+            )
+        except TradeDisputeGraphCapacity as exc:
+            raise TradeDisputeStatementStoreCapacity(str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                f"dispute statement graph is invalid: {exc}"
+            ) from exc
+
+    def page_and_graph_for_review(
+        self,
+        *,
+        review: TradeReceiptReview | dict[str, Any],
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+        package_resolver: RulePackageResolver | None = None,
+        limit: int = 100,
+    ) -> tuple[TradeDisputeStatementPage, TradeDisputeGraphProjection]:
+        """Return the first page and graph from one exact inventory snapshot."""
+
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 1
+            or limit > MAX_TRADE_DISPUTE_PAGE_SIZE
+        ):
+            raise ValueError(
+                f"limit must be between 1 and {MAX_TRADE_DISPUTE_PAGE_SIZE}"
+            )
+        verified_review, verified_receipt, verified_order = self._verified_context(
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        review_digest_value = receipt_review_digest(
+            verified_review,
+            receipt=verified_receipt,
+            order=verified_order,
+        )
+        dispute_id_value = trade_dispute_id(
+            verified_review.to_dict()["review_id"]
+        )
+        if not self.root.exists():
+            graph = project_trade_dispute_graph(
+                (),
+                expected_review_digest=review_digest_value,
+                expected_dispute_id=dispute_id_value,
+                max_nodes=self.max_statements,
+                max_edges=self.max_graph_edges,
+            )
+            return (
+                TradeDisputeStatementPage(
+                    statements=(),
+                    statement_digests=(),
+                    snapshot_token=graph.snapshot_token,
+                    next_cursor=None,
+                ),
+                graph,
+            )
+        try:
+            with self._acquire():
+                captured_payloads: dict[Path, bytes] = {}
+                index_snapshot = self._review_index_locked(
+                    review_digest=review_digest_value,
+                    dispute_id=dispute_id_value,
+                    captured_payloads=captured_payloads,
+                )
+                selected_edge_count = sum(
+                    record.parent_count for record in index_snapshot.matching
+                )
+                if selected_edge_count > self.max_graph_edges:
+                    raise TradeDisputeStatementStoreCapacity(
+                        "dispute statement graph exceeds max_edges"
+                    )
+                stored = [
+                    self._record_from_payload(
+                        record.path,
+                        captured_payloads[record.path],
+                    )
+                    for record in index_snapshot.matching
+                ]
+        except TimeoutError as exc:
+            raise TradeDisputeStatementStoreBusy(
+                "Trade Dispute Statement store is busy"
+            ) from exc
+        try:
+            statements = tuple(
+                self._verified_statement(
+                    record.document,
+                    review=verified_review,
+                    receipt=verified_receipt,
+                    order=verified_order,
+                    package_resolver=package_resolver,
+                )
+                for record in stored
+            )
+        except TradeDisputeStatementResolverRequired:
+            raise
+        except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                "stored dispute statement failed protocol verification"
+            ) from exc
+        records = [
+            (record.digest, statement)
+            for record, statement in zip(stored, statements, strict=True)
+        ]
+        try:
+            graph = project_trade_dispute_graph(
+                records,
+                known_review_digests=index_snapshot.known_review_digests,
+                expected_review_digest=review_digest_value,
+                expected_dispute_id=dispute_id_value,
+                max_nodes=self.max_statements,
+                max_edges=self.max_graph_edges,
+            )
+        except TradeDisputeGraphCapacity as exc:
+            raise TradeDisputeStatementStoreCapacity(str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                f"dispute statement graph is invalid: {exc}"
+            ) from exc
+        if graph.snapshot_token != index_snapshot.snapshot_token:
+            raise TradeDisputeStatementStoreError(
+                "dispute statement graph snapshot binding is inconsistent"
+            )
+        selected = stored[:limit]
+        page = TradeDisputeStatementPage(
+            statements=statements[:limit],
+            statement_digests=tuple(record.digest for record in selected),
+            snapshot_token=index_snapshot.snapshot_token,
+            next_cursor=(
+                self._encode_page_cursor(
+                    index_snapshot.cursor_snapshot,
+                    selected[-1].digest,
+                )
+                if len(stored) > len(selected) and selected
+                else None
+            ),
+        )
+        return page, graph
+
+    def assert_complete_parent_chain(
+        self,
+        statement: TradeDisputeStatement | dict[str, Any],
+        *,
+        review: TradeReceiptReview | dict[str, Any],
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+        package_resolver: RulePackageResolver | None = None,
+        max_ancestry_nodes: int = DEFAULT_MAX_TRADE_DISPUTE_ANCESTRY_NODES,
+        max_ancestry_edges: int = DEFAULT_MAX_TRADE_DISPUTE_ANCESTRY_EDGES,
+    ) -> TradeDisputeGraphProjection:
+        """Require a bounded, complete ancestry before a local extension."""
+
+        if (
+            isinstance(max_ancestry_nodes, bool)
+            or not isinstance(max_ancestry_nodes, int)
+            or max_ancestry_nodes < 1
+        ):
+            raise ValueError("max_ancestry_nodes must be a positive integer")
+        if (
+            isinstance(max_ancestry_edges, bool)
+            or not isinstance(max_ancestry_edges, int)
+            or max_ancestry_edges < 1
+        ):
+            raise ValueError("max_ancestry_edges must be a positive integer")
+        verified_review, verified_receipt, verified_order = self._verified_context(
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        raw = (
+            statement.canonical_bytes
+            if isinstance(statement, TradeDisputeStatement)
+            else trade_canonical_json(statement)
+        )
+        verified = self._from_verified_context(
+            raw,
+            review=verified_review,
+            receipt=verified_receipt,
+            order=verified_order,
+            package_resolver=package_resolver,
+        )
+        digest_value = self._statement_digest(verified.canonical_bytes)
+        records: dict[str, TradeDisputeStatement] = {digest_value: verified}
+        pending_document = verified.to_dict()
+        pending_parents = tuple(pending_document["parent_statement_digests"])
+        edge_count = len(pending_parents)
+        if edge_count > max_ancestry_edges:
+            raise TradeDisputeStatementStoreCapacity(
+                "statement ancestry exceeds max_ancestry_edges"
+            )
+        unvisited = list(reversed(pending_parents))
+        while unvisited:
+            parent_digest = unvisited.pop()
+            if parent_digest in records:
+                continue
+            if len(records) >= max_ancestry_nodes:
+                raise TradeDisputeStatementStoreCapacity(
+                    "statement ancestry exceeds max_ancestry_nodes"
+                )
+            try:
+                parent = self._get_for_verified_context(
+                    parent_digest,
+                    review=verified_review,
+                    receipt=verified_receipt,
+                    order=verified_order,
+                    package_resolver=package_resolver,
+                )
+            except TradeDisputeStatementResolverRequired:
+                raise
+            except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
+                raise TradeDisputeStatementParentError(
+                    "statement parent does not verify in this dispute context"
+                ) from exc
+            if parent is None:
+                raise TradeDisputeStatementParentError(
+                    f"statement parent chain is incomplete: missing {parent_digest}"
+                )
+            records[parent_digest] = parent
+            parent_parents = tuple(
+                parent.to_dict()["parent_statement_digests"]
+            )
+            edge_count += len(parent_parents)
+            if edge_count > max_ancestry_edges:
+                raise TradeDisputeStatementStoreCapacity(
+                    "statement ancestry exceeds max_ancestry_edges"
+                )
+            unvisited.extend(reversed(parent_parents))
+        try:
+            projection = project_trade_dispute_graph(
+                records.items(),
+                expected_review_digest=receipt_review_digest(
+                    verified_review,
+                    receipt=verified_receipt,
+                    order=verified_order,
+                ),
+                expected_dispute_id=trade_dispute_id(
+                    verified_review.to_dict()["review_id"]
+                ),
+                max_nodes=max_ancestry_nodes,
+                max_edges=max_ancestry_edges,
+            )
+        except TradeDisputeGraphCapacity as exc:
+            raise TradeDisputeStatementStoreCapacity(str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                f"dispute statement ancestry is invalid: {exc}"
+            ) from exc
+        node = next(
+            (
+                item
+                for item in projection.nodes
+                if item.statement_digest == digest_value
+            ),
+            None,
+        )
+        if node is None:
+            raise TradeDisputeStatementStoreError(
+                "pending statement is absent from its graph projection"
+            )
+        if node.ancestry_status != "complete":
+            reasons = sorted(
+                {
+                    issue.reason
+                    for issue in projection.issues
+                }
+            )
+            reason = ", ".join(reasons) if reasons else "invalid ancestor"
+            raise TradeDisputeStatementParentError(
+                f"statement parent chain is {node.ancestry_status}: {reason}"
+            )
+        return projection
 
     def reconcile(
         self,
@@ -776,10 +1370,14 @@ class TradeDisputeStatementStore:
 
 
 __all__ = [
+    "DEFAULT_MAX_TRADE_DISPUTE_ANCESTRY_EDGES",
+    "DEFAULT_MAX_TRADE_DISPUTE_ANCESTRY_NODES",
     "DEFAULT_MAX_TRADE_DISPUTE_STATEMENTS",
     "DEFAULT_MAX_TRADE_DISPUTE_STORE_BYTES",
     "MAX_TRADE_DISPUTE_PAGE_SIZE",
     "TradeDisputeStatementPage",
+    "TradeDisputeStatementDependencyError",
+    "TradeDisputeStatementParentError",
     "TradeDisputeStatementReconciliationReport",
     "TradeDisputeStatementStore",
     "TradeDisputeStatementStoreBusy",

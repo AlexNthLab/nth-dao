@@ -19,7 +19,12 @@ from nth_dao.trade_rules.dispute_statement import (
     TradeDisputeStatementRejected,
     create_trade_dispute_statement,
 )
+from nth_dao.trade_rules.dispute_graph import (
+    TradeDisputeGraphProjection,
+    project_trade_dispute_graph,
+)
 from nth_dao.trade_rules.dispute_statement_store import (
+    TradeDisputeStatementParentError,
     TradeDisputeStatementStore,
     TradeDisputeStatementStoreCapacity,
     TradeDisputeStatementStoreError,
@@ -27,7 +32,10 @@ from nth_dao.trade_rules.dispute_statement_store import (
 )
 from nth_dao.trade_rules.execution_receipt import TradeExecutionReceipt
 from nth_dao.trade_rules.package_store import build_rule_package
-from nth_dao.trade_rules.receipt_review import TradeReceiptReview
+from nth_dao.trade_rules.receipt_review import (
+    TradeReceiptReview,
+    TradeReceiptReviewRejected,
+)
 
 
 class _StaticPackageResolver:
@@ -139,7 +147,6 @@ def test_dispute_statement_store_is_idempotent_and_paginated(
         order=order,
     )
     assert created is True
-
     resolver.loads = 0
     first = store.list_for_review(
         review=review,
@@ -149,6 +156,13 @@ def test_dispute_statement_store_is_idempotent_and_paginated(
         limit=1,
     )
     assert first.statements == (stored,)
+    assert resolver.loads == 1
+    assert first.snapshot_token == store.graph_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=_package_resolver(dispute_vectors),
+    ).snapshot_token
     assert first.next_cursor is not None
     assert first.next_cursor.endswith(first.statement_digests[0].removeprefix("sha256:"))
     assert resolver.loads == 1
@@ -161,6 +175,7 @@ def test_dispute_statement_store_is_idempotent_and_paginated(
         after=first.next_cursor,
     )
     assert second.statements == (future_statement,)
+    assert second.snapshot_token == first.snapshot_token
     assert second.next_cursor is None
     assert resolver.loads == 1
     assert (
@@ -198,6 +213,110 @@ def test_dispute_statement_store_is_idempotent_and_paginated(
             order=order,
             package_resolver=resolver,
             after=first.next_cursor,
+        )
+
+
+def test_combined_page_and_graph_reads_one_inventory_generation(
+    tmp_path,
+    dispute_vectors,
+    monkeypatch,
+):
+    order, receipt, review = _artifacts(dispute_vectors)
+    resolver = _package_resolver(dispute_vectors)
+    store = TradeDisputeStatementStore(tmp_path)
+    store.put(
+        dispute_vectors["trade_dispute_statement"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=resolver,
+    )
+    alternate_case = dispute_vectors[
+        "trade_dispute_statement_signed_negative_cases"
+    ][1]
+    other_order, other_receipt, other_review = _artifacts(
+        dispute_vectors,
+        review=alternate_case["signed_review"],
+    )
+    store.put(
+        alternate_case["document"],
+        review=other_review,
+        receipt=other_receipt,
+        order=other_order,
+    )
+    inventory_scans = 0
+    file_reads = 0
+    captured_payload_count = 0
+    original_records = store._records_locked
+    original_read = store._read
+
+    def counted_records(**kwargs):
+        nonlocal captured_payload_count, inventory_scans
+        inventory_scans += 1
+        records = original_records(**kwargs)
+        captured_payload_count = len(kwargs["captured_payloads"])
+        return records
+
+    def counted_read(path):
+        nonlocal file_reads
+        file_reads += 1
+        return original_read(path)
+
+    monkeypatch.setattr(store, "_records_locked", counted_records)
+    monkeypatch.setattr(store, "_read", counted_read)
+
+    page, graph = store.page_and_graph_for_review(
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=resolver,
+        limit=500,
+    )
+
+    assert inventory_scans == 1
+    assert file_reads == 2
+    assert captured_payload_count == 1
+    assert page.snapshot_token == graph.snapshot_token
+    assert page.statement_digests == graph.topological_digests
+
+
+def test_dispute_statement_store_empty_get_validates_request_deterministically(
+    tmp_path,
+    dispute_vectors,
+):
+    order, receipt, review = _artifacts(dispute_vectors)
+    store = TradeDisputeStatementStore(tmp_path / "empty")
+    missing_digest = "sha256:" + ("0" * 64)
+
+    assert not store.root.exists()
+    assert (
+        store.get(
+            missing_digest,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        is None
+    )
+    assert not store.root.exists()
+
+    with pytest.raises(
+        TradeDisputeStatementStoreError,
+        match="statement_digest is invalid",
+    ):
+        store.get(
+            "not-a-digest",
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+
+    with pytest.raises(TradeReceiptReviewRejected):
+        store.get(
+            missing_digest,
+            review={},
+            receipt=receipt,
+            order=order,
         )
 
 
@@ -830,6 +949,15 @@ def test_dispute_store_exact_retry_is_cross_process_safe(
 def test_dispute_statement_store_is_public_api():
     assert trade_rules_api.TradeDisputeStatementStore is (TradeDisputeStatementStore)
     assert trade_rules_api.TradeDisputeStatement is TradeDisputeStatement
+    assert trade_rules_api.TradeDisputeGraphProjection is (
+        TradeDisputeGraphProjection
+    )
+    assert trade_rules_api.project_trade_dispute_graph is (
+        project_trade_dispute_graph
+    )
+    assert trade_rules_api.TradeDisputeStatementParentError is (
+        TradeDisputeStatementParentError
+    )
 
 
 def test_dispute_store_orders_canonical_timestamps_by_actual_microseconds():

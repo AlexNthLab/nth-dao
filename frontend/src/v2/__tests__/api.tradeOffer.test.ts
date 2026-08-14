@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import agreementVectors from "../../../../nth_dao/trade_rules/vectors/agreement-v1.json";
 
 import {
   acceptTradeProposal,
   createTradeReceiptReview,
+  createTradeDisputeStatement,
+  deliverTradeDisputeStatement,
   deliverTradeReceiptReview,
   deliverTradeExecutionReceipt,
   fetchTradeProposals,
@@ -11,15 +14,20 @@ import {
   getTradeRulePackage,
   getTradeExecutionReceipts,
   getTradeReceiptReview,
+  getTradeDisputeGraph,
+  getTradeDisputeProjection,
+  getTradeDisputeStatements,
   getTradeOfferInspection,
   getTradeOrder,
   getTradeProposal,
   importCachedTradeOffer,
   importTradeRulePackage,
   importTradeRuleRecognitions,
+  validateTradeDisputeStatementDeliveryResult,
   fetchTradeRuleRecognitionImports,
   fetchTradeRuleRecognitionImportBatch,
 } from "../api";
+import type { CreateTradeDisputeStatementInput } from "../types-v2";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -33,6 +41,108 @@ const packageDigest = `sha256:${"c".repeat(64)}`;
 const resourceDigest = `sha256:${"d".repeat(64)}`;
 const publisherDid = "did:key:z6Mkrd94r9yJpgZ1HEtiXs25L67fCj4bRLBpynwc6rsnTpTE";
 const proofValue = "jHMmFycGKYwl_rO8cURbBQdZFvO2ux3VWCgmhb8Jkyr94kMR1O3P1PDREi_JZbH_K1DzXFaNwBhpOGkQWrI8AA";
+
+const disputeExecutionId = `nth-trade-execution-sha256:${"e".repeat(64)}`;
+const disputeReviewId = `nth-trade-review-sha256:${"f".repeat(64)}`;
+const disputeId = `nth-trade-dispute-sha256:${"1".repeat(64)}`;
+const disputeStatementId = `nth-trade-dispute-statement-sha256:${"2".repeat(64)}`;
+const disputeStatementDigest = `sha256:${"3".repeat(64)}`;
+const disputeReviewDigest = `sha256:${"4".repeat(64)}`;
+const disputeReceiptDigest = `sha256:${"5".repeat(64)}`;
+
+function disputeStatement() {
+  return {
+    kind: "nth.dao.trade.dispute-statement",
+    protocol_version: "1",
+    statement_id: disputeStatementId,
+    dispute_id: disputeId,
+    order_digest: digest,
+    receipt_digest: disputeReceiptDigest,
+    review_digest: disputeReviewDigest,
+    review_id: disputeReviewId,
+    author_did: publisherDid,
+    author_role: "maker",
+    statement_type: "response",
+    parent_statement_digests: [],
+    reason_codes: ["result.mismatch"],
+    claim: {
+      claim_type: "response.summary",
+      media_type: "application/json",
+      digest: `sha256:${"6".repeat(64)}`,
+      size: 42,
+      schema_digest: null,
+    },
+    evidence: [],
+    rule_action: null,
+    created_at: "2026-08-14T00:00:00Z",
+    proof: {
+      type: "Ed25519Signature2020",
+      created: "2026-08-14T00:00:00Z",
+      verification_method: `${publisherDid}#${publisherDid.slice("did:key:".length)}`,
+      proof_purpose: "tradeDisputeStatement",
+      proof_value: proofValue,
+    },
+  } as const;
+}
+
+function disputePage() {
+  return {
+    status: "dispute-statements-listed",
+    order_digest: digest,
+    execution_id: disputeExecutionId,
+    review_id: disputeReviewId,
+    items: [{
+      statement_digest: disputeStatementDigest,
+      statement: disputeStatement(),
+      claim_status: "signed-unadjudicated-claim",
+      audit_status: "anchored",
+      audit_event_id: "7".repeat(64),
+    }],
+    snapshot_token: `v2:${"8".repeat(64)}`,
+    next_cursor: null,
+    graph_endpoint: `/api/v2/trade/orders/${digest}/execution-receipts/`
+      + `${disputeExecutionId}/reviews/${disputeReviewId}/dispute-statements/graph`,
+    claims_adjudicated_or_proven_true: false,
+  } as const;
+}
+
+function disputeGraph() {
+  return {
+    status: "dispute-statement-graph-projected",
+    order_digest: digest,
+    execution_id: disputeExecutionId,
+    review_id: disputeReviewId,
+    graph: {
+      snapshot_token: `v2:${"8".repeat(64)}`,
+      graph_status: "complete",
+      review_digest: disputeReviewDigest,
+      dispute_id: disputeId,
+      statement_count: 1,
+      root_digests: [disputeStatementDigest],
+      root_count: 1,
+      tip_digests: [disputeStatementDigest],
+      tip_count: 1,
+      topological_digests: [disputeStatementDigest],
+      topological_count: 1,
+      unresolved_parent_digests: [],
+      unresolved_parent_count: 0,
+      non_dag_digests: [],
+      non_dag_count: 0,
+      issues: [],
+      issue_count: 0,
+      nodes: [{
+        statement_digest: disputeStatementDigest,
+        parent_statement_digests: [],
+        ancestry_status: "complete",
+        depth: 0,
+      }],
+      node_count: 1,
+      items_truncated: false,
+      adjudicated_or_proven_true: false,
+    },
+    claims_adjudicated_or_proven_true: false,
+  } as const;
+}
 
 function tradeSkillCatalogItem() {
   return {
@@ -1212,5 +1322,392 @@ describe("Trade Offer inspection API wiring", () => {
     await expect(getTradeRulePackage(packageDigest)).rejects.toThrow(
       "invalid Trade Skill detail",
     );
+  });
+
+  it("reads a signed Dispute Statement page and its local DAG projection", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(disputePage()))
+      .mockResolvedValueOnce(jsonResponse(disputeGraph()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getTradeDisputeStatements(
+      digest,
+      disputeExecutionId,
+      disputeReviewId,
+    )).resolves.toEqual(disputePage());
+    await expect(getTradeDisputeGraph(
+      digest,
+      disputeExecutionId,
+      disputeReviewId,
+    )).resolves.toEqual(disputeGraph());
+
+    const base = `/api/v2/trade/orders/${encodeURIComponent(digest)}`
+      + `/execution-receipts/${encodeURIComponent(disputeExecutionId)}`
+      + `/reviews/${encodeURIComponent(disputeReviewId)}/dispute-statements`;
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      `${base}?limit=500`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `${base}/graph`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("signs a Dispute Statement with an explicit idempotency key", async () => {
+    const result = {
+      status: "dispute-statement-signed",
+      order_digest: digest,
+      execution_id: disputeExecutionId,
+      review_id: disputeReviewId,
+      dispute_id: disputeId,
+      statement_id: disputeStatementId,
+      statement_digest: disputeStatementDigest,
+      statement: disputeStatement(),
+      statement_store_created: true,
+      audit_anchor_created: true,
+      audit_event_id: "7".repeat(64),
+      operation_id: `sha256:${"9".repeat(64)}`,
+      reservation_created: true,
+      claim_status: "signed-unadjudicated-claim",
+      claim_adjudicated_or_proven_true: false,
+    } as const;
+    const input: CreateTradeDisputeStatementInput = {
+      statement_type: "response",
+      parent_statement_digests: [],
+      reason_codes: ["result.mismatch"],
+      claim: disputeStatement().claim,
+      evidence: [],
+      rule_action: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(result, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createTradeDisputeStatement(
+      digest,
+      disputeExecutionId,
+      disputeReviewId,
+      input,
+      "dispute-ui-0123456789abcdef0123456789abcdef",
+    )).resolves.toEqual(result);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/dispute-statements"),
+      expect.objectContaining({
+        body: JSON.stringify(input),
+        method: "POST",
+        headers: expect.objectContaining({
+          "Idempotency-Key": "dispute-ui-0123456789abcdef0123456789abcdef",
+        }),
+      }),
+    );
+  });
+
+  it("requests a snapshot-bound Statement page and validates peer delivery", async () => {
+    const cursor = `v1:${"6".repeat(64)}:${"7".repeat(64)}`;
+    const signedDelivery = agreementVectors.trade_dispute_statement_delivery;
+    const signedAcknowledgement = (
+      agreementVectors.trade_dispute_statement_acknowledgement
+    );
+    const delivered = {
+      status: "dispute-statement-delivered",
+      order_digest: signedDelivery.order_digest,
+      execution_id: agreementVectors.execution_receipt.execution_id,
+      review_id: agreementVectors.disputed_receipt_review.review_id,
+      statement_digest: signedDelivery.statement_digest,
+      delivery: signedDelivery,
+      delivery_digest: agreementVectors.trade_dispute_statement_delivery_digest,
+      acknowledgement: signedAcknowledgement,
+      acknowledgement_digest: (
+        agreementVectors.trade_dispute_statement_acknowledgement_digest
+      ),
+      remote_audit_event_id: signedAcknowledgement.audit_event_id,
+      remote_received_at: signedAcknowledgement.received_at,
+      generation: 1,
+      attempts: 0,
+      acknowledgement_persisted: true,
+      claim_adjudicated_or_proven_true: false,
+    } as const;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(disputePage()))
+      .mockResolvedValueOnce(jsonResponse(delivered));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getTradeDisputeStatements(
+      digest,
+      disputeExecutionId,
+      disputeReviewId,
+      undefined,
+      cursor,
+    );
+    await expect(deliverTradeDisputeStatement(
+      signedDelivery.order_digest,
+      agreementVectors.execution_receipt.execution_id,
+      agreementVectors.disputed_receipt_review.review_id,
+      signedDelivery.statement_digest,
+      signedDelivery.receipt_digest,
+      signedDelivery.review_digest,
+      signedDelivery.sender_did,
+      signedDelivery.recipient_did,
+      "https://peer.example",
+    )).resolves.toEqual(delivered);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining(`limit=500&after=${encodeURIComponent(cursor)}`),
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining(`/${encodeURIComponent(signedDelivery.statement_digest)}/deliver`),
+      expect.objectContaining({
+        body: JSON.stringify({ target_url: "https://peer.example" }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("rejects malformed, rebound, and signature-tampered peer ACK responses", async () => {
+    const delivery = agreementVectors.trade_dispute_statement_delivery;
+    const acknowledgement = (
+      agreementVectors.trade_dispute_statement_acknowledgement
+    );
+    const valid = {
+      status: "dispute-statement-delivered",
+      order_digest: delivery.order_digest,
+      execution_id: agreementVectors.execution_receipt.execution_id,
+      review_id: agreementVectors.disputed_receipt_review.review_id,
+      statement_digest: delivery.statement_digest,
+      delivery,
+      delivery_digest: agreementVectors.trade_dispute_statement_delivery_digest,
+      acknowledgement,
+      acknowledgement_digest: (
+        agreementVectors.trade_dispute_statement_acknowledgement_digest
+      ),
+      remote_audit_event_id: acknowledgement.audit_event_id,
+      remote_received_at: acknowledgement.received_at,
+      generation: 1,
+      attempts: 0,
+      acknowledgement_persisted: true,
+      claim_adjudicated_or_proven_true: false,
+    };
+    const expected = {
+      orderDigest: delivery.order_digest,
+      executionId: agreementVectors.execution_receipt.execution_id,
+      reviewId: agreementVectors.disputed_receipt_review.review_id,
+      statementDigest: delivery.statement_digest,
+      receiptDigest: delivery.receipt_digest,
+      reviewDigest: delivery.review_digest,
+      senderDid: delivery.sender_did,
+      receiverDid: delivery.recipient_did,
+    };
+
+    await expect(validateTradeDisputeStatementDeliveryResult(
+      valid,
+      expected,
+    )).resolves.toEqual(valid);
+    await expect(validateTradeDisputeStatementDeliveryResult(
+      { ...valid, acknowledgement: {} },
+      expected,
+    )).rejects.toThrow(/invalid signed peer acknowledgement/i);
+    await expect(validateTradeDisputeStatementDeliveryResult(
+      { ...valid, delivery_digest: `sha256:${"0".repeat(64)}` },
+      expected,
+    )).rejects.toThrow(/invalid Dispute Statement delivery result/i);
+    await expect(validateTradeDisputeStatementDeliveryResult(
+      valid,
+      { ...expected, receiverDid: delivery.sender_did },
+    )).rejects.toThrow(/invalid Dispute Statement delivery result/i);
+    await expect(validateTradeDisputeStatementDeliveryResult(
+      {
+        ...valid,
+        acknowledgement: {
+          ...acknowledgement,
+          proof: {
+            ...acknowledgement.proof,
+            proof_value: `${acknowledgement.proof.proof_value.slice(0, -1)}`
+              + (acknowledgement.proof.proof_value.endsWith("A") ? "B" : "A"),
+          },
+        },
+      },
+      expected,
+    )).rejects.toThrow(/invalid signed peer acknowledgement/i);
+  });
+
+  it("loads one atomic Dispute page and graph projection", async () => {
+    const projection = {
+      ...disputePage(),
+      graph: disputeGraph().graph,
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(projection));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getTradeDisputeProjection(
+      digest,
+      disputeExecutionId,
+      disputeReviewId,
+    )).resolves.toEqual({
+      page: disputePage(),
+      graph: disputeGraph(),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("include_graph=true"),
+      expect.any(Object),
+    );
+  });
+
+  it.each([
+    ["invalid nested DID", () => ({
+      ...disputePage(),
+      items: [{
+        ...disputePage().items[0],
+        statement: { ...disputeStatement(), author_did: "did:key:zfake" },
+      }],
+    }), "invalid Dispute Statement"],
+    ["graph count mismatch", () => ({
+      ...disputeGraph(),
+      graph: { ...disputeGraph().graph, node_count: 2 },
+    }), "invalid Dispute Statement graph"],
+    ["truncated graph with an unaccounted hidden parent", () => {
+      const value = disputeGraph();
+      return {
+        ...value,
+        graph: {
+          ...value.graph,
+          statement_count: 2,
+          node_count: 2,
+          root_digests: [],
+          root_count: 1,
+          topological_count: 2,
+          items_truncated: true,
+          nodes: [{
+            ...value.graph.nodes[0],
+            parent_statement_digests: [`sha256:${"6".repeat(64)}`],
+            depth: 1,
+          }],
+        },
+      };
+    }, "contradictory Dispute graph membership"],
+    ["legacy graph snapshot token", () => ({
+      ...disputeGraph(),
+      graph: {
+        ...disputeGraph().graph,
+        snapshot_token: `v1:${"8".repeat(64)}`,
+      },
+    }), "invalid Dispute Statement graph"],
+    ["invalid page snapshot token", () => ({
+      ...disputePage(),
+      snapshot_token: `v1:${"8".repeat(64)}`,
+    }), "invalid Dispute Statement page"],
+    ["truth flag escalation", () => ({
+      ...disputeGraph(),
+      claims_adjudicated_or_proven_true: true,
+    }), "invalid Dispute Statement graph result"],
+    ["non-canonical proof", () => ({
+      ...disputePage(),
+      items: [{
+        ...disputePage().items[0],
+        statement: {
+          ...disputeStatement(),
+          proof: { ...disputeStatement().proof, proof_value: `${proofValue.slice(0, -1)}B` },
+        },
+      }],
+    }), "invalid Dispute Statement proof"],
+    ["wrong verification method", () => ({
+      ...disputePage(),
+      items: [{
+        ...disputePage().items[0],
+        statement: {
+          ...disputeStatement(),
+          proof: { ...disputeStatement().proof, verification_method: `${publisherDid}#other` },
+        },
+      }],
+    }), "invalid Dispute Statement proof"],
+    ["unsorted reason codes", () => ({
+      ...disputePage(),
+      items: [{
+        ...disputePage().items[0],
+        statement: {
+          ...disputeStatement(),
+          reason_codes: ["result.z", "result.a"],
+        },
+      }],
+    }), "invalid Dispute Statement"],
+    ["duplicate evidence binding", () => {
+      const statement = disputeStatement();
+      const evidence = {
+        purpose: "test.log",
+        media_type: "text/plain",
+        digest: `sha256:${"6".repeat(64)}`,
+        size: 1,
+      };
+      return {
+        ...disputePage(),
+        items: [{
+          ...disputePage().items[0],
+          statement: {
+            ...statement,
+            statement_type: "evidence",
+            reason_codes: [],
+            claim: null,
+            evidence: [evidence, evidence],
+          },
+        }],
+      };
+    }, "invalid sorted Dispute Statement evidence"],
+    ["duplicate graph node", () => {
+      const value = disputeGraph();
+      return {
+        ...value,
+        graph: {
+          ...value.graph,
+          statement_count: 2,
+          node_count: 2,
+          nodes: [value.graph.nodes[0], value.graph.nodes[0]],
+          items_truncated: true,
+        },
+      };
+    }, "invalid Dispute graph node"],
+  ])("rejects unsafe Dispute API data: %s", async (_label, fixture, message) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse(fixture())));
+    const request = [
+      "invalid nested DID",
+      "non-canonical proof",
+      "wrong verification method",
+      "unsorted reason codes",
+      "duplicate evidence binding",
+      "invalid page snapshot token",
+    ].includes(_label)
+      ? getTradeDisputeStatements(digest, disputeExecutionId, disputeReviewId)
+      : getTradeDisputeGraph(digest, disputeExecutionId, disputeReviewId);
+    await expect(request).rejects.toThrow(message);
+  });
+
+  it("rejects a malformed Dispute idempotency key before network I/O", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createTradeDisputeStatement(
+      digest,
+      disputeExecutionId,
+      disputeReviewId,
+      {
+        statement_type: "evidence",
+        parent_statement_digests: [],
+        reason_codes: [],
+        claim: null,
+        evidence: [{
+          purpose: "test.log",
+          media_type: "text/plain",
+          digest: `sha256:${"6".repeat(64)}`,
+          size: 1,
+        }],
+        rule_action: null,
+      },
+      "short",
+    )).rejects.toThrow("idempotency key is invalid");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

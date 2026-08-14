@@ -11,6 +11,7 @@ from typing import Any
 
 from nth_dao.identity import AgentID, AgentIdentity
 from nth_dao.trade_rules.agreement import (
+    DEFAULT_CLOCK_SKEW_SECONDS,
     _sign_acceptance_body,
     _sign_proposal_body,
     acceptance_digest,
@@ -75,11 +76,20 @@ from nth_dao.trade_rules.canonical import trade_canonical_json
 from nth_dao.trade_rules.dispute_statement import (
     TRADE_DISPUTE_STATEMENT_SIGNING_DOMAIN,
     create_trade_dispute_statement,
+    trade_dispute_id,
     trade_dispute_statement_digest,
 )
 from nth_dao.trade_rules.dispute_statement_audit import (
+    EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED,
+    EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
     EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
     trade_dispute_statement_audit_payload,
+    trade_dispute_statement_create_failure_payload,
+    trade_dispute_statement_create_reservation_payload,
+)
+from nth_dao.trade_rules.dispute_graph import project_trade_dispute_graph
+from nth_dao.trade_rules.dispute_statement_store import (
+    TradeDisputeStatementStore,
 )
 from nth_dao.trade_rules.dispute_statement_dispatch import (
     EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED,
@@ -771,6 +781,144 @@ def generate_vectors() -> dict[str, Any]:
         dispute_statement_audit = trade_dispute_statement_audit_payload(
             dispute_statement
         )
+        dispute_statement_creation_failure = (
+            trade_dispute_statement_create_failure_payload(
+                operation_id="sha256:" + ("1" * 64),
+                request_digest="sha256:" + ("2" * 64),
+                reason_code="dependency-unavailable",
+            )
+        )
+        dispute_statement_creation_failure_bad_retryability = copy.deepcopy(
+            dispute_statement_creation_failure
+        )
+        dispute_statement_creation_failure_bad_retryability["retryable"] = False
+        dispute_statement_creation_failure_bad_id = copy.deepcopy(
+            dispute_statement_creation_failure
+        )
+        dispute_statement_creation_failure_bad_id["failure_id"] = (
+            "sha256:" + ("3" * 64)
+        )
+        dispute_statement_digest_value = trade_dispute_statement_digest(
+            dispute_statement,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        dispute_statement_child = create_trade_dispute_statement(
+            maker,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            statement_type="remedy-proposal",
+            parent_statement_digests=[dispute_statement_digest_value],
+            reason_codes=["executor.proposes-remedy"],
+            claim={
+                "claim_type": "remedy-proposal",
+                "media_type": "application/json",
+                "digest": "sha256:" + ("c" * 64),
+                "size": 1,
+                "schema_digest": None,
+            },
+            created_at="2026-08-01T02:04:01Z",
+            now=_utc("2026-08-01T02:04:01Z"),
+        )
+        dispute_statement_child_digest = trade_dispute_statement_digest(
+            dispute_statement_child,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        graph_store = TradeDisputeStatementStore(
+            Path(directory) / "dispute-graph-conformance"
+        )
+        for retained in (dispute_statement, dispute_statement_child):
+            graph_store.put(
+                retained,
+                review=conflicting_receipt_review,
+                receipt=execution_receipt,
+                order=order,
+                package_resolver=package_store,
+                at=_utc("2026-08-01T02:04:02Z"),
+            )
+        dispute_page, dispute_graph = graph_store.page_and_graph_for_review(
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            package_resolver=package_store,
+            limit=1,
+        )
+        missing_parent_digest = "sha256:" + ("d" * 64)
+        cross_context_statement = create_trade_dispute_statement(
+            maker,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+            statement_type="response",
+            parent_statement_digests=[missing_parent_digest],
+            reason_codes=["executor.contests-review"],
+            claim={
+                "claim_type": "receipt-result-assertion",
+                "media_type": execution_result_reference["media_type"],
+                "digest": execution_result_reference["digest"],
+                "size": execution_result_reference["size_bytes"],
+                "schema_digest": output_schema_digest,
+            },
+            created_at="2026-08-01T02:04:02Z",
+            now=_utc("2026-08-01T02:04:02Z"),
+        )
+        cross_context_digest = trade_dispute_statement_digest(
+            cross_context_statement,
+            review=conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        current_review_digest = receipt_review_digest(
+            conflicting_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        alternate_review_digest = receipt_review_digest(
+            alternate_disputed_receipt_review,
+            receipt=execution_receipt,
+            order=order,
+        )
+        current_dispute_id = trade_dispute_id(
+            conflicting_receipt_review.to_dict()["review_id"]
+        )
+        missing_parent_graph = project_trade_dispute_graph(
+            [(cross_context_digest, cross_context_statement)],
+            expected_review_digest=current_review_digest,
+            expected_dispute_id=current_dispute_id,
+        )
+        foreign_parent_graph = project_trade_dispute_graph(
+            [(cross_context_digest, cross_context_statement)],
+            known_review_digests={
+                missing_parent_digest: alternate_review_digest,
+            },
+            expected_review_digest=current_review_digest,
+            expected_dispute_id=current_dispute_id,
+        )
+        reservation_body = {
+            "statement_type": "response",
+            "parent_statement_digests": [],
+            "reason_codes": ["executor.contests-review"],
+            "claim": None,
+            "evidence": [],
+            "rule_action": None,
+        }
+        reservation_input = {
+            "idempotency_key": "public-vector-0001",
+            "body": reservation_body,
+            "order_digest": trade_order_digest(order),
+            "execution_id": execution_receipt.to_dict()["execution_id"],
+            "review_id": conflicting_receipt_review.to_dict()["review_id"],
+            "author_did": maker.as_did(),
+        }
+        reservation_payload = (
+            trade_dispute_statement_create_reservation_payload(
+                **reservation_input
+            )
+        )
         future_dispute_statement = create_trade_dispute_statement(
             maker,
             review=conflicting_receipt_review,
@@ -1433,6 +1581,85 @@ def generate_vectors() -> dict[str, Any]:
         "trade_dispute_statement_audit": {
             "event_type": EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
             "payload": dispute_statement_audit,
+        },
+        "trade_dispute_statement_creation_failure_audit": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED,
+            "payload": dispute_statement_creation_failure,
+        },
+        "trade_dispute_statement_creation_failure_negative_cases": [
+            {
+                "case": "retryability-mismatch",
+                "payload": dispute_statement_creation_failure_bad_retryability,
+                "expected_reason": "retryability is invalid",
+            },
+            {
+                "case": "failure-id-mismatch",
+                "payload": dispute_statement_creation_failure_bad_id,
+                "expected_reason": "failure_id binding is invalid",
+            },
+        ],
+        "trade_dispute_statement_creation_reservation": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
+            "input": reservation_input,
+            "payload": reservation_payload,
+        },
+        "trade_dispute_statement_page_snapshot": {
+            "limit": 1,
+            "items": [
+                {
+                    "statement_digest": digest,
+                    "statement": statement.to_dict(),
+                }
+                for digest, statement in zip(
+                    dispute_page.statement_digests,
+                    dispute_page.statements,
+                    strict=True,
+                )
+            ],
+            "snapshot_token": dispute_page.snapshot_token,
+            "next_cursor": dispute_page.next_cursor,
+        },
+        "trade_dispute_statement_graph_snapshot": {
+            "input": {
+                "records": [
+                    {
+                        "statement_digest": dispute_statement_digest_value,
+                        "statement": dispute_statement.to_dict(),
+                    },
+                    {
+                        "statement_digest": dispute_statement_child_digest,
+                        "statement": dispute_statement_child.to_dict(),
+                    },
+                ],
+                "known_review_digests": {},
+                "expected_review_digest": current_review_digest,
+                "expected_dispute_id": current_dispute_id,
+                "clock_skew_seconds": DEFAULT_CLOCK_SKEW_SECONDS,
+            },
+            "projection": dispute_graph.to_dict(),
+        },
+        "trade_dispute_statement_graph_context_cases": [
+            {
+                "case": "missing-parent",
+                "known_review_digests": {},
+                "projection": missing_parent_graph.to_dict(),
+            },
+            {
+                "case": "foreign-review-parent",
+                "known_review_digests": {
+                    missing_parent_digest: alternate_review_digest,
+                },
+                "projection": foreign_parent_graph.to_dict(),
+            },
+        ],
+        "trade_dispute_statement_graph_context_input": {
+            "record": {
+                "statement_digest": cross_context_digest,
+                "statement": cross_context_statement.to_dict(),
+            },
+            "expected_review_digest": current_review_digest,
+            "expected_dispute_id": current_dispute_id,
+            "clock_skew_seconds": DEFAULT_CLOCK_SKEW_SECONDS,
         },
         "trade_dispute_statement_acknowledgement_audit": {
             "event_type": EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED,

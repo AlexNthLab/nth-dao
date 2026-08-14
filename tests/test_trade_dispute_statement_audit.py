@@ -20,9 +20,14 @@ from nth_dao.trade_rules.dispute_statement_audit import (
     TradeDisputeStatementAuditCoordinator,
     TradeDisputeStatementAuditError,
     trade_dispute_statement_audit_payload,
+    trade_dispute_statement_create_failure_payload,
+    trade_dispute_statement_create_reservation_payload,
     validate_trade_dispute_statement_audit_binding,
     validate_trade_dispute_statement_audit_event,
     validate_trade_dispute_statement_audit_payload,
+    validate_trade_dispute_statement_create_failure_payload,
+    validate_trade_dispute_statement_create_reservation_binding,
+    validate_trade_dispute_statement_create_reservation_payload,
 )
 from nth_dao.trade_rules.dispute_statement_store import (
     TradeDisputeStatementStore,
@@ -104,6 +109,83 @@ def test_dispute_statement_audit_payload_is_an_exact_claim_binding(
             receipt=receipt,
             order=order,
             package_resolver=resolver,
+        )
+
+
+def test_dispute_statement_creation_failure_payload_is_closed_and_bound():
+    payload = trade_dispute_statement_create_failure_payload(
+        operation_id="sha256:" + ("1" * 64),
+        request_digest="sha256:" + ("2" * 64),
+        reason_code="dependency-unavailable",
+    )
+
+    assert payload["retryable"] is True
+    assert validate_trade_dispute_statement_create_failure_payload(payload) == payload
+
+    for field, value, message in (
+        ("retryable", False, "retryability is invalid"),
+        ("failure_id", "sha256:" + ("3" * 64), "failure_id binding is invalid"),
+    ):
+        tampered = {**payload, field: value}
+        with pytest.raises(TradeDisputeStatementAuditError, match=message):
+            validate_trade_dispute_statement_create_failure_payload(tampered)
+
+    with pytest.raises(TradeDisputeStatementAuditError, match="reason_code is invalid"):
+        trade_dispute_statement_create_failure_payload(
+            operation_id=payload["operation_id"],
+            request_digest=payload["request_digest"],
+            reason_code="invented-reason",
+        )
+
+
+def test_dispute_statement_creation_reservation_is_closed_and_request_bound(
+    dispute_artifacts,
+):
+    statement, review, receipt, order, _resolver = dispute_artifacts
+    body = {
+        "statement_type": "response",
+        "parent_statement_digests": [],
+        "reason_codes": ["executor.contests-review"],
+        "claim": None,
+        "evidence": [],
+        "rule_action": None,
+    }
+    document = statement.to_dict()
+    payload = trade_dispute_statement_create_reservation_payload(
+        idempotency_key="reservation-test-0001",
+        body=body,
+        order_digest=document["order_digest"],
+        execution_id=receipt.to_dict()["execution_id"],
+        review_id=review.to_dict()["review_id"],
+        author_did=document["author_did"],
+    )
+
+    assert validate_trade_dispute_statement_create_reservation_payload(payload) == payload
+    assert validate_trade_dispute_statement_create_reservation_binding(
+        payload,
+        idempotency_key="reservation-test-0001",
+        body=body,
+        order_digest=document["order_digest"],
+        execution_id=receipt.to_dict()["execution_id"],
+        review_id=review.to_dict()["review_id"],
+        author_did=document["author_did"],
+    ) == payload
+
+    rebound = {**body, "reason_codes": ["executor.requests-remedy"]}
+    with pytest.raises(TradeDisputeStatementAuditError, match="does not bind"):
+        validate_trade_dispute_statement_create_reservation_binding(
+            payload,
+            idempotency_key="reservation-test-0001",
+            body=rebound,
+            order_digest=document["order_digest"],
+            execution_id=receipt.to_dict()["execution_id"],
+            review_id=review.to_dict()["review_id"],
+            author_did=document["author_did"],
+        )
+
+    with pytest.raises(TradeDisputeStatementAuditError, match="unknown fields"):
+        validate_trade_dispute_statement_create_reservation_payload(
+            {**payload, "unexpected": True}
         )
 
 
@@ -573,4 +655,11 @@ def test_dispute_statement_audit_is_public_api():
     )
     assert trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED == (
         EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+    )
+    assert trade_rules_api.trade_dispute_statement_create_reservation_payload is (
+        trade_dispute_statement_create_reservation_payload
+    )
+    assert (
+        trade_rules_api.validate_trade_dispute_statement_create_reservation_binding
+        is validate_trade_dispute_statement_create_reservation_binding
     )

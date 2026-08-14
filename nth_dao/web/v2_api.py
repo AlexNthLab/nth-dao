@@ -1916,6 +1916,19 @@ class TradeDisputeStatementCreateConflict(ValueError):
     """An idempotency key is already bound to another Statement request."""
 
 
+def _trade_dispute_idempotency_key(request: Request) -> str:
+    value = request.headers.get("Idempotency-Key", "").strip()
+    if _TRADE_DISPUTE_IDEMPOTENCY_KEY.fullmatch(value) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Idempotency-Key must contain 16..128 ASCII letters, digits, "
+                "'.', ':', '_' or '-'"
+            ),
+        )
+    return value
+
+
 def _reserve_trade_dispute_statement_creation(
     request: Request,
     *,
@@ -1924,7 +1937,7 @@ def _reserve_trade_dispute_statement_creation(
     execution_id: str,
     review_id: str,
     author_did: str,
-) -> tuple[str, datetime, str, bool]:
+) -> tuple[str, str, datetime, str, bool]:
     """Durably bind one retry key before creating signed Statement bytes.
 
     The reservation is a local, signed Spine event. Its timestamp becomes the
@@ -1934,51 +1947,26 @@ def _reserve_trade_dispute_statement_creation(
 
     from nth_dao.trade_rules import (
         EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
-        trade_canonical_json,
+        trade_dispute_statement_create_reservation_payload,
     )
 
-    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
-    if _TRADE_DISPUTE_IDEMPOTENCY_KEY.fullmatch(idempotency_key) is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Idempotency-Key must contain 16..128 ASCII letters, digits, "
-                "'.', ':', '_' or '-'"
-            ),
-        )
+    idempotency_key = _trade_dispute_idempotency_key(request)
     spine = _state_spine(request)
     if spine is None:
         raise HTTPException(
             status_code=503,
             detail="signed Spine unavailable for idempotent Statement creation",
         )
-    operation_id = "sha256:" + hashlib.sha256(
-        (
-            "nth-dao/trade-dispute-statement-create/v1\0"
-            + author_did
-            + "\0"
-            + idempotency_key
-        ).encode("ascii")
-    ).hexdigest()
-    request_material = {
-        "order_digest": order_digest,
-        "execution_id": execution_id,
-        "review_id": review_id,
-        "author_did": author_did,
-        "body": body,
-    }
-    request_digest = "sha256:" + hashlib.sha256(
-        trade_canonical_json(request_material)
-    ).hexdigest()
-    payload = {
-        "protocol_version": "1",
-        "operation_id": operation_id,
-        "request_digest": request_digest,
-        "order_digest": order_digest,
-        "execution_id": execution_id,
-        "review_id": review_id,
-        "author_did": author_did,
-    }
+    payload = trade_dispute_statement_create_reservation_payload(
+        idempotency_key=idempotency_key,
+        body=body,
+        order_digest=order_digest,
+        execution_id=execution_id,
+        review_id=review_id,
+        author_did=author_did,
+    )
+    operation_id = payload["operation_id"]
+    request_digest = payload["request_digest"]
     reserved_at_ms = int(datetime.now(timezone.utc).timestamp() * 1_000)
     if reserved_at_ms % 1_000 == 0:
         reserved_at_ms += 1
@@ -2019,7 +2007,41 @@ def _reserve_trade_dispute_statement_creation(
     created_at = created_moment.isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
     )
-    return operation_id, created_moment, created_at, created
+    return operation_id, request_digest, created_moment, created_at, created
+
+
+def _record_trade_dispute_statement_creation_failure(
+    request: Request,
+    *,
+    operation_id: str,
+    request_digest: str,
+    reason_code: str,
+) -> tuple[Any, bool]:
+    """Append one signed, idempotent failure class for a reserved operation."""
+
+    from nth_dao.trade_rules import (
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED,
+        trade_dispute_statement_create_failure_payload,
+    )
+
+    spine = _state_spine(request)
+    if spine is None:
+        raise RuntimeError("signed Spine unavailable for Statement failure audit")
+    payload = trade_dispute_statement_create_failure_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        reason_code=reason_code,
+    )
+    event, created = spine.append_unique(
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED,
+        payload,
+        unique_payload_fields=("failure_id",),
+    )
+    if event.author_did != spine.signer_did or event.payload != payload:
+        raise RuntimeError(
+            "Dispute Statement creation failure audit is unauthorized or conflicting"
+        )
+    return event, created
 
 
 class MarketPublishConflict(ValueError):
@@ -14675,7 +14697,9 @@ def register_v2_routes(app: FastAPI) -> None:
             TradeDisputeStatementIntakeCoordinator,
             TradeDisputeStatementIntakeJournalCapacity,
             TradeDisputeStatementIntakeJournalError,
+            TradeDisputeStatementDependencyError,
             TradeDisputeStatementRejected,
+            TradeDisputeStatementResolutionError,
             TradeDisputeStatementStoreBusy,
             TradeDisputeStatementStoreCapacity,
             TradeDisputeStatementStoreError,
@@ -14888,6 +14912,15 @@ def register_v2_routes(app: FastAPI) -> None:
             result = await run_in_threadpool(_receive_statement)
         except TradeDisputeStatementDeliveryRejected as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (
+            TradeDisputeStatementDependencyError,
+            TradeDisputeStatementResolutionError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
         except TradeDisputeStatementRejected as exc:
             logger.info(
                 "remote Dispute Statement rejected during signed replay: %s",
@@ -16943,13 +16976,18 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request,
         limit: int = 100,
         after: str | None = None,
+        include_graph: bool = False,
     ) -> Dict[str, Any]:
         """List verified signed claims for one exact disputed Review."""
 
         from nth_dao.trade_rules import (
             EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
             TradeDisputeStatementAuditError,
+            TradeDisputeStatementDependencyError,
+            TradeDisputeStatementRejected,
+            TradeDisputeStatementResolutionError,
             TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreCapacity,
             TradeDisputeStatementStoreError,
             validate_trade_dispute_statement_audit_event,
             validate_trade_dispute_statement_audit_payload,
@@ -16963,6 +17001,11 @@ def register_v2_routes(app: FastAPI) -> None:
             after,
         ) is None:
             raise HTTPException(status_code=400, detail="after cursor is invalid")
+        if include_graph and after is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="include_graph is available only for the first page",
+            )
         order, receipt, review = await _load_trade_dispute_review(
             request,
             order_digest=order_digest,
@@ -16986,21 +17029,44 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=503,
                 detail="trade Rule Package audit resolver unavailable",
             ) from exc
+
         try:
-            page = await run_in_threadpool(
-                store.list_for_review,
-                review=review,
-                receipt=receipt,
-                order=order,
-                package_resolver=package_resolver,
-                limit=limit,
-                after=after,
-            )
+            graph = None
+            if include_graph:
+                page, graph = await run_in_threadpool(
+                    store.page_and_graph_for_review,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    package_resolver=package_resolver,
+                    limit=limit,
+                )
+            else:
+                page = await run_in_threadpool(
+                    store.list_for_review,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    package_resolver=package_resolver,
+                    limit=limit,
+                    after=after,
+                )
         except TradeDisputeStatementStoreBusy as exc:
             raise HTTPException(
                 status_code=503,
                 detail="trade Dispute Statement store is busy",
                 headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementDependencyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement graph capacity exceeded",
             ) from exc
         except TradeDisputeStatementStoreError as exc:
             raise HTTPException(
@@ -17078,6 +17144,17 @@ def register_v2_routes(app: FastAPI) -> None:
                         "audit_event_id": audit_event_id,
                     }
                 )
+        except TradeDisputeStatementResolutionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementRejected as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement audit projection is invalid",
+            ) from exc
         except (
             OSError,
             RuntimeError,
@@ -17089,13 +17166,99 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=409,
                 detail="trade Dispute Statement audit projection is invalid",
             ) from exc
-        return {
+        result = {
             "status": "dispute-statements-listed",
             "order_digest": order_digest,
             "execution_id": execution_id,
             "review_id": review_id,
             "items": projected,
+            "snapshot_token": page.snapshot_token,
             "next_cursor": page.next_cursor,
+            "graph_endpoint": request.url.path + "/graph",
+            "claims_adjudicated_or_proven_true": False,
+        }
+        if graph is not None:
+            result["graph"] = graph.to_dict(max_items=500)
+        return result
+
+    @app.get(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews/{review_id}/dispute-statements/graph"
+    )
+    async def v2_trade_dispute_statement_graph(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Project locally retained ancestry without adjudicating claims."""
+
+        from nth_dao.trade_rules import (
+            TradeDisputeStatementDependencyError,
+            TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreCapacity,
+            TradeDisputeStatementStoreError,
+        )
+
+        _require_console_bearer_for_sensitive_read(request)
+        order, receipt, review = await _load_trade_dispute_review(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+            review_id=review_id,
+        )
+        store = _state_trade_dispute_statement_store(request)
+        if store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement runtime unavailable",
+            )
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+        try:
+            graph = await run_in_threadpool(
+                store.graph_for_review,
+                review=review,
+                receipt=receipt,
+                order=order,
+                package_resolver=package_resolver,
+            )
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement graph capacity exceeded",
+            ) from exc
+        except TradeDisputeStatementDependencyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement graph integrity conflict",
+            ) from exc
+        return {
+            "status": "dispute-statement-graph-projected",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "graph": graph.to_dict(max_items=500),
             "claims_adjudicated_or_proven_true": False,
         }
 
@@ -17115,7 +17278,10 @@ def register_v2_routes(app: FastAPI) -> None:
 
         from nth_dao.trade_rules import (
             TradeDisputeStatementAuditError,
+            TradeDisputeStatementDependencyError,
             TradeDisputeStatementRejected,
+            TradeDisputeStatementResolutionError,
+            TradeDisputeStatementParentError,
             TradeDisputeStatementStoreBusy,
             TradeDisputeStatementStoreCapacity,
             TradeDisputeStatementStoreError,
@@ -17157,10 +17323,12 @@ def register_v2_routes(app: FastAPI) -> None:
         )
         identity = _state_node_identity(request)
         coordinator = _state_trade_dispute_statement_audit(request)
+        store = _state_trade_dispute_statement_store(request)
         if (
             identity is None
             or not getattr(identity, "can_sign", False)
             or coordinator is None
+            or store is None
         ):
             raise HTTPException(
                 status_code=503,
@@ -17185,8 +17353,96 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=503,
                 detail="trade Rule Package audit resolver unavailable",
             ) from exc
+
+        _trade_dispute_idempotency_key(request)
+
+        def _create_statement(created_at_value: str, moment: datetime) -> Any:
+            try:
+                return create_trade_dispute_statement(
+                    identity,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    statement_type=body["statement_type"],
+                    parent_statement_digests=body.get(
+                        "parent_statement_digests", ()
+                    ),
+                    reason_codes=body.get("reason_codes", ()),
+                    claim=body.get("claim"),
+                    evidence=body.get("evidence", ()),
+                    rule_action=body.get("rule_action"),
+                    package_resolver=package_resolver,
+                    created_at=created_at_value,
+                    now=moment,
+                )
+            except TradeDisputeStatementResolutionError as exc:
+                raise TradeDisputeStatementDependencyError(
+                    "trade Dispute Statement dependency is unavailable"
+                ) from exc
+
+        preflight_moment = datetime.now(timezone.utc)
+        if preflight_moment.microsecond == 0:
+            preflight_moment = preflight_moment.replace(microsecond=1)
+        preflight_created_at = preflight_moment.isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
+
+        def _preflight_statement() -> None:
+            statement = _create_statement(
+                preflight_created_at,
+                preflight_moment,
+            )
+            if statement.to_dict()["parent_statement_digests"]:
+                store.assert_complete_parent_chain(
+                    statement,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    package_resolver=package_resolver,
+                )
+
         try:
-            operation_id, creation_moment, created_at, reservation_created = (
+            await run_in_threadpool(_preflight_statement)
+        except TradeDisputeStatementDependencyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TradeDisputeStatementParentError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement graph capacity exceeded",
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement integrity conflict",
+            ) from exc
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement preflight failed",
+                headers={"Retry-After": "1"},
+            ) from exc
+        try:
+            (
+                operation_id,
+                request_digest,
+                creation_moment,
+                created_at,
+                reservation_created,
+            ) = (
                 _reserve_trade_dispute_statement_creation(
                     request,
                     body=body,
@@ -17208,24 +17464,36 @@ def register_v2_routes(app: FastAPI) -> None:
             ) from exc
         observed_at_ms = int(creation_moment.timestamp() * 1_000)
 
+        async def _audit_creation_failure(
+            reason_code: str,
+        ) -> None:
+            try:
+                await run_in_threadpool(
+                    _record_trade_dispute_statement_creation_failure,
+                    request,
+                    operation_id=operation_id,
+                    request_digest=request_digest,
+                    reason_code=reason_code,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "trade Dispute Statement failure audit is incomplete"
+                    ),
+                    headers={"Retry-After": "1"},
+                ) from exc
+
         def _create_and_record_statement() -> Any:
-            statement = create_trade_dispute_statement(
-                identity,
-                review=review,
-                receipt=receipt,
-                order=order,
-                statement_type=body["statement_type"],
-                parent_statement_digests=body.get(
-                    "parent_statement_digests", ()
-                ),
-                reason_codes=body.get("reason_codes", ()),
-                claim=body.get("claim"),
-                evidence=body.get("evidence", ()),
-                rule_action=body.get("rule_action"),
-                package_resolver=package_resolver,
-                created_at=created_at,
-                now=creation_moment,
-            )
+            statement = _create_statement(created_at, creation_moment)
+            if statement.to_dict()["parent_statement_digests"]:
+                store.assert_complete_parent_chain(
+                    statement,
+                    review=review,
+                    receipt=receipt,
+                    order=order,
+                    package_resolver=package_resolver,
+                )
             return coordinator.record(
                 statement,
                 review=review,
@@ -17237,20 +17505,34 @@ def register_v2_routes(app: FastAPI) -> None:
 
         try:
             result = await run_in_threadpool(_create_and_record_statement)
+        except TradeDisputeStatementDependencyError as exc:
+            await _audit_creation_failure("dependency-unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
         except TradeDisputeStatementRejected as exc:
+            await _audit_creation_failure("statement-rejected")
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TradeDisputeStatementParentError as exc:
+            await _audit_creation_failure("parent-chain-unavailable")
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except TradeDisputeStatementStoreBusy as exc:
+            await _audit_creation_failure("store-busy")
             raise HTTPException(
                 status_code=503,
                 detail="trade Dispute Statement store is busy",
                 headers={"Retry-After": "1"},
             ) from exc
         except TradeDisputeStatementStoreCapacity as exc:
+            await _audit_creation_failure("store-capacity")
             raise HTTPException(
                 status_code=507,
                 detail="trade Dispute Statement capacity exceeded",
             ) from exc
         except TradeDisputeStatementStoreError as exc:
+            await _audit_creation_failure("store-integrity-conflict")
             raise HTTPException(
                 status_code=409,
                 detail="trade Dispute Statement integrity conflict",
@@ -17262,6 +17544,7 @@ def register_v2_routes(app: FastAPI) -> None:
             TypeError,
             ValueError,
         ) as exc:
+            await _audit_creation_failure("persistence-incomplete")
             raise HTTPException(
                 status_code=503,
                 detail="trade Dispute Statement persistence is incomplete",
@@ -17406,6 +17689,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 "execution_id": execution_id,
                 "review_id": review_id,
                 "statement_digest": statement_digest,
+                "delivery": record.delivery.to_dict(),
                 "delivery_digest": record.delivery_digest,
                 "acknowledgement": acknowledgement,
                 "acknowledgement_digest": record.acknowledgement_digest,
@@ -17449,9 +17733,13 @@ def register_v2_routes(app: FastAPI) -> None:
                 headers={"Retry-After": "1"},
             ) from exc
 
-        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        moment = datetime.now(timezone.utc)
+        if moment.microsecond == 0:
+            moment += timedelta(microseconds=1)
         now_ms = int(moment.timestamp() * 1_000)
-        created_at = moment.isoformat().replace("+00:00", "Z")
+        created_at = moment.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
         try:
             if pending is not None:
                 if pending.target_url != target_url:
@@ -17477,9 +17765,9 @@ def register_v2_routes(app: FastAPI) -> None:
                         order=order,
                         package_resolver=package_resolver,
                         created_at=created_at,
-                        not_after=(moment + timedelta(minutes=5)).isoformat().replace(
-                            "+00:00", "Z"
-                        ),
+                        not_after=(moment + timedelta(minutes=5)).isoformat(
+                            timespec="microseconds"
+                        ).replace("+00:00", "Z"),
                         now=moment,
                     )
                     pending = await run_in_threadpool(
@@ -17505,9 +17793,9 @@ def register_v2_routes(app: FastAPI) -> None:
                     order=order,
                     package_resolver=package_resolver,
                     created_at=created_at,
-                    not_after=(moment + timedelta(minutes=5)).isoformat().replace(
-                        "+00:00", "Z"
-                    ),
+                    not_after=(moment + timedelta(minutes=5)).isoformat(
+                        timespec="microseconds"
+                    ).replace("+00:00", "Z"),
                     now=moment,
                 )
                 pending = await run_in_threadpool(

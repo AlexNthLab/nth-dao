@@ -61,6 +61,14 @@ import type {
   TradeReceiptReviewCreateResult,
   TradeReceiptReviewDeliveryResult,
   TradeReceiptReviewState,
+  CreateTradeDisputeStatementInput,
+  TradeDisputeClaimReference,
+  TradeDisputeEvidenceReference,
+  TradeDisputeGraphResult,
+  TradeDisputeStatementCreateResult,
+  TradeDisputeStatementDeliveryResult,
+  TradeDisputeStatementDocument,
+  TradeDisputeStatementPage,
   TradeOrderDetail,
   TradeOrderPage,
   TradeRuleRecognitionImportResult,
@@ -72,6 +80,10 @@ import type {
   TradeRulePackageCatalogPage,
   TradeRulePackageDetail,
 } from "./types-v2";
+import {
+  tradeCanonicalSha256Digest,
+  verifyTradeDisputeStatementAcknowledgementBinding,
+} from "../tradeRules/conformance";
 
 const BASE = "/api/v2";
 const TRADE_INBOX_PAGE_SIZE = "100";
@@ -451,14 +463,15 @@ async function postJson<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  extraHeaders: Record<string, string> = {},
 ): Promise<T> {
   const init: RequestInit = {
     method: "POST",
     signal,
     credentials: "same-origin",
     headers: body === undefined
-      ? { Accept: "application/json", ...authHeader() }
-      : { Accept: "application/json", "Content-Type": "application/json", ...authHeader() },
+      ? { Accept: "application/json", ...extraHeaders, ...authHeader() }
+      : { Accept: "application/json", "Content-Type": "application/json", ...extraHeaders, ...authHeader() },
   };
   if (body !== undefined) {
     init.body = JSON.stringify(body);
@@ -1027,7 +1040,50 @@ export async function getTradeOfferInspection(
 }
 
 const TRADE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const TRADE_DISPUTE_SNAPSHOT = /^v2:[0-9a-f]{64}$/;
 const SPINE_EVENT_ID = /^[0-9a-f]{64}$/;
+const TRADE_DISPUTE_ID = /^nth-trade-dispute-sha256:[0-9a-f]{64}$/;
+const TRADE_DISPUTE_STATEMENT_ID = /^nth-trade-dispute-statement-sha256:[0-9a-f]{64}$/;
+const TRADE_REVIEW_ID = /^nth-trade-review-sha256:[0-9a-f]{64}$/;
+const TRADE_PROTOCOL_TOKEN = /^[a-z][a-z0-9._:/-]{0,127}$/;
+const TRADE_REASON_CODE = /^[a-z][a-z0-9._:-]{0,127}$/;
+const TRADE_MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+const TRADE_DISPUTE_CURSOR = /^v1:[0-9a-f]{64}:[0-9a-f]{64}$/;
+const TRADE_IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{16,128}$/;
+const TRADE_DISPUTE_DELIVERY_ID = /^nth:trade:dispute-statement-delivery:sha256:[0-9a-f]{64}$/;
+const TRADE_DISPUTE_NONCE = /^(?:[0-9a-f]{2}){16,64}$/;
+const ED25519_DID_KEY = /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/;
+const ED25519_PROOF_VALUE = /^[A-Za-z0-9_-]{86}$/;
+
+function isCanonicalEd25519Proof(value: unknown): value is string {
+  if (typeof value !== "string" || !ED25519_PROOF_VALUE.test(value)) return false;
+  try {
+    const binary = atob(`${value.replace(/-/g, "+").replace(/_/g, "/")}==`);
+    if (binary.length !== 64) return false;
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") === value;
+  } catch {
+    return false;
+  }
+}
+
+function isCanonicalTradeTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{6}))?Z$/.exec(value);
+  if (!match || match[7] === "000000") return false;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) {
+    return false;
+  }
+  const moment = new Date(0);
+  moment.setUTCFullYear(year, month - 1, day);
+  moment.setUTCHours(hour, minute, second, 0);
+  return moment.getUTCFullYear() === year
+    && moment.getUTCMonth() === month - 1
+    && moment.getUTCDate() === day
+    && moment.getUTCHours() === hour
+    && moment.getUTCMinutes() === minute
+    && moment.getUTCSeconds() === second;
+}
 
 export function validateTradeOfferImportResult(
   value: unknown,
@@ -1220,6 +1276,767 @@ export async function deliverTradeReceiptReview(
       + `/reviews/${encodeURIComponent(reviewId)}/deliver`,
     { target_url: targetUrl },
     signal,
+  );
+}
+
+function disputeObject(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`server returned an invalid ${label}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function disputeExactFields(
+  value: Record<string, unknown>,
+  expected: string[],
+  label: string,
+) {
+  const actual = Object.keys(value).sort();
+  const fields = [...expected].sort();
+  if (
+    actual.length !== fields.length
+    || actual.some((field, index) => field !== fields[index])
+  ) {
+    throw new Error(`server returned an invalid ${label}`);
+  }
+}
+
+function disputeDigestArray(
+  value: unknown,
+  label: string,
+  maximum = 500,
+): string[] {
+  if (
+    !Array.isArray(value)
+    || value.length > maximum
+    || !value.every((item) => typeof item === "string" && TRADE_DIGEST.test(item))
+    || new Set(value).size !== value.length
+  ) {
+    throw new Error(`server returned an invalid ${label}`);
+  }
+  return value;
+}
+
+function disputeContentReference(
+  value: unknown,
+  kind: "claim" | "evidence",
+): TradeDisputeClaimReference | TradeDisputeEvidenceReference {
+  const item = disputeObject(value, `Dispute Statement ${kind}`);
+  disputeExactFields(
+    item,
+    kind === "claim"
+      ? ["claim_type", "media_type", "digest", "size", "schema_digest"]
+      : ["purpose", "media_type", "digest", "size"],
+    `Dispute Statement ${kind}`,
+  );
+  const token = kind === "claim" ? item.claim_type : item.purpose;
+  if (
+    typeof token !== "string"
+    || !TRADE_PROTOCOL_TOKEN.test(token)
+    || typeof item.media_type !== "string"
+    || item.media_type.length > 127
+    || !TRADE_MEDIA_TYPE.test(item.media_type)
+    || typeof item.digest !== "string"
+    || !TRADE_DIGEST.test(item.digest)
+    || !Number.isInteger(item.size)
+    || (item.size as number) < 0
+    || (item.size as number) > 16 * 1024 * 1024
+    || (
+      kind === "claim"
+      && item.schema_digest !== null
+      && (typeof item.schema_digest !== "string" || !TRADE_DIGEST.test(item.schema_digest))
+    )
+  ) {
+    throw new Error(`server returned an invalid Dispute Statement ${kind}`);
+  }
+  return item as unknown as TradeDisputeClaimReference | TradeDisputeEvidenceReference;
+}
+
+export function validateTradeDisputeStatementDocument(
+  value: unknown,
+  expected: { orderDigest: string; executionReviewId: string },
+): TradeDisputeStatementDocument {
+  const statement = disputeObject(value, "Dispute Statement");
+  disputeExactFields(statement, [
+    "kind", "protocol_version", "statement_id", "dispute_id", "order_digest",
+    "receipt_digest", "review_digest", "review_id", "author_did", "author_role",
+    "statement_type", "parent_statement_digests", "reason_codes", "claim",
+    "evidence", "rule_action", "created_at", "proof",
+  ], "Dispute Statement");
+  const parents = disputeDigestArray(
+    statement.parent_statement_digests,
+    "Dispute Statement parents",
+    64,
+  );
+  const reasons = statement.reason_codes;
+  const evidence = statement.evidence;
+  if (
+    statement.kind !== "nth.dao.trade.dispute-statement"
+    || statement.protocol_version !== "1"
+    || typeof statement.statement_id !== "string"
+    || !TRADE_DISPUTE_STATEMENT_ID.test(statement.statement_id)
+    || typeof statement.dispute_id !== "string"
+    || !TRADE_DISPUTE_ID.test(statement.dispute_id)
+    || statement.order_digest !== expected.orderDigest
+    || typeof statement.receipt_digest !== "string"
+    || !TRADE_DIGEST.test(statement.receipt_digest)
+    || typeof statement.review_digest !== "string"
+    || !TRADE_DIGEST.test(statement.review_digest)
+    || typeof statement.review_id !== "string"
+    || !TRADE_REVIEW_ID.test(statement.review_id)
+    || statement.review_id !== expected.executionReviewId
+    || typeof statement.author_did !== "string"
+    || !ED25519_DID_KEY.test(statement.author_did)
+    || !["maker", "taker"].includes(String(statement.author_role))
+    || !["response", "evidence", "remedy-proposal"].includes(
+      String(statement.statement_type),
+    )
+    || !Array.isArray(reasons)
+    || reasons.length > 32
+    || !reasons.every(
+      (reason) => typeof reason === "string" && TRADE_REASON_CODE.test(reason),
+    )
+    || new Set(reasons).size !== reasons.length
+    || reasons.some((reason, index) => index > 0 && reasons[index - 1] >= reason)
+    || parents.some((parent, index) => index > 0 && parents[index - 1] >= parent)
+    || !Array.isArray(evidence)
+    || evidence.length > 32
+    || !isCanonicalTradeTimestamp(statement.created_at)
+  ) {
+    throw new Error("server returned an invalid Dispute Statement");
+  }
+  if (statement.statement_type === "evidence") {
+    if (statement.claim !== null || evidence.length < 1 || reasons.length > 0) {
+      throw new Error("server returned an invalid Dispute Statement");
+    }
+  } else if (statement.claim === null || reasons.length < 1) {
+    throw new Error("server returned an invalid Dispute Statement");
+  }
+  const claim = statement.claim === null
+    ? null
+    : disputeContentReference(statement.claim, "claim") as TradeDisputeClaimReference;
+  const evidenceReferences = evidence.map(
+    (item) => disputeContentReference(item, "evidence") as TradeDisputeEvidenceReference,
+  );
+  const evidenceBindings = evidenceReferences.map((item) => (
+    [item.purpose, item.digest, item.media_type, item.size] as const
+  ));
+  const compareEvidence = (
+    left: readonly [string, string, string, number],
+    right: readonly [string, string, string, number],
+  ) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
+    || (left[1] < right[1] ? -1 : left[1] > right[1] ? 1 : 0)
+    || (left[2] < right[2] ? -1 : left[2] > right[2] ? 1 : 0)
+    || left[3] - right[3];
+  const sortedEvidence = [...evidenceBindings].sort(compareEvidence);
+  const evidenceKeys = evidenceBindings.map((binding) => binding.join("\u0000"));
+  if (
+    evidenceBindings.some((binding, index) => compareEvidence(binding, sortedEvidence[index]) !== 0)
+    || new Set(evidenceKeys).size !== evidenceKeys.length
+    || evidenceReferences.reduce((total, item) => total + item.size, 0) > 64 * 1024 * 1024
+  ) {
+    throw new Error("server returned invalid sorted Dispute Statement evidence");
+  }
+  const evidenceMetadata = new Map<string, string>();
+  for (const item of evidenceReferences) {
+    const metadata = `${item.media_type}\u0000${item.size}`;
+    const existing = evidenceMetadata.get(item.digest);
+    if (existing !== undefined && existing !== metadata) {
+      throw new Error("server returned conflicting Dispute Statement evidence metadata");
+    }
+    evidenceMetadata.set(item.digest, metadata);
+  }
+  if (claim !== null) {
+    const evidenceMetadataForClaim = evidenceMetadata.get(claim.digest);
+    if (
+      evidenceMetadataForClaim !== undefined
+      && evidenceMetadataForClaim !== `${claim.media_type}\u0000${claim.size}`
+    ) {
+      throw new Error("server returned conflicting Dispute Statement claim metadata");
+    }
+  }
+  const ruleAction = statement.rule_action;
+  if (ruleAction !== null) {
+    const action = disputeObject(ruleAction, "Dispute Statement rule action");
+    disputeExactFields(
+      action,
+      ["rule_id", "digest", "hook", "hook_version"],
+      "Dispute Statement rule action",
+    );
+    if (
+      typeof action.rule_id !== "string"
+      || action.rule_id.length > 160
+      || typeof action.digest !== "string"
+      || !TRADE_DIGEST.test(action.digest)
+      || typeof action.hook !== "string"
+      || !TRADE_PROTOCOL_TOKEN.test(action.hook)
+      || typeof action.hook_version !== "string"
+      || !/^[a-z0-9][a-z0-9._:/-]{0,31}$/.test(action.hook_version)
+    ) {
+      throw new Error("server returned an invalid Dispute Statement rule action");
+    }
+  }
+  const proof = disputeObject(statement.proof, "Dispute Statement proof");
+  disputeExactFields(
+    proof,
+    ["type", "created", "verification_method", "proof_purpose", "proof_value"],
+    "Dispute Statement proof",
+  );
+  if (
+    proof.type !== "Ed25519Signature2020"
+    || proof.created !== statement.created_at
+    || typeof proof.verification_method !== "string"
+    || proof.verification_method
+      !== `${statement.author_did}#${statement.author_did.slice("did:key:".length)}`
+    || proof.proof_purpose !== "tradeDisputeStatement"
+    || !isCanonicalEd25519Proof(proof.proof_value)
+  ) {
+    throw new Error("server returned an invalid Dispute Statement proof");
+  }
+  return statement as unknown as TradeDisputeStatementDocument;
+}
+
+export function validateTradeDisputeStatementPage(
+  value: unknown,
+  expected: { orderDigest: string; executionId: string; reviewId: string },
+): TradeDisputeStatementPage {
+  const page = disputeObject(value, "Dispute Statement page");
+  disputeExactFields(page, [
+    "status", "order_digest", "execution_id", "review_id", "items",
+    "snapshot_token", "next_cursor", "graph_endpoint",
+    "claims_adjudicated_or_proven_true",
+  ], "Dispute Statement page");
+  if (
+    page.status !== "dispute-statements-listed"
+    || page.order_digest !== expected.orderDigest
+    || page.execution_id !== expected.executionId
+    || page.review_id !== expected.reviewId
+    || !Array.isArray(page.items)
+    || page.items.length > 500
+    || typeof page.snapshot_token !== "string"
+    || !TRADE_DISPUTE_SNAPSHOT.test(page.snapshot_token)
+    || (page.next_cursor !== null && (
+      typeof page.next_cursor !== "string"
+      || !TRADE_DISPUTE_CURSOR.test(page.next_cursor)
+    ))
+    || typeof page.graph_endpoint !== "string"
+    || ![
+      `${BASE}${tradeDisputePath(expected.orderDigest, expected.executionId, expected.reviewId)}/graph`,
+      decodeURIComponent(
+        `${BASE}${tradeDisputePath(expected.orderDigest, expected.executionId, expected.reviewId)}/graph`,
+      ),
+    ].includes(page.graph_endpoint)
+    || page.claims_adjudicated_or_proven_true !== false
+  ) {
+    throw new Error("server returned an invalid Dispute Statement page");
+  }
+  const digests = new Set<string>();
+  for (const raw of page.items) {
+    const item = disputeObject(raw, "Dispute Statement item");
+    disputeExactFields(
+      item,
+      ["statement_digest", "statement", "claim_status", "audit_status", "audit_event_id"],
+      "Dispute Statement item",
+    );
+    if (
+      typeof item.statement_digest !== "string"
+      || !TRADE_DIGEST.test(item.statement_digest)
+      || digests.has(item.statement_digest)
+      || item.claim_status !== "signed-unadjudicated-claim"
+      || !["anchored", "retained-pending-audit"].includes(String(item.audit_status))
+      || typeof item.audit_event_id !== "string"
+      || (item.audit_status === "anchored"
+        ? !SPINE_EVENT_ID.test(item.audit_event_id)
+        : item.audit_event_id !== "")
+    ) {
+      throw new Error("server returned an invalid Dispute Statement item");
+    }
+    digests.add(item.statement_digest);
+    validateTradeDisputeStatementDocument(item.statement, {
+      orderDigest: expected.orderDigest,
+      executionReviewId: expected.reviewId,
+    });
+  }
+  return page as unknown as TradeDisputeStatementPage;
+}
+
+export function validateTradeDisputeProjection(
+  value: unknown,
+  expected: { orderDigest: string; executionId: string; reviewId: string },
+): { page: TradeDisputeStatementPage; graph: TradeDisputeGraphResult } {
+  const projection = disputeObject(value, "Dispute Statement projection");
+  disputeExactFields(projection, [
+    "status", "order_digest", "execution_id", "review_id", "items",
+    "snapshot_token", "next_cursor", "graph_endpoint", "graph",
+    "claims_adjudicated_or_proven_true",
+  ], "Dispute Statement projection");
+  const pageValue = { ...projection };
+  delete pageValue.graph;
+  const page = validateTradeDisputeStatementPage(pageValue, expected);
+  const graph = validateTradeDisputeGraphResult({
+    status: "dispute-statement-graph-projected",
+    order_digest: projection.order_digest,
+    execution_id: projection.execution_id,
+    review_id: projection.review_id,
+    graph: projection.graph,
+    claims_adjudicated_or_proven_true:
+      projection.claims_adjudicated_or_proven_true,
+  }, expected);
+  if (page.snapshot_token !== graph.graph.snapshot_token) {
+    throw new Error("server returned a mixed-snapshot Dispute projection");
+  }
+  return { page, graph };
+}
+
+function disputeCount(value: unknown, label: string, maximum: number): number {
+  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > maximum) {
+    throw new Error(`server returned an invalid ${label}`);
+  }
+  return value as number;
+}
+
+export function validateTradeDisputeGraphResult(
+  value: unknown,
+  expected: { orderDigest: string; executionId: string; reviewId: string },
+): TradeDisputeGraphResult {
+  const result = disputeObject(value, "Dispute Statement graph result");
+  disputeExactFields(result, [
+    "status", "order_digest", "execution_id", "review_id", "graph",
+    "claims_adjudicated_or_proven_true",
+  ], "Dispute Statement graph result");
+  if (
+    result.status !== "dispute-statement-graph-projected"
+    || result.order_digest !== expected.orderDigest
+    || result.execution_id !== expected.executionId
+    || result.review_id !== expected.reviewId
+    || result.claims_adjudicated_or_proven_true !== false
+  ) {
+    throw new Error("server returned an invalid Dispute Statement graph result");
+  }
+  const graph = disputeObject(result.graph, "Dispute Statement graph");
+  disputeExactFields(graph, [
+    "snapshot_token", "graph_status", "review_digest", "dispute_id",
+    "statement_count", "root_digests", "root_count", "tip_digests", "tip_count",
+    "topological_digests", "topological_count", "unresolved_parent_digests",
+    "unresolved_parent_count", "non_dag_digests", "non_dag_count", "issues",
+    "issue_count", "nodes", "node_count", "items_truncated",
+    "adjudicated_or_proven_true",
+  ], "Dispute Statement graph");
+  const roots = disputeDigestArray(graph.root_digests, "Dispute graph roots");
+  const tips = disputeDigestArray(graph.tip_digests, "Dispute graph tips");
+  const ordered = disputeDigestArray(
+    graph.topological_digests,
+    "Dispute graph topological order",
+  );
+  const unresolved = disputeDigestArray(
+    graph.unresolved_parent_digests,
+    "Dispute graph unresolved parents",
+  );
+  const nonDag = disputeDigestArray(
+    graph.non_dag_digests,
+    "Dispute graph non-DAG digests",
+  );
+  const statementCount = disputeCount(graph.statement_count, "statement count", 20_000);
+  const rootCount = disputeCount(graph.root_count, "root count", 20_000);
+  const tipCount = disputeCount(graph.tip_count, "tip count", 20_000);
+  const topologicalCount = disputeCount(
+    graph.topological_count,
+    "topological count",
+    20_000,
+  );
+  const unresolvedCount = disputeCount(
+    graph.unresolved_parent_count,
+    "unresolved parent count",
+    100_000,
+  );
+  const nonDagCount = disputeCount(graph.non_dag_count, "non-DAG count", 20_000);
+  const issueCount = disputeCount(graph.issue_count, "issue count", 100_000);
+  const nodeCount = disputeCount(graph.node_count, "node count", 20_000);
+  if (
+    typeof graph.snapshot_token !== "string"
+    || !TRADE_DISPUTE_SNAPSHOT.test(graph.snapshot_token)
+    || !["complete", "incomplete", "invalid"].includes(String(graph.graph_status))
+    || typeof graph.review_digest !== "string"
+    || !TRADE_DIGEST.test(graph.review_digest)
+    || typeof graph.dispute_id !== "string"
+    || !TRADE_DISPUTE_ID.test(graph.dispute_id)
+    || !Array.isArray(graph.issues)
+    || graph.issues.length > 500
+    || !Array.isArray(graph.nodes)
+    || graph.nodes.length > 500
+    || typeof graph.items_truncated !== "boolean"
+    || graph.adjudicated_or_proven_true !== false
+    || rootCount < roots.length
+    || tipCount < tips.length
+    || topologicalCount < ordered.length
+    || unresolvedCount < unresolved.length
+    || nonDagCount < nonDag.length
+    || issueCount < graph.issues.length
+    || nodeCount < graph.nodes.length
+    || nodeCount !== statementCount
+  ) {
+    throw new Error("server returned an invalid Dispute Statement graph");
+  }
+  if (!graph.items_truncated && (
+    rootCount !== roots.length
+    || tipCount !== tips.length
+    || topologicalCount !== ordered.length
+    || unresolvedCount !== unresolved.length
+    || nonDagCount !== nonDag.length
+    || issueCount !== graph.issues.length
+    || nodeCount !== graph.nodes.length
+  )) {
+    throw new Error("server returned an inconsistent Dispute Statement graph");
+  }
+  const nodeDigests = new Set<string>();
+  const parentDigests = new Map<string, string[]>();
+  const nodeStatuses = new Map<string, string>();
+  for (const raw of graph.nodes) {
+    const node = disputeObject(raw, "Dispute graph node");
+    disputeExactFields(
+      node,
+      ["statement_digest", "parent_statement_digests", "ancestry_status", "depth"],
+      "Dispute graph node",
+    );
+    if (
+      typeof node.statement_digest !== "string"
+      || !TRADE_DIGEST.test(node.statement_digest)
+      || nodeDigests.has(node.statement_digest)
+      || !["complete", "incomplete", "invalid"].includes(String(node.ancestry_status))
+      || (node.depth !== null && (
+        !Number.isInteger(node.depth)
+        || (node.depth as number) < 0
+        || (node.depth as number) >= Math.max(statementCount, 1)
+      ))
+      || (node.ancestry_status === "complete" ? node.depth === null : node.depth !== null)
+    ) {
+      throw new Error("server returned an invalid Dispute graph node");
+    }
+    const nodeParents = disputeDigestArray(
+      node.parent_statement_digests,
+      "Dispute graph node parents",
+      64,
+    );
+    if (nodeParents.some((parent, index) => index > 0 && nodeParents[index - 1] >= parent)) {
+      throw new Error("server returned unsorted Dispute graph node parents");
+    }
+    nodeDigests.add(node.statement_digest);
+    parentDigests.set(node.statement_digest, nodeParents);
+    nodeStatuses.set(node.statement_digest, String(node.ancestry_status));
+  }
+  const issueKeys = new Set<string>();
+  const issueBindings = new Set<string>();
+  for (const raw of graph.issues) {
+    const issue = disputeObject(raw, "Dispute graph issue");
+    disputeExactFields(
+      issue,
+      ["statement_digest", "parent_digest", "reason"],
+      "Dispute graph issue",
+    );
+    if (
+      typeof issue.statement_digest !== "string"
+      || !TRADE_DIGEST.test(issue.statement_digest)
+      || typeof issue.parent_digest !== "string"
+      || !TRADE_DIGEST.test(issue.parent_digest)
+      || typeof issue.reason !== "string"
+      || !TRADE_PROTOCOL_TOKEN.test(issue.reason)
+      || issueKeys.has(`${issue.statement_digest}\u0000${issue.parent_digest}\u0000${issue.reason}`)
+    ) {
+      throw new Error("server returned an invalid Dispute graph issue");
+    }
+    issueKeys.add(`${issue.statement_digest}\u0000${issue.parent_digest}\u0000${issue.reason}`);
+    issueBindings.add(`${issue.statement_digest}\u0000${issue.parent_digest}`);
+  }
+  const rootSet = new Set(roots);
+  const tipSet = new Set(tips);
+  const orderedSet = new Set(ordered);
+  const nonDagSet = new Set(nonDag);
+  if (
+    [...rootSet, ...tipSet, ...orderedSet, ...nonDagSet].some(
+      (digest) => !nodeDigests.has(digest),
+    )
+    || ordered.some((digest) => nonDagSet.has(digest))
+    || graph.issues.some((issue) => !nodeDigests.has(issue.statement_digest))
+    || [...parentDigests].some(([digest, parents]) => parents.some(
+      (parent) => !nodeDigests.has(parent) && !issueBindings.has(`${digest}\u0000${parent}`),
+    ))
+    || graph.graph_status === "complete" && (
+      unresolvedCount !== 0
+      || nonDagCount !== 0
+      || [...nodeStatuses.values()].some((status) => status !== "complete")
+    )
+  ) {
+    throw new Error("server returned contradictory Dispute graph membership");
+  }
+  if (!graph.items_truncated) {
+    const childCounts = new Map([...nodeDigests].map((digest) => [digest, 0]));
+    for (const [digest, parents] of parentDigests) {
+      if ((parents.length === 0) !== rootSet.has(digest)) {
+        throw new Error("server returned contradictory Dispute graph roots");
+      }
+      for (const parent of parents) {
+        if (nodeDigests.has(parent)) childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
+      }
+    }
+    if ([...childCounts].some(([digest, count]) => (count === 0) !== tipSet.has(digest))) {
+      throw new Error("server returned contradictory Dispute graph tips");
+    }
+    if (
+      ordered.length + nonDag.length !== statementCount
+      || [...nodeDigests].some((digest) => !orderedSet.has(digest) && !nonDagSet.has(digest))
+    ) {
+      throw new Error("server returned contradictory Dispute graph partition");
+    }
+  }
+  return result as unknown as TradeDisputeGraphResult;
+}
+
+export function validateTradeDisputeStatementCreateResult(
+  value: unknown,
+  expected: { orderDigest: string; executionId: string; reviewId: string },
+): TradeDisputeStatementCreateResult {
+  const result = disputeObject(value, "Dispute Statement create result");
+  disputeExactFields(result, [
+    "status", "order_digest", "execution_id", "review_id", "dispute_id",
+    "statement_id", "statement_digest", "statement", "statement_store_created",
+    "audit_anchor_created", "audit_event_id", "operation_id", "reservation_created",
+    "claim_status", "claim_adjudicated_or_proven_true",
+  ], "Dispute Statement create result");
+  const statement = validateTradeDisputeStatementDocument(result.statement, {
+    orderDigest: expected.orderDigest,
+    executionReviewId: expected.reviewId,
+  });
+  if (
+    result.status !== "dispute-statement-signed"
+    || result.order_digest !== expected.orderDigest
+    || result.execution_id !== expected.executionId
+    || result.review_id !== expected.reviewId
+    || result.dispute_id !== statement.dispute_id
+    || result.statement_id !== statement.statement_id
+    || typeof result.statement_digest !== "string"
+    || !TRADE_DIGEST.test(result.statement_digest)
+    || typeof result.statement_store_created !== "boolean"
+    || typeof result.audit_anchor_created !== "boolean"
+    || typeof result.audit_event_id !== "string"
+    || !SPINE_EVENT_ID.test(result.audit_event_id)
+    || typeof result.operation_id !== "string"
+    || !TRADE_DIGEST.test(result.operation_id)
+    || typeof result.reservation_created !== "boolean"
+    || result.claim_status !== "signed-unadjudicated-claim"
+    || result.claim_adjudicated_or_proven_true !== false
+  ) {
+    throw new Error("server returned an invalid Dispute Statement create result");
+  }
+  return result as unknown as TradeDisputeStatementCreateResult;
+}
+
+function tradeDisputePath(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+): string {
+  return `/trade/orders/${encodeURIComponent(orderDigest)}`
+    + `/execution-receipts/${encodeURIComponent(executionId)}`
+    + `/reviews/${encodeURIComponent(reviewId)}/dispute-statements`;
+}
+
+export async function getTradeDisputeStatements(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+  signal?: AbortSignal,
+  after = "",
+): Promise<TradeDisputeStatementPage> {
+  if (after && !TRADE_DISPUTE_CURSOR.test(after)) {
+    throw new Error("Dispute Statement cursor is invalid");
+  }
+  const params = new URLSearchParams({ limit: "500" });
+  if (after) params.set("after", after);
+  const value = await getJson<unknown>(
+    `${tradeDisputePath(orderDigest, executionId, reviewId)}?${params.toString()}`,
+    signal,
+  );
+  return validateTradeDisputeStatementPage(value, { orderDigest, executionId, reviewId });
+}
+
+export async function getTradeDisputeProjection(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+  signal?: AbortSignal,
+): Promise<{ page: TradeDisputeStatementPage; graph: TradeDisputeGraphResult }> {
+  const params = new URLSearchParams({ limit: "500", include_graph: "true" });
+  const value = await getJson<unknown>(
+    `${tradeDisputePath(orderDigest, executionId, reviewId)}?${params.toString()}`,
+    signal,
+  );
+  return validateTradeDisputeProjection(
+    value,
+    { orderDigest, executionId, reviewId },
+  );
+}
+
+export async function validateTradeDisputeStatementDeliveryResult(
+  value: unknown,
+  expected: {
+    orderDigest: string;
+    executionId: string;
+    reviewId: string;
+    statementDigest: string;
+    receiptDigest: string;
+    reviewDigest: string;
+    senderDid: string;
+    receiverDid: string;
+  },
+): Promise<TradeDisputeStatementDeliveryResult> {
+  const result = disputeObject(value, "Dispute Statement delivery result");
+  disputeExactFields(result, [
+    "status", "order_digest", "execution_id", "review_id", "statement_digest",
+    "delivery", "delivery_digest", "acknowledgement", "acknowledgement_digest",
+    "remote_audit_event_id", "remote_received_at", "generation", "attempts",
+    "acknowledgement_persisted", "claim_adjudicated_or_proven_true",
+  ], "Dispute Statement delivery result");
+  const delivery = disputeObject(
+    result.delivery,
+    "Dispute Statement delivery",
+  );
+  const acknowledgement = disputeObject(
+    result.acknowledgement,
+    "Dispute Statement acknowledgement",
+  );
+  const statement = validateTradeDisputeStatementDocument(delivery.statement, {
+    orderDigest: expected.orderDigest,
+    executionReviewId: expected.reviewId,
+  });
+  const binding = await verifyTradeDisputeStatementAcknowledgementBinding(
+    acknowledgement,
+    delivery,
+  );
+  if (!binding.valid) {
+    throw new Error(`server returned an invalid signed peer acknowledgement: ${binding.reason}`);
+  }
+  const acknowledgementDigest = await tradeCanonicalSha256Digest(acknowledgement);
+  if (
+    result.status !== "dispute-statement-delivered"
+    || result.order_digest !== expected.orderDigest
+    || result.execution_id !== expected.executionId
+    || result.review_id !== expected.reviewId
+    || result.statement_digest !== expected.statementDigest
+    || delivery.kind !== "nth.dao.trade.dispute-statement-delivery"
+    || delivery.protocol_version !== "1"
+    || typeof delivery.delivery_id !== "string"
+    || !TRADE_DISPUTE_DELIVERY_ID.test(delivery.delivery_id)
+    || typeof delivery.nonce !== "string"
+    || !TRADE_DISPUTE_NONCE.test(delivery.nonce)
+    || delivery.order_digest !== expected.orderDigest
+    || delivery.receipt_digest !== expected.receiptDigest
+    || delivery.review_digest !== expected.reviewDigest
+    || delivery.statement_digest !== expected.statementDigest
+    || delivery.sender_did !== expected.senderDid
+    || delivery.sender_did !== statement.author_did
+    || typeof delivery.recipient_did !== "string"
+    || !ED25519_DID_KEY.test(delivery.recipient_did)
+    || delivery.recipient_did !== expected.receiverDid
+    || delivery.recipient_did === expected.senderDid
+    || !isCanonicalTradeTimestamp(delivery.created_at)
+    || !isCanonicalTradeTimestamp(delivery.not_after)
+    || typeof result.delivery_digest !== "string"
+    || !TRADE_DIGEST.test(result.delivery_digest)
+    || acknowledgement.kind
+      !== "nth.dao.trade.dispute-statement-acknowledgement"
+    || acknowledgement.protocol_version !== "1"
+    || acknowledgement.delivery_id !== delivery.delivery_id
+    || acknowledgement.delivery_digest !== result.delivery_digest
+    || acknowledgement.order_digest !== expected.orderDigest
+    || acknowledgement.receipt_digest !== expected.receiptDigest
+    || acknowledgement.review_digest !== expected.reviewDigest
+    || acknowledgement.statement_digest !== expected.statementDigest
+    || acknowledgement.sender_did !== expected.senderDid
+    || acknowledgement.receiver_did !== delivery.recipient_did
+    || acknowledgement.status !== "retained-claim-not-adjudicated"
+    || acknowledgement.audit_event_id !== result.remote_audit_event_id
+    || acknowledgement.received_at !== result.remote_received_at
+    || typeof result.acknowledgement_digest !== "string"
+    || !TRADE_DIGEST.test(result.acknowledgement_digest)
+    || result.acknowledgement_digest !== acknowledgementDigest
+    || typeof result.remote_audit_event_id !== "string"
+    || !SPINE_EVENT_ID.test(result.remote_audit_event_id)
+    || !isCanonicalTradeTimestamp(result.remote_received_at)
+    || !Number.isInteger(result.generation)
+    || (result.generation as number) < 1
+    || !Number.isInteger(result.attempts)
+    || (result.attempts as number) < 0
+    || result.acknowledgement_persisted !== true
+    || result.claim_adjudicated_or_proven_true !== false
+  ) {
+    throw new Error("server returned an invalid Dispute Statement delivery result");
+  }
+  return result as unknown as TradeDisputeStatementDeliveryResult;
+}
+
+export async function deliverTradeDisputeStatement(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+  statementDigest: string,
+  receiptDigest: string,
+  reviewDigest: string,
+  senderDid: string,
+  receiverDid: string,
+  targetUrl: string,
+  signal?: AbortSignal,
+): Promise<TradeDisputeStatementDeliveryResult> {
+  const value = await postJson<unknown>(
+    `${tradeDisputePath(orderDigest, executionId, reviewId)}`
+      + `/${encodeURIComponent(statementDigest)}/deliver`,
+    { target_url: targetUrl },
+    signal,
+  );
+  return await validateTradeDisputeStatementDeliveryResult(value, {
+    orderDigest,
+    executionId,
+    reviewId,
+    statementDigest,
+    receiptDigest,
+    reviewDigest,
+    senderDid,
+    receiverDid,
+  });
+}
+
+export async function getTradeDisputeGraph(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+  signal?: AbortSignal,
+): Promise<TradeDisputeGraphResult> {
+  const value = await getJson<unknown>(
+    `${tradeDisputePath(orderDigest, executionId, reviewId)}/graph`,
+    signal,
+  );
+  return validateTradeDisputeGraphResult(value, { orderDigest, executionId, reviewId });
+}
+
+export async function createTradeDisputeStatement(
+  orderDigest: string,
+  executionId: string,
+  reviewId: string,
+  body: CreateTradeDisputeStatementInput,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+): Promise<TradeDisputeStatementCreateResult> {
+  if (!TRADE_IDEMPOTENCY_KEY.test(idempotencyKey)) {
+    throw new Error("Dispute Statement idempotency key is invalid");
+  }
+  const value = await postJson<unknown>(
+    tradeDisputePath(orderDigest, executionId, reviewId),
+    body,
+    signal,
+    { "Idempotency-Key": idempotencyKey },
+  );
+  return validateTradeDisputeStatementCreateResult(
+    value,
+    { orderDigest, executionId, reviewId },
   );
 }
 
@@ -1798,8 +2615,8 @@ const TRADE_RULE_ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z
 const TRADE_RULE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const TRADE_RULE_TOKEN = /^[a-z0-9][a-z0-9._:/-]*$/;
 const TRADE_RULE_MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
-const TRADE_RULE_DID = /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/;
-const TRADE_RULE_PROOF = /^[A-Za-z0-9_-]{86}$/;
+const TRADE_RULE_DID = ED25519_DID_KEY;
+const TRADE_RULE_PROOF = ED25519_PROOF_VALUE;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

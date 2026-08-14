@@ -414,6 +414,42 @@ vi.mock("../api", () => ({
     status: "receipt-review-delivered",
     remote_audit_event_id: "7".repeat(64),
   }),
+  getTradeDisputeStatements: vi.fn().mockResolvedValue({
+    status: "dispute-statements-listed",
+    order_digest: "sha256:" + "1".repeat(64),
+    execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    items: [],
+    snapshot_token: "v2:" + "1".repeat(64),
+    next_cursor: null,
+    graph_endpoint: "/api/v2/trade/dispute-statements/graph",
+    claims_adjudicated_or_proven_true: false,
+  }),
+  getTradeDisputeGraph: vi.fn().mockResolvedValue({
+    status: "dispute-statement-graph-projected",
+    order_digest: "sha256:" + "1".repeat(64),
+    execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    graph: {
+      snapshot_token: "v2:" + "1".repeat(64),
+      graph_status: "complete",
+      review_digest: "sha256:" + "6".repeat(64),
+      dispute_id: "nth-trade-dispute-sha256:" + "2".repeat(64),
+      statement_count: 0,
+      root_digests: [], root_count: 0,
+      tip_digests: [], tip_count: 0,
+      topological_digests: [], topological_count: 0,
+      unresolved_parent_digests: [], unresolved_parent_count: 0,
+      non_dag_digests: [], non_dag_count: 0,
+      issues: [], issue_count: 0,
+      nodes: [], node_count: 0,
+      items_truncated: false,
+      adjudicated_or_proven_true: false,
+    },
+    claims_adjudicated_or_proven_true: false,
+  }),
+  getTradeDisputeProjection: vi.fn(),
+  createTradeDisputeStatement: vi.fn(),
   getTradeRulePackage: vi.fn().mockResolvedValue(null),
   getTradeExecutionReceipts: vi.fn().mockResolvedValue({
     status: "available",
@@ -510,6 +546,7 @@ vi.mock("../api", () => ({
 import {
   ApiHttpError,
   createTradeReceiptReview,
+  createTradeDisputeStatement,
   deliverTradeReceiptReview,
   deliverTradeExecutionReceipt,
   fetchCommerceOrders,
@@ -519,6 +556,9 @@ import {
   fetchTradeRuleRecognitionImportBatch,
   getTradeOrder,
   getTradeReceiptReview,
+  getTradeDisputeGraph,
+  getTradeDisputeProjection,
+  getTradeDisputeStatements,
   getTradeOfferInspection,
   getTradeExecutionReceipts,
   getTradeProposal,
@@ -574,6 +614,77 @@ beforeEach(() => {
     status: "receipt-review-delivered",
     remote_audit_event_id: "7".repeat(64),
   } as never);
+  vi.mocked(getTradeDisputeStatements).mockReset().mockResolvedValue({
+    status: "dispute-statements-listed",
+    order_digest: "sha256:" + "1".repeat(64),
+    execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    items: [],
+    snapshot_token: "v2:" + "1".repeat(64),
+    next_cursor: null,
+    graph_endpoint: "/api/v2/trade/dispute-statements/graph",
+    claims_adjudicated_or_proven_true: false,
+  });
+  vi.mocked(getTradeDisputeGraph).mockReset().mockResolvedValue({
+    status: "dispute-statement-graph-projected",
+    order_digest: "sha256:" + "1".repeat(64),
+    execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+    review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+    graph: {
+      snapshot_token: "v2:" + "1".repeat(64),
+      graph_status: "complete",
+      review_digest: "sha256:" + "6".repeat(64),
+      dispute_id: "nth-trade-dispute-sha256:" + "2".repeat(64),
+      statement_count: 0,
+      root_digests: [], root_count: 0,
+      tip_digests: [], tip_count: 0,
+      topological_digests: [], topological_count: 0,
+      unresolved_parent_digests: [], unresolved_parent_count: 0,
+      non_dag_digests: [], non_dag_count: 0,
+      issues: [], issue_count: 0,
+      nodes: [], node_count: 0,
+      items_truncated: false,
+      adjudicated_or_proven_true: false,
+    },
+    claims_adjudicated_or_proven_true: false,
+  });
+  vi.mocked(getTradeDisputeProjection).mockReset().mockResolvedValue({
+    page: {
+      status: "dispute-statements-listed",
+      order_digest: "sha256:" + "1".repeat(64),
+      execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+      review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+      items: [],
+      snapshot_token: "v2:" + "1".repeat(64),
+      next_cursor: null,
+      graph_endpoint: "/api/v2/trade/dispute-statements/graph",
+      claims_adjudicated_or_proven_true: false,
+    },
+    graph: {
+      status: "dispute-statement-graph-projected",
+      order_digest: "sha256:" + "1".repeat(64),
+      execution_id: "nth-trade-execution-sha256:" + "a".repeat(64),
+      review_id: "nth-trade-review-sha256:" + "f".repeat(64),
+      graph: {
+        snapshot_token: "v2:" + "1".repeat(64),
+        graph_status: "complete",
+        review_digest: "sha256:" + "6".repeat(64),
+        dispute_id: "nth-trade-dispute-sha256:" + "2".repeat(64),
+        statement_count: 0,
+        root_digests: [], root_count: 0,
+        tip_digests: [], tip_count: 0,
+        topological_digests: [], topological_count: 0,
+        unresolved_parent_digests: [], unresolved_parent_count: 0,
+        non_dag_digests: [], non_dag_count: 0,
+        issues: [], issue_count: 0,
+        nodes: [], node_count: 0,
+        items_truncated: false,
+        adjudicated_or_proven_true: false,
+      },
+      claims_adjudicated_or_proven_true: false,
+    },
+  });
+  vi.mocked(createTradeDisputeStatement).mockReset();
   vi.mocked(getTradeExecutionReceipts).mockReset().mockResolvedValue({
     status: "available",
     items: [],
@@ -2273,6 +2384,14 @@ describe("CommerceView", () => {
     ));
     expect(await screen.findByText("Disputed")).toBeTruthy();
     expect(screen.getByText(/counterparty claim, not a verified fact/i)).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Dispute statements" })).toBeTruthy();
+    expect(screen.getByText(/Signed statements are claims, not verified facts/i)).toBeTruthy();
+    expect(getTradeDisputeProjection).toHaveBeenCalledWith(
+      summary.order_digest,
+      projection.history.items[0].execution_id,
+      reviewId,
+      expect.any(AbortSignal),
+    );
   });
 
   it("blocks a conflicted Receipt Review and exposes every retained digest", async () => {

@@ -125,6 +125,14 @@ class TradeDisputeStatementRejected(ValueError):
     """A dispute statement is malformed, unsigned, or outside its Order."""
 
 
+class TradeDisputeStatementResolverRequired(TradeDisputeStatementRejected):
+    """Verification requires the exact-digest Rule Package resolver."""
+
+
+class TradeDisputeStatementResolutionError(RuntimeError):
+    """The configured Rule Package resolver failed operationally."""
+
+
 def _reject(message: str) -> None:
     raise TradeDisputeStatementRejected(message)
 
@@ -356,7 +364,7 @@ def _assert_rule_action_resolves(
     except Exception as exc:
         # Resolvers may be local stores, federation adapters, or plugins. Keep
         # their operational failures behind this protocol validation boundary.
-        raise TradeDisputeStatementRejected(
+        raise TradeDisputeStatementResolutionError(
             "rule_action package resolution failed"
         ) from exc
     if package is None:
@@ -589,7 +597,9 @@ def _validated_canonical_statement(
         and snapshot["rule_action"] is not None
         and package_resolver is None
     ):
-        _reject("rule_action requires an exact-digest package_resolver")
+        raise TradeDisputeStatementResolverRequired(
+            "rule_action requires an exact-digest package_resolver"
+        )
     _assert_document_binding(
         snapshot,
         review=review,
@@ -1019,6 +1029,8 @@ __all__ = [
     "TRADE_DISPUTE_STATEMENT_TYPES",
     "TradeDisputeStatement",
     "TradeDisputeStatementRejected",
+    "TradeDisputeStatementResolutionError",
+    "TradeDisputeStatementResolverRequired",
     "UnresolvedTradeDisputeStatement",
     "create_trade_dispute_statement",
     "trade_dispute_id",

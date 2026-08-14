@@ -1730,6 +1730,13 @@ async function sha256Digest(
   ).join("")}`;
 }
 
+export async function tradeCanonicalSha256Digest(
+  value: unknown,
+  subtle: SubtleCrypto = globalThis.crypto.subtle
+): Promise<string> {
+  return sha256Digest(value, subtle);
+}
+
 async function validateResolvedDisputePackage(
   value: unknown,
   action: Record<string, unknown>,
@@ -2082,6 +2089,155 @@ export async function verifyTradeDisputeStatementDelivery(
   }
 }
 
+type VerifiedDisputeAcknowledgementBinding = {
+  document: Record<string, unknown>;
+  deliveryDocument: Record<string, unknown>;
+  receivedAt: string;
+  received: bigint;
+};
+
+async function assertTradeDisputeStatementAcknowledgementBinding(
+  acknowledgement: unknown,
+  delivery: unknown,
+  clockSkewSeconds: number | undefined,
+  subtle: SubtleCrypto,
+  domain: string
+): Promise<VerifiedDisputeAcknowledgementBinding> {
+  const canonical = tradeCanonicalBytes(acknowledgement);
+  if (canonical.byteLength > MAX_DISPUTE_ACK_BYTES) {
+    throw new Error("acknowledgement exceeds byte limit");
+  }
+  const document = exactObject(
+    JSON.parse(new TextDecoder().decode(canonical)),
+    DISPUTE_ACK_FIELDS,
+    "Trade Dispute Statement Acknowledgement"
+  );
+  const deliveryDocument = exactObject(
+    JSON.parse(new TextDecoder().decode(tradeCanonicalBytes(delivery))),
+    DISPUTE_DELIVERY_FIELDS,
+    "Trade Dispute Statement Delivery"
+  );
+  if (
+    document.kind !== "nth.dao.trade.dispute-statement-acknowledgement" ||
+    document.protocol_version !== "1" ||
+    document.status !== "retained-claim-not-adjudicated" ||
+    typeof document.audit_event_id !== "string" ||
+    !EVENT_ID.test(document.audit_event_id) ||
+    deliveryDocument.kind !== "nth.dao.trade.dispute-statement-delivery" ||
+    deliveryDocument.protocol_version !== "1" ||
+    typeof deliveryDocument.delivery_id !== "string" ||
+    !DISPUTE_DELIVERY_ID.test(deliveryDocument.delivery_id) ||
+    typeof deliveryDocument.nonce !== "string" ||
+    !DISPUTE_NONCE.test(deliveryDocument.nonce)
+  ) {
+    throw new Error("Trade Dispute Statement Acknowledgement shape is invalid");
+  }
+  for (const field of [
+    "delivery_digest", "order_digest", "receipt_digest", "review_digest",
+    "statement_digest",
+  ] as const) {
+    digest(document[field], `acknowledgement.${field}`);
+  }
+  for (const field of [
+    "order_digest", "receipt_digest", "review_digest", "statement_digest",
+  ] as const) {
+    digest(deliveryDocument[field], `delivery.${field}`);
+  }
+  const senderDid = boundedString(
+    deliveryDocument.sender_did,
+    "delivery.sender_did",
+    1,
+    256
+  );
+  const recipientDid = boundedString(
+    deliveryDocument.recipient_did,
+    "delivery.recipient_did",
+    1,
+    256
+  );
+  decodeDidKey(senderDid);
+  decodeDidKey(recipientDid);
+  if (senderDid === recipientDid) throw new Error("delivery parties must be different");
+  const deliveryBinding = Object.fromEntries(
+    Object.entries(deliveryDocument).filter(
+      ([field]) => field !== "delivery_id" && field !== "proof"
+    )
+  );
+  const expectedDeliveryId = "nth:trade:dispute-statement-delivery:sha256:"
+    + (await sha256Digest(deliveryBinding, subtle)).slice("sha256:".length);
+  if (deliveryDocument.delivery_id !== expectedDeliveryId) {
+    throw new Error("delivery_id does not match Delivery content");
+  }
+  if (deliveryDocument.statement_digest !== await sha256Digest(
+    deliveryDocument.statement,
+    subtle
+  )) {
+    throw new Error("statement_digest does not match embedded Statement");
+  }
+  await verifyTransportSignature(
+    deliveryDocument,
+    "sender_did",
+    "tradeDisputeStatementDelivery",
+    "created_at",
+    TRADE_DISPUTE_STATEMENT_DELIVERY_DOMAIN,
+    subtle
+  );
+  const expected = {
+    delivery_id: deliveryDocument.delivery_id,
+    delivery_digest: await sha256Digest(deliveryDocument, subtle),
+    order_digest: deliveryDocument.order_digest,
+    receipt_digest: deliveryDocument.receipt_digest,
+    review_digest: deliveryDocument.review_digest,
+    statement_digest: deliveryDocument.statement_digest,
+    sender_did: senderDid,
+    receiver_did: recipientDid,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (document[field] !== value) throw new Error(`${field} does not match Delivery`);
+  }
+  const receivedAt = boundedString(document.received_at, "received_at", 1, 35);
+  const received = timestampNanos(receivedAt, "received_at");
+  const created = timestampNanos(deliveryDocument.created_at, "delivery.created_at");
+  const expiry = timestampNanos(deliveryDocument.not_after, "delivery.not_after");
+  const skew = boundedTransportSeconds(clockSkewSeconds, 300);
+  if (received < created - skew || received > expiry + skew) {
+    throw new Error("acknowledgement chronology is outside Delivery lifetime");
+  }
+  await verifyTransportSignature(
+    document,
+    "receiver_did",
+    "tradeDisputeStatementAcknowledgement",
+    "received_at",
+    domain,
+    subtle
+  );
+  return { document, deliveryDocument, receivedAt, received };
+}
+
+export async function verifyTradeDisputeStatementAcknowledgementBinding(
+  acknowledgement: unknown,
+  delivery: unknown,
+  clockSkewSeconds?: number,
+  subtle: SubtleCrypto = globalThis.crypto.subtle,
+  domain = TRADE_DISPUTE_STATEMENT_ACKNOWLEDGEMENT_DOMAIN
+): Promise<TradeDisputeStatementVerificationResult> {
+  try {
+    await assertTradeDisputeStatementAcknowledgementBinding(
+      acknowledgement,
+      delivery,
+      clockSkewSeconds,
+      subtle,
+      domain
+    );
+    return { valid: true, reason: "ok" };
+  } catch (error) {
+    return {
+      valid: false,
+      reason: error instanceof Error ? error.message : "invalid acknowledgement",
+    };
+  }
+}
+
 export async function verifyTradeDisputeStatementAcknowledgement(
   acknowledgement: unknown,
   delivery: unknown,
@@ -2090,66 +2246,26 @@ export async function verifyTradeDisputeStatementAcknowledgement(
   domain = TRADE_DISPUTE_STATEMENT_ACKNOWLEDGEMENT_DOMAIN
 ): Promise<TradeDisputeStatementVerificationResult> {
   try {
-    const canonical = tradeCanonicalBytes(acknowledgement);
-    if (canonical.byteLength > MAX_DISPUTE_ACK_BYTES) {
-      throw new Error("acknowledgement exceeds byte limit");
-    }
-    const document = exactObject(
-      JSON.parse(new TextDecoder().decode(canonical)),
-      DISPUTE_ACK_FIELDS,
-      "Trade Dispute Statement Acknowledgement"
+    const binding = await assertTradeDisputeStatementAcknowledgementBinding(
+      acknowledgement,
+      delivery,
+      context.clockSkewSeconds,
+      subtle,
+      domain
     );
-    if (
-      document.kind !== "nth.dao.trade.dispute-statement-acknowledgement" ||
-      document.protocol_version !== "1" ||
-      document.status !== "retained-claim-not-adjudicated" ||
-      typeof document.audit_event_id !== "string" ||
-      !EVENT_ID.test(document.audit_event_id)
-    ) {
-      throw new Error("Trade Dispute Statement Acknowledgement shape is invalid");
-    }
-    const receivedAt = boundedString(document.received_at, "received_at", 1, 35);
     const verifiedDelivery = await verifyTradeDisputeStatementDelivery(
       delivery,
-      { ...context, observedAt: receivedAt },
+      { ...context, observedAt: binding.receivedAt },
       subtle
     );
     if (!verifiedDelivery.valid) {
       throw new Error(`Delivery is invalid: ${verifiedDelivery.reason}`);
     }
-    const deliveryDocument = asObject(delivery, "Delivery");
-    const expected = {
-      delivery_id: deliveryDocument.delivery_id,
-      delivery_digest: await sha256Digest(deliveryDocument, subtle),
-      order_digest: deliveryDocument.order_digest,
-      receipt_digest: deliveryDocument.receipt_digest,
-      review_digest: deliveryDocument.review_digest,
-      statement_digest: deliveryDocument.statement_digest,
-      sender_did: deliveryDocument.sender_did,
-      receiver_did: deliveryDocument.recipient_did,
-    };
-    for (const [field, value] of Object.entries(expected)) {
-      if (document[field] !== value) throw new Error(`${field} does not match Delivery`);
-    }
-    const received = timestampNanos(receivedAt, "received_at");
-    const created = timestampNanos(deliveryDocument.created_at, "delivery.created_at");
-    const expiry = timestampNanos(deliveryDocument.not_after, "delivery.not_after");
     const observed = timestampNanos(context.observedAt, "observedAt");
     const skew = boundedTransportSeconds(context.clockSkewSeconds, 300);
-    if (received < created - skew || received > expiry + skew) {
-      throw new Error("acknowledgement chronology is outside Delivery lifetime");
-    }
-    if (received > observed + skew) {
+    if (binding.received > observed + skew) {
       throw new Error("acknowledgement was created too far in the future");
     }
-    await verifyTransportSignature(
-      document,
-      "receiver_did",
-      "tradeDisputeStatementAcknowledgement",
-      "received_at",
-      domain,
-      subtle
-    );
     return { valid: true, reason: "ok" };
   } catch (error) {
     return {

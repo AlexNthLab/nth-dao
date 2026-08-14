@@ -704,7 +704,8 @@ and Adapter policy and obtain any separate authority required before execution.
 The signature proves authorship and binding, not truth. Evidence digests prove
 only which bytes were referenced, not that those bytes support a claim. A
 standalone statement also does not prove that every parent exists, that the DAG
-is complete or acyclic, or that a remedy was accepted.
+is complete or acyclic, or that a remedy was accepted. Those properties require
+an explicit projection over a bounded local snapshot.
 
 The local dispute store retains only fully verified canonical statements under
 their complete content digest. It is bounded by statement count and bytes,
@@ -721,11 +722,40 @@ claim bytes. Statement pages use snapshot-bound cursors. If a signed statement
 arrives while a caller is walking pages, continuation fails explicitly and the
 caller must restart from page one; a changing collection is never silently
 presented as a complete snapshot. Paging performs a bounded read and complete
-content-digest check for every content-addressed file, but caches the verified
-canonical header instead of reparsing the full JSON collection on each page.
-The selected page is reread and fully protocol-validated while the store lock
-is held. The cache therefore reduces parse and memory cost without making mtime
-or an unsigned index an integrity authority.
+content-digest check for every content-addressed file, but caches the canonical
+header instead of reparsing the full JSON collection on each page. The selected
+page is reread while the store lock is held, then fully protocol-validated after
+that lock is released so a Rule Package resolver cannot invert lock order. The
+cache therefore reduces parse and memory cost without making mtime or an
+unsigned index an integrity authority.
+
+`TradeDisputeGraphProjection` is a deterministic, unsigned local view over one
+exact disputed Review. It rechecks every retained Statement content digest and
+protocol binding, distinguishes unavailable parents from exact parent content
+that names another Review, permits only the protocol's bounded clock skew when
+checking parent/child chronology, propagates incomplete or invalid ancestry,
+and exposes a `v2:<64-lowercase-hex>` snapshot token, roots, tips, and
+deterministic topological order. The token binds the Review, dispute, exact
+retained Statement digest set, and every known cross-Review parent binding that
+can change the graph verdict; it is versioned protocol metadata rather than a
+`sha256:` content reference.
+Federated intake may retain a child before its parent so offline delivery can
+converge; the projection remains `incomplete` until the exact parent arrives.
+Local creation is stricter: before any durable idempotency reservation or claim
+write, a Statement that extends parents walks only its content-addressed
+ancestor closure and rejects missing or invalid ancestry. The write path repeats
+that check as defense in depth. Both the ancestor walk and complete projection
+have independent node and aggregate-edge budgets. Unrelated corrupt statements
+therefore remain visible to explicit reconciliation without blocking a valid
+local parent chain. The potentially O(N) complete projection has a dedicated
+authenticated endpoint and is not recomputed by paginated Statement listing.
+Its HTTP projection returns full counts but bounds each detailed list to 500
+entries; the in-process protocol API retains the complete bounded projection.
+Operational Rule Package resolver failures are retryable dependency failures,
+not claim-integrity verdicts.
+
+`complete` means only structurally complete in this local snapshot; it
+does not mean globally complete, truthful, admitted, or adjudicated.
 
 The optional Spine projection emits `trade.dispute.statement.retained` after
 the CAS write. Its exact payload binds the statement and labels it
@@ -792,8 +822,9 @@ that intent, a foreign signer, or conflicting bytes remains a hard integrity
 failure. Dispute Delivery TTL and receiver clock-skew policy inputs are capped
 at 86,400 seconds in both Python and TypeScript before nanosecond conversion.
 
-Parent retrieval, DAG completeness/cycle checks, governance admission, and
-adjudication remain future work. No statement, Delivery, ACK, journal row, or
+Automatic cross-node parent retrieval, governance admission, and adjudication
+remain future work. Local DAG completeness, chronology, and non-DAG detection
+are now explicit derived checks, but no Statement, Delivery, ACK, journal row, or
 retention anchor settles a dispute, changes reputation, transfers an asset, or
 authorizes funds. JSON Schema validates wire shape; the protocol validator
 remains mandatory for signatures, identifiers, roles, chronology, resource
@@ -941,6 +972,13 @@ The reviewed protocol kernel currently contains:
   snapshots, mandatory executor replay, receiver-signed ACK, durable sender
   outbox, restart reconciliation, expiry-only renewal history, and explicit
   claim-not-truth UI semantics;
+- signed, content-addressed Trade Dispute Statement v1 claims with bounded
+  parent/evidence references, destination-bound Delivery and receiver ACK,
+  durable sender/intake recovery, claim-not-fact Spine projection, and an
+  explicit local DAG completeness/chronology projection that does not
+  adjudicate truth; the operator response returns both signed transport
+  documents so the browser can independently verify Delivery content
+  addressing, both Ed25519 signatures, ACK digest, and exact response binding;
 - bounded package-store reconciliation with explicit cleanup;
 - authenticated, paginated local Trade Skill catalog inspection with strict
   frontend response validation, metadata-only resource projection, and
@@ -958,7 +996,9 @@ The reviewed protocol kernel currently contains:
 - schemas and deterministic positive and negative conformance vectors,
   including Agreement v1, Proposal Delivery v1, Execution Receipt v1,
   Execution Receipt Delivery/Acknowledgement v1, Receipt Review v1, Receipt
-  Review Delivery/Acknowledgement v1, and the
+  Review Delivery/Acknowledgement v1, Dispute Statement creation reservation
+  and creation-failure audit payloads, first-page/graph snapshot binding,
+  cross-Review parent-context token separation, and the
   `trade.order.accepted`, `trade.execution.recorded`, and
   Rule Recognition, Recognition Policy, and Receipt Review audit payloads;
 - focused tests.
@@ -973,6 +1013,25 @@ projection exposes only a local publisher's active canonical Offer head, but a
 signature still proves authorship rather than truth or global freshness.
 The discovery hint has a hard 24-hour lifetime and cannot outlive its Offer;
 renewal requires a new publisher signature.
+
+Local Dispute Statement authoring validates the complete bounded parent chain
+before it writes an idempotency reservation. The signed
+`trade.dispute.statement.create.reserved` event binds the author, request
+digest, and logical creation time. If work after that reservation fails, the
+node appends an idempotent
+`trade.dispute.statement.create.attempt-failed` event. Its content-derived
+failure ID binds the operation, exact request, and a closed reason code;
+retryability is derived from that reason code rather than chosen by an API
+caller. This event records an unsuccessful attempt, not a terminal judgment:
+the same reserved operation may complete after a retryable dependency recovers.
+Store graph projection applies statement, byte, node, and edge limits before
+full statement verification wherever a validated index header is sufficient.
+The public Agreement vector fixes the reservation derivation inputs, the
+closed reservation payload, one paginated Store snapshot, its full graph
+projection, and distinct `incomplete` versus cross-Review `invalid` parent
+cases. Page and graph tokens must match only when they describe the same exact
+statement inventory, graph-affecting parent context, and effective
+microsecond-resolution clock-skew policy.
 
 Globally convergent latest-revision proofs, Acceptance federation, inventory
 or asset reservation, fulfillment, payment, global Receipt/Review propagation,

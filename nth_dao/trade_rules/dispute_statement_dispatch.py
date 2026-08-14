@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import secrets
 import sqlite3
-import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +27,7 @@ from nth_dao.trade_rules.dispute_statement_transport import (
 )
 from nth_dao.trade_rules.execution_receipt import TradeExecutionReceipt
 from nth_dao.trade_rules.receipt_review import TradeReceiptReview
+from nth_dao.util.path_security import path_is_linklike
 
 EVENT_TRADE_DISPUTE_STATEMENT_ACKNOWLEDGED = (
     "trade.dispute.statement-acknowledged"
@@ -206,18 +205,7 @@ class TradeDisputeStatementDispatchStore:
 
     @staticmethod
     def _is_linklike(path: Path) -> bool:
-        if path.is_symlink():
-            return True
-        is_junction = getattr(path, "is_junction", None)
-        if is_junction and is_junction():
-            return True
-        if os.name == "nt" and path.exists():
-            metadata = os.lstat(path)
-            return bool(
-                getattr(metadata, "st_file_attributes", 0)
-                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            )
-        return False
+        return path_is_linklike(path)
 
     def _assert_storage_path(self) -> None:
         try:

@@ -19,6 +19,10 @@ from nth_dao.trade_rules.dispute_statement import (
     TradeDisputeStatement,
     TradeDisputeStatementRejected,
 )
+from nth_dao.trade_rules.canonical import (
+    TradeCanonicalJSONError,
+    trade_canonical_json,
+)
 from nth_dao.trade_rules.dispute_statement_store import (
     TradeDisputeStatementStore,
 )
@@ -26,6 +30,7 @@ from nth_dao.trade_rules.dispute_statement_outbox import (
     TradeDisputeStatementAuditOutbox,
 )
 from nth_dao.trade_rules.execution_receipt import TradeExecutionReceipt
+from nth_dao.trade_rules.execution_receipt import EXECUTION_RECEIPT_ID_PREFIX
 from nth_dao.trade_rules.negotiation import RulePackageResolver
 from nth_dao.trade_rules.receipt_review import (
     RECEIPT_REVIEW_ID_PREFIX,
@@ -36,8 +41,31 @@ EVENT_TRADE_DISPUTE_STATEMENT_RETAINED = "trade.dispute.statement.retained"
 EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED = (
     "trade.dispute.statement.create.reserved"
 )
+EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED = (
+    "trade.dispute.statement.create.attempt-failed"
+)
 TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION = "1"
 TRADE_DISPUTE_STATEMENT_ASSERTION_STATUS = "signed-claim-not-adjudicated"
+TRADE_DISPUTE_STATEMENT_CREATE_FAILURE_REASONS = frozenset(
+    {
+        "dependency-unavailable",
+        "statement-rejected",
+        "parent-chain-unavailable",
+        "store-busy",
+        "store-capacity",
+        "store-integrity-conflict",
+        "persistence-incomplete",
+    }
+)
+_CREATE_FAILURE_RETRYABILITY = {
+    "dependency-unavailable": True,
+    "statement-rejected": False,
+    "parent-chain-unavailable": True,
+    "store-busy": True,
+    "store-capacity": True,
+    "store-integrity-conflict": False,
+    "persistence-incomplete": True,
+}
 MAX_TRADE_DISPUTE_AUDIT_OBSERVED_AT_MS = 253_402_300_799_999
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -64,10 +92,246 @@ _PAYLOAD_FIELDS = frozenset(
         "assertion_status",
     }
 )
+_CREATE_FAILURE_PAYLOAD_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "failure_id",
+        "operation_id",
+        "request_digest",
+        "reason_code",
+        "retryable",
+    }
+)
+_CREATE_RESERVATION_PAYLOAD_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "operation_id",
+        "request_digest",
+        "order_digest",
+        "execution_id",
+        "review_id",
+        "author_did",
+    }
+)
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+_EXECUTION_ID = re.compile(
+    rf"^{re.escape(EXECUTION_RECEIPT_ID_PREFIX)}[0-9a-f]{{64}}$"
+)
 
 
 class TradeDisputeStatementAuditError(RuntimeError):
     """A dispute-statement audit projection is invalid or unavailable."""
+
+
+def trade_dispute_statement_create_reservation_payload(
+    *,
+    idempotency_key: str,
+    body: dict[str, Any],
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    author_did: str,
+) -> dict[str, Any]:
+    """Bind one retry key to one exact local Statement creation request."""
+
+    if (
+        not isinstance(idempotency_key, str)
+        or _IDEMPOTENCY_KEY.fullmatch(idempotency_key) is None
+    ):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement idempotency_key is invalid"
+        )
+    if not isinstance(body, dict):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation body must be an object"
+        )
+    if not is_did_key(author_did):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation author_did is invalid"
+        )
+    operation_material = (
+        "nth-dao/trade-dispute-statement-create/v1\0"
+        + author_did
+        + "\0"
+        + idempotency_key
+    ).encode("ascii", errors="strict")
+    request_material = {
+        "order_digest": order_digest,
+        "execution_id": execution_id,
+        "review_id": review_id,
+        "author_did": author_did,
+        "body": body,
+    }
+    try:
+        canonical_request = trade_canonical_json(request_material)
+    except (TradeCanonicalJSONError, TypeError, ValueError, UnicodeError) as exc:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation request is not canonicalizable"
+        ) from exc
+    return validate_trade_dispute_statement_create_reservation_payload(
+        {
+            "protocol_version": TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION,
+            "operation_id": (
+                "sha256:" + hashlib.sha256(operation_material).hexdigest()
+            ),
+            "request_digest": (
+                "sha256:" + hashlib.sha256(canonical_request).hexdigest()
+            ),
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "author_did": author_did,
+        }
+    )
+
+
+def validate_trade_dispute_statement_create_reservation_payload(
+    value: Any,
+) -> dict[str, Any]:
+    """Validate the closed wire shape of a creation reservation event."""
+
+    if not isinstance(value, dict) or set(value) != _CREATE_RESERVATION_PAYLOAD_FIELDS:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation reservation has missing or unknown fields"
+        )
+    if value["protocol_version"] != TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation reservation version is unsupported"
+        )
+    for field in ("operation_id", "request_digest", "order_digest"):
+        if not isinstance(value[field], str) or _DIGEST.fullmatch(value[field]) is None:
+            raise TradeDisputeStatementAuditError(
+                f"Trade Dispute Statement creation reservation {field} is invalid"
+            )
+    if (
+        not isinstance(value["execution_id"], str)
+        or _EXECUTION_ID.fullmatch(value["execution_id"]) is None
+    ):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation reservation execution_id is invalid"
+        )
+    if (
+        not isinstance(value["review_id"], str)
+        or _REVIEW_ID.fullmatch(value["review_id"]) is None
+    ):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation reservation review_id is invalid"
+        )
+    if not is_did_key(value["author_did"]):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation reservation author_did is invalid"
+        )
+    return dict(value)
+
+
+def validate_trade_dispute_statement_create_reservation_binding(
+    value: Any,
+    *,
+    idempotency_key: str,
+    body: dict[str, Any],
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    author_did: str,
+) -> dict[str, Any]:
+    """Require a reservation to bind the exact retry key and request body."""
+
+    payload = validate_trade_dispute_statement_create_reservation_payload(value)
+    expected = trade_dispute_statement_create_reservation_payload(
+        idempotency_key=idempotency_key,
+        body=body,
+        order_digest=order_digest,
+        execution_id=execution_id,
+        review_id=review_id,
+        author_did=author_did,
+    )
+    if payload != expected:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation reservation does not bind the request"
+        )
+    return payload
+
+
+def trade_dispute_statement_create_failure_payload(
+    *,
+    operation_id: str,
+    request_digest: str,
+    reason_code: str,
+) -> dict[str, Any]:
+    """Build an idempotent signed audit payload for one failed attempt class."""
+
+    if reason_code not in TRADE_DISPUTE_STATEMENT_CREATE_FAILURE_REASONS:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation failure reason_code is invalid"
+        )
+    for field, value in (
+        ("operation_id", operation_id),
+        ("request_digest", request_digest),
+    ):
+        if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+            raise TradeDisputeStatementAuditError(
+                f"Trade Dispute Statement creation failure payload {field} is invalid"
+            )
+    failure_material = (
+        "nth-dao/trade-dispute-statement-create-failure/v1\0"
+        + operation_id
+        + "\0"
+        + request_digest
+        + "\0"
+        + reason_code
+    ).encode("ascii", errors="strict")
+    return validate_trade_dispute_statement_create_failure_payload(
+        {
+            "protocol_version": TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION,
+            "failure_id": "sha256:" + hashlib.sha256(failure_material).hexdigest(),
+            "operation_id": operation_id,
+            "request_digest": request_digest,
+            "reason_code": reason_code,
+            "retryable": _CREATE_FAILURE_RETRYABILITY[reason_code],
+        }
+    )
+
+
+def validate_trade_dispute_statement_create_failure_payload(
+    value: Any,
+) -> dict[str, Any]:
+    """Validate the closed wire shape of a creation-attempt failure event."""
+
+    if not isinstance(value, dict) or set(value) != _CREATE_FAILURE_PAYLOAD_FIELDS:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation failure payload has missing or unknown fields"
+        )
+    if value["protocol_version"] != TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation failure payload version is unsupported"
+        )
+    for field in ("failure_id", "operation_id", "request_digest"):
+        if not isinstance(value[field], str) or _DIGEST.fullmatch(value[field]) is None:
+            raise TradeDisputeStatementAuditError(
+                f"Trade Dispute Statement creation failure payload {field} is invalid"
+            )
+    if value["reason_code"] not in TRADE_DISPUTE_STATEMENT_CREATE_FAILURE_REASONS:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation failure reason_code is invalid"
+        )
+    if value["retryable"] is not _CREATE_FAILURE_RETRYABILITY[value["reason_code"]]:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation failure retryability is invalid"
+        )
+    failure_material = (
+        "nth-dao/trade-dispute-statement-create-failure/v1\0"
+        + value["operation_id"]
+        + "\0"
+        + value["request_digest"]
+        + "\0"
+        + value["reason_code"]
+    ).encode("ascii", errors="strict")
+    expected = "sha256:" + hashlib.sha256(failure_material).hexdigest()
+    if value["failure_id"] != expected:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation failure_id binding is invalid"
+        )
+    return dict(value)
 
 
 @dataclass(frozen=True)
@@ -669,17 +933,24 @@ class TradeDisputeStatementAuditCoordinator:
 
 
 __all__ = [
+    "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED",
     "EVENT_TRADE_DISPUTE_STATEMENT_RETAINED",
     "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED",
     "MAX_TRADE_DISPUTE_AUDIT_OBSERVED_AT_MS",
     "TRADE_DISPUTE_STATEMENT_ASSERTION_STATUS",
     "TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION",
+    "TRADE_DISPUTE_STATEMENT_CREATE_FAILURE_REASONS",
     "TradeDisputeStatementAuditError",
     "TradeDisputeStatementAuditCoordinator",
     "TradeDisputeStatementAuditReconciliation",
     "TradeDisputeStatementAuditResult",
     "trade_dispute_statement_audit_payload",
+    "trade_dispute_statement_create_failure_payload",
+    "trade_dispute_statement_create_reservation_payload",
     "validate_trade_dispute_statement_audit_binding",
     "validate_trade_dispute_statement_audit_event",
     "validate_trade_dispute_statement_audit_payload",
+    "validate_trade_dispute_statement_create_failure_payload",
+    "validate_trade_dispute_statement_create_reservation_binding",
+    "validate_trade_dispute_statement_create_reservation_payload",
 ]

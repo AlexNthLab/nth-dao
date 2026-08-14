@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import sqlite3
-import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +27,7 @@ from nth_dao.trade_rules.execution_transport import (
 )
 from nth_dao.util.io import InterProcessLock
 from nth_dao.util.jsonl_safe import LOCK_TIMEOUT_PATIENT
+from nth_dao.util.path_security import path_is_linklike
 
 EVENT_TRADE_EXECUTION_RECEIPT_ACKNOWLEDGED = (
     "trade.execution.receipt-acknowledged"
@@ -154,18 +153,7 @@ def _bounded_document(raw: bytes, *, label: str) -> bytes:
 
 
 def _is_linklike(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    if is_junction and is_junction():
-        return True
-    if os.name == "nt" and path.exists():
-        metadata = os.lstat(path)
-        return bool(
-            getattr(metadata, "st_file_attributes", 0)
-            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        )
-    return False
+    return path_is_linklike(path)
 
 
 @dataclass(frozen=True)
