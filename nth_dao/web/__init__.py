@@ -6,6 +6,7 @@ membership and group APIs without bypassing their permission checks.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 import hashlib
 import ipaddress
@@ -117,6 +118,7 @@ _TRADE_RECEIPT_REVIEW_DELIVERY_MAX_BODY_BYTES = 2 * 1024 * 1024
 _TRADE_RECEIPT_REVIEW_WRITE_MAX_BODY_BYTES = 32 * 1024
 _TRADE_DISPUTE_STATEMENT_DELIVERY_MAX_BODY_BYTES = 512 * 1024
 _TRADE_DISPUTE_STATEMENT_WRITE_MAX_BODY_BYTES = 256 * 1024
+_TRADE_DISPUTE_STATEMENT_FETCH_MAX_BODY_BYTES = 16 * 1024
 _TRADE_DISPUTE_BOOT_RECOVERY_BATCH = 100
 _TRADE_DISPUTE_BOOT_RECOVERY_MAX_PASSES = 5
 _RESOURCE_PROFILE_MAX_BODY_BYTES = 256 * 1024
@@ -136,6 +138,18 @@ _TRADE_DISPUTE_STATEMENT_WRITE_PATH = re.compile(
     r"nth-trade-execution-sha256:[0-9a-f]{64}/reviews/"
     r"nth-trade-review-sha256:[0-9a-f]{64}/dispute-statements"
     r"(?:/sha256:[0-9a-f]{64}/deliver)?"
+)
+_TRADE_DISPUTE_STATEMENT_FETCH_FEDERATION_PATH = re.compile(
+    r"/api/v2/trade/federation/orders/"
+    r"sha256:[0-9a-f]{64}/execution-receipts/"
+    r"nth-trade-execution-sha256:[0-9a-f]{64}/reviews/"
+    r"nth-trade-review-sha256:[0-9a-f]{64}/dispute-statements/fetch"
+)
+_TRADE_DISPUTE_STATEMENT_FETCH_WRITE_PATH = re.compile(
+    r"/api/v2/trade/orders/"
+    r"sha256:[0-9a-f]{64}/execution-receipts/"
+    r"nth-trade-execution-sha256:[0-9a-f]{64}/reviews/"
+    r"nth-trade-review-sha256:[0-9a-f]{64}/dispute-statements/fetch"
 )
 
 
@@ -158,9 +172,9 @@ class _FederationBodyLimitMiddleware:
             and path.endswith("/claim-foreign")
         )
         is_federation_hello = (
-            scope.get('type') == 'http'
-            and scope.get('method') == 'POST'
-            and path == '/api/v2/market/federation/hello'
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/market/federation/hello"
         )
         is_commerce_cart = (
             scope.get("type") == "http"
@@ -248,8 +262,16 @@ class _FederationBodyLimitMiddleware:
         is_trade_dispute_statement_delivery = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
-            and _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH.fullmatch(path)
-            is not None
+            and _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH.fullmatch(path) is not None
+        )
+        is_trade_dispute_statement_fetch = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and (
+                _TRADE_DISPUTE_STATEMENT_FETCH_FEDERATION_PATH.fullmatch(path)
+                is not None
+                or _TRADE_DISPUTE_STATEMENT_FETCH_WRITE_PATH.fullmatch(path) is not None
+            )
         )
         is_trade_dispute_statement_write = (
             scope.get("type") == "http"
@@ -291,6 +313,7 @@ class _FederationBodyLimitMiddleware:
             or is_trade_execution_receipt_dispatch
             or is_trade_receipt_review_delivery
             or is_trade_dispute_statement_delivery
+            or is_trade_dispute_statement_fetch
             or is_trade_dispute_statement_write
             or is_trade_receipt_review_write
             or is_trade_proposal_accept
@@ -338,6 +361,9 @@ class _FederationBodyLimitMiddleware:
         elif is_trade_dispute_statement_delivery:
             max_body_bytes = _TRADE_DISPUTE_STATEMENT_DELIVERY_MAX_BODY_BYTES
             body_label = "trade Dispute Statement delivery"
+        elif is_trade_dispute_statement_fetch:
+            max_body_bytes = _TRADE_DISPUTE_STATEMENT_FETCH_MAX_BODY_BYTES
+            body_label = "trade Dispute Statement fetch"
         elif is_trade_dispute_statement_write:
             max_body_bytes = _TRADE_DISPUTE_STATEMENT_WRITE_MAX_BODY_BYTES
             body_label = "trade Dispute Statement write"
@@ -410,7 +436,6 @@ class _FederationBodyLimitMiddleware:
             )
             await response(scope, receive, send)
 
-
 DEFAULT_ADMIN_ID = "admin"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONSOLE_TOKEN_ENV = "NTH_CONSOLE_TOKEN"
@@ -438,6 +463,7 @@ def _compute_git_rev_at_startup() -> str:
     wrong, never raises.
     """
     import subprocess as _sp
+
     candidate_cwds = [
         Path(__file__).resolve().parent.parent.parent,    # source checkout
         Path.cwd(),                                       # fallback
@@ -741,12 +767,10 @@ class _MtimeCache:
         self._cached_value = value
         self._cached_signature = sig_tuple
         return value
-
     def invalidate(self) -> None:
         """Force the next get() call to recompute. Useful in tests."""
         self._cached_value = None
         self._cached_signature = None
-
 
 class WebState:
     def __init__(self, workspace: Path):
@@ -763,6 +787,7 @@ class WebState:
         # Lives on disk under ``team_trust/``; reading on every search
         # request is cheap (filesystem cache + small append-only JSONL).
         from ..web_of_trust import TrustGraph
+
         self.trust = TrustGraph(workspace)
         # DID persistence (2026-06-08): the workspace's contact book.
         # /api/agents/add writes here so a peer's DID survives a process
@@ -845,6 +870,10 @@ class WebState:
             TradeExecutionReceiptDispatchStore,
             TradeDisputeStatementIntakeJournal,
             TradeDisputeStatementIntakeJournalError,
+            TradeDisputeStatementFetchJournal,
+            TradeDisputeStatementFetchJournalError,
+            TradeDisputeStatementFetchOutbox,
+            TradeDisputeStatementFetchOutboxError,
             TradeDisputeStatementDispatchError,
             TradeDisputeStatementDispatchStore,
             TradeDisputeStatementStore,
@@ -854,6 +883,7 @@ class WebState:
             TradeOrderDispatchStore,
             TradeOrderStore,
         )
+
         self.trade_offers = OfferStore(workspace)
         self.trade_rule_packages = RulePackageStore(workspace)
         self.trade_rule_recognitions = RuleRecognitionStore(workspace)
@@ -899,6 +929,36 @@ class WebState:
                 type(exc).__name__,
             )
             self.trade_dispute_statement_intake_journal = None
+        try:
+            self.trade_dispute_statement_fetch_journal = (
+                TradeDisputeStatementFetchJournal(workspace)
+            )
+        except (OSError, TradeDisputeStatementFetchJournalError) as exc:
+            logger.warning(
+                "trade Dispute Statement fetch journal unavailable (%s); "
+                "federated Statement fetch disabled until repaired",
+                type(exc).__name__,
+            )
+            self.trade_dispute_statement_fetch_journal = None
+        try:
+            self.trade_dispute_statement_fetch_outbox = (
+                TradeDisputeStatementFetchOutbox(workspace)
+            )
+        except (OSError, TradeDisputeStatementFetchOutboxError) as exc:
+            logger.warning(
+                "trade Dispute Statement fetch outbox unavailable (%s); "
+                "outbound Statement fetch disabled until repaired",
+                type(exc).__name__,
+            )
+            self.trade_dispute_statement_fetch_outbox = None
+        self.trade_dispute_statement_fetch_coordinator_lock = threading.RLock()
+        self.trade_dispute_statement_fetch_coordinators: OrderedDict[
+            str,
+            Any,
+        ] = OrderedDict()
+        self.trade_dispute_statement_fetch_max_coordinators = 8
+        self.trade_dispute_statement_fetch_coordinator_ttl_seconds = 300.0
+        self.trade_dispute_statement_fetch_cache_bytes_per_coordinator = 2 * 1024 * 1024
         self.trade_execution_health_lock = threading.RLock()
         self.trade_execution_recovery_lock = threading.Lock()
         self.trade_execution_recovery_cursor: Optional[str] = None
@@ -924,22 +984,17 @@ class WebState:
             max_per_window=30,
             window_seconds=60.0,
         )
-        self.trade_execution_receipt_delivery_global_limiter = (
-            PersistentRateLimiter(
-                Path(workspace)
-                / "trade"
-                / "rate_limits"
-                / "execution_receipt_delivery_global.json",
-                max_per_window=120,
-                window_seconds=60.0,
-                max_tracked_keys=4,
-            )
-        )
-        self.trade_receipt_review_delivery_limiter = PersistentRateLimiter(
+        self.trade_execution_receipt_delivery_global_limiter = PersistentRateLimiter(
             Path(workspace)
             / "trade"
             / "rate_limits"
-            / "receipt_review_delivery.json",
+            / "execution_receipt_delivery_global.json",
+            max_per_window=120,
+            window_seconds=60.0,
+            max_tracked_keys=4,
+        )
+        self.trade_receipt_review_delivery_limiter = PersistentRateLimiter(
+            Path(workspace) / "trade" / "rate_limits" / "receipt_review_delivery.json",
             max_per_window=30,
             window_seconds=60.0,
         )
@@ -962,16 +1017,27 @@ class WebState:
             max_per_window=30,
             window_seconds=60.0,
         )
-        self.trade_dispute_statement_delivery_global_limiter = (
-            PersistentRateLimiter(
-                Path(workspace)
-                / "trade"
-                / "rate_limits"
-                / "dispute_statement_delivery_global.json",
-                max_per_window=120,
-                window_seconds=60.0,
-                max_tracked_keys=4,
-            )
+        self.trade_dispute_statement_delivery_global_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "dispute_statement_delivery_global.json",
+            max_per_window=120,
+            window_seconds=60.0,
+            max_tracked_keys=4,
+        )
+        self.trade_dispute_statement_fetch_limiter = PersistentRateLimiter(
+            Path(workspace) / "trade" / "rate_limits" / "dispute_statement_fetch.json",
+            max_per_window=30, window_seconds=60.0,
+        )
+        self.trade_dispute_statement_fetch_global_limiter = PersistentRateLimiter(
+            Path(workspace)
+            / "trade"
+            / "rate_limits"
+            / "dispute_statement_fetch_global.json",
+            max_per_window=120,
+            window_seconds=60.0,
+            max_tracked_keys=4,
         )
         self.trade_order_store = TradeOrderStore(workspace)
         self.trade_order_audit_outbox = TradeOrderAuditOutbox(workspace)
@@ -1032,7 +1098,8 @@ class WebState:
         # Defaults sized for a sidebar in active use: ~30 verify calls
         # per minute is plenty for clicking through a panel of rows.
         self.verify_limiter = RateLimiter(
-            max_per_window=30, window_seconds=60.0,
+            max_per_window=30,
+            window_seconds=60.0,
         )
         self.store_limiter = RateLimiter(
             max_per_window=60, window_seconds=60.0,
@@ -1050,7 +1117,6 @@ class WebState:
         # store + revocation list. Lives under
         # <workspace>/team_cap_tokens/.
         self.cap_tokens = _CapTokenStore(workspace)
-
 
 # L1-3 (2026-06-08): cap-token request payloads. Defined at module
 # scope rather than inside ``create_app`` because Pydantic forward-
@@ -1120,6 +1186,7 @@ class TaskStatusPayload(BaseModel):
 
 class AddAgentPayload(BaseModel):
     """Friend-request style direct add. Resolves an agent_id OR a did:key."""
+
     actor_id: str
     target_agent_id: str = ""
     target_did: str = ""
@@ -1516,8 +1583,7 @@ class _TradeDisputeStatementRecoveryWorker:
                     )
                 except (OSError, RuntimeError, TypeError, ValueError) as exc:
                     logger.warning(
-                        "trade Dispute Statement audit background recovery "
-                        "failed (%s)",
+                        "trade Dispute Statement audit background recovery failed (%s)",
                         type(exc).__name__,
                     )
                     report = {"has_more": False}
@@ -1630,7 +1696,6 @@ class _MDNSPublisher:
         with self._lock:
             self._thread = None
 
-
 class _UDPLANPublisher:
     """Own the stdlib UDP discovery responder for explicit LAN mode."""
 
@@ -1695,6 +1760,7 @@ def create_app(
     # While lifespan is active, a per-app atexit callback still protects
     # normal interpreter shutdown.
     import atexit as _atexit
+
     shutdown_registered = False
 
     def _shutdown_runtime(app_instance: FastAPI) -> None:
@@ -1996,7 +2062,20 @@ def create_app(
         # and Rule Package before bounded retention and a receiver-signed ACK.
         if (
             request.method == "POST"
-            and _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH.fullmatch(
+            and _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH.fullmatch(request.url.path)
+            is not None
+        ):
+            request.state.nth_principal = {"type": "anonymous"}
+            return await call_next(request)
+
+        # Exact Statement retrieval is authorized by a short-lived signed
+        # Fetch Request whose requester and responder are both bound to the
+        # retained bilateral Order. Remote counterparties cannot possess the
+        # operator console token, so the handler performs the cryptographic,
+        # replay, quota, and audit checks before disclosing any Statement.
+        if (
+            request.method == "POST"
+            and _TRADE_DISPUTE_STATEMENT_FETCH_FEDERATION_PATH.fullmatch(
                 request.url.path
             )
             is not None
@@ -2089,10 +2168,7 @@ def create_app(
             # rather than a misleading empty card.
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "node identity unavailable; install pynacl + "
-                    "restart"
-                ),
+                detail=("node identity unavailable; install pynacl + restart"),
             )
         ident = state.node_identity
         pubkey_hex = getattr(ident, "pubkey_hex", "") or ""
@@ -2164,7 +2240,6 @@ def create_app(
             ) from exc
         card["sig"] = sig
         return card
-
     # L0-2 (2026-06-08): A2A Protocol AgentCard mirror.
     #
     # The A2A spec (a2aproject/A2A specification/a2a.proto) defines
@@ -2190,10 +2265,7 @@ def create_app(
             # the consumer's trust store.
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "node identity unavailable; install pynacl + "
-                    "restart"
-                ),
+                detail=("node identity unavailable; install pynacl + restart"),
             )
         # A4 (architect review 2026-06-08): a2a_card helpers are at
         # module scope (same convention as R-58's did_key hoist).
@@ -2206,8 +2278,7 @@ def create_app(
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "node identity has no usable keypair; "
-                    "install pynacl + restart"
+                    "node identity has no usable keypair; install pynacl + restart"
                 ),
             )
 
@@ -2256,6 +2327,7 @@ def create_app(
         # every request — ETag would never hit there. Adding ETag
         # only here, not the native endpoint, is the correct asymmetry.
         from nth_dao.identity import canonical_json as _canonical_json
+
         body_bytes = _canonical_json(card)
         etag = '"' + hashlib.sha256(body_bytes).hexdigest()[:32] + '"'
 
@@ -2496,7 +2568,6 @@ def create_app(
         include_artifacts = (request.query_params.get("includeArtifacts") or "true").lower() != "false"
         context_id = request.query_params.get("contextId") or ""
         status_filter = request.query_params.get("status") or ""
-
         tasks: list[dict[str, Any]] = []
         for task_id in state.a2a_tasks.all_ids():
             task = state.a2a_tasks.get(task_id)
@@ -2563,6 +2634,7 @@ def create_app(
         if version_error is not None:
             return version_error
         return a2a_public_agent_card(request)
+
     # L1-3 (2026-06-08): capability-token endpoints.
     #
     # - POST /api/cap_tokens/issue   : admin-only, signs a token
@@ -2594,10 +2666,7 @@ def create_app(
         if state.node_identity is None:
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "node identity unavailable; install pynacl + "
-                    "restart"
-                ),
+                detail=("node identity unavailable; install pynacl + restart"),
             )
         # Reject unknown capability strings:
         #   * Known caps (KNOWN_CAPABILITIES) — accept
@@ -3154,8 +3223,9 @@ def create_app(
                     contact = state.contacts.get(r.record.agent_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(
-                        "contact_book lookup failed for registry row "
-                        "%s: %s", r.record.agent_id, exc,
+                        "contact_book lookup failed for registry row %s: %s",
+                        r.record.agent_id,
+                        exc,
                     )
                     contact = None
                 if contact is not None:
@@ -3522,7 +3592,6 @@ def create_app(
                         "contact book"
                     ),
                 ) from exc
-
         return {
             "ok": True,
             "agent_id": target_id,
@@ -3531,7 +3600,6 @@ def create_app(
         }
 
     # v0.9.6: group registry CRUD + search
-
     @app.post("/api/groups/registry")
     def create_unique_group(payload: GroupCreatePayload) -> dict[str, Any]:
         """Create a workspace-unique group. Display name must produce a unique slug."""
@@ -3580,6 +3648,7 @@ def create_app(
     def publish_group(payload: GroupPublishPayload) -> dict[str, Any]:
         """Persist a signed GroupRecord. Signature must verify; slug must be free."""
         from nth_dao.group_registry import GroupRecord
+
         try:
             record = GroupRecord.from_dict(payload.record)
         except Exception as exc:
@@ -3602,6 +3671,7 @@ def create_app(
     @app.post("/api/groups/registry/search")
     def search_groups(payload: GroupSearchPayload) -> dict[str, Any]:
         from nth_dao.group_registry import GroupPolicy
+
         policy = None
         if payload.policy:
             try:
@@ -3730,7 +3800,6 @@ def create_app(
     # gate as the rest of the web console. Mandates leak counterparty
     # / amount / settlement-rail metadata; an anonymous reader is not
     # an acceptable default even for local-first deployments.
-
     @app.get("/api/mandates")
     def list_mandates(actor_id: str) -> dict[str, Any]:
         """List all mandates with summary rows for the sidebar."""
@@ -3798,13 +3867,13 @@ def create_app(
         already closed.
         """
         import time as _time
+
         _start = _time.monotonic()
         try:
             return await _store_mandate_body(payload, state, _start)
         except HTTPException:
             await enforce_min_response_time(_start, 0.05)
             raise
-
     async def _store_mandate_body(
         payload: MandateStorePayload,
         state: WebState,
@@ -3853,8 +3922,7 @@ def create_app(
         if not sig_ok:
             raise HTTPException(
                 status_code=400,
-                detail=f"refusing to store {kind} with invalid signature: "
-                f"{sig_reason}",
+                detail=f"refusing to store {kind} with invalid signature: {sig_reason}",
             )
         try:
             if kind == KIND_INTENT:
@@ -3890,6 +3958,7 @@ def create_app(
             takes 50ms, leaking membership status via wall-clock.
         """
         import time as _time
+
         _start = _time.monotonic()
         try:
             return await _verify_mandate_body(payload, state, _start)
@@ -3933,7 +4002,6 @@ def create_app(
         if not _looks_like_mandate(kind, body):
             await enforce_min_response_time(_start, 0.05)
             return {"ok": False, "reason": f"malformed {kind}: not a W3C VC body"}
-
         # Layer 1: signature verification.
         # The mandate.verify_*_mandate helpers return (ok, reason)
         # tuples, NOT bare booleans - unpacking them avoids the trap
@@ -4011,6 +4079,7 @@ def create_app(
     # nth_dao/web/v2_api.py for the contract.
     try:
         from . import v2_api as _v2_api
+
         _v2_api.register_v2_routes(app)
     except Exception as exc:  # noqa: BLE001
         # Don't take down the whole console because v2 routes failed
@@ -4206,7 +4275,6 @@ def _build_mdns_responder(state: WebState) -> Optional[Any]:
                 "on the local network",
             )
             return None
-
         config = state.membership.load_config()
         node_did = _safe_did(state.node_identity)
         node_pk = getattr(state.node_identity, "pubkey_hex", "") or ""
@@ -4239,7 +4307,6 @@ def _build_mdns_responder(state: WebState) -> Optional[Any]:
                 "NTH_PUBLIC_BASE_URL or bind with NTH_HOST + "
                 "NTH_ALLOW_REMOTE_BIND=1 for cross-PC task discovery",
             )
-
         return MDNSDiscovery(
             agent_id=node_network_id,
             label=advertised_label,
@@ -4272,6 +4339,7 @@ def _bootstrap(state: WebState) -> None:
     # does the heavy lifting; _bootstrap just has to call it before
     # building team.json so we can pin owner_pubkey on first boot.
     from ..identity import load_or_generate as _load_or_generate_identity
+
     try:
         node_identity = _load_or_generate_identity(
             state.workspace, label=DEFAULT_ADMIN_ID,
@@ -4305,6 +4373,7 @@ def _bootstrap(state: WebState) -> None:
     if node_identity is not None and getattr(node_identity, "can_sign", False):
         try:
             from ..spine import SignedEventLog
+
             state.spine = SignedEventLog(
                 state.workspace / "spine" / "events.jsonl", node_identity,
             )
@@ -4677,8 +4746,7 @@ def _bootstrap(state: WebState) -> None:
                     break
             if proposal_anchored or proposal_failed:
                 logger.info(
-                    "trade Proposal audit recovery: scanned=%d anchored=%d "
-                    "failed=%d",
+                    "trade Proposal audit recovery: scanned=%d anchored=%d failed=%d",
                     proposal_scanned,
                     proposal_anchored,
                     proposal_failed,
@@ -4704,8 +4772,7 @@ def _bootstrap(state: WebState) -> None:
                     break
             if proposal_archived or proposal_archive_failures:
                 logger.info(
-                    "trade Proposal expiry archive: scanned=%d archived=%d "
-                    "failed=%d",
+                    "trade Proposal expiry archive: scanned=%d archived=%d failed=%d",
                     proposal_archive_scanned,
                     proposal_archived,
                     proposal_archive_failures,
@@ -4763,6 +4830,7 @@ def _bootstrap(state: WebState) -> None:
     #                                          and uselessly change
     #                                          team.json on every boot)
     #   (c) team.json owner_pubkey differs  -> drift; log loudly and
+
     #                                          refuse to silently
     #                                          override (could indicate
     #                                          identity.json swap /
@@ -4828,7 +4896,6 @@ def _bootstrap(state: WebState) -> None:
         purge_legacy_demo_state(state)
     except (OSError, RuntimeError, ValueError) as exc:
         logger.warning("legacy demo cleanup did not complete: %s", exc)
-
 
 
 def _require_member_or_joinable(state: WebState, agent_id: str) -> None:
@@ -5453,19 +5520,19 @@ def _embed_console_token_in_page() -> bool:
 # 按钮,不碰 React 根。app 仍读同一个 ``window.__NTH_CONSOLE_TOKEN__``(本脚本在
 # <head> 同步设好,先于 body 里的 bundle 运行)。
 _CONSOLE_TOKEN_BOOTSTRAP_JS = (
-    "<script>(function(){var K=\"nth_console_token\";"
-    "function g(){try{return localStorage.getItem(K)||\"\"}catch(e){return\"\"}}"
+    '<script>(function(){var K="nth_console_token";'
+    'function g(){try{return localStorage.getItem(K)||""}catch(e){return""}}'
     "window.__NTH_CONSOLE_TOKEN__=g()||undefined;"
-    "window.nthSetToken=function(t){try{localStorage.setItem(K,t||\"\")}catch(e){}location.reload()};"
+    'window.nthSetToken=function(t){try{localStorage.setItem(K,t||"")}catch(e){}location.reload()};'
     "window.nthClearToken=function(){try{localStorage.removeItem(K)}catch(e){}location.reload()};"
-    "window.addEventListener(\"DOMContentLoaded\",function(){"
-    "var b=document.createElement(\"button\");"
-    "b.textContent=g()?\"\\uD83D\\uDD13 \\u5199\\u5165\\u4ee4\\u724c\":\"\\uD83D\\uDD11 \\u8bbe\\u7f6e\\u5199\\u5165\\u4ee4\\u724c\";"
-    "b.style.cssText=\"position:fixed;right:12px;bottom:12px;z-index:2147483647;"
+    'window.addEventListener("DOMContentLoaded",function(){'
+    'var b=document.createElement("button");'
+    'b.textContent=g()?"\\uD83D\\uDD13 \\u5199\\u5165\\u4ee4\\u724c":"\\uD83D\\uDD11 \\u8bbe\\u7f6e\\u5199\\u5165\\u4ee4\\u724c";'
+    'b.style.cssText="position:fixed;right:12px;bottom:12px;z-index:2147483647;'
     "padding:6px 10px;font:12px sans-serif;border:1px solid #888;border-radius:6px;"
-    "background:#1c1c1e;color:#eee;cursor:pointer;opacity:.85\";"
-    "b.onclick=function(){if(g()){if(confirm(\"\\u6e05\\u9664\\u5df2\\u5b58\\u7684\\u5199\\u5165\\u4ee4\\u724c?\"))window.nthClearToken();}"
-    "else{var t=prompt(\"\\u7c98\\u8d34\\u5199\\u5165\\u4ee4\\u724c(\\u5411\\u8fd0\\u8425\\u8005\\u5e26\\u5916\\u7d22\\u53d6):\");if(t)window.nthSetToken(t);}};"
+    'background:#1c1c1e;color:#eee;cursor:pointer;opacity:.85";'
+    'b.onclick=function(){if(g()){if(confirm("\\u6e05\\u9664\\u5df2\\u5b58\\u7684\\u5199\\u5165\\u4ee4\\u724c?"))window.nthClearToken();}'
+    'else{var t=prompt("\\u7c98\\u8d34\\u5199\\u5165\\u4ee4\\u724c(\\u5411\\u8fd0\\u8425\\u8005\\u5e26\\u5916\\u7d22\\u53d6):");if(t)window.nthSetToken(t);}};'
     "document.body.appendChild(b);});})();</script>"
 )
 
@@ -5476,16 +5543,13 @@ def _render_console_html(
     html = index_file.read_text(encoding="utf-8")
     if embed_token:
         snippet = (
-            "<script>"
-            f"window.__NTH_CONSOLE_TOKEN__ = {json.dumps(token)};"
-            "</script>"
+            f"<script>window.__NTH_CONSOLE_TOKEN__ = {json.dumps(token)};</script>"
         )
     else:
         snippet = _CONSOLE_TOKEN_BOOTSTRAP_JS   # 页面不含 token
     if "</head>" in html:
         return html.replace("</head>", f"  {snippet}\n  </head>", 1)
     return snippet + html
-
 
 class _LazyASGIApp:
     """Preserve ``nth_dao.web:app`` without import-time workspace writes."""
@@ -5552,6 +5616,7 @@ def _resolve_safe_bind_host() -> str:
     # Loud warning on every cold start so a misconfigured-but-opted-in
     # deployment still surfaces the risk in logs.
     import logging as _logging
+
     _logging.getLogger("nth_dao.web").warning(
         "NTH DAO web console binding to non-loopback host %r with "
         "NTH_ALLOW_REMOTE_BIND=1; console tokens are not embedded for remote "

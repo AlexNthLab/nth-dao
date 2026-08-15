@@ -17,6 +17,7 @@ from nth_dao.identity import AgentID, AgentIdentity
 from nth_dao.spine import SignedEventLog, SpineEvent
 from nth_dao.trade_rules.agreement_conformance import VECTORS_PATH
 from nth_dao.trade_rules.agreement_order import TradeOrder
+from nth_dao.trade_rules.canonical import trade_canonical_json
 from nth_dao.trade_rules.dispute_statement_fetch_journal import (
     TradeDisputeStatementFetchJournal,
     TradeDisputeStatementFetchJournalCapacity,
@@ -28,6 +29,11 @@ from nth_dao.trade_rules.dispute_statement_fetch_audit import (
     TradeDisputeStatementFetchAuditError,
     trade_dispute_statement_fetch_audit_payload,
     verify_trade_dispute_statement_fetch_audit_event,
+)
+from nth_dao.trade_rules.dispute_statement_fetch_outbox import (
+    TradeDisputeStatementFetchOutbox,
+    TradeDisputeStatementFetchOutboxCapacity,
+    TradeDisputeStatementFetchOutboxError,
 )
 from nth_dao.trade_rules.dispute_statement_retrieval import (
     TradeDisputeStatementFetchRequest,
@@ -1025,6 +1031,554 @@ def test_fetch_coordinator_caches_are_bounded(tmp_path):
     assert len(coordinator._verification_cache) == 1
     assert len(coordinator._response_cache) == 1
     assert len(coordinator._audit_cache) == 1
+
+
+def test_fetch_coordinator_cache_enforces_total_bytes_and_ttl(tmp_path):
+    order, receipt, review, request, expected_response = _artifacts()
+    clock = [100.0]
+    coordinator = TradeDisputeStatementFetchCoordinator(
+        TradeDisputeStatementFetchJournal(tmp_path),
+        _StatementLookup(expected_response.statement.to_dict()),
+        responder_identity=_maker_identity(),
+        spine=_spine(tmp_path),
+        package_resolver=None,
+        cache_max_bytes=2_048,
+        cache_ttl_seconds=5.0,
+        cache_clock=lambda: clock[0],
+    )
+
+    coordinator.receive(
+        request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=datetime.fromisoformat("2026-08-01T02:08:00+00:00"),
+    )
+
+    assert coordinator.cache_size_bytes <= 2_048
+    assert coordinator._cache_meta
+    clock[0] += 6.0
+    assert coordinator.cache_size_bytes == 0
+    assert not coordinator._verification_cache
+    assert not coordinator._response_cache
+    assert not coordinator._audit_cache
+
+
+def test_fetch_coordinator_does_not_cache_one_oversized_snapshot(tmp_path):
+    order, receipt, review, request, expected_response = _artifacts()
+    coordinator = TradeDisputeStatementFetchCoordinator(
+        TradeDisputeStatementFetchJournal(tmp_path),
+        _StatementLookup(expected_response.statement.to_dict()),
+        responder_identity=_maker_identity(),
+        spine=_spine(tmp_path),
+        package_resolver=None,
+        cache_max_bytes=1,
+    )
+
+    coordinator.receive(
+        request,
+        review=review,
+        receipt=receipt,
+        order=order,
+        at=datetime.fromisoformat("2026-08-01T02:08:00+00:00"),
+    )
+
+    assert coordinator.cache_size_bytes == 0
+    assert not coordinator._verification_cache
+    assert not coordinator._response_cache
+    assert not coordinator._audit_cache
+
+
+def _fetch_audit_event(tmp_path, request, response, order, receipt, review):
+    payload = trade_dispute_statement_fetch_audit_payload(
+        request,
+        response,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    event, _created = _spine(tmp_path).append_unique(
+        EVENT_TRADE_DISPUTE_STATEMENT_FETCH_SERVED,
+        payload,
+        unique_payload_fields=("request_id",),
+        ts_ms=1_775_012_880_000,
+    )
+    return event
+
+
+def test_fetch_requester_outbox_reuses_exact_request_under_concurrency(tmp_path):
+    order, receipt, review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    candidates = tuple(
+        _alternate_request(
+            order,
+            receipt,
+            review,
+            request,
+            nonce=f"{index + 1:02x}" * 16,
+        )
+        for index in range(8)
+    )
+
+    def reserve(candidate):
+        return outbox.reserve(
+            "https://peer.example",
+            candidate,
+            observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        retained = tuple(executor.map(reserve, candidates))
+
+    assert sum(created for _record, created in retained) == 1
+    assert len({record.request_bytes for record, _created in retained}) == 1
+    assert {record.generation for record, _created in retained} == {1}
+
+
+def test_fetch_requester_outbox_preserves_expired_generations(tmp_path):
+    order, receipt, review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    first, created = outbox.reserve(
+        "https://peer.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    assert created
+    request_document = request.to_dict()
+    replacement = create_trade_dispute_statement_fetch_request(
+        _taker_identity(),
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=request_document["statement_digest"],
+        responder_did=request_document["responder_did"],
+        created_at="2026-08-01T02:13:00Z",
+        not_after="2026-08-01T02:17:00Z",
+        nonce="59" * 16,
+        now=datetime.fromisoformat("2026-08-01T02:13:00+00:00"),
+    )
+    second, created = outbox.reserve(
+        "https://peer.example",
+        replacement,
+        observed_at_ns=_ns("2026-08-01T02:13:00Z"),
+    )
+
+    assert created
+    assert second.generation == 2
+    assert second.request_bytes == replacement.canonical_bytes
+    with sqlite3.connect(outbox.path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM fetch_outbox").fetchone()[0] == 2
+        )
+    assert first.request_bytes != second.request_bytes
+
+
+def test_fetch_requester_outbox_replays_verified_completion_after_restart(tmp_path):
+    order, receipt, review, request, response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    pending, _created = outbox.reserve(
+        "https://peer.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    attempted = outbox.mark_attempt(
+        pending,
+        updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+    )
+    event = _fetch_audit_event(
+        tmp_path,
+        request,
+        response,
+        order,
+        receipt,
+        review,
+    )
+    completed, created = outbox.complete(
+        attempted,
+        response,
+        event,
+        updated_at_ns=_ns("2026-08-01T02:08:02Z"),
+    )
+    assert created
+
+    restarted = TradeDisputeStatementFetchOutbox(tmp_path)
+    replay, created = restarted.reserve(
+        "https://peer.example",
+        _alternate_request(order, receipt, review, request, nonce="61" * 16),
+        observed_at_ns=_ns("2026-08-01T02:12:00Z"),
+    )
+    resolved_request, resolved_response, resolved_event = replay.resolve(
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+
+    assert not created
+    assert replay == completed
+    assert resolved_request == request
+    assert resolved_response == response
+    assert resolved_event == event
+
+
+def test_fetch_requester_outbox_floors_wall_clock_regression(tmp_path):
+    order, receipt, review, request, response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    pending, _created = outbox.reserve(
+        "https://peer.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+
+    with pytest.raises(ValueError, match="updated_at_ns is invalid"):
+        outbox.mark_attempt(pending, updated_at_ns=0)
+    rolled_back = outbox.mark_attempt(
+        pending,
+        updated_at_ns=_ns("2026-08-01T02:07:59Z"),
+    )
+    assert rolled_back.updated_at_ns == pending.updated_at_ns
+    attempted = outbox.mark_attempt(
+        rolled_back,
+        updated_at_ns=_ns("2026-08-01T02:08:02Z"),
+    )
+    outbox.note_failure(
+        attempted,
+        updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+        error="clock moved backwards",
+    )
+    event = _fetch_audit_event(
+        tmp_path,
+        request,
+        response,
+        order,
+        receipt,
+        review,
+    )
+    completed, created = outbox.complete(
+        attempted,
+        response,
+        event,
+        updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+    )
+    assert created
+    assert completed.updated_at_ns == attempted.updated_at_ns
+
+    restarted = TradeDisputeStatementFetchOutbox(tmp_path)
+    retained, created = restarted.reserve(
+        "https://peer.example",
+        _alternate_request(order, receipt, review, request, nonce="62" * 16),
+        observed_at_ns=_ns("2026-08-01T02:09:00Z"),
+    )
+    assert not created
+    assert retained == completed
+
+
+def test_fetch_requester_outbox_ignores_late_failure_after_completion(tmp_path):
+    order, receipt, review, request, response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    pending, _created = outbox.reserve(
+        "https://peer.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    attempted = outbox.mark_attempt(
+        pending,
+        updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+    )
+    event = _fetch_audit_event(
+        tmp_path,
+        request,
+        response,
+        order,
+        receipt,
+        review,
+    )
+    completed, _created = outbox.complete(
+        attempted,
+        response,
+        event,
+        updated_at_ns=_ns("2026-08-01T02:08:02Z"),
+    )
+
+    outbox.note_failure(
+        attempted,
+        updated_at_ns=_ns("2026-08-01T02:08:03Z"),
+        error="late network failure",
+    )
+
+    restarted = TradeDisputeStatementFetchOutbox(tmp_path)
+    retained, created = restarted.reserve(
+        "https://peer.example",
+        _alternate_request(order, receipt, review, request, nonce="63" * 16),
+        observed_at_ns=_ns("2026-08-01T02:09:00Z"),
+    )
+    assert not created
+    assert retained == completed
+    assert retained.last_error == ""
+
+
+def test_fetch_requester_outbox_rejects_capacity_before_network_state(tmp_path):
+    _order, _receipt, _review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path, max_bytes=1)
+
+    with pytest.raises(TradeDisputeStatementFetchOutboxCapacity):
+        outbox.reserve(
+            "https://peer.example",
+            request,
+            observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+        )
+
+
+def test_fetch_requester_outbox_rejects_semantic_request_rebinding(tmp_path):
+    _order, _receipt, _review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    pending, _created = outbox.reserve(
+        "https://peer.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    rebound = request.to_dict()
+    rebound["responder_did"] = AgentIdentity.generate().as_did()
+    rebound_bytes = trade_canonical_json(rebound)
+    rebound_digest = "sha256:" + hashlib.sha256(rebound_bytes).hexdigest()
+    with sqlite3.connect(outbox.path) as connection:
+        connection.execute(
+            "UPDATE fetch_outbox SET request_bytes = ?, request_digest = ?, "
+            "total_bytes = ? WHERE operation_id = ? AND generation = ?",
+            (
+                rebound_bytes,
+                rebound_digest,
+                len(pending.target_url.encode("utf-8")) + len(rebound_bytes),
+                pending.operation_id,
+                pending.generation,
+            ),
+        )
+
+    with pytest.raises(
+        TradeDisputeStatementFetchOutboxError,
+        match="retained fetch outbox bytes are invalid",
+    ):
+        outbox.mark_attempt(
+            pending,
+            updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+        )
+
+
+def test_fetch_requester_outbox_rejects_expiry_column_rebinding(tmp_path):
+    _order, _receipt, _review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path)
+    pending, _created = outbox.reserve(
+        "https://peer.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    with sqlite3.connect(outbox.path) as connection:
+        connection.execute(
+            "UPDATE fetch_outbox SET not_after_ns = ? "
+            "WHERE operation_id = ? AND generation = ?",
+            (
+                pending.not_after_ns + 1,
+                pending.operation_id,
+                pending.generation,
+            ),
+        )
+
+    with pytest.raises(
+        TradeDisputeStatementFetchOutboxError,
+        match="retained fetch outbox bytes are invalid",
+    ):
+        outbox.mark_attempt(
+            pending,
+            updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+        )
+
+
+def test_fetch_requester_outbox_purges_only_expired_incomplete_records(tmp_path):
+    order, receipt, review, request, response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(
+        tmp_path,
+        retention_seconds=60,
+    )
+    pending, _created = outbox.reserve(
+        "https://pending.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    completed, _created = outbox.reserve(
+        "https://completed.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    completed = outbox.mark_attempt(
+        completed,
+        updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+    )
+    event = _fetch_audit_event(
+        tmp_path,
+        request,
+        response,
+        order,
+        receipt,
+        review,
+    )
+    completed, _created = outbox.complete(
+        completed,
+        response,
+        event,
+        updated_at_ns=_ns("2026-08-01T02:08:02Z"),
+    )
+    expiry_ns = _ns(request.to_dict()["not_after"])
+
+    assert outbox.purge_expired_pending(
+        at_ns=expiry_ns + 60 * 1_000_000_000,
+    ) == ()
+    assert outbox.purge_expired_pending(
+        at_ns=expiry_ns + 60 * 1_000_000_000 + 1,
+    ) == ((pending.operation_id, pending.generation),)
+
+    restarted = TradeDisputeStatementFetchOutbox(tmp_path)
+    retained, created = restarted.reserve(
+        "https://completed.example",
+        _alternate_request(order, receipt, review, request, nonce="64" * 16),
+        observed_at_ns=_ns("2026-08-01T02:09:00Z"),
+    )
+    assert not created
+    assert retained == completed
+    with sqlite3.connect(outbox.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM fetch_outbox"
+        ).fetchone()[0] == 1
+
+
+def test_fetch_requester_outbox_cleanup_is_bounded(tmp_path):
+    _order, _receipt, _review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(tmp_path, retention_seconds=0)
+    first, _created = outbox.reserve(
+        "https://first.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    second, _created = outbox.reserve(
+        "https://second.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+
+    removed = outbox.purge_expired_pending(
+        at_ns=_ns(request.to_dict()["not_after"]) + 1,
+        limit=1,
+    )
+
+    assert len(removed) == 1
+    assert removed[0] in {
+        (first.operation_id, first.generation),
+        (second.operation_id, second.generation),
+    }
+    with sqlite3.connect(outbox.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM fetch_outbox"
+        ).fetchone()[0] == 1
+
+
+def test_fetch_requester_outbox_automatically_recovers_expired_capacity(tmp_path):
+    order, receipt, review, request, _response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(
+        tmp_path,
+        max_records=1,
+        retention_seconds=0,
+    )
+    old, _created = outbox.reserve(
+        "https://old.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    document = request.to_dict()
+    replacement = create_trade_dispute_statement_fetch_request(
+        _taker_identity(),
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=document["statement_digest"],
+        responder_did=document["responder_did"],
+        created_at="2026-08-01T02:13:00Z",
+        not_after="2026-08-01T02:17:00Z",
+        nonce="65" * 16,
+        now=datetime.fromisoformat("2026-08-01T02:13:00+00:00"),
+    )
+
+    current, created = outbox.reserve(
+        "https://new.example",
+        replacement,
+        observed_at_ns=_ns("2026-08-01T02:13:00Z"),
+    )
+
+    assert created
+    assert current.operation_id != old.operation_id
+    with sqlite3.connect(outbox.path) as connection:
+        rows = connection.execute(
+            "SELECT operation_id FROM fetch_outbox"
+        ).fetchall()
+    assert rows == [(current.operation_id,)]
+
+
+def test_fetch_requester_outbox_never_purges_completed_for_capacity(tmp_path):
+    order, receipt, review, request, response = _artifacts()
+    outbox = TradeDisputeStatementFetchOutbox(
+        tmp_path,
+        max_records=1,
+        retention_seconds=0,
+    )
+    retained, _created = outbox.reserve(
+        "https://completed.example",
+        request,
+        observed_at_ns=_ns("2026-08-01T02:08:00Z"),
+    )
+    retained = outbox.mark_attempt(
+        retained,
+        updated_at_ns=_ns("2026-08-01T02:08:01Z"),
+    )
+    event = _fetch_audit_event(
+        tmp_path,
+        request,
+        response,
+        order,
+        receipt,
+        review,
+    )
+    completed, _created = outbox.complete(
+        retained,
+        response,
+        event,
+        updated_at_ns=_ns("2026-08-01T02:08:02Z"),
+    )
+    document = request.to_dict()
+    replacement = create_trade_dispute_statement_fetch_request(
+        _taker_identity(),
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=document["statement_digest"],
+        responder_did=document["responder_did"],
+        created_at="2026-08-01T02:13:00Z",
+        not_after="2026-08-01T02:17:00Z",
+        nonce="66" * 16,
+        now=datetime.fromisoformat("2026-08-01T02:13:00+00:00"),
+    )
+
+    with pytest.raises(TradeDisputeStatementFetchOutboxCapacity):
+        outbox.reserve(
+            "https://new.example",
+            replacement,
+            observed_at_ns=_ns("2026-08-01T02:13:00Z"),
+        )
+
+    restarted = TradeDisputeStatementFetchOutbox(tmp_path, max_records=1)
+    replay, created = restarted.reserve(
+        "https://completed.example",
+        replacement,
+        observed_at_ns=_ns("2026-08-01T02:13:00Z"),
+    )
+    assert not created
+    assert replay == completed
 
 
 def test_fetch_coordinator_rejects_expired_request_before_reservation(tmp_path):

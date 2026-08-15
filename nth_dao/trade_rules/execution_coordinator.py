@@ -106,7 +106,7 @@ class TradeExecutionCoordinator:
         self.audit_outbox = audit_outbox
         self.spine = spine
         self._anchor_cache_lock = threading.RLock()
-        self._anchor_cache_token: tuple[int, int, int, int, int] | None = None
+        self._anchor_cache_token: tuple[int, int, int, int, int, str] | None = None
         self._anchor_cache: tuple[
             dict[str, SpineEvent],
             dict[str, SpineEvent],

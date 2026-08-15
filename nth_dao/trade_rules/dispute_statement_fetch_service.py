@@ -81,6 +81,12 @@ class _VerifiedFetchInputs:
     cache_key: tuple[str, str, str, str]
 
 
+@dataclass(frozen=True)
+class _CacheEntryMeta:
+    size_bytes: int
+    expires_at: float
+
+
 def _utc_now(value: datetime | None) -> datetime:
     moment = value or datetime.now(timezone.utc)
     if (
@@ -88,9 +94,7 @@ def _utc_now(value: datetime | None) -> datetime:
         or moment.tzinfo is None
         or moment.utcoffset() is None
     ):
-        raise TradeDisputeStatementFetchRequestRejected(
-            "at must be timezone-aware"
-        )
+        raise TradeDisputeStatementFetchRequestRejected("at must be timezone-aware")
     return moment.astimezone(timezone.utc)
 
 
@@ -124,11 +128,12 @@ class TradeDisputeStatementFetchCoordinator:
         retry_backoff_seconds: float = 1.0,
         processing_clock_ns: Callable[[], int] | None = None,
         verification_cache_entries: int = 64,
+        cache_max_bytes: int = 2 * 1024 * 1024,
+        cache_ttl_seconds: float = 300.0,
+        cache_clock: Callable[[], float] | None = None,
     ) -> None:
         if not isinstance(journal, TradeDisputeStatementFetchJournal):
-            raise TypeError(
-                "journal must be a TradeDisputeStatementFetchJournal"
-            )
+            raise TypeError("journal must be a TradeDisputeStatementFetchJournal")
         if not callable(getattr(statement_store, "get", None)):
             raise TypeError("statement_store must expose get()")
         if not isinstance(spine, SignedEventLog):
@@ -184,6 +189,24 @@ class TradeDisputeStatementFetchCoordinator:
             raise ValueError(
                 "verification_cache_entries must be an integer between 1 and 1024"
             )
+        if (
+            isinstance(cache_max_bytes, bool)
+            or not isinstance(cache_max_bytes, int)
+            or not 1 <= cache_max_bytes <= 64 * 1024 * 1024
+        ):
+            raise ValueError(
+                "cache_max_bytes must be an integer between 1 and 67108864"
+            )
+        cache_ttl = bounded_seconds(
+            cache_ttl_seconds,
+            label="cache_ttl_seconds",
+            error_type=ValueError,
+            maximum=3_600.0,
+        )
+        if cache_ttl <= 0:
+            raise ValueError("cache_ttl_seconds must be greater than zero")
+        if cache_clock is not None and not callable(cache_clock):
+            raise TypeError("cache_clock must be callable")
         self.journal = journal
         self.statement_store = statement_store
         self.responder_identity = responder_identity
@@ -197,7 +220,11 @@ class TradeDisputeStatementFetchCoordinator:
         self.retry_backoff_seconds = retry_backoff
         self.processing_clock_ns = processing_clock_ns or time.time_ns
         self.verification_cache_entries = verification_cache_entries
-        self._verification_cache_lock = threading.Lock()
+        self.cache_max_bytes = cache_max_bytes
+        self.cache_ttl_seconds = cache_ttl
+        self.cache_clock = cache_clock or time.monotonic
+        self._cache_lock = threading.RLock()
+        self._verification_cache_lock = self._cache_lock
         self._verification_cache: OrderedDict[
             tuple[str, str, str, str], _VerifiedFetchInputs
         ] = OrderedDict()
@@ -207,10 +234,97 @@ class TradeDisputeStatementFetchCoordinator:
         self._response_cache: OrderedDict[
             tuple[str, str, str, str, str], TradeDisputeStatementFetchResponse
         ] = OrderedDict()
-        self._audit_cache_lock = threading.Lock()
+        self._audit_cache_lock = self._cache_lock
         self._audit_cache: OrderedDict[
-            tuple[str, str, str], tuple[int, int, int, int, int]
+            tuple[str, str, str], tuple[int, int, int, int, int, str]
         ] = OrderedDict()
+        self._cache_meta: OrderedDict[tuple[str, tuple[Any, ...]], _CacheEntryMeta] = (
+            OrderedDict()
+        )
+        self._cache_bytes = 0
+
+    def _cache_mapping(self, kind: str) -> OrderedDict[Any, Any]:
+        if kind == "verification":
+            return self._verification_cache
+        if kind == "response":
+            return self._response_cache
+        if kind == "audit":
+            return self._audit_cache
+        raise RuntimeError("unknown fetch cache kind")
+
+    def _remove_cache_entry_locked(self, kind: str, key: tuple[Any, ...]) -> None:
+        self._cache_mapping(kind).pop(key, None)
+        meta = self._cache_meta.pop((kind, key), None)
+        if meta is not None:
+            self._cache_bytes = max(0, self._cache_bytes - meta.size_bytes)
+
+    def _purge_expired_cache_locked(self) -> None:
+        now = self.cache_clock()
+        for (kind, key), meta in tuple(self._cache_meta.items()):
+            if meta.expires_at > now:
+                continue
+            self._remove_cache_entry_locked(kind, key)
+
+    def _cache_get_locked(self, kind: str, key: tuple[Any, ...]) -> Any:
+        self._purge_expired_cache_locked()
+        cache = self._cache_mapping(kind)
+        value = cache.get(key)
+        if value is None:
+            return None
+        meta_key = (kind, key)
+        if meta_key not in self._cache_meta:
+            cache.pop(key, None)
+            return None
+        cache.move_to_end(key)
+        self._cache_meta.move_to_end(meta_key)
+        return value
+
+    def _cache_put_locked(
+        self,
+        kind: str,
+        key: tuple[Any, ...],
+        value: Any,
+        *,
+        size_bytes: int,
+    ) -> None:
+        self._purge_expired_cache_locked()
+        self._remove_cache_entry_locked(kind, key)
+        if size_bytes > self.cache_max_bytes:
+            return
+        cache = self._cache_mapping(kind)
+        cache[key] = value
+        cache.move_to_end(key)
+        meta_key = (kind, key)
+        self._cache_meta[meta_key] = _CacheEntryMeta(
+            size_bytes=size_bytes,
+            expires_at=self.cache_clock() + self.cache_ttl_seconds,
+        )
+        self._cache_meta.move_to_end(meta_key)
+        self._cache_bytes += size_bytes
+        while len(cache) > self.verification_cache_entries:
+            oldest_key = next(iter(cache))
+            self._remove_cache_entry_locked(kind, oldest_key)
+        while self._cache_bytes > self.cache_max_bytes and self._cache_meta:
+            oldest_kind, oldest_key = next(iter(self._cache_meta))
+            self._remove_cache_entry_locked(oldest_kind, oldest_key)
+
+    @property
+    def cache_size_bytes(self) -> int:
+        with self._cache_lock:
+            self._purge_expired_cache_locked()
+            return self._cache_bytes
+
+    @staticmethod
+    def _verified_inputs_size(value: _VerifiedFetchInputs) -> int:
+        return 512 + sum(
+            len(document.canonical_bytes)
+            for document in (
+                value.order,
+                value.receipt,
+                value.review,
+                value.request,
+            )
+        )
 
     def receive(
         self,
@@ -475,9 +589,8 @@ class TradeDisputeStatementFetchCoordinator:
             )
         while True:
             with self._verification_cache_lock:
-                cached = self._verification_cache.get(key)
+                cached = self._cache_get_locked("verification", key)
                 if cached is not None:
-                    self._verification_cache.move_to_end(key)
                     return cached
                 pending = self._verification_inflight.get(key)
                 if pending is None:
@@ -501,10 +614,12 @@ class TradeDisputeStatementFetchCoordinator:
                 self._verification_inflight.pop(key).set()
             raise
         with self._verification_cache_lock:
-            self._verification_cache[key] = verified
-            self._verification_cache.move_to_end(key)
-            while len(self._verification_cache) > self.verification_cache_entries:
-                self._verification_cache.popitem(last=False)
+            self._cache_put_locked(
+                "verification",
+                key,
+                verified,
+                size_bytes=self._verified_inputs_size(verified),
+            )
             self._verification_inflight.pop(key).set()
         return verified
 
@@ -517,10 +632,12 @@ class TradeDisputeStatementFetchCoordinator:
             hashlib.sha256(response.canonical_bytes).hexdigest(),
         )
         with self._verification_cache_lock:
-            self._response_cache[key] = response
-            self._response_cache.move_to_end(key)
-            while len(self._response_cache) > self.verification_cache_entries:
-                self._response_cache.popitem(last=False)
+            self._cache_put_locked(
+                "response",
+                key,
+                response,
+                size_bytes=256 + len(response.canonical_bytes),
+            )
 
     def _acquire_processing(
         self,
@@ -596,9 +713,7 @@ class TradeDisputeStatementFetchCoordinator:
             retained.response_digest.removeprefix("sha256:"),
         )
         with self._verification_cache_lock:
-            response = self._response_cache.get(response_key)
-            if response is not None:
-                self._response_cache.move_to_end(response_key)
+            response = self._cache_get_locked("response", response_key)
         if response is None:
             response = TradeDisputeStatementFetchResponse.from_json(
                 retained.response_bytes,
@@ -657,11 +772,14 @@ class TradeDisputeStatementFetchCoordinator:
         order: TradeOrder,
     ) -> str:
         payload = _audit_payload_from_verified(request, response)
-        served_ms = timestamp_ns(
-            payload["served_at"],
-            label="served_at",
-            error_type=TradeDisputeStatementFetchAuditError,
-        ) // 1_000_000
+        served_ms = (
+            timestamp_ns(
+                payload["served_at"],
+                label="served_at",
+                error_type=TradeDisputeStatementFetchAuditError,
+            )
+            // 1_000_000
+        )
         try:
             event, _created = self.spine.append_unique(
                 EVENT_TRADE_DISPUTE_STATEMENT_FETCH_SERVED,
@@ -719,10 +837,12 @@ class TradeDisputeStatementFetchCoordinator:
         except OSError:
             return
         with self._audit_cache_lock:
-            self._audit_cache[key] = token
-            self._audit_cache.move_to_end(key)
-            while len(self._audit_cache) > self.verification_cache_entries:
-                self._audit_cache.popitem(last=False)
+            self._cache_put_locked(
+                "audit",
+                key,
+                token,
+                size_bytes=256,
+            )
 
     def _resolve_existing_audit(
         self,
@@ -742,8 +862,7 @@ class TradeDisputeStatementFetchCoordinator:
                 raise TradeDisputeStatementFetchAuditError(
                     "unable to inspect persisted fetch audit event"
                 ) from exc
-            if self._audit_cache.get(key) == token:
-                self._audit_cache.move_to_end(key)
+            if self._cache_get_locked("audit", key) == token:
                 return audit_event_id
             try:
                 event = self.spine.reconcile_append(audit_event_id)
@@ -766,10 +885,12 @@ class TradeDisputeStatementFetchCoordinator:
             if not ok:
                 raise TradeDisputeStatementFetchAuditError(reason)
             if self.spine.storage_token() == token:
-                self._audit_cache[key] = token
-                self._audit_cache.move_to_end(key)
-                while len(self._audit_cache) > self.verification_cache_entries:
-                    self._audit_cache.popitem(last=False)
+                self._cache_put_locked(
+                    "audit",
+                    key,
+                    token,
+                    size_bytes=256,
+                )
             return event.event_id
 
     @staticmethod

@@ -848,7 +848,8 @@ nanosecond range used by the durable SQLite state; out-of-range RFC3339 values
 fail at the protocol boundary rather than during persistence. The coordinator
 may coalesce verification of byte-identical immutable signed inputs in a
 bounded in-memory cache. Destination and lifetime checks still run for every
-observation. Verified audit reuse is bound to the Spine storage token, so any
+observation. Verified audit reuse is bound to the content-aware Spine storage
+token, so any
 on-disk change or cross-process append invalidates the cached snapshot and
 forces chain and event verification again. Local DAG completeness,
 chronology, and non-DAG detection are explicit derived checks, but no Statement,
@@ -857,6 +858,21 @@ dispute, changes reputation, transfers an asset, or authorizes funds. JSON
 Schema validates wire shape; the protocol validator remains mandatory for
 signatures, identifiers, roles, chronology, resource bounds, destination,
 replay handling, and artifact bindings.
+
+The requester uses a separate bounded SQLite outbox. It persists the exact
+canonical signed Request before transport, reuses those bytes for concurrent
+and restarted retries, and creates a new retained generation only after the
+previous Request has signed expiry. A verified Response and standalone signed
+audit are committed before success is returned, allowing exact offline replay
+after restart. This is durable transport evidence, not Statement import or
+proof that the remote audit is included in the responder's full Spine. The
+public route verifies the bounded Request envelope, destination, lifetime, and
+signature before reading Order, Receipt, or Review state. Missing and
+unauthorized trade context share one unavailable response to avoid exposing a
+context-existence oracle. Web runtime coordinator retention is capped at eight
+idle-pruned coordinators; each coordinator's immutable verification, response,
+and audit caches have a five-minute TTL and a two-MiB aggregate canonical-byte
+bound.
 
 Trade Execution Adapter Policy v1 is a canonical protocol value with kind,
 protocol version, accepted Adapter digests, execution modes, and permissions.
@@ -1013,8 +1029,21 @@ The reviewed protocol kernel currently contains:
   embedded author-signature replay, plus a bounded atomic SQLite nonce/response
   journal, single-owner processing lease, per-DID quotas, durable retry floor,
   and recoverable signed Spine disclosure audit in the
-  verify-reserve-claim-lookup-sign-complete-anchor responder
-  coordinator; this is not yet a network fetch service;
+  verify-reserve-claim-lookup-sign-complete-anchor responder coordinator;
+- a bounded network Fetch service exposing that coordinator through an
+  anonymous-but-cryptographically-authorized federation endpoint, plus a
+  console-authenticated requester endpoint that DNS-pins the peer, verifies a
+  fresh challenged identity card against the requested responder DID, sends the
+  signed Request, and independently verifies the signed Response and remote
+  audit binding before returning it; a bounded durable requester outbox retains
+  exact Request generations and commits the verified Response and audit before
+  success, supporting restart-safe exact retry and offline replay. Requester-side
+  fetch does not implicitly import the Statement or adjudicate its claim, and a
+  standalone signed audit event does not prove inclusion in the responder's
+  undisclosed full Spine. The shared verified-peer transport performs a fresh
+  challenged identity-card check and a deadline-bounded POST on the same pinned
+  address. Conformance tests exercise two independent workspaces over a real
+  loopback HTTP connection and responder restart replay;
 - bounded package-store reconciliation with explicit cleanup;
 - authenticated, paginated local Trade Skill catalog inspection with strict
   frontend response validation, metadata-only resource projection, and
@@ -1070,8 +1099,8 @@ cases. Page and graph tokens must match only when they describe the same exact
 statement inventory, graph-affecting parent context, and effective
 microsecond-resolution clock-skew policy.
 
-Globally convergent latest-revision proofs, Acceptance federation, persistent
-Fetch replay admission and automatic missing-parent import, inventory or asset
+Globally convergent latest-revision proofs, Acceptance federation, automatic
+missing-parent import, inventory or asset
 reservation, fulfillment, payment, global Receipt/Review propagation,
 delegation, and sandboxed
 executable Adapters remain separate, independently reviewed slices. Durable

@@ -31,6 +31,8 @@ DEFAULT_SPINE_LOCK_TIMEOUT_SECONDS = 30.0
 SPINE_APPEND_INTENT_VERSION = 1
 MAX_SPINE_APPEND_INTENT_BYTES = MAX_SPINE_LINE_BYTES + 1_024
 
+StorageToken = tuple[int, int, int, int, int, str]
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,7 +74,7 @@ class SignedEventLog:
         self._lock_timeout = float(lock_timeout)
         self._head_hash = GENESIS_PREV
         self._head_seq = -1
-        self._verified_cache_token: tuple[int, int, int, int, int] | None = None
+        self._verified_cache_token: StorageToken | None = None
         self._verified_cache_events: tuple[SpineEvent, ...] = ()
         self._verified_cache_by_id: dict[str, SpineEvent] = {}
         self._semantic_cache: dict[
@@ -252,13 +254,13 @@ class SignedEventLog:
                     os.fsync(stream.fileno())
             self._write_record_unlocked(record)
 
-        ok, reason, events = self._verified_events_unlocked()
+        self._verified_cache_token = None
+        ok, reason, events, _token = self._verified_events_cached_unlocked()
         if not ok:
             raise ValueError(f"recovered spine append is corrupt: {reason}")
         if event.seq >= len(events) or events[event.seq] != event:
             raise ValueError("recovered spine append does not match signed intent")
         self._clear_append_intent_unlocked()
-        self._remember_verified_unlocked(events)
 
     def _decode_line(self, raw: bytes, line_number: int) -> SpineEvent:
         if len(raw) > MAX_SPINE_LINE_BYTES:
@@ -356,8 +358,8 @@ class SignedEventLog:
     def _remember_verified_unlocked(
         self,
         events: tuple[SpineEvent, ...],
+        token: StorageToken,
     ) -> None:
-        token = self.storage_token()
         if (
             len(events) > MAX_SPINE_VERIFIED_CACHE_EVENTS
             or token[2] > MAX_SPINE_VERIFIED_CACHE_BYTES
@@ -417,24 +419,39 @@ class SignedEventLog:
 
     def _verified_events_cached_unlocked(
         self,
-    ) -> tuple[bool, str, tuple[SpineEvent, ...]]:
-        token = self.storage_token()
-        if self._verified_cache_token == token:
-            return True, "ok", self._verified_cache_events
-        ok, reason, events = self._verified_events_unlocked()
-        if ok:
-            self._remember_verified_unlocked(events)
-        else:
-            self._verified_cache_events = ()
-            self._verified_cache_by_id = {}
-            self._semantic_cache.clear()
-            self._verified_cache_token = None
-        return ok, reason, events
+    ) -> tuple[bool, str, tuple[SpineEvent, ...], StorageToken | None]:
+        events: tuple[SpineEvent, ...] = ()
+        for _attempt in range(3):
+            token_before = self.storage_token()
+            if self._verified_cache_token == token_before:
+                return True, "ok", self._verified_cache_events, token_before
+            ok, reason, events = self._verified_events_unlocked()
+            if not ok:
+                self._verified_cache_events = ()
+                self._verified_cache_by_id = {}
+                self._semantic_cache.clear()
+                self._verified_cache_token = None
+                return False, reason, events, None
+            token_after = self.storage_token()
+            if token_before != token_after:
+                continue
+            self._remember_verified_unlocked(events, token_after)
+            return True, "ok", events, token_after
+        self._verified_cache_events = ()
+        self._verified_cache_by_id = {}
+        self._semantic_cache.clear()
+        self._verified_cache_token = None
+        return (
+            False,
+            "spine changed repeatedly during verification",
+            events,
+            None,
+        )
 
     def _scan_verified(
         self,
     ) -> tuple[bool, str, Optional[SpineEvent]]:
-        ok, reason, events = self._verified_events_cached_unlocked()
+        ok, reason, events, _token = self._verified_events_cached_unlocked()
         return ok, reason, events[-1] if events else None
 
     def read_all(self) -> Iterator[SpineEvent]:
@@ -459,24 +476,71 @@ class SignedEventLog:
 
         return self._identity.as_did()
 
-    def storage_token(self) -> tuple[int, int, int, int, int]:
-        """Return a cheap invalidation token for the on-disk log snapshot."""
+    def storage_token(self) -> StorageToken:
+        """Return a content-bound invalidation token for the on-disk log."""
 
         try:
-            metadata = self._path.stat()
+            digest = hashlib.sha256()
+            with self._path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                metadata = os.fstat(stream.fileno())
         except FileNotFoundError:
-            return (0, 0, 0, 0, 0)
+            return (0, 0, 0, 0, 0, "")
         return (
             int(getattr(metadata, "st_dev", 0)),
             int(getattr(metadata, "st_ino", 0)),
             int(metadata.st_size),
             int(metadata.st_mtime_ns),
             int(metadata.st_ctime_ns),
+            digest.hexdigest(),
+        )
+
+    def _token_after_expected_append(
+        self,
+        prefix_token: StorageToken,
+        suffix: bytes,
+    ) -> StorageToken:
+        """Bind a verified prefix to exact newly appended bytes without rescanning events."""
+
+        prefix_size = prefix_token[2]
+        expected_size = prefix_size + len(suffix)
+        digest = hashlib.sha256()
+        try:
+            with self._path.open("rb") as stream:
+                remaining = prefix_size
+                while remaining:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("spine verified prefix was truncated")
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                expected_prefix_digest = prefix_token[5] or hashlib.sha256(
+                    b""
+                ).hexdigest()
+                if digest.hexdigest() != expected_prefix_digest:
+                    raise ValueError("spine verified prefix changed before append")
+                retained_suffix = stream.read(len(suffix))
+                if retained_suffix != suffix or stream.read(1):
+                    raise ValueError("spine appended bytes do not match signed events")
+                digest.update(retained_suffix)
+                metadata = os.fstat(stream.fileno())
+        except FileNotFoundError as exc:
+            raise ValueError("spine disappeared after append") from exc
+        if metadata.st_size != expected_size:
+            raise ValueError("spine size changed after append")
+        return (
+            int(getattr(metadata, "st_dev", 0)),
+            int(getattr(metadata, "st_ino", 0)),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+            digest.hexdigest(),
         )
 
     def verified_snapshot_with_token(
         self,
-    ) -> tuple[tuple[int, int, int, int, int], tuple[SpineEvent, ...]]:
+    ) -> tuple[StorageToken, tuple[SpineEvent, ...]]:
         """Return a storage token and events from one verified lock snapshot."""
 
         with self._lock:
@@ -485,12 +549,14 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_cached_unlocked()
+                ok, reason, events, token = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt: {reason}"
                     )
-                return self.storage_token(), events
+                if token is None:
+                    raise RuntimeError("verified spine snapshot has no storage token")
+                return token, events
 
     def append(
         self, event_type: str, payload: dict, *, ts_ms: Optional[int] = None,
@@ -510,19 +576,26 @@ class SignedEventLog:
                 self._recover_pending_append_unlocked()
                 # A second process may have advanced the chain since this
                 # instance was constructed.
-                ok, reason, events = self._verified_events_cached_unlocked()
+                ok, reason, events, token = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"appended: {reason}"
                     )
+                if token is None:
+                    raise RuntimeError("verified spine prefix has no storage token")
                 event = self._append_after_verified(
                     event_type,
                     payload,
                     ts_ms=ts_ms,
                     last=events[-1] if events else None,
                 )
-                self._remember_verified_unlocked(events + (event,))
+                appended_events = events + (event,)
+                appended_token = self._token_after_expected_append(
+                    token,
+                    self._encode_event(event) + b"\n",
+                )
+                self._remember_verified_unlocked(appended_events, appended_token)
                 return event
 
     def _append_after_verified(
@@ -595,7 +668,7 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_cached_unlocked()
+                ok, reason, events, _token = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot "
@@ -623,7 +696,7 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_cached_unlocked()
+                ok, reason, events, _token = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
@@ -701,12 +774,14 @@ class SignedEventLog:
                 timeout=self._lock_timeout,
             ):
                 self._recover_pending_append_unlocked()
-                ok, reason, events = self._verified_events_cached_unlocked()
+                ok, reason, events, token = self._verified_events_cached_unlocked()
                 if not ok:
                     raise ValueError(
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"appended: {reason}"
                     )
+                if token is None:
+                    raise RuntimeError("verified spine prefix has no storage token")
                 owners = self._semantic_owners_unlocked(
                     event_type,
                     unique_payload_fields,
@@ -756,7 +831,12 @@ class SignedEventLog:
                     )
                     appended.append(event)
                     last = event
-                self._remember_verified_unlocked(events + tuple(appended))
+                appended_events = events + tuple(appended)
+                appended_token = self._token_after_expected_append(
+                    token,
+                    b"".join(self._encode_event(event) + b"\n" for event in appended),
+                )
+                self._remember_verified_unlocked(appended_events, appended_token)
                 return tuple(
                     (
                         events[owner[1]]

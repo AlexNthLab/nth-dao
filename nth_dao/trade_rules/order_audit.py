@@ -866,7 +866,7 @@ class TradeOrderAuditCoordinator:
         self.outbox = outbox
         self.order_store = order_store
         self.spine = spine
-        self._anchor_cache_token: tuple[int, int, int, int, int] | None = None
+        self._anchor_cache_token: tuple[int, int, int, int, int, str] | None = None
         self._anchor_cache: tuple[
             dict[str, SpineEvent],
             dict[str, SpineEvent],

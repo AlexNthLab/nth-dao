@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Authenticated network retrieval of one exact missing Trade Dispute Statement:
+  a short-lived bilateral DID-signed Fetch Request reaches a rate-limited public
+  responder backed by an atomic replay journal and signed Spine disclosure
+  audit. The console requester DNS-pins the peer, verifies a challenged identity
+  card against `responder_did`, and independently replays the signed Response
+  and standalone signed audit binding. A bounded durable requester outbox keeps
+  the exact signed Request across retries, advances generation only after signed
+  expiry, and retains a verified Response and audit before returning success, so
+  an exact result can be replayed after restart without another network call.
+  The public responder verifies the signed envelope before loading retained
+  trade context and gives the same unavailable response for missing and
+  unauthorized context. Fetch remains non-importing; the audit event does not
+  prove remote chain inclusion, and the Statement does not prove its claim true.
 - Signed Rule Recognition Proof Page v2 federation for graphs beyond the v1
   256-statement ceiling, with independently signed 256 KiB pages, a 64 MiB
   page-set bound, shared observation/statement/head commitments, DNS-pinned
@@ -184,6 +197,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Spine verified-read caches now bind invalidation tokens to the complete log
+  content, detecting same-size tampering even when filesystem timestamps are
+  restored. Requester Fetch outbox updates reject timestamp regression before
+  commit, and a late concurrent failure can no longer overwrite a completed
+  verified response with stale failure state.
 - Spine append now serializes across processes, refreshes the chain head under
   lock, validates the complete chain before writing, and rejects oversized or
   structurally ambiguous events.

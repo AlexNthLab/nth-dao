@@ -187,6 +187,8 @@ complete view.
 | `GET /api/v2/trade/federation/offers/{offer_digest}/rule-packages/{package_digest}/recognition-proof-pages/{page_index}` | One signed page from a byte-stable Recognition observation (v2) | Public read; operator disclosure required |
 | `GET /api/v2/trade/federation/cached-offers/{digest}` | Reverify and inspect a volatile remote Offer cached with a discovery announcement | Console read |
 | `POST /api/v2/trade/federation/cached-offers/{digest}/import` | Reverify and durably retain the complete disclosed signed revision chain as a non-authoritative claim | Console write; Bearer always required |
+| `POST /api/v2/trade/federation/orders/{order_digest}/execution-receipts/{execution_id}/reviews/{review_id}/dispute-statements/fetch` | Return one exact retained Statement under a short-lived bilateral signed Fetch Request | Public transport; DID-signed, rate-limited, replay-journaled |
+| `POST /api/v2/trade/orders/{order_digest}/execution-receipts/{execution_id}/reviews/{review_id}/dispute-statements/fetch` | Sign a Fetch Request, pin and authenticate the peer, and return the independently verified Response without importing it | Console write; Bearer required when console auth is enabled |
 
 ## Security Boundaries
 
@@ -226,6 +228,21 @@ complete view.
   federation cache, including when the completing node identity has rotated.
 - Before a remote claim, the source identity card is fetched afresh and the
   claim POST is pinned to the same validated IP.
+- Before a Dispute Statement Fetch Request is posted, the responder identity
+  card is challenged on the same DNS-pinned address and must match the exact
+  `responder_did`. The exact signed Request is persisted in a bounded requester
+  outbox before transport and reused across concurrent and restarted retries;
+  only signed expiry permits a new retained generation. The verified Response
+  and standalone signed audit are committed before success and can be replayed
+  offline after restart. The responder applies per-source and global limits,
+  then verifies the bounded signed envelope before any Order/Receipt/Review
+  lookup. Missing and unauthorized context return the same unavailable result.
+  It journals nonce replay across processes and appends a signed disclosure
+  audit. A successful requester response remains a verified retained transport
+  observation until a separately authorized import exists.
+  The returned signed audit event proves the responder authored that audit
+  claim; without the full remote Spine it does not prove chain inclusion or
+  durable remote retention.
 
 Application checks are not a substitute for deployment controls. Public nodes
 should still run behind an egress firewall or proxy that blocks private and
@@ -256,8 +273,10 @@ cloud-metadata destinations.
   publisher has not withheld a later revision or that another peer has already
   observed one. Durable signed Offer tombstones and globally convergent
   latest-revision proofs remain future protocol work.
-- Trade Offer discovery does not federate Agreements, Mandates, Receipts,
-  payment, delivery, dispute outcomes, or settlement state.
+- Market discovery does not broadcast Agreements, Mandates, Receipts, payment,
+  delivery, dispute outcomes, or settlement state. Separate bilateral signed
+  routes can deliver selected execution records and fetch one exact Dispute
+  Statement, but they are not searchable market feeds or global propagation.
 - Withdrawal currently uses signed open-set absence, not durable tombstones.
   Nodes that need historical proof of withdrawal must retain their own audit
   events until a tombstone/revocation wire type is standardized.

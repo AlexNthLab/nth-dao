@@ -422,6 +422,49 @@ def test_verified_snapshot_with_token_matches_the_verified_bytes(
     assert events == (event,)
 
 
+def test_verified_snapshot_rejects_same_size_retimestamped_tamper(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    log.append("test.original", {"id": "one"})
+    original_token, _ = log.verified_snapshot_with_token()
+    before = path.stat()
+
+    raw = path.read_bytes()
+    assert b'"id":"one"' in raw
+    path.write_bytes(raw.replace(b'"id":"one"', b'"id":"two"', 1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert path.stat().st_size == before.st_size
+    assert log.storage_token() != original_token
+    with pytest.raises(ValueError, match="corrupt"):
+        log.verified_snapshot_with_token()
+
+
+def test_verified_snapshot_never_binds_verified_events_to_later_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    log.append("test.original", {"id": "one"})
+    real_verify = log._verified_events_unlocked
+
+    def verify_then_tamper():
+        result = real_verify()
+        raw = path.read_bytes()
+        path.write_bytes(raw.replace(b'"id":"one"', b'"id":"two"', 1))
+        return result
+
+    log._verified_cache_token = None
+    monkeypatch.setattr(log, "_verified_events_unlocked", verify_then_tamper)
+
+    with pytest.raises(ValueError, match="corrupt"):
+        log.verified_snapshot_with_token()
+    assert log._verified_cache_token is None
+
+
 def test_append_unique_is_idempotent_and_rejects_key_reuse(
     tmp_path: Path,
 ) -> None:

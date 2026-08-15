@@ -202,25 +202,29 @@ def _mission_timeline_events(
         cap_detail = f"requires {', '.join(caps)}" if caps else "no capability gate"
         changed_at = step.get("updated_at") or step.get("created_at") or created_at
         detail = f"current state snapshot; {cap_detail}"
-        events.append({
-            "id": f"{m.id}:{step['id']}:current",
-            "kind": "step",
-            "label": f"Step current {step['status']}: {desc}",
-            "detail": detail,
-            "at": changed_at,
-            "status": step["status"],
-            "agent_did": step.get("assignee"),
-        })
-        if step.get("completed_at"):
-            events.append({
-                "id": f"{m.id}:{step['id']}:completed",
+        events.append(
+            {
+                "id": f"{m.id}:{step['id']}:current",
                 "kind": "step",
-                "label": f"Step completed: {desc}",
-                "detail": cap_detail,
-                "at": step["completed_at"],
-                "status": "done",
+                "label": f"Step current {step['status']}: {desc}",
+                "detail": detail,
+                "at": changed_at,
+                "status": step["status"],
                 "agent_did": step.get("assignee"),
-            })
+            }
+        )
+        if step.get("completed_at"):
+            events.append(
+                {
+                    "id": f"{m.id}:{step['id']}:completed",
+                    "kind": "step",
+                    "label": f"Step completed: {desc}",
+                    "detail": cap_detail,
+                    "at": step["completed_at"],
+                    "status": "done",
+                    "agent_did": step.get("assignee"),
+                }
+            )
 
     indexed = list(enumerate(events))
     indexed.sort(key=lambda item: (item[1].get("at") or "", item[0]))
@@ -539,9 +543,9 @@ def _reflect_claim_to_mission(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "claim->mission reflect failed for %s: %s", announcement_id, exc,
+
         )
         return {"reflected": False, "reason": "reflect_failed"}
-
 
 
 _STAGE_FROM_BLACKBOARD = {
@@ -742,9 +746,9 @@ def _map_receipt(path: Path) -> Optional[Dict[str, Any]]:
         "principal_user_did": data.get("principal_user_did"),
     }
 
-
 def _receipt_cap_scope_summary(receipt: Dict[str, Any]) -> Dict[str, Any]:
     """Return a compact UI-safe view of the receipt's authorizing scope."""
+
     def _int_or_zero(value: Any) -> int:
         try:
             return int(value or 0)
@@ -776,13 +780,13 @@ def _receipt_cap_scope_summary(receipt: Dict[str, Any]) -> Dict[str, Any]:
         "not_after": _int_or_zero(cap.get("not_after")),
     }
 
-
 def _receipt_detail_to_wire(receipt: Dict[str, Any]) -> Dict[str, Any]:
     """Build the console inspection envelope for a raw signed receipt."""
     verified = False
     reason = ""
     try:
         from nth_dao.execution_receipt import verify_receipt
+
         verified = bool(verify_receipt(receipt))
         if not verified:
             reason = "receipt signature/content/cap-token verification failed"
@@ -1014,9 +1018,9 @@ class CreateMissionStepBody(_Model):
     description: str
     required_capabilities: List[str] = Field(default_factory=list)
 
-
 class CreateMissionBody(_Model):
     """POST /api/v2/missions 请求体:真正创建并落盘一个 mission(含 steps)。"""
+
     title: str
     goal: str = ""
     driver: str = Field(default="", description="负责推进的 agent 标签(owner)。")
@@ -1048,9 +1052,9 @@ class ProcessCardM(_Model):
     cap_token_id: Optional[str] = None
     amount: Optional[str] = None
 
-
 class CreateProcessBody(_Model):
     """POST /api/v2/processes: create a real Blackboard-backed process."""
+
     model_config = {"extra": "forbid"}
 
     title: str = Field(min_length=1, max_length=200)
@@ -1080,13 +1084,13 @@ class CreateProcessBody(_Model):
     @classmethod
     def _agent_not_empty(cls, value: str) -> str:
         return value or "admin"
-
     @field_validator("stage")
     @classmethod
     def _known_stage(cls, value: str) -> str:
         if value not in _PROCESS_STAGE_TO_BLACKBOARD:
             raise ValueError(f"unknown process stage: {value}")
         return value
+
 
 class ReceiptSummaryM(_Model):
     id: str
@@ -2594,14 +2598,11 @@ def _ensure_local_trade_offer_announcement(
             for field in ("offer_id", "revision", "state"):
                 existing_availability.pop(field, None)
             if (
-                (
-                    match_capability_set
-                    and existing.capability_set != expected_capabilities
-                )
-                or (
-                    match_availability_summary
-                    and existing_availability != availability_summary
-                )
+                match_capability_set
+                and existing.capability_set != expected_capabilities
+            ) or (
+                match_availability_summary
+                and existing_availability != availability_summary
             ):
                 raise MarketPublishConflict(
                     "the active discovery announcement is already bound to "
@@ -3256,32 +3257,39 @@ def _handoff_evidence_verification(evidence: List[Any]) -> List[Dict[str, Any]]:
         repo_root, matched_by, resolver_error = _handoff_source_repo_root_for_evidence(item)
         if repo_root is None:
             source = item.get("source", {}) if isinstance(item, dict) else {}
-            reports.append({
-                "kind": item.get("kind", ""),
-                "path": item.get("path", ""),
-                "commit": item.get("commit", ""),
-                "content_hash": item.get("content_hash", ""),
-                "source": source,
-                "resolver": {
-                    "type": "git",
-                    "repo_id": source.get("repo_id", "") if isinstance(source, dict) else "",
-                    "repo_url": source.get("repo_url", "") if isinstance(source, dict) else "",
-                    "commit": item.get("commit", ""),
+            reports.append(
+                {
+                    "kind": item.get("kind", ""),
                     "path": item.get("path", ""),
+                    "commit": item.get("commit", ""),
                     "content_hash": item.get("content_hash", ""),
-                    "source_present": bool(source),
-                    "matched_by": matched_by,
-                },
-                "status": "unavailable",
-                "reason": resolver_error or (
-                    "set NTH_SOURCE_REPOS repo_id=PATH or NTH_SOURCE_REPO, "
-                    "or start the hub from a git checkout"
-                ),
-                "local_reachable": False,
-                "commit_reachable": False,
-                "blob_reachable": False,
-                "content_match": False,
-            })
+                    "source": source,
+                    "resolver": {
+                        "type": "git",
+                        "repo_id": source.get("repo_id", "")
+                        if isinstance(source, dict)
+                        else "",
+                        "repo_url": source.get("repo_url", "")
+                        if isinstance(source, dict)
+                        else "",
+                        "commit": item.get("commit", ""),
+                        "path": item.get("path", ""),
+                        "content_hash": item.get("content_hash", ""),
+                        "source_present": bool(source),
+                        "matched_by": matched_by,
+                    },
+                    "status": "unavailable",
+                    "reason": resolver_error
+                    or (
+                        "set NTH_SOURCE_REPOS repo_id=PATH or NTH_SOURCE_REPO, "
+                        "or start the hub from a git checkout"
+                    ),
+                    "local_reachable": False,
+                    "commit_reachable": False,
+                    "blob_reachable": False,
+                    "content_match": False,
+                }
+            )
             continue
         report = verify_source_evidence_report(repo_root, item)
         resolver = report.get("resolver")
@@ -3508,13 +3516,13 @@ def _mission_handoff_events(
             try:
                 for rec in proj.all():
                     view = _mission_handoff_record_to_view(rec)
+
                     cache.setdefault(rec.mission_id, []).append(view)
             except (RuntimeError, TypeError, ValueError) as exc:
                 logger.warning("mission handoff replay failed: %s", exc)
         if req_state is not None:
             setattr(req_state, "_v2_mission_handoff_events", cache)
     return list(cache.get(mission_id, []))
-
 
 
 def _emit_mission_evidence(
@@ -3573,6 +3581,7 @@ def _emit_mission_evidence(
             evidence["event_timestamp"] = getattr(event, "timestamp", "")
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning(
+
                 "mission EventBus emit failed for %s %s: %s",
                 event_type,
                 event_payload.get("mission_id", ""),
@@ -3580,13 +3589,12 @@ def _emit_mission_evidence(
             )
     return evidence
 
-
-
 def _expected_pubkey_from_did(expected_did: str) -> str:
     if not expected_did:
         return ""
     try:
         from nth_dao.did_key import decode_ed25519_did_key_hex
+
         return decode_ed25519_did_key_hex(expected_did)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"expected agent DID is not a valid did:key: {expected_did!r}") from exc
@@ -3706,8 +3714,7 @@ def _persist_agent_response_receipt_to_store(
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         safe_exc = _redact_local_paths(str(exc))
         logger.exception(
-            "v2_api: failed to persist response receipt for agent %s "
-            "(id=%s)",
+            "v2_api: failed to persist response receipt for agent %s (id=%s)",
             agent_id,
             receipt_id,
         )
@@ -4116,17 +4123,17 @@ def _state_supervisor(request: Request) -> Optional[Any]:
                     expected_did = str(getattr(rec, "did", "") or "")
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(
-                        "v2_api: could not look up DID for receipt "
-                        "from agent %s: %s",
-                        agent_id, exc,
+                        "v2_api: could not look up DID for receipt from agent %s: %s",
+                        agent_id,
+                        exc,
                     )
+
                 _verify_agent_receipt(
                     agent_id=agent_id,
                     expected_did=expected_did,
                     receipt=receipt,
                 )
                 receipts.save(receipt)
-
 
             # Phase 3d: decision_raiser closure — inserts the
             # child-proposed decision into the in-process
@@ -4407,7 +4414,8 @@ def _make_cap_issuer(node_identity: Any, cap_tokens_store: Any):
             if c in KNOWN_CAPABILITIES and c not in caps:
                 caps.append(c)
         token = sign_cap_token(
-            issuer=node_identity, subject_did=subject_did, capabilities=caps)
+            issuer=node_identity, subject_did=subject_did, capabilities=caps
+        )
         cap_tokens_store.record(token)
         return token
 
@@ -4584,8 +4592,7 @@ def _auto_prepare_supervised_agents(request: Request, sup: Any) -> None:
         status = statuses.get(kind, {})
         if not status.get("ready"):
             logger.warning(
-                "v2_api: auto agent %s not prepared because backend is "
-                "not ready: %s",
+                "v2_api: auto agent %s not prepared because backend is not ready: %s",
                 kind,
                 status.get("detail") or status.get("warning") or "not ready",
             )
@@ -4622,8 +4629,7 @@ def _auto_prepare_supervised_agents(request: Request, sup: Any) -> None:
     if not join_channels or not prepared:
         if prepared:
             logger.info(
-                "v2_api: prepared %d auto agent(s); no startup channel join "
-                "requested",
+                "v2_api: prepared %d auto agent(s); no startup channel join requested",
                 len(prepared),
             )
         return
@@ -4692,8 +4698,7 @@ def _restore_persistent_agents(request: Request, sup: Any) -> None:
             continue
         if not roster.is_owned_identity_file(idf):
             logger.warning(
-                "v2_api: ignoring unsafe persistent-agent identity_file "
-                "for did=%s",
+                "v2_api: ignoring unsafe persistent-agent identity_file for did=%s",
                 str(e.get("did", "?"))[:24],
             )
             continue
@@ -4731,13 +4736,16 @@ def _restore_persistent_agents(request: Request, sup: Any) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "v2_api: restore agent failed (did=%s): %s",
-                str(e.get("did", "?"))[:24], exc)
+                str(e.get("did", "?"))[:24],
+                exc,
+            )
     if restored:
         logger.info("v2_api: restored %d persistent agent(s) from roster", restored)
 
 
 class SpawnAgentBody(_Model):
-    """POST /api/v2/agents/spawn request body. """
+    """POST /api/v2/agents/spawn request body."""
+
     kind: str = Field(
         ...,
         description=(
@@ -4758,7 +4766,6 @@ class SpawnAgentBody(_Model):
         # constant lives next to ``_resolve_ask_backend`` so the
         # single source of truth is co-located with the dispatcher.
         from nth_dao.web.dummy_agent import KNOWN_BACKEND_KINDS
-
         if v not in KNOWN_BACKEND_KINDS:
             raise ValueError(
                 f"unknown backend kind {v!r}; must be one of "
@@ -4767,6 +4774,7 @@ class SpawnAgentBody(_Model):
                 "only — operator input should fail clearly here."
             )
         return v
+
     label: str = Field(
         default="",
         description="Human-readable name; defaults to kind if empty.",
@@ -4826,7 +4834,6 @@ class SpawnAgentBody(_Model):
         default="workspace-write",
         description="Filesystem policy: read-only or workspace-write.",
     )
-
     @field_validator("work_access")
     @classmethod
     def _validate_work_access(cls, value: str) -> str:
@@ -4838,6 +4845,7 @@ class SpawnAgentBody(_Model):
 
 class AnnounceTaskBody(_Model):
     """POST /api/v2/market/announce 请求体:往任务市场发一条公告。"""
+
     title: str = Field(..., description="任务标题(必填)。")
     description: str = Field(default="", description="任务详述。")
     listing_type: str = Field(default="task")
@@ -4942,7 +4950,6 @@ class PublishMarketOfferBody(_Model):
 
 class ImportTradeRulePackageBody(_Model):
     """Operator-selected peer for an exact Order-bound Rule Package import."""
-
     model_config = {"extra": "forbid"}
     peer_url: str = Field(min_length=1, max_length=2048)
 
@@ -4952,7 +4959,8 @@ class AnnounceStepBody(_Model):
     发成可认领的市场 Task(Mission↔Task 之桥)。能力/标题/描述取自 step,
     赏金由操作员在发布时设定。"""
     reward_minor: int = Field(
-        default=0, ge=0, description="赏金,整数最小单位(禁 float)。")
+        default=0, ge=0, description="赏金,整数最小单位(禁 float)。"
+    )
     reward_asset: str = Field(default="credit", description="赏金资产类型。")
 
 
@@ -4960,8 +4968,10 @@ class ClaimTaskBody(_Model):
     """POST /api/v2/market/{ann_id}/claim 请求体:操作员选某个 supervised
     agent 去认领。hub 给该 agent 按需铸 cap_token(能力=任务所需),派发给
     agent,由 agent 用**自己的私钥**签认领收据(谁干谁签)。"""
+
     agent_did: str = Field(
-        ..., description="去认领的 supervised agent 的 DID(与 ask 同款按 DID 寻址)。")
+        ..., description="去认领的 supervised agent 的 DID(与 ask 同款按 DID 寻址)。"
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -6323,7 +6333,7 @@ class _OrderAuditedRulePackageResolver:
         self._spine = spine
         self._order_digest = order_digest
         self._workspace = workspace
-        self._audit_token: tuple[int, int, int, int, int] | None = None
+        self._audit_token: tuple[int, int, int, int, int, str] | None = None
         self._audit_records: Any = None
 
     def load(self, package_digest: str) -> Any:
@@ -7803,7 +7813,8 @@ def _channel_ask_and_reply(
             )
             for attempt in range(1, _CHANNEL_DISPATCH_RETRIES + 1):
                 req = urllib.request.Request(
-                    url, data=body_bytes, headers=headers, method="POST")
+                    url, data=body_bytes, headers=headers, method="POST"
+                )
                 try:
                     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                         raw = _read_local_a2a_body(resp)
@@ -7901,8 +7912,9 @@ def _channel_ask_and_reply(
         should_post_detail = _channel_dispatch_note_error(channel_id, did)
         if not should_post_detail:
             logger.info(
-                "channel agent dispatch error suppressed during cooldown "
-                "for %s in %s", did, channel_id,
+                "channel agent dispatch error suppressed during cooldown for %s in %s",
+                did,
+                channel_id,
             )
             message = "agent failed again during the current cooldown; retry later."
         else:
@@ -8362,8 +8374,8 @@ def _maybe_dispatch_to_channel_agents(request: Request, channel_id: str, message
                     )
                 except Exception:
                     logger.exception(
-                        "channel AgentLink start failure could not be persisted "
-                        "for %s", did,
+                        "channel AgentLink start failure could not be persisted for %s",
+                        did,
                     )
                 _post_channel_dispatch_status(
                     groups,
@@ -8563,6 +8575,125 @@ def _state_trade_dispute_statement_delivery_global_limiter(
         )
     except AttributeError:
         return None
+
+
+def _state_trade_dispute_statement_fetch_journal(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_fetch_journal
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_fetch_outbox(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_fetch_outbox
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_fetch_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_fetch_limiter
+    except AttributeError:
+        return None
+
+
+def _state_trade_dispute_statement_fetch_global_limiter(
+    request: Request,
+) -> Optional[Any]:
+    try:
+        return request.app.state.nth.trade_dispute_statement_fetch_global_limiter
+    except AttributeError:
+        return None
+
+
+def _trade_dispute_statement_fetch_coordinator(
+    request: Request,
+    *,
+    order_digest: str,
+    journal: Any,
+    statement_store: Any,
+    identity: Any,
+    spine: Any,
+    package_resolver: Any,
+) -> Any:
+    """Return one bounded order-scoped responder with reusable verify caches."""
+
+    from nth_dao.trade_rules import TradeDisputeStatementFetchCoordinator
+
+    state = request.app.state.nth
+    lock = getattr(
+        state,
+        "trade_dispute_statement_fetch_coordinator_lock",
+        None,
+    )
+    coordinators = getattr(
+        state,
+        "trade_dispute_statement_fetch_coordinators",
+        None,
+    )
+    if lock is None or coordinators is None:
+        raise RuntimeError("trade Dispute Statement fetch cache unavailable")
+    with lock:
+        now_mono = time.monotonic()
+        coordinator_ttl = float(
+            getattr(
+                state,
+                "trade_dispute_statement_fetch_coordinator_ttl_seconds",
+                300.0,
+            )
+        )
+        for cached_order_digest, cached_coordinator in tuple(coordinators.items()):
+            last_used = float(
+                getattr(cached_coordinator, "web_cache_last_used", now_mono)
+            )
+            if now_mono - last_used >= coordinator_ttl:
+                coordinators.pop(cached_order_digest, None)
+        coordinator = coordinators.get(order_digest)
+        if coordinator is not None and (
+            coordinator.journal is journal
+            and coordinator.statement_store is statement_store
+            and coordinator.responder_identity is identity
+            and coordinator.spine is spine
+        ):
+            coordinator.web_cache_last_used = now_mono
+            coordinators.move_to_end(order_digest)
+            return coordinator
+        if coordinator is not None:
+            coordinators.pop(order_digest, None)
+        coordinator = TradeDisputeStatementFetchCoordinator(
+            journal,
+            statement_store,
+            responder_identity=identity,
+            spine=spine,
+            package_resolver=package_resolver,
+            cache_max_bytes=int(
+                getattr(
+                    state,
+                    "trade_dispute_statement_fetch_cache_bytes_per_coordinator",
+                    2 * 1024 * 1024,
+                )
+            ),
+        )
+        coordinator.web_cache_last_used = now_mono
+        coordinators[order_digest] = coordinator
+        coordinators.move_to_end(order_digest)
+        max_coordinators = int(
+            getattr(
+                state,
+                "trade_dispute_statement_fetch_max_coordinators",
+                8,
+            )
+        )
+        while len(coordinators) > max_coordinators:
+            coordinators.popitem(last=False)
+        return coordinator
 
 
 def _learned_fed_peer_store(ws: Optional[Path]):
@@ -9471,21 +9602,95 @@ def _post_trade_order_delivery_to_peer(
     *,
     timeout_seconds: float = 15.0,
 ) -> tuple[int, dict[str, Any]]:
-    """POST one signed Order Delivery over a DNS-pinned connection."""
+    """Verify the destination DID, then POST over the same pinned address."""
 
-    from .market_federation_poll import _urllib_post_json_pinned_raw
+    from nth_dao.did_key import is_did_key
 
     normalized = _normalize_configured_fed_peer(peer_url)
+    recipient_did = document.get("recipient_did")
+    if not isinstance(recipient_did, str) or not is_did_key(recipient_did):
+        raise ValueError("Order delivery recipient_did is invalid")
     url = normalized + "/api/v2/trade/federation/orders"
-    status, raw = _call_operator_trade_peer_with_fallback(
+
+    return _post_json_to_verified_trade_peer(
         normalized,
-        lambda resolved_ip, remaining: _urllib_post_json_pinned_raw(
+        url,
+        document,
+        expected_did=recipient_did,
+        identity_field="Order recipient_did",
+        timeout_seconds=timeout_seconds,
+        max_response_bytes=256 * 1024,
+    )
+
+
+def _post_json_to_verified_trade_peer(
+    normalized_peer: str,
+    url: str,
+    document: dict[str, Any],
+    *,
+    expected_did: str,
+    identity_field: str,
+    timeout_seconds: float,
+    max_response_bytes: int,
+) -> tuple[int, dict[str, Any]]:
+    """Challenge one pinned peer identity before sending signed trade JSON."""
+
+    from .market_federation_poll import _urllib_post_json_pinned_raw
+    from nth_dao.did_key import is_did_key
+
+    if not isinstance(expected_did, str) or not is_did_key(expected_did):
+        raise ValueError(f"{identity_field} is invalid")
+
+    def verify_and_post(
+        resolved_ip: str,
+        remaining_seconds: float,
+    ) -> tuple[int, bytes]:
+        started = time.monotonic()
+        challenge = secrets.token_hex(32)
+        identity_url = (
+            normalized_peer
+            + "/.well-known/nth-dao/identity.json"
+            + f"?challenge={challenge}"
+        )
+        raw_card = _open_federation_identity_card(
+            identity_url,
+            min(remaining_seconds, 3.0),
+            resolved_ip,
+        )
+        try:
+            card = json.loads(raw_card.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("trade peer returned an invalid identity card") from exc
+        metadata, identity_error = _verify_federation_identity_card(
+            normalized_peer,
+            card,
+            expected_challenge=challenge,
+        )
+        if metadata is None:
+            raise ValueError(
+                f"trade peer identity verification failed: {identity_error}"
+            )
+        if not hmac.compare_digest(
+            str(metadata.get("did") or ""),
+            expected_did,
+        ):
+            raise ValueError(
+                f"trade peer identity does not match {identity_field}"
+            )
+        post_timeout = remaining_seconds - (time.monotonic() - started)
+        if post_timeout <= 0:
+            raise TimeoutError("trade peer request deadline exceeded")
+        return _urllib_post_json_pinned_raw(
             url,
             resolved_ip,
             document,
-            timeout_s=remaining,
-            max_bytes=256 * 1024,
-        ),
+            timeout_s=post_timeout,
+            max_bytes=max_response_bytes,
+        )
+
+    status, raw = _call_operator_trade_peer_with_fallback(
+        normalized_peer,
+        verify_and_post,
         timeout_seconds=timeout_seconds,
     )
     try:
@@ -9506,7 +9711,6 @@ def _post_trade_execution_receipt_delivery_to_peer(
 ) -> tuple[int, dict[str, Any]]:
     """Verify the destination DID, then POST over the same pinned address."""
 
-    from .market_federation_poll import _urllib_post_json_pinned_raw
     from nth_dao.did_key import is_did_key
 
     if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
@@ -9521,65 +9725,15 @@ def _post_trade_execution_receipt_delivery_to_peer(
         + "/execution-receipts"
     )
 
-    def verify_and_post(
-        resolved_ip: str,
-        remaining_seconds: float,
-    ) -> tuple[int, bytes]:
-        started = time.monotonic()
-        challenge = secrets.token_hex(32)
-        identity_url = (
-            normalized
-            + "/.well-known/nth-dao/identity.json"
-            + f"?challenge={challenge}"
-        )
-        raw_card = _open_federation_identity_card(
-            identity_url,
-            min(remaining_seconds, 3.0),
-            resolved_ip,
-        )
-        try:
-            card = json.loads(raw_card.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("trade peer returned an invalid identity card") from exc
-        metadata, identity_error = _verify_federation_identity_card(
-            normalized,
-            card,
-            expected_challenge=challenge,
-        )
-        if metadata is None:
-            raise ValueError(
-                f"trade peer identity verification failed: {identity_error}"
-            )
-        if not hmac.compare_digest(
-            str(metadata.get("did") or ""),
-            recipient_did,
-        ):
-            raise ValueError(
-                "trade peer identity does not match Receipt recipient_did"
-            )
-        post_timeout = remaining_seconds - (time.monotonic() - started)
-        if post_timeout <= 0:
-            raise TimeoutError("trade peer request deadline exceeded")
-        return _urllib_post_json_pinned_raw(
-            url,
-            resolved_ip,
-            document,
-            timeout_s=post_timeout,
-            max_bytes=256 * 1024,
-        )
-
-    status, raw = _call_operator_trade_peer_with_fallback(
+    return _post_json_to_verified_trade_peer(
         normalized,
-        verify_and_post,
+        url,
+        document,
+        expected_did=recipient_did,
+        identity_field="Receipt recipient_did",
         timeout_seconds=timeout_seconds,
+        max_response_bytes=256 * 1024,
     )
-    try:
-        response = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("trade peer returned invalid JSON") from exc
-    if not isinstance(response, dict):
-        raise ValueError("trade peer returned a non-object response")
-    return status, response
 
 
 def _post_trade_receipt_review_delivery_to_peer(
@@ -9592,7 +9746,6 @@ def _post_trade_receipt_review_delivery_to_peer(
 ) -> tuple[int, dict[str, Any]]:
     """Verify the execution peer DID, then POST a signed Review."""
 
-    from .market_federation_poll import _urllib_post_json_pinned_raw
     from nth_dao.did_key import is_did_key
 
     if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
@@ -9612,67 +9765,15 @@ def _post_trade_receipt_review_delivery_to_peer(
         + f"/execution-receipts/{execution_id}/reviews"
     )
 
-    def verify_and_post(
-        resolved_ip: str,
-        remaining_seconds: float,
-    ) -> tuple[int, bytes]:
-        started = time.monotonic()
-        challenge = secrets.token_hex(32)
-        identity_url = (
-            normalized
-            + "/.well-known/nth-dao/identity.json"
-            + f"?challenge={challenge}"
-        )
-        raw_card = _open_federation_identity_card(
-            identity_url,
-            min(remaining_seconds, 3.0),
-            resolved_ip,
-        )
-        try:
-            card = json.loads(raw_card.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                "trade peer returned an invalid identity card"
-            ) from exc
-        metadata, identity_error = _verify_federation_identity_card(
-            normalized,
-            card,
-            expected_challenge=challenge,
-        )
-        if metadata is None:
-            raise ValueError(
-                f"trade peer identity verification failed: {identity_error}"
-            )
-        if not hmac.compare_digest(
-            str(metadata.get("did") or ""),
-            recipient_did,
-        ):
-            raise ValueError(
-                "trade peer identity does not match Review recipient_did"
-            )
-        post_timeout = remaining_seconds - (time.monotonic() - started)
-        if post_timeout <= 0:
-            raise TimeoutError("trade peer request deadline exceeded")
-        return _urllib_post_json_pinned_raw(
-            url,
-            resolved_ip,
-            document,
-            timeout_s=post_timeout,
-            max_bytes=256 * 1024,
-        )
-
-    status, raw = _call_operator_trade_peer_with_fallback(
+    return _post_json_to_verified_trade_peer(
         normalized,
-        verify_and_post,
+        url,
+        document,
+        expected_did=recipient_did,
+        identity_field="Review recipient_did",
         timeout_seconds=timeout_seconds,
+        max_response_bytes=256 * 1024,
     )
-    try:
-        response = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("trade peer returned invalid JSON") from exc
-    if not isinstance(response, dict):
-        raise ValueError("trade peer returned a non-object response")
-    return status, response
 
 
 def _post_trade_dispute_statement_delivery_to_peer(
@@ -9686,7 +9787,6 @@ def _post_trade_dispute_statement_delivery_to_peer(
 ) -> tuple[int, dict[str, Any]]:
     """Verify the counterparty DID, then POST one signed claim."""
 
-    from .market_federation_poll import _urllib_post_json_pinned_raw
     from nth_dao.did_key import is_did_key
 
     if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
@@ -9712,67 +9812,67 @@ def _post_trade_dispute_statement_delivery_to_peer(
         + "/dispute-statements"
     )
 
-    def verify_and_post(
-        resolved_ip: str,
-        remaining_seconds: float,
-    ) -> tuple[int, bytes]:
-        started = time.monotonic()
-        challenge = secrets.token_hex(32)
-        identity_url = (
-            normalized
-            + "/.well-known/nth-dao/identity.json"
-            + f"?challenge={challenge}"
-        )
-        raw_card = _open_federation_identity_card(
-            identity_url,
-            min(remaining_seconds, 3.0),
-            resolved_ip,
-        )
-        try:
-            card = json.loads(raw_card.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                "trade peer returned an invalid identity card"
-            ) from exc
-        metadata, identity_error = _verify_federation_identity_card(
-            normalized,
-            card,
-            expected_challenge=challenge,
-        )
-        if metadata is None:
-            raise ValueError(
-                f"trade peer identity verification failed: {identity_error}"
-            )
-        if not hmac.compare_digest(
-            str(metadata.get("did") or ""),
-            recipient_did,
-        ):
-            raise ValueError(
-                "trade peer identity does not match Statement recipient_did"
-            )
-        post_timeout = remaining_seconds - (time.monotonic() - started)
-        if post_timeout <= 0:
-            raise TimeoutError("trade peer request deadline exceeded")
-        return _urllib_post_json_pinned_raw(
-            url,
-            resolved_ip,
-            document,
-            timeout_s=post_timeout,
-            max_bytes=256 * 1024,
-        )
-
-    status, raw = _call_operator_trade_peer_with_fallback(
+    return _post_json_to_verified_trade_peer(
         normalized,
-        verify_and_post,
+        url,
+        document,
+        expected_did=recipient_did,
+        identity_field="Statement recipient_did",
         timeout_seconds=timeout_seconds,
+        max_response_bytes=256 * 1024,
     )
-    try:
-        response = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("trade peer returned invalid JSON") from exc
-    if not isinstance(response, dict):
-        raise ValueError("trade peer returned a non-object response")
-    return status, response
+
+
+def _post_trade_dispute_statement_fetch_to_peer(
+    peer_url: str,
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    document: dict[str, Any],
+    *,
+    timeout_seconds: float = 15.0,
+) -> tuple[int, dict[str, Any]]:
+    """Verify the responder DID, then POST one signed Fetch Request."""
+
+    from nth_dao.did_key import is_did_key
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", order_digest) is None:
+        raise ValueError("order_digest is invalid")
+    if (
+        re.fullmatch(
+            r"nth-trade-execution-sha256:[0-9a-f]{64}",
+            execution_id,
+        )
+        is None
+    ):
+        raise ValueError("execution_id is invalid")
+    if (
+        re.fullmatch(
+            r"nth-trade-review-sha256:[0-9a-f]{64}",
+            review_id,
+        )
+        is None
+    ):
+        raise ValueError("review_id is invalid")
+    normalized = _normalize_configured_fed_peer(peer_url)
+    responder_did = document.get("responder_did")
+    if not isinstance(responder_did, str) or not is_did_key(responder_did):
+        raise ValueError("fetch responder_did is invalid")
+    url = (
+        normalized
+        + f"/api/v2/trade/federation/orders/{order_digest}"
+        + f"/execution-receipts/{execution_id}/reviews/{review_id}"
+        + "/dispute-statements/fetch"
+    )
+    return _post_json_to_verified_trade_peer(
+        normalized,
+        url,
+        document,
+        expected_did=responder_did,
+        identity_field="fetch responder_did",
+        timeout_seconds=timeout_seconds,
+        max_response_bytes=512 * 1024,
+    )
 
 
 def _federation_url_from_discovered_peer(peer: Any) -> str:
@@ -9801,19 +9901,19 @@ def _resolve_safe_discovered_federation_ip(
     *,
     resolve: Callable[..., list] = socket.getaddrinfo,
 ) -> Optional[str]:
-    '''Resolve a LAN-discovered URL once and return a safe pinned address.'''
+    """Resolve a LAN-discovered URL once and return a safe pinned address."""
     try:
         parsed = urlsplit(url)
-        if parsed.scheme not in {'http', 'https'}:
+        if parsed.scheme not in {"http", "https"}:
             return None
-        host = (parsed.hostname or '').strip().lower().rstrip('.')
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
     except (TypeError, ValueError):
         return None
     if (
         not host
-        or host == 'localhost'
-        or host.endswith('.localhost')
-        or host.endswith('.local')
+        or host == "localhost"
+        or host.endswith(".localhost")
+        or host.endswith(".local")
     ):
         return None
 
@@ -9867,7 +9967,6 @@ def _discovered_source_ip(source_addr: str) -> Optional[str]:
     except (TypeError, ValueError):
         return None
 
-
 class _RejectFederationRedirect(urllib.request.HTTPRedirectHandler):
     """Do not follow identity-card redirects during discovery preflight."""
 
@@ -9883,6 +9982,7 @@ def _open_federation_identity_card(
     """Fetch a bounded identity card without following redirects."""
     if resolved_ip:
         from .market_federation_poll import _urllib_get_bytes_pinned
+
         return _urllib_get_bytes_pinned(
             url,
             resolved_ip,
@@ -9949,6 +10049,7 @@ def _verify_federation_identity_card(
 
     try:
         from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
+
         if not is_did_key(did):
             return None, "identity card did is not a did:key Ed25519 identifier"
         did_pubkey_hex = decode_ed25519_did_key_hex(did)
@@ -10094,6 +10195,7 @@ def _market_fed_gossip_identity_verifier(
                 parsed = urlsplit(normalized)
                 if parsed.scheme == "https":
                     from .market_federation_poll import _resolve_safe_gossip_ip
+
                     resolved_ip = _resolve_safe_gossip_ip(normalized) or ""
                     if not resolved_ip:
                         return False
@@ -10259,8 +10361,6 @@ def _read_fed_peer_metadata(
             raise
         logger.warning("federation peer metadata is temporarily busy")
         return {}
-
-
 def _read_fed_peer_metadata_unlocked(
     ws: Optional[Path],
     *,
@@ -10505,6 +10605,7 @@ def _discover_market_federation_peers(
 
     try:
         from nth_dao.discovery import LANDiscovery, configured_discovery_port
+
         lan = LANDiscovery(
             agent_id=actor_id,
             pubkey_hex=pubkey_hex,
@@ -10518,6 +10619,7 @@ def _discover_market_federation_peers(
 
     try:
         from nth_dao.discovery import MDNSDiscovery, mdns_available
+
         if MDNSDiscovery is not None and mdns_available():
             mdns = MDNSDiscovery(agent_id=actor_id, pubkey_hex=pubkey_hex, did=did)
             peers.extend(mdns.discover(timeout=timeout_seconds))
@@ -10541,8 +10643,7 @@ def _discover_market_federation_peers(
     rows = list(by_key.values())
     if len(rows) > _MAX_FED_DISCOVERY_CANDIDATES:
         errors.append(
-            "discovery:candidate limit reached "
-            f"({_MAX_FED_DISCOVERY_CANDIDATES})"
+            f"discovery:candidate limit reached ({_MAX_FED_DISCOVERY_CANDIDATES})"
         )
         rows = rows[:_MAX_FED_DISCOVERY_CANDIDATES]
     return rows, errors
@@ -10801,7 +10902,6 @@ def _launch_market_fed_poller(
         interval,
     )
 
-
 def _clear_finished_market_fed_poller(state: Any) -> None:
     """Clear a stopped poller only after its thread has really exited."""
     if not getattr(state, "market_fed_poller_started", False):
@@ -10934,25 +11034,29 @@ def _verified_cached_trade_offer(
                 raise ValueError("one digest resolved to conflicting head proofs")
             verified_offer = candidate
             verified_chain = candidate_chain
-            discoveries.append({
-                "announcement_id": announcement.announcement_id,
-                "federation_key": federation_key,
-                "source_peer": str(entry.get("source") or ""),
-                "source_did": source_did,
-                "stale": bool(entry.get("stale", False)),
-                "last_verified_ms": int(entry.get("last_verified_ms") or 0),
-            })
-            evidence_candidates.append((
+            discoveries.append(
                 {
-                    "announcement": announcement.to_dict(),
+                    "announcement_id": announcement.announcement_id,
                     "federation_key": federation_key,
                     "source_peer": str(entry.get("source") or ""),
                     "source_did": source_did,
                     "stale": bool(entry.get("stale", False)),
                     "last_verified_ms": int(entry.get("last_verified_ms") or 0),
-                },
-                proof,
-            ))
+                }
+            )
+            evidence_candidates.append(
+                (
+                    {
+                        "announcement": announcement.to_dict(),
+                        "federation_key": federation_key,
+                        "source_peer": str(entry.get("source") or ""),
+                        "source_did": source_did,
+                        "stale": bool(entry.get("stale", False)),
+                        "last_verified_ms": int(entry.get("last_verified_ms") or 0),
+                    },
+                    proof,
+                )
+            )
     except (AttributeError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=503,
@@ -11028,6 +11132,7 @@ def _ensure_market_fed_cache_for_update(request: Request):
         cache = getattr(state, "market_fed_cache", None)
         if cache is None:
             from .market_federation_poll import FederationCache
+
             cache = FederationCache()
             state.market_fed_cache = cache
         ws = _state_workspace(request)
@@ -11203,7 +11308,6 @@ def start_market_federation_runtime(app: FastAPI) -> None:
     state.market_fed_discovery_thread = thread
     thread.start()
 
-
 def stop_market_federation_runtime(app: FastAPI) -> None:
     """Signal and briefly join the lifecycle-owned federation thread."""
     state = app.state
@@ -11322,8 +11426,7 @@ def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
         )
     if not discovery_enabled:
         diagnostics.append(
-            "Background LAN discovery is disabled "
-            "(NTH_LAN_DISCOVERY is not 1)."
+            "Background LAN discovery is disabled (NTH_LAN_DISCOVERY is not 1)."
         )
     if configured and not publisher_active:
         diagnostics.append(
@@ -11445,6 +11548,7 @@ def register_v2_routes(app: FastAPI) -> None:
     # no-real-money boundary do not become entangled with the large console
     # projection module.
     from .commerce_api import register_commerce_routes
+
     register_commerce_routes(
         app,
         sensitive_read_guard=_require_console_bearer_for_sensitive_read,
@@ -11906,7 +12010,8 @@ def register_v2_routes(app: FastAPI) -> None:
                 continue
             if len(desc) > 500:
                 raise HTTPException(
-                    status_code=400, detail="step description too long (max 500)")
+                    status_code=400, detail="step description too long (max 500)"
+                )
             if len(s.required_capabilities) > 16:
                 raise HTTPException(
                     status_code=400, detail="too many capabilities on a step")
@@ -12008,33 +12113,46 @@ def register_v2_routes(app: FastAPI) -> None:
             logger.exception("v2_mission_activate: save failed: %s", exc)
             raise HTTPException(status_code=500, detail=f"activate failed: {exc}")
         if created_bootstrap_step:
-            _emit_mission_evidence(request, MISSION_STEP_BOOTSTRAPPED, {
-                "mission_id": m.id,
-                "step_id": created_bootstrap_step,
-                "step_status": (
-                    StepStatus.CLAIMED.value
-                    if assigned_bootstrap_step else StepStatus.TODO.value
-                ),
-                "driver_did": getattr(m, "owner_did", "") or "",
-                "status": m.status,
-                "bootstrap": True,
-            })
-            if assigned_bootstrap_step:
-                _emit_mission_evidence(request, MISSION_STEP_CLAIMED, {
+            _emit_mission_evidence(
+                request,
+                MISSION_STEP_BOOTSTRAPPED,
+                {
                     "mission_id": m.id,
                     "step_id": created_bootstrap_step,
-                    "step_status": StepStatus.CLAIMED.value,
-                    "claimant_did": getattr(m, "owner_did", "") or "",
+                    "step_status": (
+                        StepStatus.CLAIMED.value
+                        if assigned_bootstrap_step
+                        else StepStatus.TODO.value
+                    ),
+                    "driver_did": getattr(m, "owner_did", "") or "",
                     "status": m.status,
                     "bootstrap": True,
-                })
-        _emit_mission_evidence(request, MISSION_ACTIVATED, {
-            "mission_id": m.id,
-            "status": m.status,
-            "driver_label": getattr(m, "owner", "") or "",
-            "driver_did": getattr(m, "owner_did", "") or "",
-            "steps_total": len(getattr(m, "steps", []) or []),
-        })
+                },
+            )
+            if assigned_bootstrap_step:
+                _emit_mission_evidence(
+                    request,
+                    MISSION_STEP_CLAIMED,
+                    {
+                        "mission_id": m.id,
+                        "step_id": created_bootstrap_step,
+                        "step_status": StepStatus.CLAIMED.value,
+                        "claimant_did": getattr(m, "owner_did", "") or "",
+                        "status": m.status,
+                        "bootstrap": True,
+                    },
+                )
+        _emit_mission_evidence(
+            request,
+            MISSION_ACTIVATED,
+            {
+                "mission_id": m.id,
+                "status": m.status,
+                "driver_label": getattr(m, "owner", "") or "",
+                "driver_did": getattr(m, "owner_did", "") or "",
+                "steps_total": len(getattr(m, "steps", []) or []),
+            },
+        )
         return _mission_to_summary(m, request)
 
     @app.post(
@@ -12101,6 +12219,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 store.try_claim(
                     mission_id=mission_id,
                     step_id=step_id,
+
                     agent_id=agent_did,
                     capabilities=None,
                 )
@@ -12350,7 +12469,6 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_processes(request: Request) -> List[Dict[str, Any]]:
         return _read_processes_from_blackboard(_state_blackboard(request))
 
-
     @app.post("/api/v2/processes", response_model=ProcessCardM)
     def v2_process_create(
         body: CreateProcessBody, request: Request,
@@ -12556,8 +12674,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=415,
                 detail=(
-                    "trade rule recognition requires "
-                    "Content-Type application/json"
+                    "trade rule recognition requires Content-Type application/json"
                 ),
             )
         coordinator = _state_trade_rule_recognition_audit(request)
@@ -12645,10 +12762,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "items": [statement.to_dict() for statement in statements],
         }
 
-    @app.post(
-        "/api/v2/trade/rule-packages/{package_digest}"
-        "/recognitions/reconcile"
-    )
+    @app.post("/api/v2/trade/rule-packages/{package_digest}/recognitions/reconcile")
     def v2_trade_rule_recognition_reconcile(
         package_digest: str,
         request: Request,
@@ -12934,10 +13048,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "error_message": result.error_message,
         }
 
-    @app.get(
-        "/api/v2/trade/rule-packages/{package_digest}"
-        "/recognition-evaluation"
-    )
+    @app.get("/api/v2/trade/rule-packages/{package_digest}/recognition-evaluation")
     def v2_trade_rule_recognition_policy_evaluate(
         package_digest: str,
         request: Request,
@@ -14334,8 +14445,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail={
                     "code": "execution-receipt-policy-rejected",
                     "message": (
-                        "Receipt could not be verified under local "
-                        "execution policy"
+                        "Receipt could not be verified under local execution policy"
                     ),
                 },
             ) from exc
@@ -14996,6 +15106,307 @@ def register_v2_routes(app: FastAPI) -> None:
             "claim_adjudicated_or_proven_true": False,
         }
 
+    @app.post(
+        "/api/v2/trade/federation/orders/{order_digest}/"
+        "execution-receipts/{execution_id}/reviews/{review_id}/"
+        "dispute-statements/fetch"
+    )
+    async def v2_trade_dispute_statement_fetch_respond(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Serve one exact retained Statement to an authorized counterparty."""
+
+        from nth_dao.trade_rules import (
+            TradeDisputeStatementDependencyError,
+            TradeDisputeStatementFetchAuditError,
+            TradeDisputeStatementFetchInProgress,
+            TradeDisputeStatementFetchJournalBusy,
+            TradeDisputeStatementFetchJournalCapacity,
+            TradeDisputeStatementFetchJournalError,
+            TradeDisputeStatementFetchNotFound,
+            TradeDisputeStatementFetchRequest,
+            TradeDisputeStatementFetchRequestRejected,
+            TradeDisputeStatementFetchResponseRejected,
+            TradeDisputeStatementFetchRetryLater,
+            TradeDisputeStatementFetchServiceError,
+            TradeDisputeStatementFetchReplayConflict,
+            TradeDisputeStatementStoreBusy,
+            TradeDisputeStatementStoreCapacity,
+            TradeDisputeStatementStoreError,
+            preflight_trade_dispute_statement_fetch_request,
+            verify_trade_dispute_statement_fetch_audit_event,
+        )
+
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    "trade Dispute Statement fetch requires "
+                    "Content-Type application/json"
+                ),
+            )
+
+        limiter = _state_trade_dispute_statement_fetch_limiter(request)
+        global_limiter = _state_trade_dispute_statement_fetch_global_limiter(request)
+        if limiter is None or global_limiter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch budget unavailable",
+            )
+        client_key = (
+            str(request.client.host).strip()
+            if request.client is not None and request.client.host
+            else "anonymous"
+        )
+        try:
+            decision = await run_in_threadpool(limiter.check, client_key)
+            global_decision = await run_in_threadpool(
+                global_limiter.check,
+                "global",
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch budget unavailable",
+            ) from exc
+        if not decision.allowed or not global_decision.allowed:
+            retry_after = max(
+                1,
+                int(
+                    max(
+                        decision.retry_after_seconds,
+                        global_decision.retry_after_seconds,
+                    )
+                )
+                + 1,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="trade Dispute Statement fetch rate exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        statement_store = _state_trade_dispute_statement_store(request)
+        journal = _state_trade_dispute_statement_fetch_journal(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if (
+            statement_store is None
+            or journal is None
+            or identity is None
+            or not getattr(identity, "can_sign", False)
+            or spine is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "dispute-statement-fetch-not-configured",
+                    "message": (
+                        "local signed Order, Receipt, Review, Statement, "
+                        "journal, Spine, and identity state are required"
+                    ),
+                },
+            )
+        raw_body = await request.body()
+        received_at = datetime.now(timezone.utc)
+        try:
+            preflight_document = await run_in_threadpool(
+                preflight_trade_dispute_statement_fetch_request,
+                raw_body,
+                order_digest=order_digest,
+                execution_id=execution_id,
+                review_id=review_id,
+                responder_did=identity.as_did(),
+                at=received_at,
+            )
+        except TradeDisputeStatementFetchRequestRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            order, receipt, review = await _load_trade_dispute_review(
+                request,
+                order_digest=order_digest,
+                execution_id=execution_id,
+                review_id=review_id,
+            )
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            raise HTTPException(
+                status_code=404,
+                detail="requested Trade Dispute Statement context is unavailable",
+            ) from exc
+        try:
+            package_resolver = _trade_order_rule_package_resolver(
+                request,
+                order_digest,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Rule Package audit resolver unavailable",
+            ) from exc
+
+        def _serve_statement() -> Any:
+            fetch_request = TradeDisputeStatementFetchRequest.from_dict(
+                preflight_document,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+            coordinator = _trade_dispute_statement_fetch_coordinator(
+                request,
+                order_digest=order_digest,
+                journal=journal,
+                statement_store=statement_store,
+                identity=identity,
+                spine=spine,
+                package_resolver=package_resolver,
+            )
+            return coordinator.receive(
+                fetch_request,
+                review=review,
+                receipt=receipt,
+                order=order,
+                at=received_at,
+            )
+
+        try:
+            result = await run_in_threadpool(_serve_statement)
+        except TradeDisputeStatementFetchRequestRejected as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="requested Trade Dispute Statement context is unavailable",
+            ) from exc
+        except TradeDisputeStatementFetchNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="requested Trade Dispute Statement is unavailable",
+            ) from exc
+        except TradeDisputeStatementFetchInProgress as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch is already processing",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementFetchRetryLater as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="trade Dispute Statement fetch retry floor is active",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementFetchJournalBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch journal is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except (
+            TradeDisputeStatementFetchJournalCapacity,
+            TradeDisputeStatementStoreCapacity,
+        ) as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement fetch capacity exceeded",
+            ) from exc
+        except TradeDisputeStatementFetchReplayConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement fetch replay conflict",
+            ) from exc
+        except TradeDisputeStatementStoreBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement store is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementDependencyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement dependency is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementStoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="trade Dispute Statement integrity conflict",
+            ) from exc
+        except (
+            TradeDisputeStatementFetchAuditError,
+            TradeDisputeStatementFetchJournalError,
+            TradeDisputeStatementFetchResponseRejected,
+            TradeDisputeStatementFetchServiceError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.warning(
+                "trade Dispute Statement fetch failed durably: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "dispute-statement-fetch-incomplete",
+                    "message": "signed Statement fetch is incomplete",
+                    "safe_to_retry": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        try:
+            audit_event = await run_in_threadpool(
+                spine.reconcile_append,
+                result.audit_event_id,
+            )
+            if audit_event is None:
+                raise RuntimeError("fetch disclosure audit event is missing")
+            audit_ok, audit_reason = verify_trade_dispute_statement_fetch_audit_event(
+                audit_event,
+                result.request,
+                result.response,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+            if not audit_ok:
+                raise RuntimeError(
+                    f"fetch disclosure audit event is invalid: {audit_reason}"
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "trade Dispute Statement fetch audit readback failed: %s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "dispute-statement-fetch-audit-unavailable",
+                    "message": "signed Statement fetch audit is unavailable",
+                    "safe_to_retry": True,
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        return {
+            "status": "dispute-statement-fetched",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "request_digest": result.request_digest,
+            "response_digest": result.response_digest,
+            "response": result.response.to_dict(),
+            "audit_event_id": result.audit_event_id,
+            "audit_event": audit_event.to_dict(),
+            "replayed": result.replayed,
+            "retained_by_responder": True,
+            "imported_by_requester": False,
+            "claim_adjudicated_or_proven_true": False,
+        }
+
     def _trade_order_audit_view(
         view: Any,
         *,
@@ -15026,9 +15437,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "dispatch_target_url": (
                 pending_dispatch.target_url if pending_dispatch else ""
             ),
-            "dispatch_attempts": (
-                pending_dispatch.attempts if pending_dispatch else 0
-            ),
+            "dispatch_attempts": (pending_dispatch.attempts if pending_dispatch else 0),
             "dispatch_last_error": (
                 pending_dispatch.last_error if pending_dispatch else ""
             ),
@@ -15040,7 +15449,8 @@ def register_v2_routes(app: FastAPI) -> None:
             ),
             "dispatch_superseded_deliveries": (
                 len(pending_dispatch.superseded_delivery_digests)
-                if pending_dispatch else 0
+                if pending_dispatch
+                else 0
             ),
             "remote_acknowledged": acknowledgement is not None,
             "remote_receipt_digest": (
@@ -15051,7 +15461,8 @@ def register_v2_routes(app: FastAPI) -> None:
             ),
             "remote_received_at": (
                 acknowledgement.receipt.to_dict()["received_at"]
-                if acknowledgement else ""
+                if acknowledgement
+                else ""
             ),
         }
         if include_document:
@@ -15413,8 +15824,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "receipt_acknowledgement_cursor must be a lowercase "
-                    "sha256 digest"
+                    "receipt_acknowledgement_cursor must be a lowercase sha256 digest"
                 ),
             )
         if review_acknowledgement_cursor and re.fullmatch(
@@ -15423,8 +15833,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "review_acknowledgement_cursor must be a lowercase "
-                    "sha256 digest"
+                    "review_acknowledgement_cursor must be a lowercase sha256 digest"
                 ),
             )
         coordinator = _state_trade_order_audit(request)
@@ -15595,8 +16004,7 @@ def register_v2_routes(app: FastAPI) -> None:
             ) from exc
 
     @app.post(
-        "/api/v2/trade/orders/{order_digest}/rule-packages/"
-        "{package_digest}/import"
+        "/api/v2/trade/orders/{order_digest}/rule-packages/{package_digest}/import"
     )
     async def v2_trade_order_rule_package_import(
         order_digest: str,
@@ -16249,8 +16657,7 @@ def register_v2_routes(app: FastAPI) -> None:
             ) from exc
 
     @app.post(
-        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
-        "{execution_id}/deliver"
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/{execution_id}/deliver"
     )
     async def v2_trade_execution_receipt_deliver(
         order_digest: str,
@@ -16552,8 +16959,7 @@ def register_v2_routes(app: FastAPI) -> None:
         return _acknowledged_response(retained)
 
     @app.get(
-        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
-        "{execution_id}/reviews"
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/{execution_id}/reviews"
     )
     async def v2_trade_receipt_review_get(
         order_digest: str,
@@ -16717,8 +17123,7 @@ def register_v2_routes(app: FastAPI) -> None:
         }
 
     @app.post(
-        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
-        "{execution_id}/reviews",
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/{execution_id}/reviews",
         status_code=201,
     )
     async def v2_trade_receipt_review_create(
@@ -16823,14 +17228,15 @@ def register_v2_routes(app: FastAPI) -> None:
         moment = datetime.now(timezone.utc)
         if moment.microsecond == 0:
             moment = moment.replace(microsecond=1)
-        reviewed_at = moment.isoformat(timespec="microseconds").replace(
-            "+00:00", "Z"
+        reviewed_at = moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        schema_validator = (
+            getattr(
+                state,
+                "trade_execution_schema_validator",
+                None,
+            )
+            or JsonSchema202012Validator()
         )
-        schema_validator = getattr(
-            state,
-            "trade_execution_schema_validator",
-            None,
-        ) or JsonSchema202012Validator()
 
         def _create_and_record_review() -> Any:
             review = create_trade_receipt_review(
@@ -17579,6 +17985,343 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.post(
         "/api/v2/trade/orders/{order_digest}/execution-receipts/"
+        "{execution_id}/reviews/{review_id}/dispute-statements/fetch"
+    )
+    async def v2_trade_dispute_statement_fetch(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Fetch and verify one exact remote Statement without importing it."""
+
+        from nth_dao.trade_rules import (
+            TradeDisputeStatementFetchOutboxBusy,
+            TradeDisputeStatementFetchOutboxCapacity,
+            TradeDisputeStatementFetchOutboxConflict,
+            TradeDisputeStatementFetchOutboxError,
+            TradeDisputeStatementFetchRequestRejected,
+            TradeDisputeStatementFetchResponse,
+            create_trade_dispute_statement_fetch_request,
+            trade_dispute_statement_fetch_request_digest,
+            trade_dispute_statement_fetch_response_digest,
+            verify_trade_dispute_statement_fetch_audit_event,
+            verify_trade_dispute_statement_fetch_response,
+        )
+        from nth_dao.spine import SpineEvent
+
+        _require_console_bearer_for_sensitive_read(request)
+        try:
+            body = await request.json()
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict) or set(body) != {
+            "target_url",
+            "statement_digest",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="body requires only target_url and statement_digest",
+            )
+        statement_digest = body.get("statement_digest")
+        if (
+            not isinstance(statement_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", statement_digest) is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="statement_digest is invalid",
+            )
+        try:
+            target_url = _normalize_configured_fed_peer(body["target_url"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        order, receipt, review = await _load_trade_dispute_review(
+            request,
+            order_digest=order_digest,
+            execution_id=execution_id,
+            review_id=review_id,
+        )
+        identity = _state_node_identity(request)
+        if identity is None or not getattr(identity, "can_sign", False):
+            raise HTTPException(
+                status_code=503,
+                detail="local signing identity unavailable",
+            )
+        requester_did = identity.as_did()
+        order_document = order.to_dict()
+        if requester_did == order_document["maker_did"]:
+            responder_did = order_document["taker_did"]
+        elif requester_did == order_document["taker_did"]:
+            responder_did = order_document["maker_did"]
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="local identity is not a party to this Trade Order",
+            )
+
+        moment = datetime.now(timezone.utc)
+        if moment.microsecond == 0:
+            moment = moment.replace(microsecond=1)
+        created_at = moment.isoformat(timespec="microseconds").replace(
+            "+00:00",
+            "Z",
+        )
+        not_after = (
+            (moment + timedelta(minutes=5))
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+        try:
+            candidate_request = create_trade_dispute_statement_fetch_request(
+                identity,
+                review=review,
+                receipt=receipt,
+                order=order,
+                statement_digest=statement_digest,
+                responder_did=responder_did,
+                created_at=created_at,
+                not_after=not_after,
+                now=moment,
+            )
+        except TradeDisputeStatementFetchRequestRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        outbox = _state_trade_dispute_statement_fetch_outbox(request)
+        if outbox is None:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch outbox unavailable",
+            )
+        observed_at_ns = time.time_ns()
+        try:
+            outbox_record, outbox_created = await run_in_threadpool(
+                outbox.reserve,
+                target_url,
+                candidate_request,
+                observed_at_ns=observed_at_ns,
+            )
+            (
+                fetch_request,
+                retained_response,
+                retained_audit_event,
+            ) = await run_in_threadpool(
+                outbox_record.resolve,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+        except TradeDisputeStatementFetchOutboxBusy as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch outbox is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        except TradeDisputeStatementFetchOutboxCapacity as exc:
+            raise HTTPException(
+                status_code=507,
+                detail="trade Dispute Statement fetch outbox capacity exceeded",
+            ) from exc
+        except (
+            TradeDisputeStatementFetchOutboxConflict,
+            TradeDisputeStatementFetchOutboxError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement fetch outbox is inconsistent",
+            ) from exc
+
+        replayed_from_outbox = outbox_record.completed
+        if replayed_from_outbox:
+            if retained_response is None or retained_audit_event is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade Dispute Statement fetch outbox is incomplete",
+                )
+            peer_status = 200
+            peer_body = {
+                "request_digest": outbox_record.request_digest,
+                "response_digest": outbox_record.response_digest,
+                "audit_event_id": outbox_record.audit_event_id,
+                "audit_event": retained_audit_event.to_dict(),
+                "response": retained_response.to_dict(),
+            }
+        else:
+            try:
+                outbox_record = await run_in_threadpool(
+                    outbox.mark_attempt,
+                    outbox_record,
+                    updated_at_ns=time.time_ns(),
+                )
+                peer_status, peer_body = await run_in_threadpool(
+                    _post_trade_dispute_statement_fetch_to_peer,
+                    target_url,
+                    order_digest,
+                    execution_id,
+                    review_id,
+                    fetch_request.to_dict(),
+                )
+            except (OSError, TimeoutError, ValueError, urllib.error.URLError) as exc:
+                try:
+                    await run_in_threadpool(
+                        outbox.note_failure,
+                        outbox_record,
+                        updated_at_ns=time.time_ns(),
+                        error=type(exc).__name__,
+                    )
+                except TradeDisputeStatementFetchOutboxError:
+                    logger.warning(
+                        "unable to persist requester fetch failure",
+                        exc_info=True,
+                    )
+                raise HTTPException(
+                    status_code=502,
+                    detail="signed Dispute Statement fetch request failed",
+                ) from exc
+            if not 200 <= peer_status < 300:
+                try:
+                    await run_in_threadpool(
+                        outbox.note_failure,
+                        outbox_record,
+                        updated_at_ns=time.time_ns(),
+                        error=f"peer-http-{peer_status}",
+                    )
+                except TradeDisputeStatementFetchOutboxError:
+                    logger.warning(
+                        "unable to persist requester fetch rejection",
+                        exc_info=True,
+                    )
+                raise HTTPException(
+                    status_code=502,
+                    detail="trade peer rejected the signed Statement fetch",
+                )
+        try:
+            response_document = peer_body["response"]
+            remote_request_digest = peer_body["request_digest"]
+            remote_response_digest = peer_body["response_digest"]
+            remote_audit_event_id = peer_body["audit_event_id"]
+            audit_event = SpineEvent.from_dict(peer_body["audit_event"])
+            response = TradeDisputeStatementFetchResponse.from_dict(
+                response_document,
+                request=fetch_request,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+            request_digest = trade_dispute_statement_fetch_request_digest(
+                fetch_request,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+            response_digest = trade_dispute_statement_fetch_response_digest(
+                response,
+                request=fetch_request,
+                review=review,
+                receipt=receipt,
+                order=order,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="trade peer returned an invalid signed fetch response",
+            ) from exc
+        verification_at = datetime.now(timezone.utc)
+        if replayed_from_outbox:
+            verification_at = datetime.fromisoformat(
+                response.to_dict()["served_at"].replace("Z", "+00:00")
+            )
+        response_ok, _reason = verify_trade_dispute_statement_fetch_response(
+            response,
+            request=fetch_request,
+            review=review,
+            receipt=receipt,
+            order=order,
+            at=verification_at,
+        )
+        audit_ok, _audit_reason = verify_trade_dispute_statement_fetch_audit_event(
+            audit_event,
+            fetch_request,
+            response,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        if (
+            not response_ok
+            or not audit_ok
+            or not isinstance(remote_request_digest, str)
+            or not hmac.compare_digest(remote_request_digest, request_digest)
+            or not isinstance(remote_response_digest, str)
+            or not hmac.compare_digest(remote_response_digest, response_digest)
+            or not isinstance(remote_audit_event_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", remote_audit_event_id) is None
+            or not hmac.compare_digest(
+                remote_audit_event_id,
+                audit_event.event_id,
+            )
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="trade peer returned an invalid signed fetch binding",
+            )
+        if not replayed_from_outbox:
+            try:
+                outbox_record, _completed = await run_in_threadpool(
+                    outbox.complete,
+                    outbox_record,
+                    response,
+                    audit_event,
+                    updated_at_ns=time.time_ns(),
+                )
+            except TradeDisputeStatementFetchOutboxBusy as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="verified fetch response could not be persisted",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            except TradeDisputeStatementFetchOutboxCapacity as exc:
+                raise HTTPException(
+                    status_code=507,
+                    detail="verified fetch response exceeds outbox capacity",
+                ) from exc
+            except (
+                TradeDisputeStatementFetchOutboxConflict,
+                TradeDisputeStatementFetchOutboxError,
+            ) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="verified fetch response persistence conflicted",
+                ) from exc
+        return {
+            "status": "dispute-statement-fetched-verified",
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "statement_digest": statement_digest,
+            "request": fetch_request.to_dict(),
+            "request_digest": request_digest,
+            "response": response.to_dict(),
+            "response_digest": response_digest,
+            "remote_audit_event_id": remote_audit_event_id,
+            "remote_audit_event": audit_event.to_dict(),
+            "remote_audit_event_verified": True,
+            "remote_audit_chain_verified": False,
+            "source_url": target_url,
+            "outbox_operation_id": outbox_record.operation_id,
+            "outbox_generation": outbox_record.generation,
+            "outbox_created": outbox_created,
+            "replayed_from_outbox": replayed_from_outbox,
+            "imported": False,
+            "claim_adjudicated_or_proven_true": False,
+        }
+
+    @app.post(
+        "/api/v2/trade/orders/{order_digest}/execution-receipts/"
         "{execution_id}/reviews/{review_id}/dispute-statements/"
         "{statement_digest}/deliver"
     )
@@ -18134,8 +18877,7 @@ def register_v2_routes(app: FastAPI) -> None:
                     raise HTTPException(
                         status_code=409,
                         detail=(
-                            "Receipt Review was acknowledged by a different "
-                            "peer target"
+                            "Receipt Review was acknowledged by a different peer target"
                         ),
                     )
                 return _acknowledged_response(existing_ack)
@@ -18278,8 +19020,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "signed Review is retained locally but peer delivery "
-                    f"failed: {exc}"
+                    f"signed Review is retained locally but peer delivery failed: {exc}"
                 ),
             ) from exc
         if not 200 <= peer_status < 300:
@@ -18570,8 +19311,7 @@ def register_v2_routes(app: FastAPI) -> None:
         return offer.to_dict()
 
     @app.get(
-        "/api/v2/trade/federation/offers/{offer_digest}/rule-packages/"
-        "{package_digest}"
+        "/api/v2/trade/federation/offers/{offer_digest}/rule-packages/{package_digest}"
     )
     def v2_trade_rule_package_federation_get(
         offer_digest: str,
@@ -18739,8 +19479,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        "public Rule Recognition proof integrity "
-                        "verification failed"
+                        "public Rule Recognition proof integrity verification failed"
                     ),
                 ) from exc
             etag = f'"sha256:{hashlib.sha256(raw).hexdigest()}"'
@@ -18874,8 +19613,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        "public Rule Recognition proof integrity "
-                        "verification failed"
+                        "public Rule Recognition proof integrity verification failed"
                     ),
                 ) from exc
             if page_index >= len(raw_pages):
@@ -18908,8 +19646,7 @@ def register_v2_routes(app: FastAPI) -> None:
             return Response(
                 content=raw,
                 media_type=(
-                    "application/vnd.nth-dao."
-                    "trade-rule-recognition-proof-page+json"
+                    "application/vnd.nth-dao.trade-rule-recognition-proof-page+json"
                 ),
                 headers=response_headers,
             )
@@ -19100,7 +19837,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail="signed Spine or node identity unavailable",
             )
         local_did = local_identity.as_did()
-
         lock_path = (
             workspace / "trade" / "offers" / ".locks"
             / f"federation-import-{digest[7:]}.lock"
@@ -19183,7 +19919,6 @@ def register_v2_routes(app: FastAPI) -> None:
                         },
                     )
                     proposal_source_id = proposal_event.author_did
-
                 results = []
                 anchors = []
                 for offer in offers:
@@ -19432,7 +20167,6 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         if len(q) > 200 or len(context) > 128 or len(capability) > 128:
             raise HTTPException(status_code=400, detail="market search filter is too long")
-
         rows = v2_market_open(
             request=request,
             context=context,
@@ -19598,7 +20332,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 "recognition never grants execution or payment authority."
             ),
         }
-
     @app.post("/api/v2/market/resource-profiles/import")
     def v2_market_resource_profile_import(
         body: MarketResourceProfileImportBody,
@@ -19611,7 +20344,6 @@ def register_v2_routes(app: FastAPI) -> None:
             ResourceProfileRejected,
             ResourceProfileStore,
         )
-
         _require_console_bearer_for_governance_mutation(request)
         _enforce_recognition_policy_mutation_limit(
             request,
@@ -19674,7 +20406,6 @@ def register_v2_routes(app: FastAPI) -> None:
             "audit_event_id": event.event_id,
             "audit_created": audit_created,
         }
-
     @app.post(
         "/api/v2/market/resource-profiles/{profile_digest}/recognition",
     )
@@ -19689,7 +20420,6 @@ def register_v2_routes(app: FastAPI) -> None:
             ResourceProfileRejected,
             ResourceProfileStore,
         )
-
         _require_console_bearer_for_governance_mutation(request)
         _enforce_recognition_policy_mutation_limit(
             request,
@@ -19796,7 +20526,6 @@ def register_v2_routes(app: FastAPI) -> None:
         rep["available"] = True
         rep["active_source"] = source
         return rep
-
     @app.post("/api/v2/market/{announcement_id}/accept")
     def v2_market_accept(
         announcement_id: str, body: AcceptBody, request: Request,
@@ -19811,7 +20540,6 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.market.claim import ClaimStore
         from nth_dao.market.feed import MarketFeed
         from nth_dao.market.projection import EVENT_MARKET_ACCEPTANCE
-
         spine = _state_spine(request)
         identity = _state_node_identity(request)
         ws = _state_workspace(request)
@@ -19819,7 +20547,8 @@ def register_v2_routes(app: FastAPI) -> None:
             identity, "can_sign", False
         ):
             raise HTTPException(
-                status_code=503, detail="spine / identity / workspace unavailable")
+                status_code=503, detail="spine / identity / workspace unavailable"
+            )
         if not (ws / "market_feed" / "announcements.jsonl").exists():
             raise HTTPException(status_code=404, detail="announcement not found")
         ann = MarketFeed(ws).get(announcement_id)
@@ -19827,31 +20556,33 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="announcement not found")
         if ann.publisher_did != identity.as_did():
             raise HTTPException(
-                status_code=403, detail="only the publisher can accept this task")
+                status_code=403, detail="only the publisher can accept this task"
+            )
         if body.completer_did == ann.publisher_did:
             # 防 self-dealing:发布方不能给"自己认领自己发的活"验收刷分。
             raise HTTPException(
-                status_code=400, detail="publisher cannot accept their own claim")
+                status_code=400, detail="publisher cannot accept their own claim"
+            )
         claim = ClaimStore(ws).get(announcement_id, announcement=ann)
         if not claim or claim.get("claimant_did") != body.completer_did:
             raise HTTPException(
-                status_code=409,
-                detail="completer has not claimed this task")
+                status_code=409, detail="completer has not claimed this task"
+            )
         stmt = sign_acceptance(
-            publisher=identity, announcement_id=announcement_id,
-            completer_did=body.completer_did)
+            publisher=identity,
+            announcement_id=announcement_id,
+            completer_did=body.completer_did,
+        )
         ev = spine.append(EVENT_MARKET_ACCEPTANCE, stmt)
         return {
             "accepted": True, "announcement_id": announcement_id,
             "completer_did": body.completer_did, "seq": ev.seq,
         }
-
     @app.post("/api/v2/market/announce")
     def v2_market_announce(
         body: AnnounceTaskBody, request: Request,
     ) -> Dict[str, Any]:
         """发布一条任务公告到市场 feed(本节点签名)。让"任务广场"非空。
-
         这是 publish 路径——browse(/market/open)与 claim 都依赖有公告可
         发现。发布者=本节点身份(operator 代表本 DAO 发活)。POST 状态变更
         动作,auth 开启时受控(不吃匿名旁路)。
@@ -19861,7 +20592,6 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.market.publication_policy import (
             reject_private_publication_data,
         )
-
         if not body.title.strip():
             raise HTTPException(status_code=400, detail="title must not be empty")
         # 输入上限(对抗审查补):公告会被签名并追加进 append-only feed
@@ -19880,20 +20610,24 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail="title too long (max 200)")
         if len(body.description) > 4000:
             raise HTTPException(
-                status_code=400, detail="description too long (max 4000)")
+                status_code=400, detail="description too long (max 4000)"
+            )
         if len(body.capability_set) > 32:
             raise HTTPException(
-                status_code=400, detail="too many capabilities (max 32)")
+                status_code=400, detail="too many capabilities (max 32)"
+            )
         if any(len(c) > 100 for c in body.capability_set):
             raise HTTPException(
-                status_code=400, detail="capability name too long (max 100)")
+                status_code=400, detail="capability name too long (max 100)"
+            )
         if (
             len(body.reward_asset) > 32
             or len(body.context) > 64
             or len(body.mission_id) > 128
         ):
             raise HTTPException(
-                status_code=400, detail="reward_asset/context/mission_id too long")
+                status_code=400, detail="reward_asset/context/mission_id too long"
+            )
         try:
             reject_private_publication_data(
                 {
@@ -19945,7 +20679,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=400, detail=f"publish rejected: {exc}",
             )
         return ann.to_dict()
-
     # ── 任务市场联邦传输层(FED-1:serve 侧)─────────────────────────
     # federation.py 已把数据模型/验签/信任模型做好;这里只把它包成 HTTP。
     # 两个端点都匿名可读(只暴露本就可发现的公告摘要/全文,与 market/open
@@ -19955,7 +20688,6 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_commerce_fed_listing(digest: str, request: Request) -> Dict[str, Any]:
         """Serve one content-addressed, seller-signed listing."""
         from nth_dao.commerce.listing import ListingRejected, ListingStore
-
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
@@ -19972,7 +20704,6 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request, since: int = -1,
     ) -> Dict[str, Any]:
         """返回本节点 feed 的签名摘要(provenance),供对端发现。
-
         ``since`` = 上次的 high_seq 游标(增量);每页封顶 _FED_DIGEST_PAGE 条,
         响应有界。拉方带 since=high_seq 翻下一页直到 refs 空。
         """
@@ -19980,7 +20711,8 @@ def register_v2_routes(app: FastAPI) -> None:
         identity = _state_node_identity(request)
         if ws is None or identity is None or not getattr(identity, "can_sign", False):
             raise HTTPException(
-                status_code=503, detail="node identity/workspace unavailable")
+                status_code=503, detail="node identity/workspace unavailable"
+            )
         # 没 feed 文件 = 没活可联邦;返回签名的空 digest,绝不 mkdir
         # (避免被对端轮询时在从不发活的节点凭空造 market_feed/)。
         if not (ws / "market_feed" / "announcements.jsonl").exists():
@@ -19993,7 +20725,8 @@ def register_v2_routes(app: FastAPI) -> None:
                 high_seq=-1, refs=[],
             )
             empty.digest_sig = b64u_encode(
-                identity.sign(canonical_json(empty.signing_body())))
+                identity.sign(canonical_json(empty.signing_body()))
+            )
             return empty.to_dict()
         from nth_dao.market.feed import MarketFeed
         from nth_dao.market.claim import ClaimStore
@@ -20014,13 +20747,11 @@ def register_v2_routes(app: FastAPI) -> None:
                 else None
             ),
         ).to_dict()
-
     @app.get("/api/v2/market/federation/pull")
     def v2_market_fed_pull(
         request: Request, keys: str = "", ids: str = "",
     ) -> List[Dict[str, Any]]:
         """Pull verified full records by content key, with legacy ID fallback.
-
         ``keys`` is canonical because it is transport-safe and binds the signed
         body. ``ids`` remains available for pre-content-key digest clients.
         """
@@ -20060,12 +20791,10 @@ def register_v2_routes(app: FastAPI) -> None:
             seen.add(key)
             result.append(ann.to_dict())
         return result
-
     @app.get("/api/v2/market/federation/peers")
     def v2_market_fed_peers(request: Request) -> Dict[str, Any]:
         """Public verified peer hints for transitive discovery."""
         return {"peers": _public_fed_peer_hints(_state_workspace(request))}
-
     @app.get("/api/v2/market/federation/status")
     def v2_market_fed_status(request: Request) -> Dict[str, Any]:
         """Operator-facing federation discovery status."""
@@ -20075,14 +20804,12 @@ def register_v2_routes(app: FastAPI) -> None:
         if _read_fed_peers(ws) or _read_learned_fed_peers(ws):
             _state_market_fed_cache(request)
         return _market_fed_status(request)
-
     @app.post("/api/v2/market/federation/hello")
     def v2_market_fed_hello(
         body: FederationHelloBody, request: Request,
     ) -> Dict[str, Any]:
         """Learn a public DAO only after pinned signed-card verification."""
         from nth_dao.did_key import is_did_key
-
         client_key = _federation_hello_client_key(request)
         try:
             global_decision = _federation_hello_global_limiter(request).check(
@@ -20118,7 +20845,6 @@ def register_v2_routes(app: FastAPI) -> None:
                 normalize_learned_peer_url,
             )
             from .market_federation_poll import _resolve_safe_gossip_ip
-
             peer_url = normalize_learned_peer_url(body.peer_url)
             resolved_ip = _resolve_safe_gossip_ip(peer_url)
         except ValueError as exc:
@@ -20184,7 +20910,6 @@ def register_v2_routes(app: FastAPI) -> None:
             "did": record.did,
             "expires_at_ms": record.expires_at_ms,
         }
-
     @app.post("/api/v2/market/federation/peers")
     def v2_market_fed_peer_update(
         body: FederationPeerBody, request: Request,
@@ -20237,13 +20962,11 @@ def register_v2_routes(app: FastAPI) -> None:
         status["peer_url"] = peer
         status["action"] = action
         return status
-
     @app.post("/api/v2/market/federation/discover")
     def v2_market_fed_discover(
         body: FederationDiscoverBody, request: Request,
     ) -> Dict[str, Any]:
         """Discover nearby DAO nodes and import their market federation URLs.
-
         This bridges identity discovery (LAN/mDNS Agent/DID records) to market
         federation (HTTP digest + pull). Only peers that publish an explicit
         HTTP(S) federation URL and pass signed identity-card preflight are
@@ -20281,6 +21004,7 @@ def register_v2_routes(app: FastAPI) -> None:
             status["refreshed"] = True
             return status
         from .market_federation_poll import FederationCycleReport, federate_once
+
         try:
             report = FederationCycleReport()
             entries = federate_once(
@@ -20463,10 +21187,12 @@ def register_v2_routes(app: FastAPI) -> None:
         (未授权的 resolve 记入可审计但不被采信)。
         """
         from nth_dao.dispute import record_dispute
+
         spine = _state_spine(request)
         if spine is None:
             raise HTTPException(
-                status_code=503, detail="spine unavailable; cannot record dispute")
+                status_code=503, detail="spine unavailable; cannot record dispute"
+            )
         try:
             ev = record_dispute(spine, body.statement)
         except ValueError as exc:
@@ -20490,6 +21216,7 @@ def register_v2_routes(app: FastAPI) -> None:
         from nth_dao.governance import (
             ACTION_DISPUTE_RESOLVE, PolicyProjection, can,
         )
+
         events = _verified_spine_events(request)
         if events is None:
             return []
@@ -20526,10 +21253,12 @@ def register_v2_routes(app: FastAPI) -> None:
         The server only verifies and persists it; validity is not correctness.
         """
         from nth_dao.runtime import record_handoff
+
         spine = _state_spine(request)
         if spine is None:
             raise HTTPException(
-                status_code=503, detail="spine unavailable; cannot record handoff")
+                status_code=503, detail="spine unavailable; cannot record handoff"
+            )
         try:
             ev = record_handoff(spine, body.statement)
         except ValueError as exc:
@@ -20552,6 +21281,7 @@ def register_v2_routes(app: FastAPI) -> None:
             record_handoff_response,
             verify_handoff_response,
         )
+
         spine = _state_spine(request)
         if spine is None:
             raise HTTPException(
@@ -20661,6 +21391,7 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """回放一条公告的证据链(audit.reconstruct_evidence)。匿名读、逐项重验。"""
         from nth_dao.audit import reconstruct_evidence
+
         events = _verified_spine_events(request)
         if events is None:
             return {
@@ -20684,6 +21415,7 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_governance_policy(request: Request) -> Dict[str, Any]:
         """当前生效治理策略(PolicyProjection 回放 governance 事件)。匿名读。"""
         from nth_dao.governance import PolicyProjection
+
         events = _verified_spine_events(request)
         empty = {"roles": {}, "grants": {}, "constraints": {}}
         if events is None:
@@ -20718,6 +21450,7 @@ def register_v2_routes(app: FastAPI) -> None:
         任何节点回放同一日志得同一信誉。
         """
         from nth_dao.reputation_spine import ReputationProjection
+
         events = _verified_spine_events(request)
         if events is None:
             return []
@@ -20730,6 +21463,7 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_reputation_one(did: str, request: Request) -> Dict[str, Any]:
         """单个 DID 的可验证信誉。匿名读。"""
         from nth_dao.reputation_spine import ReputationProjection
+
         events = _verified_spine_events(request)
         proj = ReputationProjection()
         for ev in (events or []):
@@ -20742,6 +21476,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     def _cap_projection(request: Request):
         from nth_dao.authz import CapRequestProjection
+
         events = _verified_spine_events(request)
         if events is None:
             return None
@@ -20757,7 +21492,8 @@ def register_v2_routes(app: FastAPI) -> None:
         spine = _state_spine(request)
         if spine is None:
             raise HTTPException(
-                status_code=503, detail="spine unavailable; cannot record request")
+                status_code=503, detail="spine unavailable; cannot record request"
+            )
         try:
             ev = record_cap_request(spine, body.statement)
         except ValueError as exc:
@@ -20803,13 +21539,15 @@ def register_v2_routes(app: FastAPI) -> None:
         授权(谁能批)= 操作员(写口受 console auth);未来可叠治理 can()。
         """
         from nth_dao.authz import grant_cap_request
+
         spine = _state_spine(request)
         identity = _state_node_identity(request)
         if spine is None or identity is None or not getattr(
             identity, "can_sign", False
         ):
             raise HTTPException(
-                status_code=503, detail="spine or signer identity unavailable")
+                status_code=503, detail="spine or signer identity unavailable"
+            )
         proj = _cap_projection(request)
         rec = proj.get(request_id) if proj else None
         if rec is None:
@@ -20818,9 +21556,13 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=409, detail=f"request already {rec.status}")
         token = grant_cap_request(
-            spine, issuer=identity, request_id=request_id,
-            requester_did=rec.requester_did, capabilities=rec.capabilities,
-            scope=rec.scope)
+            spine,
+            issuer=identity,
+            request_id=request_id,
+            requester_did=rec.requester_did,
+            capabilities=rec.capabilities,
+            scope=rec.scope,
+        )
         return {
             "granted": True, "request_id": request_id,
             "token_id": token.get("token_id", ""),
@@ -20833,13 +21575,15 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """拒绝:记 cap.deny(决策者身份在案)。token-gated。"""
         from nth_dao.authz import deny_cap_request
+
         spine = _state_spine(request)
         identity = _state_node_identity(request)
         if spine is None or identity is None or not getattr(
             identity, "can_sign", False
         ):
             raise HTTPException(
-                status_code=503, detail="spine or signer identity unavailable")
+                status_code=503, detail="spine or signer identity unavailable"
+            )
         proj = _cap_projection(request)
         rec = proj.get(request_id) if proj else None
         if rec is None:
@@ -20848,7 +21592,8 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=409, detail=f"request already {rec.status}")
         deny_cap_request(
-            spine, decider=identity, request_id=request_id, reason=body.reason)
+            spine, decider=identity, request_id=request_id, reason=body.reason
+        )
         return {"denied": True, "request_id": request_id}
 
     # ── 社交层(Phase 社交):关注(单向)/ 好友(双向需确认)─────────────────
@@ -20857,6 +21602,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     def _social_projection(request: Request):
         from nth_dao.social import SocialProjection
+
         events = _verified_spine_events(request)
         if events is None:
             return None
@@ -20881,6 +21627,7 @@ def register_v2_routes(app: FastAPI) -> None:
             if getattr(state, "social_fed_started", False):
                 return
             from .social_federation_poll import start_social_poller
+
             try:
                 interval = float(os.environ.get("NTH_FED_POLL_INTERVAL_S", "20"))
             except ValueError:
@@ -20912,17 +21659,19 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request, statement_type: str, target_did: str,
     ) -> Dict[str, Any]:
         from nth_dao.social import record_social, sign_social_statement
+
         spine = _state_spine(request)
         identity = _state_node_identity(request)
         if spine is None or identity is None or not getattr(
             identity, "can_sign", False
         ):
             raise HTTPException(
-                status_code=503, detail="spine or signer identity unavailable")
+                status_code=503, detail="spine or signer identity unavailable"
+            )
         try:
             stmt = sign_social_statement(
-                signer=identity, statement_type=statement_type,
-                target_did=target_did)
+                signer=identity, statement_type=statement_type, target_did=target_did
+            )
             ev = record_social(spine, stmt)
         except ValueError as exc:   # 自指 / target 空 / 签名无效
             raise HTTPException(status_code=400, detail=str(exc))
@@ -20935,12 +21684,14 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_social_follow(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
         """本节点关注 target_did(单向、免对方确认)。token-gated。"""
         from nth_dao.social import FOLLOW
+
         return _record_social_action(request, FOLLOW, body.target_did)
 
     @app.post("/api/v2/social/unfollow")
     def v2_social_unfollow(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
         """取消关注。token-gated。"""
         from nth_dao.social import UNFOLLOW
+
         return _record_social_action(request, UNFOLLOW, body.target_did)
 
     @app.post("/api/v2/social/friend/request")
@@ -20949,6 +21700,7 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """向 target_did 发好友请求(需对方 accept 才成好友)。token-gated。"""
         from nth_dao.social import FRIEND_REQUEST
+
         return _record_social_action(request, FRIEND_REQUEST, body.target_did)
 
     @app.post("/api/v2/social/friend/accept")
@@ -20957,6 +21709,7 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """接受 target_did 的好友请求 → 互为好友。token-gated。"""
         from nth_dao.social import FRIEND_ACCEPT
+
         return _record_social_action(request, FRIEND_ACCEPT, body.target_did)
 
     @app.post("/api/v2/social/friend/decline")
@@ -20965,6 +21718,7 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """拒绝 target_did 的好友请求。token-gated。"""
         from nth_dao.social import FRIEND_DECLINE
+
         return _record_social_action(request, FRIEND_DECLINE, body.target_did)
 
     @app.post("/api/v2/social/friend/remove")
@@ -20973,6 +21727,7 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """解除与 target_did 的好友关系(或撤回未决请求)。token-gated。"""
         from nth_dao.social import FRIEND_REMOVE
+
         return _record_social_action(request, FRIEND_REMOVE, body.target_did)
 
     @app.post("/api/v2/social/block")
@@ -20980,12 +21735,14 @@ def register_v2_routes(app: FastAPI) -> None:
         """屏蔽 target_did(#3,**静默**):清除既有所有边 + 之后拒收其任何社交语句。
         屏蔽决定纯本地、**不外发**,被屏蔽方无从察觉(隐形拉黑)。token-gated。"""
         from nth_dao.social import BLOCK
+
         return _record_social_action(request, BLOCK, body.target_did)
 
     @app.post("/api/v2/social/unblock")
     def v2_social_unblock(body: SocialTargetBody, request: Request) -> Dict[str, Any]:
         """解除屏蔽 target_did(不恢复旧关系,需重新关注/加好友)。静默、token-gated。"""
         from nth_dao.social import UNBLOCK
+
         return _record_social_action(request, UNBLOCK, body.target_did)
 
     @app.get("/api/v2/social/me")
@@ -21043,8 +21800,10 @@ def register_v2_routes(app: FastAPI) -> None:
         if spine is None or identity is None or not hasattr(identity, "as_did"):
             return []
         from nth_dao.social.federation import local_social_statements
+
         return local_social_statements(
-            spine, identity.as_did(), since_seq=since, limit=500)
+            spine, identity.as_did(), since_seq=since, limit=500
+        )
 
     @app.post("/api/v2/market/federated/claim")
     async def v2_market_federated_claim(
@@ -21076,9 +21835,9 @@ def register_v2_routes(app: FastAPI) -> None:
         if not matching:
             raise HTTPException(
                 status_code=404,
-                detail=f"no live supervised agent did={body.agent_did!r}")
+                detail=f"no live supervised agent did={body.agent_did!r}",
+            )
         rec = matching[0]
-
         # 公告全文 + 来源:取自联邦缓存(已双层验签 + 来源=配置 peer)。
         cache = _state_market_fed_cache(request)
         snapshot = cache.snapshot() if cache is not None else {}
@@ -21108,7 +21867,8 @@ def register_v2_routes(app: FastAPI) -> None:
         if entry is None:
             raise HTTPException(
                 status_code=404,
-                detail="federated announcement not in cache (refresh Tasks first)")
+                detail="federated announcement not in cache (refresh Tasks first)",
+            )
         if entry.get("stale") is True:
             raise HTTPException(
                 status_code=409,
@@ -21127,7 +21887,8 @@ def register_v2_routes(app: FastAPI) -> None:
         source_did = str(entry.get("source_did") or "")
         if not source_peer:
             raise HTTPException(
-                status_code=409, detail="unknown source peer for this announcement")
+                status_code=409, detail="unknown source peer for this announcement"
+            )
         if not source_did or source_did != ann.effective_authority_did():
             raise HTTPException(
                 status_code=409,
@@ -21177,7 +21938,8 @@ def register_v2_routes(app: FastAPI) -> None:
         if not isinstance(auth_token, dict):
             raise HTTPException(
                 status_code=409,
-                detail=f"agent {body.agent_did!r} has no cap_token; re-spawn it")
+                detail=f"agent {body.agent_did!r} has no cap_token; re-spawn it",
+            )
         auth_hdr = f"CapToken {encode_authorization_header(auth_token)}"
         timeout = _A2A_METHOD_TIMEOUTS.get("claim", _A2A_DEFAULT_TIMEOUT_S)
 
@@ -21196,7 +21958,6 @@ def register_v2_routes(app: FastAPI) -> None:
                     return resp.status, _read_local_a2a_body(resp)
             except urllib.error.HTTPError as exc:
                 return exc.code, _read_local_a2a_body(exc)
-
         # 1) 本地 agent claim-sign(自签 cap_token + ClaimReceipt)。
         sign_url = f"http://127.0.0.1:{rec.a2a_port}/a2a/claim-sign"
         try:
@@ -21214,12 +21975,14 @@ def register_v2_routes(app: FastAPI) -> None:
         s_content = _decode_or_passthrough(s_body)
         if s_status != 200 or not isinstance(s_content, dict):
             return JSONResponse(
-                status_code=s_status if s_status >= 400 else 502, content=s_content)
+                status_code=s_status if s_status >= 400 else 502, content=s_content
+            )
         result = s_content.get("result") or {}
         cap_token, receipt = result.get("cap_token"), result.get("receipt")
         if not isinstance(cap_token, dict) or not isinstance(receipt, dict):
             raise HTTPException(
-                status_code=502, detail="agent claim-sign returned no cap_token/receipt")
+                status_code=502, detail="agent claim-sign returned no cap_token/receipt"
+            )
 
         # 2) Address the source claim by signed-body hash. Legacy IDs may
         # contain URL delimiters and are never interpolated into the path.
@@ -21255,7 +22018,8 @@ def register_v2_routes(app: FastAPI) -> None:
             A2AResponseTooLarge,
         ) as exc:
             raise HTTPException(
-                status_code=502, detail=f"forward to source peer failed: {exc}")
+                status_code=502, detail=f"forward to source peer failed: {exc}"
+            )
         foreign_content = _decode_or_passthrough(f_body)
         if 200 <= f_status < 300:
             if not isinstance(foreign_content, dict) or foreign_content.get(
@@ -21334,8 +22098,7 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"no live supervised agent did={body.agent_did!r} with "
-                    "an a2a_port"
+                    f"no live supervised agent did={body.agent_did!r} with an a2a_port"
                 ),
             )
         rec = matching[0]
@@ -21623,6 +22386,7 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_agent_backend_status(request: Request) -> Dict[str, Any]:
         """Return local backend readiness without exposing secrets or paths."""
         from nth_dao.web.dummy_agent import backend_runtime_status
+
         statuses = {
             kind: {
                 **status,
@@ -21997,6 +22761,7 @@ def register_v2_routes(app: FastAPI) -> None:
             ws = _state_workspace(request)
             if ws is not None:
                 from .agent_roster import AgentRoster
+
                 roster = AgentRoster(ws)
                 identity_file = roster.allocate_identity_file()
         try:
@@ -22057,7 +22822,8 @@ def register_v2_routes(app: FastAPI) -> None:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "v2_api: agent spawned but roster persist failed: %s", exc)
+                    "v2_api: agent spawned but roster persist failed: %s", exc
+                )
         return {
             "agent_id": record.agent_id,
             "did": record.did,
@@ -22100,11 +22866,13 @@ def register_v2_routes(app: FastAPI) -> None:
                 ws = _state_workspace(request)
                 if ws is not None:
                     from .agent_roster import AgentRoster
+
                     roster = AgentRoster(ws)
                     roster.disable_by_did(did, reason="operator-stop")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "v2_api: agent stopped but roster disable failed: %s", exc)
+                    "v2_api: agent stopped but roster disable failed: %s", exc
+                )
         return {"agent_id": agent_id, "stopped": True}
 
     @app.get("/api/v2/agents/{did}/ping")
@@ -22159,8 +22927,7 @@ def register_v2_routes(app: FastAPI) -> None:
                     raise HTTPException(
                         status_code=502,
                         detail=(
-                            f"child returned HTTP {resp.status} from "
-                            f"/ping at {url}"
+                            f"child returned HTTP {resp.status} from /ping at {url}"
                         ),
                     )
                 raw = _read_local_a2a_body(resp)
@@ -22238,10 +23005,7 @@ def register_v2_routes(app: FastAPI) -> None:
         if not matching:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"no live supervised agent for did={did!r} with "
-                    "an a2a_port"
-                ),
+                detail=(f"no live supervised agent for did={did!r} with an a2a_port"),
             )
         rec = matching[0]
 
@@ -22264,19 +23028,13 @@ def register_v2_routes(app: FastAPI) -> None:
             if claimed_length > 1024 * 1024:
                 raise HTTPException(
                     status_code=413,
-                    detail=(
-                        f"Content-Length {claimed_length} exceeds "
-                        "1MB A2A cap"
-                    ),
+                    detail=(f"Content-Length {claimed_length} exceeds 1MB A2A cap"),
                 )
         body_bytes = await request.body()
         if len(body_bytes) > 1024 * 1024:
             raise HTTPException(
                 status_code=413,
-                detail=(
-                    f"body length {len(body_bytes)} exceeds 1MB "
-                    "A2A cap"
-                ),
+                detail=(f"body length {len(body_bytes)} exceeds 1MB A2A cap"),
             )
 
         url = f"http://127.0.0.1:{rec.a2a_port}/a2a/{method}"
@@ -22530,8 +23288,8 @@ def register_v2_routes(app: FastAPI) -> None:
         ]
         if not matching:
             raise HTTPException(
-                status_code=404,
-                detail=f"no live supervised agent for did={did!r}")
+                status_code=404, detail=f"no live supervised agent for did={did!r}"
+            )
         rec = matching[0]
         from nth_dao.cap_token import CAP_A2A_MESSAGE_SEND
 
@@ -22559,7 +23317,8 @@ def register_v2_routes(app: FastAPI) -> None:
         token = store.get(token_id) if (token_id and store is not None) else None
         if not isinstance(token, dict):
             raise HTTPException(
-                status_code=409, detail=f"agent {did!r} has no usable cap_token")
+                status_code=409, detail=f"agent {did!r} has no usable cap_token"
+            )
 
         try:
             payload = await request.json()
@@ -22571,7 +23330,8 @@ def register_v2_routes(app: FastAPI) -> None:
         if len(messages) > 500:
             raise HTTPException(
                 status_code=413,
-                detail="too many messages for one summary (max 500); chunk client-side")
+                detail="too many messages for one summary (max 500); chunk client-side",
+            )
         conversation_id = str(payload.get("conversation_id") or "")
         instruction = str(payload.get("instruction") or DEFAULT_INSTRUCTION)
         transcript = canonical_transcript(messages)
@@ -22583,7 +23343,8 @@ def register_v2_routes(app: FastAPI) -> None:
         if len(body_bytes) > 256 * 1024:
             raise HTTPException(
                 status_code=413,
-                detail="transcript too large for one summary (max 256KB); chunk client-side")
+                detail="transcript too large for one summary (max 256KB); chunk client-side",
+            )
         url = f"http://127.0.0.1:{rec.a2a_port}/a2a/ask"
         req_headers = {
             "Content-Type": "application/json; charset=utf-8",
@@ -22593,7 +23354,8 @@ def register_v2_routes(app: FastAPI) -> None:
 
         def _forward() -> Tuple[int, bytes]:
             req = urllib.request.Request(
-                url, data=body_bytes, headers=req_headers, method="POST")
+                url, data=body_bytes, headers=req_headers, method="POST"
+            )
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                     return resp.status, _read_local_a2a_body(resp)
@@ -22621,13 +23383,18 @@ def register_v2_routes(app: FastAPI) -> None:
         if status != 200 or "not-yet-authorized" in _json.dumps(data):
             raise HTTPException(
                 status_code=(status if status != 200 else 502),
-                detail=f"summarize drive failed: {str(data)[:160]}")
+                detail=f"summarize drive failed: {str(data)[:160]}",
+            )
         result = data.get("result", data) if isinstance(data, dict) else {}
         summary_text = str(result.get("response", ""))
         receipt = result.get("receipt")
         ok, reason = verify_summary(
-            receipt, summary_text=summary_text, messages=messages,
-            expected_signer=did, instruction=instruction)
+            receipt,
+            summary_text=summary_text,
+            messages=messages,
+            expected_signer=did,
+            instruction=instruction,
+        )
         from .agent_link import bound_agent_response
 
         projected_summary, summary_truncated = bound_agent_response(summary_text)

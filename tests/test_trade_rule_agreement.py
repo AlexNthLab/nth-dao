@@ -33,7 +33,7 @@ from fastapi.testclient import TestClient
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity, crypto_available
-from nth_dao.spine import SignedEventLog
+from nth_dao.spine import SignedEventLog, SpineEvent
 from nth_dao.util import InterProcessLock
 from nth_dao.web import _FederationBodyLimitMiddleware, create_app
 from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
@@ -57,6 +57,7 @@ from nth_dao.trade_rules import (
     TradeExecutionCoordinator,
     TradeExecutionReceiptStore,
     TradeExecutionReceiptStoreError,
+    TradeDisputeStatementFetchJournal,
     TradeOrder,
     TradeOrderConflict,
     TradeOrderRejected,
@@ -155,6 +156,7 @@ from nth_dao.trade_rules.dispute_statement_transport import (
     verify_trade_dispute_statement_acknowledgement,
 )
 from nth_dao.trade_rules.dispute_statement_retrieval import (
+    DISPUTE_STATEMENT_FETCH_REQUEST_SIGNING_DOMAIN,
     TradeDisputeStatementFetchRequest,
     TradeDisputeStatementFetchRequestRejected,
     TradeDisputeStatementFetchResponse,
@@ -305,6 +307,7 @@ from nth_dao.trade_rules.order_dispatch import (
 from nth_dao.trade_rules.signing import (
     encode_ed25519_signature,
     signed_document_input,
+    verification_method_for_did,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -610,14 +613,14 @@ def _setup(
         adapter_id="org.nthdao.test/declarative",
         adapter_version="1.0.0",
         artifact_digest=_digest(adapter_artifact),
-        execution_modes=[
-            "adapter" if hook_permissions else "declarative"
+        execution_modes=["adapter" if hook_permissions else "declarative"],
+        hooks=[
+            {
+                "rule_id": manifest.rule_id,
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+            }
         ],
-        hooks=[{
-            "rule_id": manifest.rule_id,
-            "hook_name": "fulfillment.deliver",
-            "hook_version": "1",
-        }],
         permissions=list(hook_permissions),
     )
     descriptor_digest = _digest(b"service descriptor")
@@ -2918,13 +2921,10 @@ def test_order_store_scopes_conflict_reads_and_rejects_crash_residue(tmp_path):
     store = TradeOrderStore(tmp_path)
     store.put(order)
     unrelated_prefix = "f" * 16
-    assert not order.order_id.removeprefix(
-        "nth-trade-order-sha256:"
-    ).startswith(unrelated_prefix)
-    unrelated = (
-        store.root
-        / f"{unrelated_prefix}.{'0' * 64}.conflict.json"
+    assert not order.order_id.removeprefix("nth-trade-order-sha256:").startswith(
+        unrelated_prefix
     )
+    unrelated = store.root / f"{unrelated_prefix}.{'0' * 64}.conflict.json"
     unrelated.write_bytes(b"{}")
 
     assert store.get(order.order_id) == order
@@ -3155,12 +3155,11 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
         stored["execution_receipt"],
         order=order,
     )
-    assert execution_receipt_digest(execution_receipt) == (
-        stored["execution_receipt_digest"]
+    assert (
+        execution_receipt_digest(execution_receipt)
+        == (stored["execution_receipt_digest"])
     )
-    assert execution_receipt.to_dict()["adapter"]["adapter_digest"] == (
-        adapter.digest
-    )
+    assert execution_receipt.to_dict()["adapter"]["adapter_digest"] == (adapter.digest)
     assert validate_execution_audit_binding(
         stored["execution_audit"]["payload"],
         receipt=execution_receipt,
@@ -3221,14 +3220,13 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
             clock_skew_seconds=case["clock_skew_seconds"],
         )
         assert ok is case["expected_valid"], case["case"]
-    execution_clock_skew_ack = (
-        TradeExecutionReceiptAcknowledgement.from_dict(
-            stored["execution_receipt_acknowledgement_clock_skew"]
-        )
+    execution_clock_skew_ack = TradeExecutionReceiptAcknowledgement.from_dict(
+        stored["execution_receipt_acknowledgement_clock_skew"]
     )
-    assert trade_execution_receipt_acknowledgement_digest(
-        execution_clock_skew_ack
-    ) == stored["execution_receipt_acknowledgement_clock_skew_digest"]
+    assert (
+        trade_execution_receipt_acknowledgement_digest(execution_clock_skew_ack)
+        == stored["execution_receipt_acknowledgement_clock_skew_digest"]
+    )
     for case in stored[
         "execution_receipt_acknowledgement_clock_skew_verification_cases"
     ]:
@@ -3571,17 +3569,15 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
             accepted_adapter_digests=stored["adapter_policy"][
                 "accepted_adapter_digests"
             ],
-            allowed_execution_modes=stored["adapter_policy"][
-                "allowed_execution_modes"
-            ],
-            allowed_permissions=stored["adapter_policy"][
-                "allowed_permissions"
-            ],
+            allowed_execution_modes=stored["adapter_policy"]["allowed_execution_modes"],
+            allowed_permissions=stored["adapter_policy"]["allowed_permissions"],
         )
-        content_resolver = trade_rules_api.MappingTradeExecutionContentResolver({
-            item["digest"]: bytes.fromhex(item["bytes_hex"])
-            for item in stored["execution_content"]
-        })
+        content_resolver = trade_rules_api.MappingTradeExecutionContentResolver(
+            {
+                item["digest"]: bytes.fromhex(item["bytes_hex"])
+                for item in stored["execution_content"]
+            }
+        )
         replayed = verify_execution_receipt_under_policy(
             execution_receipt,
             order,
@@ -3838,15 +3834,15 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     )
 
     assert proposal["$schema"].endswith("2020-12/schema")
-    assert receipt_review_delivery["properties"]["proof"]["$ref"].endswith(
-        "proof"
+    assert receipt_review_delivery["properties"]["proof"]["$ref"].endswith("proof")
+    assert (
+        receipt_review_delivery["properties"]["review"]["$ref"]
+        == (receipt_review["$id"])
     )
-    assert receipt_review_delivery["properties"]["review"]["$ref"] == (
-        receipt_review["$id"]
+    assert (
+        receipt_review_acknowledgement["properties"]["status"]["const"]
+        == "review-retained-verified"
     )
-    assert receipt_review_acknowledgement["properties"]["status"][
-        "const"
-    ] == "review-retained-verified"
     assert rule_package_bundle["properties"]["kind"]["const"] == (
         RULE_PACKAGE_BUNDLE_KIND
     )
@@ -3871,21 +3867,21 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert proposal_delivery["properties"]["kind"]["const"] == (
         "nth.dao.trade.proposal-delivery"
     )
-    assert proposal_delivery["properties"]["proposal"]["$ref"] == (
-        proposal["$id"]
+    assert proposal_delivery["properties"]["proposal"]["$ref"] == (proposal["$id"])
+    assert (
+        proposal_delivery["properties"]["proof"]["properties"]["proof_purpose"]["const"]
+        == "tradeProposalDelivery"
     )
-    assert proposal_delivery["properties"]["proof"]["properties"][
-        "proof_purpose"
-    ]["const"] == "tradeProposalDelivery"
     assert proposal_intake_receipt["properties"]["kind"]["const"] == (
         "nth.dao.trade.proposal-intake-receipt"
     )
-    assert proposal_intake_receipt["properties"]["proof"]["properties"][
-        "proof_purpose"
-    ]["const"] == "tradeProposalIntakeReceipt"
-    assert acceptance["properties"]["kind"]["const"] == (
-        "nth.dao.trade.acceptance"
+    assert (
+        proposal_intake_receipt["properties"]["proof"]["properties"]["proof_purpose"][
+            "const"
+        ]
+        == "tradeProposalIntakeReceipt"
     )
+    assert acceptance["properties"]["kind"]["const"] == ("nth.dao.trade.acceptance")
     assert "maker_policy" in acceptance["required"]
     assert acceptance["properties"]["proof"]["allOf"][1]["properties"][
         "proof_purpose"
@@ -3934,12 +3930,11 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert execution_receipt["properties"]["kind"]["const"] == (
         "nth.dao.trade.execution-receipt"
     )
-    assert execution_receipt["properties"]["proof"]["$ref"].endswith(
-        "/proof"
+    assert execution_receipt["properties"]["proof"]["$ref"].endswith("/proof")
+    assert (
+        execution_receipt["$defs"]["proof"]["properties"]["proof_purpose"]["const"]
+        == "tradeExecution"
     )
-    assert execution_receipt["$defs"]["proof"]["properties"][
-        "proof_purpose"
-    ]["const"] == "tradeExecution"
     assert execution_receipt_delivery["properties"]["kind"]["const"] == (
         "nth.dao.trade.execution-receipt-delivery"
     )
@@ -3961,8 +3956,7 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
         "pattern"
     ].startswith("^nth-trade-execution-sha256:")
     assert execution_audit["$id"] == (
-        "https://nthdao.org/schemas/"
-        "trade-execution-audit-payload-v1.json"
+        "https://nthdao.org/schemas/trade-execution-audit-payload-v1.json"
     )
     assert execution_adapter["additionalProperties"] is False
     assert execution_adapter["properties"]["kind"]["const"] == (
@@ -4006,12 +4000,13 @@ def test_agreement_schemas_are_packaged_and_match_wire_constants():
     assert dispute_statement_fetch_response["properties"]["statement"]["$ref"] == (
         trade_dispute_statement["$id"]
     )
-    assert dispute_statement_fetch_response["$defs"]["proof"]["properties"][
-        "proof_purpose"
-    ]["const"] == "tradeDisputeStatementFetchResponse"
-    assert dispute_statement_fetch_audit["properties"]["status"]["const"] == (
-        "served"
+    assert (
+        dispute_statement_fetch_response["$defs"]["proof"]["properties"][
+            "proof_purpose"
+        ]["const"]
+        == "tradeDisputeStatementFetchResponse"
     )
+    assert dispute_statement_fetch_audit["properties"]["status"]["const"] == ("served")
 
 
 def test_trade_dispute_statement_schema_validates_public_vector():
@@ -5914,10 +5909,7 @@ def test_agreement_rest_pages_execution_receipts_by_spine_sequence(tmp_path):
             operation_id=operation_id,
         )
     auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
-    path = (
-        f"/api/v2/trade/orders/{trade_order_digest(order)}"
-        "/execution-receipts"
-    )
+    path = f"/api/v2/trade/orders/{trade_order_digest(order)}/execution-receipts"
 
     newest = client.get(path, params={"limit": 2}, headers=auth)
     cursor = newest.json()["next_cursor"]
@@ -6449,8 +6441,7 @@ def test_operator_import_falls_back_to_signed_recognition_pages(
     } == {2}
 
     batch_path = (
-        f"/api/v2/trade/orders/{trade_order_digest(order)}/"
-        "recognitions/imports"
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/recognitions/imports"
     )
     spine = app.state.nth.trade_rule_recognition_audit.spine
     original_verified_snapshot = spine.verified_snapshot
@@ -7906,13 +7897,14 @@ def test_public_execution_receipt_rejects_unaudited_federated_package(
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == (
-        "execution-receipt-policy-rejected"
+    assert response.json()["detail"]["code"] == ("execution-receipt-policy-rejected")
+    assert (
+        app.state.nth.trade_execution_receipts.get(
+            receipt.execution_id,
+            order=order,
+        )
+        is None
     )
-    assert app.state.nth.trade_execution_receipts.get(
-        receipt.execution_id,
-        order=order,
-    ) is None
 
 
 def test_public_execution_receipt_budget_precedes_runtime_disclosure(tmp_path):
@@ -7927,8 +7919,7 @@ def test_public_execution_receipt_budget_precedes_runtime_disclosure(tmp_path):
     )
 
     response = TestClient(app).post(
-        f"/api/v2/trade/federation/orders/{'sha256:' + '1' * 64}"
-        "/execution-receipts",
+        f"/api/v2/trade/federation/orders/{'sha256:' + '1' * 64}/execution-receipts",
         json={},
     )
 
@@ -8479,8 +8470,8 @@ def test_public_dispute_statement_replays_context_and_returns_stable_ack(
     tmp_path,
 ):
     app = create_app(tmp_path / "node", require_console_auth=True)
-    context, order, receipt, _review, delivery, path = (
-        _live_dispute_statement_delivery(tmp_path, app)
+    context, order, receipt, _review, delivery, path = _live_dispute_statement_delivery(
+        tmp_path, app
     )
     client = TestClient(app)
 
@@ -8513,6 +8504,789 @@ def test_public_dispute_statement_replays_context_and_returns_stable_ack(
     ) == (True, "ok")
     assert first.json()["claim_adjudicated_or_proven_true"] is False
     assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def _live_dispute_statement_fetch(tmp_path, app):
+    context, order, receipt, review, delivery, delivery_path = (
+        _live_dispute_statement_delivery(tmp_path, app)
+    )
+    client = TestClient(app)
+    retained = client.post(
+        delivery_path,
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert retained.status_code == 202, retained.text
+    moment = datetime.now(timezone.utc)
+    if moment.microsecond == 0:
+        moment = moment.replace(microsecond=1)
+    created_at = moment.isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )
+    not_after = (
+        (moment + timedelta(minutes=5))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    statement_digest = delivery.to_dict()["statement_digest"]
+    fetch_request = create_trade_dispute_statement_fetch_request(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=statement_digest,
+        responder_did=app.state.nth.node_identity.as_did(),
+        created_at=created_at,
+        not_after=not_after,
+        nonce="6a" * 16,
+        now=moment,
+    )
+    return (
+        context,
+        order,
+        receipt,
+        review,
+        fetch_request,
+        delivery_path + "/fetch",
+    )
+
+
+def _resign_fetch_envelope(identity, document):
+    rebound = copy.deepcopy(document)
+    rebound["requester_did"] = identity.as_did()
+    rebound["proof"]["verification_method"] = verification_method_for_did(
+        identity.as_did()
+    )
+    binding = {
+        key: copy.deepcopy(value)
+        for key, value in rebound.items()
+        if key not in {"request_id", "proof"}
+    }
+    prefix = rebound["request_id"].rsplit(":", 1)[0] + ":"
+    rebound["request_id"] = (
+        prefix
+        + hashlib.sha256(trade_rules_api.trade_canonical_json(binding)).hexdigest()
+    )
+    rebound["proof"]["proof_value"] = encode_ed25519_signature(
+        identity.sign(
+            signed_document_input(
+                DISPUTE_STATEMENT_FETCH_REQUEST_SIGNING_DOMAIN,
+                rebound,
+            )
+        )
+    )
+    return rebound
+
+
+def test_public_dispute_statement_fetch_replays_signed_response(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, fetch_request, path = (
+        _live_dispute_statement_fetch(tmp_path, app)
+    )
+    client = TestClient(app)
+
+    first = client.post(
+        path,
+        content=fetch_request.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    replay = client.post(
+        path,
+        content=fetch_request.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert first.json()["replayed"] is False
+    assert replay.json()["replayed"] is True
+    assert replay.json()["response"] == first.json()["response"]
+    assert replay.json()["audit_event_id"] == first.json()["audit_event_id"]
+    response = TradeDisputeStatementFetchResponse.from_dict(
+        first.json()["response"],
+        request=fetch_request,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    assert verify_trade_dispute_statement_fetch_response(
+        response,
+        request=fetch_request,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ) == (True, "ok")
+    audit_event = SpineEvent.from_dict(first.json()["audit_event"])
+    assert trade_rules_api.verify_trade_dispute_statement_fetch_audit_event(
+        audit_event,
+        fetch_request,
+        response,
+        review=review,
+        receipt=receipt,
+        order=order,
+    ) == (True, "ok")
+    assert first.json()["imported_by_requester"] is False
+    assert first.json()["claim_adjudicated_or_proven_true"] is False
+    assert len(app.state.nth.trade_dispute_statement_fetch_coordinators) == 1
+    assert app.state.nth.spine.verify_chain() == (True, "ok")
+
+
+def test_public_dispute_statement_fetch_rejects_tamper_before_lookup(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, _order, _receipt, _review, fetch_request, path = (
+        _live_dispute_statement_fetch(tmp_path, app)
+    )
+    document = fetch_request.to_dict()
+    document["proof"]["proof_value"] = "A" * 86
+    lookups = 0
+    original_get = app.state.nth.trade_dispute_statements.get
+
+    def counted_get(*args, **kwargs):
+        nonlocal lookups
+        lookups += 1
+        return original_get(*args, **kwargs)
+
+    monkeypatch.setattr(app.state.nth.trade_dispute_statements, "get", counted_get)
+
+    def context_must_not_load(*_args, **_kwargs):
+        raise AssertionError("invalid signature must fail before context lookup")
+
+    monkeypatch.setattr(
+        app.state.nth.trade_order_store,
+        "get",
+        context_must_not_load,
+    )
+
+    response = TestClient(app).post(path, json=document)
+
+    assert response.status_code == 400
+    assert lookups == 0
+
+
+def test_public_fetch_hides_missing_context_from_signed_outsider(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, _order, _receipt, _review, fetch_request, path = (
+        _live_dispute_statement_fetch(tmp_path, app)
+    )
+    outsider = AgentIdentity.generate(label="fetch-outsider")
+    outsider_request = _resign_fetch_envelope(
+        outsider,
+        fetch_request.to_dict(),
+    )
+    client = TestClient(app)
+
+    existing = client.post(path, json=outsider_request)
+
+    missing_document = copy.deepcopy(outsider_request)
+    missing_document["order_digest"] = "sha256:" + ("f" * 64)
+    missing_document = _resign_fetch_envelope(outsider, missing_document)
+    missing_path = path.replace(
+        fetch_request.to_dict()["order_digest"],
+        missing_document["order_digest"],
+    )
+    missing = client.post(missing_path, json=missing_document)
+
+    assert existing.status_code == 404
+    assert missing.status_code == 404
+    assert existing.json() == missing.json()
+
+
+def test_public_fetch_maps_missing_retry_capacity_and_audit_readback(tmp_path):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, fetch_request, path = (
+        _live_dispute_statement_fetch(tmp_path, app)
+    )
+    moment = datetime.now(timezone.utc)
+    if moment.microsecond == 0:
+        moment = moment.replace(microsecond=1)
+    missing_request = create_trade_dispute_statement_fetch_request(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest="sha256:" + ("e" * 64),
+        responder_did=app.state.nth.node_identity.as_did(),
+        created_at=moment.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        not_after=(moment + timedelta(minutes=5))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        nonce="73" * 16,
+        now=moment,
+    )
+    client = TestClient(app)
+
+    json_headers = {"Content-Type": "application/json"}
+    missing = client.post(
+        path,
+        content=missing_request.canonical_bytes,
+        headers=json_headers,
+    )
+    retry = client.post(
+        path,
+        content=missing_request.canonical_bytes,
+        headers=json_headers,
+    )
+
+    assert missing.status_code == 404
+    assert retry.status_code == 429
+    assert retry.headers["retry-after"] == "1"
+
+    capacity_app = create_app(tmp_path / "capacity", require_console_auth=True)
+    _context, _order, _receipt, _review, capacity_request, capacity_path = (
+        _live_dispute_statement_fetch(tmp_path / "capacity-fixture", capacity_app)
+    )
+    capacity_app.state.nth.trade_dispute_statement_fetch_journal = (
+        TradeDisputeStatementFetchJournal(
+            capacity_app.state.nth.workspace,
+            max_bytes=1,
+        )
+    )
+    capacity = TestClient(capacity_app).post(
+        capacity_path,
+        content=capacity_request.canonical_bytes,
+        headers=json_headers,
+    )
+    assert capacity.status_code == 507
+
+    successful = client.post(
+        path,
+        content=fetch_request.canonical_bytes,
+        headers=json_headers,
+    )
+    assert successful.status_code == 200, successful.text
+
+    def fail_readback(_event_id):
+        raise OSError("simulated Spine readback failure")
+
+    app.state.nth.spine.reconcile_append = fail_readback
+    audit_unavailable = client.post(
+        path,
+        content=fetch_request.canonical_bytes,
+        headers=json_headers,
+    )
+    assert audit_unavailable.status_code == 503
+    assert audit_unavailable.json()["detail"]["safe_to_retry"] is True
+
+
+def test_public_dispute_statement_fetch_budget_precedes_context_disclosure(
+    tmp_path,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    per_client = RateLimiter(max_per_window=1, window_seconds=60)
+    global_limiter = RateLimiter(max_per_window=1, window_seconds=60)
+    per_client.check("testclient")
+    global_limiter.check("global")
+    app.state.nth.trade_dispute_statement_fetch_limiter = per_client
+    app.state.nth.trade_dispute_statement_fetch_global_limiter = global_limiter
+    path = (
+        f"/api/v2/trade/federation/orders/sha256:{'1' * 64}"
+        f"/execution-receipts/nth-trade-execution-sha256:{'2' * 64}"
+        f"/reviews/nth-trade-review-sha256:{'3' * 64}"
+        "/dispute-statements/fetch"
+    )
+
+    response = TestClient(app).post(path, json={})
+
+    assert response.status_code == 429
+
+
+def test_operator_dispute_statement_fetch_verifies_without_importing(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    context, order, receipt, review, delivery, federation_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    statement = delivery.statement.to_dict()
+    statement_digest = delivery.to_dict()["statement_digest"]
+    observed_requests = []
+
+    def fetch_from_peer(
+        _target_url,
+        _order_digest,
+        _execution_id,
+        _review_id,
+        document,
+    ):
+        fetch_request = TradeDisputeStatementFetchRequest.from_dict(
+            document,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        observed_requests.append(fetch_request)
+        response = create_trade_dispute_statement_fetch_response(
+            context["taker"],
+            request=fetch_request,
+            statement=statement,
+            review=review,
+            receipt=receipt,
+            order=order,
+            served_at=datetime.now(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+            now=datetime.now(timezone.utc),
+        )
+        audit_payload = trade_rules_api.trade_dispute_statement_fetch_audit_payload(
+            fetch_request,
+            response,
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        served_at = datetime.fromisoformat(
+            response.to_dict()["served_at"].replace("Z", "+00:00")
+        )
+        audit_event, _created = SignedEventLog(
+            tmp_path / "remote-spine" / "events.jsonl",
+            context["taker"],
+        ).append_unique(
+            trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_FETCH_SERVED,
+            audit_payload,
+            unique_payload_fields=("request_id",),
+            ts_ms=int(served_at.timestamp() * 1_000),
+        )
+        return 200, {
+            "request_digest": trade_dispute_statement_fetch_request_digest(
+                fetch_request,
+                review=review,
+                receipt=receipt,
+                order=order,
+            ),
+            "response_digest": trade_dispute_statement_fetch_response_digest(
+                response,
+                request=fetch_request,
+                review=review,
+                receipt=receipt,
+                order=order,
+            ),
+            "audit_event_id": audit_event.event_id,
+            "audit_event": audit_event.to_dict(),
+            "response": response.to_dict(),
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_fetch_to_peer",
+        fetch_from_peer,
+    )
+    local_path = (
+        federation_path.replace(
+            "/api/v2/trade/federation/",
+            "/api/v2/trade/",
+        )
+        + "/fetch"
+    )
+    response = TestClient(app).post(
+        local_path,
+        json={
+            "target_url": "http://127.0.0.1:18083",
+            "statement_digest": statement_digest,
+        },
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "dispute-statement-fetched-verified"
+    assert response.json()["imported"] is False
+    assert response.json()["claim_adjudicated_or_proven_true"] is False
+    assert response.json()["remote_audit_event_verified"] is True
+    assert response.json()["remote_audit_chain_verified"] is False
+    assert len(observed_requests) == 1
+    assert observed_requests[0].to_dict()["requester_did"] == (
+        context["maker"].as_did()
+    )
+    assert observed_requests[0].to_dict()["responder_did"] == (
+        context["taker"].as_did()
+    )
+
+    def network_must_not_run(*_args, **_kwargs):
+        raise AssertionError("completed requester outbox must replay offline")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_fetch_to_peer",
+        network_must_not_run,
+    )
+    replay = TestClient(app).post(
+        local_path,
+        json={
+            "target_url": "http://127.0.0.1:18083",
+            "statement_digest": statement_digest,
+        },
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed_from_outbox"] is True
+    assert replay.json()["request"] == response.json()["request"]
+
+    restarted_app = create_app(tmp_path / "node", require_console_auth=True)
+    restarted = TestClient(restarted_app).post(
+        local_path,
+        json={
+            "target_url": "http://127.0.0.1:18083",
+            "statement_digest": statement_digest,
+        },
+        headers={"Authorization": f"Bearer {restarted_app.state.nth_console_token}"},
+    )
+    assert restarted.status_code == 200, restarted.text
+    assert restarted.json()["replayed_from_outbox"] is True
+    assert restarted.json()["request"] == response.json()["request"]
+
+    def fetch_with_forged_audit(*args, **kwargs):
+        status, peer_body = fetch_from_peer(*args, **kwargs)
+        forged = copy.deepcopy(peer_body)
+        forged["audit_event"]["payload"]["statement_digest"] = "sha256:" + ("f" * 64)
+        return status, forged
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_fetch_to_peer",
+        fetch_with_forged_audit,
+    )
+    tampered = TestClient(app).post(
+        local_path,
+        json={
+            "target_url": "http://127.0.0.1:18084",
+            "statement_digest": statement_digest,
+        },
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+    assert tampered.status_code == 502
+    assert "invalid signed fetch binding" in tampered.json()["detail"]
+
+
+def test_operator_dispute_statement_fetch_reuses_request_after_timeout(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, _order, _receipt, _review, delivery, federation_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    local_path = (
+        federation_path.replace(
+            "/api/v2/trade/federation/",
+            "/api/v2/trade/",
+        )
+        + "/fetch"
+    )
+    observed = []
+
+    def timeout_peer(_url, _order, _execution, _review, document):
+        observed.append(copy.deepcopy(document))
+        raise TimeoutError("simulated lost response")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_fetch_to_peer",
+        timeout_peer,
+    )
+    payload = {
+        "target_url": "http://127.0.0.1:18083",
+        "statement_digest": delivery.to_dict()["statement_digest"],
+    }
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+
+    first = TestClient(app).post(local_path, json=payload, headers=headers)
+    second = TestClient(app).post(local_path, json=payload, headers=headers)
+
+    assert first.status_code == 502
+    assert second.status_code == 502
+    assert len(observed) == 2
+    assert observed[0] == observed[1]
+
+
+def test_dispute_statement_fetch_real_two_node_wire_and_responder_restart(
+    tmp_path,
+):
+    requester_root = tmp_path / "requester"
+    responder_root = tmp_path / "responder"
+    requester_app = create_app(requester_root, require_console_auth=True)
+    responder_app = create_app(responder_root, require_console_auth=True)
+    context = _setup(
+        tmp_path / "fixtures",
+        maker=requester_app.state.nth.node_identity,
+        taker=responder_app.state.nth.node_identity,
+    )
+    order = _order(context)
+    receipt = _current_execution_receipt(context, order)
+    for app in (requester_app, responder_app):
+        _configure_live_execution_receiver(app, context)
+        _retain_order_and_receipt(app, context, order, receipt)
+
+    moment = datetime.now(timezone.utc)
+    if moment.microsecond == 0:
+        moment = moment.replace(microsecond=1)
+    timestamp = moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    review = create_trade_receipt_review(
+        context["taker"],
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        verifier_policy=context["taker_policy"],
+        adapter_resolver=context["adapter_resolver"],
+        adapter_policy=context["adapter_policy"],
+        content_resolver=context["content_resolver"],
+        schema_validator=context["schema_validator"],
+        decision="disputed",
+        reason_codes=["result.mismatch"],
+        reviewed_at=timestamp,
+        now=moment,
+    )
+    for app in (requester_app, responder_app):
+        app.state.nth.trade_receipt_review_coordinator.record(
+            review,
+            receipt=receipt,
+            order=order,
+            verifier_policy=context["taker_policy"],
+            adapter_policy=context["adapter_policy"],
+            observed_at_ms=int(moment.timestamp() * 1_000),
+        )
+    rule_binding = order.to_dict()["rule_bindings"][0]
+    statement = create_trade_dispute_statement(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_type="response",
+        reason_codes=["executor.contests-review"],
+        claim=_dispute_claim(),
+        rule_action={
+            **rule_binding,
+            "hook": "fulfillment.deliver",
+            "hook_version": "1",
+        },
+        package_resolver=context["package_store"],
+        created_at=timestamp,
+        now=moment,
+    )
+    delivery = create_trade_dispute_statement_delivery(
+        context["maker"],
+        statement=statement,
+        review=review,
+        receipt=receipt,
+        order=order,
+        package_resolver=context["package_store"],
+        created_at=timestamp,
+        not_after=(moment + timedelta(minutes=5))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        now=moment,
+    )
+    federation_base = (
+        f"/api/v2/trade/federation/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}/reviews/{review.review_id}"
+    )
+    retained = TestClient(responder_app).post(
+        federation_base + "/dispute-statements",
+        content=delivery.canonical_bytes,
+        headers={"Content-Type": "application/json"},
+    )
+    assert retained.status_code == 202, retained.text
+
+    port = _free_tcp_port()
+    target_url = f"http://127.0.0.1:{port}"
+    local_path = (
+        federation_base.replace(
+            "/api/v2/trade/federation/",
+            "/api/v2/trade/",
+        )
+        + "/dispute-statements/fetch"
+    )
+    with _UvicornThreadServer(responder_app, port):
+        fetched = TestClient(requester_app).post(
+            local_path,
+            json={
+                "target_url": target_url,
+                "statement_digest": delivery.to_dict()["statement_digest"],
+            },
+            headers={
+                "Authorization": (f"Bearer {requester_app.state.nth_console_token}")
+            },
+        )
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["replayed_from_outbox"] is False
+    fetch_request_document = fetched.json()["request"]
+
+    restarted_responder = create_app(responder_root, require_console_auth=True)
+    _configure_live_execution_receiver(restarted_responder, context)
+    with _UvicornThreadServer(restarted_responder, port):
+        status, replay = web_v2_api._post_trade_dispute_statement_fetch_to_peer(
+            target_url,
+            trade_order_digest(order),
+            receipt.execution_id,
+            review.review_id,
+            fetch_request_document,
+        )
+
+    assert status == 200
+    assert replay["replayed"] is True
+    assert replay["response"] == fetched.json()["response"]
+    assert replay["audit_event_id"] == fetched.json()["remote_audit_event_id"]
+
+
+def test_operator_dispute_statement_fetch_rejects_peer_binding_tamper(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, _order, _receipt, _review, delivery, federation_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+
+    def forged_peer(*_args, **_kwargs):
+        return 200, {
+            "request_digest": "sha256:" + ("0" * 64),
+            "response_digest": "sha256:" + ("0" * 64),
+            "audit_event_id": "0" * 64,
+            "response": {},
+        }
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_post_trade_dispute_statement_fetch_to_peer",
+        forged_peer,
+    )
+    local_path = (
+        federation_path.replace(
+            "/api/v2/trade/federation/",
+            "/api/v2/trade/",
+        )
+        + "/fetch"
+    )
+
+    response = TestClient(app).post(
+        local_path,
+        json={
+            "target_url": "http://127.0.0.1:18083",
+            "statement_digest": delivery.to_dict()["statement_digest"],
+        },
+        headers={"Authorization": f"Bearer {app.state.nth_console_token}"},
+    )
+
+    assert response.status_code == 502
+    assert "invalid signed fetch response" in response.json()["detail"]
+
+
+def test_fetch_transport_pins_responder_before_bounded_post(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node")
+    context, order, receipt, review, delivery, _path = _live_dispute_statement_delivery(
+        tmp_path,
+        app,
+        receiver_role="maker",
+    )
+    moment = datetime.now(timezone.utc)
+    if moment.microsecond == 0:
+        moment = moment.replace(microsecond=1)
+    fetch_request = create_trade_dispute_statement_fetch_request(
+        context["maker"],
+        review=review,
+        receipt=receipt,
+        order=order,
+        statement_digest=delivery.to_dict()["statement_digest"],
+        responder_did=context["taker"].as_did(),
+        created_at=moment.isoformat(timespec="microseconds").replace(
+            "+00:00",
+            "Z",
+        ),
+        not_after=(moment + timedelta(minutes=5))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        now=moment,
+    )
+    post_calls = 0
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("203.0.113.20",),
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        lambda *_args, **_kwargs: b"{}",
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        lambda *_args, **_kwargs: ({"did": context["maker"].as_did()}, None),
+    )
+
+    def post(*_args, **_kwargs):
+        nonlocal post_calls
+        post_calls += 1
+        raise AssertionError("request must not be posted to the wrong DID")
+
+    monkeypatch.setattr(
+        "nth_dao.web.market_federation_poll._urllib_post_json_pinned_raw",
+        post,
+    )
+
+    with pytest.raises(ValueError, match="does not match fetch responder_did"):
+        web_v2_api._post_trade_dispute_statement_fetch_to_peer(
+            "https://peer.example",
+            trade_order_digest(order),
+            receipt.execution_id,
+            review.review_id,
+            fetch_request.to_dict(),
+        )
+    assert post_calls == 0
+
+    posted = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        lambda *_args, **_kwargs: ({"did": context["taker"].as_did()}, None),
+    )
+
+    def accept_post(url, resolved_ip, document, **kwargs):
+        posted.append((url, resolved_ip, document, kwargs))
+        return 200, b'{"status":"ok"}'
+
+    monkeypatch.setattr(
+        "nth_dao.web.market_federation_poll._urllib_post_json_pinned_raw",
+        accept_post,
+    )
+    status, body = web_v2_api._post_trade_dispute_statement_fetch_to_peer(
+        "https://peer.example",
+        trade_order_digest(order),
+        receipt.execution_id,
+        review.review_id,
+        fetch_request.to_dict(),
+    )
+
+    assert status == 200
+    assert body == {"status": "ok"}
+    assert len(posted) == 1
+    assert posted[0][1] == "203.0.113.20"
+    assert posted[0][2] == fetch_request.to_dict()
+    assert posted[0][3]["max_bytes"] == 512 * 1024
+    assert posted[0][0].endswith(
+        f"/orders/{trade_order_digest(order)}"
+        f"/execution-receipts/{receipt.execution_id}"
+        f"/reviews/{review.review_id}/dispute-statements/fetch"
+    )
 
 
 def test_public_dispute_statement_maps_resolver_failure_to_503(
@@ -8761,12 +9535,11 @@ def test_operator_creates_and_lists_signed_dispute_statement(tmp_path):
     assert graphed.json()["graph"]["adjudicated_or_proven_true"] is False
     assert unauthenticated_graph.status_code == 401
     assert len(listed.json()["items"]) == 1
-    assert listed.json()["items"][0]["statement_digest"] == (
-        created.json()["statement_digest"]
+    assert (
+        listed.json()["items"][0]["statement_digest"]
+        == (created.json()["statement_digest"])
     )
-    assert listed.json()["items"][0]["claim_status"] == (
-        "signed-unadjudicated-claim"
-    )
+    assert listed.json()["items"][0]["claim_status"] == ("signed-unadjudicated-claim")
     assert listed.json()["items"][0]["audit_status"] == "anchored"
     assert listed.json()["items"][0]["audit_event_id"] == (
         created.json()["audit_event_id"]
@@ -9822,7 +10595,6 @@ def test_operator_delivers_dispute_statement_once_and_reuses_durable_ack(
     statement_created = datetime.fromisoformat(
         created["statement"]["created_at"].replace("Z", "+00:00")
     )
-
     class ImmediateDeliveryDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -9876,7 +10648,6 @@ def test_operator_delivers_dispute_statement_once_and_reuses_durable_ack(
     )
     target = f"{path}/{created['statement_digest']}/deliver"
     client = TestClient(app)
-
     first = client.post(
         target,
         json={"target_url": "http://peer.example/"},
@@ -10472,8 +11243,7 @@ def test_operator_delivers_execution_receipt_and_persists_peer_ack(
     ]
     assert len(anchors) == 1
     history = TestClient(app).get(
-        f"/api/v2/trade/orders/{trade_order_digest(order)}"
-        "/execution-receipts",
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/execution-receipts",
         headers=headers,
     )
     assert history.status_code == 200, history.text
@@ -10545,8 +11315,7 @@ def test_order_reconcile_repairs_retained_receipt_ack_without_restart(tmp_path):
     headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
     client = TestClient(app)
     history_path = (
-        f"/api/v2/trade/orders/{trade_order_digest(order)}"
-        "/execution-receipts"
+        f"/api/v2/trade/orders/{trade_order_digest(order)}/execution-receipts"
     )
 
     before = client.get(history_path, headers=headers)
@@ -10568,6 +11337,135 @@ def test_order_reconcile_repairs_retained_receipt_ack_without_restart(tmp_path):
     assert store.get_pending(receipt_digest) is None
     after = client.get(history_path, headers=headers)
     assert after.json()["items"][0]["federation_status"] == "acknowledged"
+
+
+def test_order_delivery_post_verifies_recipient_on_same_pinned_ip(monkeypatch):
+    recipient = AgentIdentity.generate().as_did()
+    resolved_ip = "198.51.100.19"
+    calls = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: (resolved_ip,),
+    )
+
+    def open_card(url, timeout_seconds, pinned_ip=""):
+        calls.append(("identity", url, pinned_ip, timeout_seconds))
+        challenge = urlsplit(url).query.removeprefix("challenge=")
+        return json.dumps({"challenge": challenge}).encode("utf-8")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        open_card,
+    )
+
+    def verify_card(_peer, card, *, expected_challenge=None):
+        assert expected_challenge == card["challenge"]
+        return ({"did": recipient}, "")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        verify_card,
+    )
+    from nth_dao.web import market_federation_poll
+
+    def post(url, pinned_ip, document, **_kwargs):
+        calls.append(("post", url, pinned_ip, document))
+        return 202, b'{"status":"accepted"}'
+
+    monkeypatch.setattr(
+        market_federation_poll,
+        "_urllib_post_json_pinned_raw",
+        post,
+    )
+
+    status, response = web_v2_api._post_trade_order_delivery_to_peer(
+        "https://peer.example",
+        {"recipient_did": recipient, "order": "private"},
+    )
+
+    assert status == 202
+    assert response == {"status": "accepted"}
+    assert [item[0] for item in calls] == ["identity", "post"]
+    assert calls[0][2] == calls[1][2] == resolved_ip
+
+
+def test_order_delivery_post_rejects_wrong_peer_before_disclosure(monkeypatch):
+    recipient = AgentIdentity.generate().as_did()
+    wrong_peer = AgentIdentity.generate().as_did()
+    post_calls = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("198.51.100.18",),
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        lambda url, *_args, **_kwargs: json.dumps({
+            "challenge": urlsplit(url).query.removeprefix("challenge=")
+        }).encode("utf-8"),
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        lambda *_args, **_kwargs: ({"did": wrong_peer}, ""),
+    )
+    from nth_dao.web import market_federation_poll
+
+    monkeypatch.setattr(
+        market_federation_poll,
+        "_urllib_post_json_pinned_raw",
+        lambda *_args, **_kwargs: post_calls.append(True),
+    )
+
+    with pytest.raises(ValueError, match="does not match Order recipient_did"):
+        web_v2_api._post_trade_order_delivery_to_peer(
+            "https://peer.example",
+            {"recipient_did": recipient, "order": "private"},
+        )
+
+    assert post_calls == []
+
+
+def test_order_delivery_post_rejects_replayed_identity_card(monkeypatch):
+    recipient = AgentIdentity.generate().as_did()
+    post_calls = []
+    monkeypatch.setattr(
+        web_v2_api,
+        "_resolve_operator_trade_peer_ips",
+        lambda _url: ("198.51.100.17",),
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_open_federation_identity_card",
+        lambda *_args, **_kwargs: b"{}",
+    )
+    monkeypatch.setattr(
+        web_v2_api,
+        "_verify_federation_identity_card",
+        lambda _peer, _card, **_kwargs: (
+            None,
+            "identity card challenge did not match",
+        ),
+    )
+    from nth_dao.web import market_federation_poll
+
+    monkeypatch.setattr(
+        market_federation_poll,
+        "_urllib_post_json_pinned_raw",
+        lambda *_args, **_kwargs: post_calls.append(True),
+    )
+
+    with pytest.raises(ValueError, match="challenge did not match"):
+        web_v2_api._post_trade_order_delivery_to_peer(
+            "https://peer.example",
+            {"recipient_did": recipient, "order": "private"},
+        )
+
+    assert post_calls == []
 
 
 def test_execution_receipt_post_verifies_recipient_on_same_pinned_ip(
@@ -10593,6 +11491,7 @@ def test_execution_receipt_post_verifies_recipient_on_same_pinned_ip(
         "_open_federation_identity_card",
         open_card,
     )
+
     def verify_card(_peer, card, *, expected_challenge=None):
         assert expected_challenge == card["challenge"]
         return ({"did": recipient}, "")
@@ -10646,6 +11545,7 @@ def test_execution_receipt_post_rejects_wrong_peer_before_disclosure(
             "challenge": urlsplit(url).query.removeprefix("challenge=")
         }).encode("utf-8"),
     )
+
     def verify_wrong_card(_peer, card, *, expected_challenge=None):
         assert expected_challenge == card["challenge"]
         return ({"did": wrong_peer}, "")
@@ -13491,10 +14391,15 @@ def _execution_audit_components(tmp_path, context):
         tmp_path / "execution-spine.jsonl",
         context["maker"],
     )
-    return store, outbox, spine, TradeExecutionCoordinator(
+    return (
         store,
         outbox,
         spine,
+        TradeExecutionCoordinator(
+            store,
+            outbox,
+            spine,
+        ),
     )
 
 
@@ -13841,16 +14746,12 @@ def test_execution_audit_prepare_counts_temporary_files_in_capacity(
         order=order,
         now_ms=int(_utc("2026-09-01T00:02:00Z").timestamp() * 1000),
     )
-    record_size = next(
-        (
-            measure_root
-            / "trade"
-            / "execution_audit_outbox_v1"
-        ).glob("*.json")
-    ).stat().st_size
-    byte_root = tmp_path / "byte-cap" / "trade" / (
-        "execution_audit_outbox_v1"
+    record_size = (
+        next((measure_root / "trade" / "execution_audit_outbox_v1").glob("*.json"))
+        .stat()
+        .st_size
     )
+    byte_root = tmp_path / "byte-cap" / "trade" / ("execution_audit_outbox_v1")
     byte_root.mkdir(parents=True)
     (byte_root / f"{0:064x}.json.deadbeef.tmp").write_bytes(b"x" * 11)
     byte_limited = TradeExecutionAuditOutbox(
@@ -17334,12 +18235,9 @@ def test_receipt_review_is_public_trade_rule_api():
     assert trade_rules_api.TradeReceiptReview is TradeReceiptReview
     assert trade_rules_api.TradeReceiptReviewStore is TradeReceiptReviewStore
     assert (
-        trade_rules_api.TradeReceiptReviewCoordinator
-        is TradeReceiptReviewCoordinator
+        trade_rules_api.TradeReceiptReviewCoordinator is TradeReceiptReviewCoordinator
     )
-    assert trade_rules_api.create_trade_receipt_review is (
-        create_trade_receipt_review
-    )
+    assert trade_rules_api.create_trade_receipt_review is (create_trade_receipt_review)
     assert trade_rules_api.EVENT_TRADE_RECEIPT_REVIEWED == (
         EVENT_TRADE_RECEIPT_REVIEWED
     )

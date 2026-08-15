@@ -62,19 +62,11 @@ from nth_dao.trade_rules.transport_common import (
     within_clock_skewed_lifetime,
 )
 
-DISPUTE_STATEMENT_FETCH_REQUEST_KIND = (
-    "nth.dao.trade.dispute-statement-fetch-request"
-)
-DISPUTE_STATEMENT_FETCH_RESPONSE_KIND = (
-    "nth.dao.trade.dispute-statement-fetch-response"
-)
+DISPUTE_STATEMENT_FETCH_REQUEST_KIND = "nth.dao.trade.dispute-statement-fetch-request"
+DISPUTE_STATEMENT_FETCH_RESPONSE_KIND = "nth.dao.trade.dispute-statement-fetch-response"
 DISPUTE_STATEMENT_FETCH_PROTOCOL_VERSION = "1"
-DISPUTE_STATEMENT_FETCH_REQUEST_PROOF_PURPOSE = (
-    "tradeDisputeStatementFetchRequest"
-)
-DISPUTE_STATEMENT_FETCH_RESPONSE_PROOF_PURPOSE = (
-    "tradeDisputeStatementFetchResponse"
-)
+DISPUTE_STATEMENT_FETCH_REQUEST_PROOF_PURPOSE = "tradeDisputeStatementFetchRequest"
+DISPUTE_STATEMENT_FETCH_RESPONSE_PROOF_PURPOSE = "tradeDisputeStatementFetchResponse"
 DISPUTE_STATEMENT_FETCH_PROOF_TYPE = "Ed25519Signature2020"
 DISPUTE_STATEMENT_FETCH_REQUEST_SIGNING_DOMAIN = (
     b"nth-dao/trade-dispute-statement-fetch-request/v1"
@@ -210,24 +202,21 @@ def _content_id(
     identifier_field: str,
     prefix: str,
 ) -> str:
-    return prefix + hashlib.sha256(
-        trade_canonical_json(
-            _content_binding(document, identifier_field=identifier_field)
-        )
-    ).hexdigest()
+    return (
+        prefix
+        + hashlib.sha256(
+            trade_canonical_json(
+                _content_binding(document, identifier_field=identifier_field)
+            )
+        ).hexdigest()
+    )
 
 
 def _request_digest(document: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(trade_canonical_json(document)).hexdigest()
 
 
-def _validate_request_static(
-    document: dict[str, Any],
-    *,
-    review: TradeReceiptReview,
-    receipt: TradeExecutionReceipt,
-    order: TradeOrder,
-) -> None:
+def _validate_request_envelope(document: dict[str, Any]) -> None:
     error_type = TradeDisputeStatementFetchRequestRejected
     if not isinstance(document, dict) or set(document) != _REQUEST_FIELDS:
         reject(error_type, "fetch request has missing or unknown fields")
@@ -257,7 +246,10 @@ def _validate_request_static(
         "review_digest",
         "statement_digest",
     ):
-        if not isinstance(document[field], str) or _DIGEST.fullmatch(document[field]) is None:
+        if (
+            not isinstance(document[field], str)
+            or _DIGEST.fullmatch(document[field]) is None
+        ):
             reject(error_type, f"{field} must be a lowercase sha256 digest")
     if (
         not isinstance(document["execution_id"], str)
@@ -279,6 +271,38 @@ def _validate_request_static(
             reject(error_type, f"{field} must be an Ed25519 did:key")
     if document["requester_did"] == document["responder_did"]:
         reject(error_type, "fetch request parties must be different principals")
+
+    created_ns = timestamp_ns(
+        document["created_at"],
+        label="created_at",
+        error_type=error_type,
+    )
+    expiry_ns = timestamp_ns(
+        document["not_after"],
+        label="not_after",
+        error_type=error_type,
+    )
+    if expiry_ns <= created_ns:
+        reject(error_type, "not_after must be later than created_at")
+    validate_transport_proof(
+        document["proof"],
+        signer_did=document["requester_did"],
+        purpose=DISPUTE_STATEMENT_FETCH_REQUEST_PROOF_PURPOSE,
+        created_at=document["created_at"],
+        proof_type=DISPUTE_STATEMENT_FETCH_PROOF_TYPE,
+        error_type=error_type,
+    )
+
+
+def _validate_request_static(
+    document: dict[str, Any],
+    *,
+    review: TradeReceiptReview,
+    receipt: TradeExecutionReceipt,
+    order: TradeOrder,
+) -> None:
+    error_type = TradeDisputeStatementFetchRequestRejected
+    _validate_request_envelope(document)
 
     order_document = order.to_dict()
     receipt_document = receipt.to_dict()
@@ -313,27 +337,6 @@ def _validate_request_static(
     )
     if document["responder_did"] != expected_responder:
         reject(error_type, "responder_did is not the opposing Order party")
-
-    created_ns = timestamp_ns(
-        document["created_at"],
-        label="created_at",
-        error_type=error_type,
-    )
-    expiry_ns = timestamp_ns(
-        document["not_after"],
-        label="not_after",
-        error_type=error_type,
-    )
-    if expiry_ns <= created_ns:
-        reject(error_type, "not_after must be later than created_at")
-    validate_transport_proof(
-        document["proof"],
-        signer_did=document["requester_did"],
-        purpose=DISPUTE_STATEMENT_FETCH_REQUEST_PROOF_PURPOSE,
-        created_at=document["created_at"],
-        proof_type=DISPUTE_STATEMENT_FETCH_PROOF_TYPE,
-        error_type=error_type,
-    )
 
 
 @dataclass(frozen=True, init=False)
@@ -460,6 +463,59 @@ class TradeDisputeStatementFetchRequest:
             reject(error_type, "fetch request is outside its signed lifetime")
 
 
+def preflight_trade_dispute_statement_fetch_request(
+    raw: bytes | str,
+    *,
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    responder_did: str,
+    at: datetime | None = None,
+    max_ttl_seconds: float = DEFAULT_MAX_DISPUTE_STATEMENT_FETCH_TTL_SECONDS,
+    clock_skew_seconds: float = DEFAULT_DISPUTE_STATEMENT_FETCH_CLOCK_SKEW_SECONDS,
+) -> dict[str, Any]:
+    """Verify the signed request envelope before loading retained trade state."""
+
+    error_type = TradeDisputeStatementFetchRequestRejected
+    try:
+        document = parse_trade_json(raw)
+        canonical = trade_canonical_json(document)
+        if len(canonical) > MAX_DISPUTE_STATEMENT_FETCH_REQUEST_BYTES:
+            reject(error_type, "fetch request exceeds byte limit")
+        _validate_request_envelope(document)
+        expected_path = {
+            "order_digest": order_digest,
+            "execution_id": execution_id,
+            "review_id": review_id,
+            "responder_did": responder_did,
+        }
+        for field, expected in expected_path.items():
+            if document[field] != expected:
+                reject(error_type, "fetch request does not match its destination")
+        verify_transport_signature(
+            document,
+            signer_field="requester_did",
+            domain=DISPUTE_STATEMENT_FETCH_REQUEST_SIGNING_DOMAIN,
+            error_type=error_type,
+        )
+        TradeDisputeStatementFetchRequest._create(canonical).assert_observed_at(
+            at=at,
+            max_ttl_seconds=max_ttl_seconds,
+            clock_skew_seconds=clock_skew_seconds,
+        )
+    except (
+        TradeCanonicalJSONError,
+        TradeProofError,
+        TypeError,
+        ValueError,
+        UnicodeError,
+    ) as exc:
+        if isinstance(exc, error_type):
+            raise
+        raise error_type(str(exc)) from exc
+    return document
+
+
 def trade_dispute_statement_fetch_request_digest(
     request: TradeDisputeStatementFetchRequest | dict[str, Any],
     *,
@@ -555,9 +611,7 @@ def create_trade_dispute_statement_fetch_request(
         receipt=verified_receipt,
         order=verified_order,
     )
-    unsigned = TradeDisputeStatementFetchRequest._create(
-        trade_canonical_json(document)
-    )
+    unsigned = TradeDisputeStatementFetchRequest._create(trade_canonical_json(document))
     unsigned.assert_observed_at(
         at=now,
         max_ttl_seconds=max_ttl_seconds,
@@ -618,7 +672,10 @@ def _validate_response_static(
         "review_digest",
         "statement_digest",
     ):
-        if not isinstance(document[field], str) or _DIGEST.fullmatch(document[field]) is None:
+        if (
+            not isinstance(document[field], str)
+            or _DIGEST.fullmatch(document[field]) is None
+        ):
             reject(error_type, f"fetch response {field} is invalid")
     if (
         not isinstance(document["request_id"], str)
@@ -646,7 +703,9 @@ def _validate_response_static(
     if document["order_digest"] != trade_order_digest(order):
         reject(error_type, "fetch response order_digest does not match signed Order")
     if document["receipt_digest"] != execution_receipt_digest(receipt, order=order):
-        reject(error_type, "fetch response receipt_digest does not match signed Receipt")
+        reject(
+            error_type, "fetch response receipt_digest does not match signed Receipt"
+        )
     if document["review_digest"] != receipt_review_digest(
         review,
         receipt=receipt,
