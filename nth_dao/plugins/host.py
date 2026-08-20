@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -14,6 +15,7 @@ from typing import Any, Dict, Protocol, Tuple
 import weakref
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.util.io import InterProcessLock
 
 from .contracts import (
     PLUGIN_HOST_API_VERSION,
@@ -232,6 +234,7 @@ class _PluginRecord:
     bindings: Dict[str, ProviderBinding] = field(default_factory=dict)
     providers: Dict[str, CapabilityProvider] = field(default_factory=dict)
     schemas: Dict[str, CapabilitySchemas] = field(default_factory=dict)
+    audited_capabilities: frozenset[str] = frozenset()
     generation: str = ""
     active_calls: int = 0
     stop_operation: _StopOperation | None = None
@@ -278,6 +281,11 @@ class PluginHost:
             if self.workspace_root is not None
             else None
         )
+        self._refresh_execution_dir = (
+            self.workspace_root / ".nth" / "plugin-host" / "refresh-executions"
+            if self.workspace_root is not None
+            else None
+        )
         self._persisted = (
             self._audit_log.projection() if self._audit_log is not None else {}
         )
@@ -289,6 +297,7 @@ class PluginHost:
         *,
         schemas: Mapping[str, CapabilitySchemas],
         allow_manifest_upgrade: bool = False,
+        audited_capabilities: frozenset[str] | set[str] = frozenset(),
     ) -> None:
         if not isinstance(manifest, PluginManifest):
             raise TypeError("manifest must be a PluginManifest")
@@ -296,6 +305,18 @@ class PluginHost:
             raise TypeError("plugin factory must be callable")
         if type(allow_manifest_upgrade) is not bool:
             raise TypeError("allow_manifest_upgrade must be a boolean")
+        audited = frozenset(audited_capabilities)
+        if any(not isinstance(item, str) or not item for item in audited):
+            raise TypeError("audited capability ids must be non-empty strings")
+        provided_ids = frozenset(item.capability_id for item in manifest.provides)
+        if not audited <= provided_ids:
+            raise PluginContractError(
+                "audited capabilities must be provided by the plugin manifest"
+            )
+        if audited and self._audit_log is None:
+            raise PluginAuthorizationError(
+                "audited capabilities require a host-bound workspace audit"
+            )
         if manifest.runtime != "builtin":
             raise PluginContractError("only builtin manifests may be registered")
         if manifest.publisher_did or manifest.proof:
@@ -360,6 +381,7 @@ class PluginHost:
                 state="authorized" if restored_grants else "installed",
                 grants=restored_grants,
                 schemas=checked_schemas,
+                audited_capabilities=audited,
                 desired_enabled=bool(persisted and persisted.get("desired_enabled")),
             )
 
@@ -702,6 +724,7 @@ class PluginHost:
         payload: Mapping[str, Any],
         *,
         authority: InvocationAuthority,
+        _refresh_invocation_id: str = "",
     ) -> Dict[str, Any]:
         """Invoke one capability through the revocable Trust Kernel boundary."""
 
@@ -726,6 +749,20 @@ class PluginHost:
                 raise PluginAuthorizationError(
                     f"principal is not authorized for capability {capability_id!r}"
                 )
+            if capability_id in record.audited_capabilities:
+                if not _refresh_invocation_id:
+                    raise PluginAuthorizationError(
+                        "capability requires an audited refresh invocation"
+                    )
+                pending = {
+                    item["invocation_id"]: item
+                    for item in self.incomplete_refreshes(binding.plugin_id)
+                }
+                intent = pending.get(_refresh_invocation_id)
+                if intent is None:
+                    raise PluginAuthorizationError(
+                        "audited refresh intent is missing or already terminal"
+                    )
             required = binding.contract.required_permissions
             if not required <= record.grants or not required <= self.policy.allowed_permissions:
                 raise PluginAuthorizationError("capability grants are no longer effective")
@@ -753,6 +790,68 @@ class PluginHost:
             with self._condition:
                 record.active_calls = max(0, record.active_calls - 1)
                 self._condition.notify_all()
+
+    def invoke_audited_refresh(
+        self,
+        binding: ProviderBinding,
+        payload: Mapping[str, Any],
+        *,
+        authority: InvocationAuthority,
+        operator: Mapping[str, str],
+    ) -> Dict[str, Any]:
+        """Invoke an audited capability with durable intent and terminal state."""
+
+        invocation_id = self.begin_refresh(binding.plugin_id, operator=operator)
+        execution_lock = self._refresh_execution_lock(invocation_id)
+        try:
+            execution_lock.acquire()
+        except (OSError, TimeoutError) as exc:
+            try:
+                self.record_refresh(
+                    binding.plugin_id,
+                    operator=operator,
+                    error_type="RefreshExecutionLeaseUnavailable",
+                    invocation_id=invocation_id,
+                )
+            except PluginAuditError as audit_exc:
+                raise audit_exc from exc
+            raise PluginLifecycleError(
+                "audited refresh execution lease is unavailable"
+            ) from exc
+        try:
+            try:
+                result = self.invoke(
+                    binding,
+                    payload,
+                    authority=authority,
+                    _refresh_invocation_id=invocation_id,
+                )
+            except Exception as exc:
+                try:
+                    self.record_refresh(
+                        binding.plugin_id,
+                        operator=operator,
+                        error_type=type(exc).__name__,
+                        invocation_id=invocation_id,
+                    )
+                except PluginAuditError as audit_exc:
+                    raise audit_exc from exc
+                raise
+            result_items = result.get("verified_peers", [])
+            result_count = len(result_items) if isinstance(result_items, list) else 0
+            result_digest = (
+                "sha256:" + hashlib.sha256(canonical_json(result)).hexdigest()
+            )
+            self.record_refresh(
+                binding.plugin_id,
+                operator=operator,
+                invocation_id=invocation_id,
+                result_digest=result_digest,
+                result_count=result_count,
+            )
+            return result
+        finally:
+            execution_lock.release()
 
     def status(self, plugin_id: str) -> PluginStatus:
         with self._lock:
@@ -799,19 +898,120 @@ class PluginHost:
         *,
         operator: Mapping[str, str],
         error_type: str = "",
+        invocation_id: str = "",
+        result_digest: str = "",
+        result_count: int = 0,
     ) -> None:
         """Commit operator attribution for a manual provider refresh."""
         with self._lock:
             self._require_record(plugin_id)
-            event_type = (
-                "plugin.refresh.failed" if error_type else "plugin.refresh.succeeded"
-            )
-            details: Dict[str, Any] = {"error_type": error_type} if error_type else {}
+            if invocation_id:
+                event_type = (
+                    "plugin.refresh.aborted"
+                    if error_type
+                    else "plugin.refresh.completed"
+                )
+                details: Dict[str, Any] = {"invocation_id": invocation_id}
+                if error_type:
+                    details["error_type"] = error_type
+                else:
+                    details["result_digest"] = result_digest
+                    details["result_count"] = result_count
+            else:
+                event_type = (
+                    "plugin.refresh.failed"
+                    if error_type
+                    else "plugin.refresh.succeeded"
+                )
+                details = {"error_type": error_type} if error_type else {}
             self._audit(
                 event_type,
                 plugin_id,
                 self._operator_details(details, operator),
             )
+
+    def begin_refresh(
+        self,
+        plugin_id: str,
+        *,
+        operator: Mapping[str, str],
+    ) -> str:
+        """Durably record refresh intent before any provider side effect."""
+
+        invocation_id = secrets.token_hex(16)
+        with self._lock:
+            record = self._require_record(plugin_id)
+            if record.state != "enabled" or not record.generation:
+                raise PluginInvocationError(
+                    "plugin refresh intent requires an enabled provider"
+                )
+            self._audit(
+                "plugin.refresh.started",
+                plugin_id,
+                self._operator_details(
+                    {"invocation_id": invocation_id}, operator,
+                ),
+            )
+        return invocation_id
+
+    def incomplete_refreshes(self, plugin_id: str = "") -> tuple[Dict[str, str], ...]:
+        if self._audit_log is None:
+            return ()
+        pending = self._audit_log.incomplete_refreshes()
+        if not plugin_id:
+            return pending
+        return tuple(item for item in pending if item["plugin_id"] == plugin_id)
+
+    def abort_incomplete_refresh(
+        self,
+        plugin_id: str,
+        invocation_id: str,
+        *,
+        operator: Mapping[str, str],
+    ) -> None:
+        """Close one crash-left intent as outcome-unknown; never forge success."""
+
+        if (
+            not isinstance(invocation_id, str)
+            or len(invocation_id) != 32
+            or any(char not in "0123456789abcdef" for char in invocation_id)
+        ):
+            raise ValueError("refresh invocation_id is invalid")
+        with self._lock:
+            self._require_record(plugin_id)
+        execution_lock = self._refresh_execution_lock(invocation_id)
+        try:
+            execution_lock.acquire()
+        except (OSError, TimeoutError) as exc:
+            raise PluginLifecycleError("refresh invocation is still active") from exc
+        try:
+            with self._lock:
+                self._require_record(plugin_id)
+                pending = {
+                    item["invocation_id"]: item
+                    for item in self.incomplete_refreshes(plugin_id)
+                }
+                if invocation_id not in pending:
+                    raise PluginInvocationError("refresh intent is not pending")
+                self.record_refresh(
+                    plugin_id,
+                    operator=operator,
+                    error_type="OperatorReconciledOutcomeUnknown",
+                    invocation_id=invocation_id,
+                )
+        finally:
+            execution_lock.release()
+
+    def _refresh_execution_lock(self, invocation_id: str) -> InterProcessLock:
+        if self._refresh_execution_dir is None:
+            raise PluginAuthorizationError(
+                "audited refresh execution requires a workspace"
+            )
+        return InterProcessLock(
+            self._refresh_execution_dir / invocation_id,
+            timeout=0.1,
+            poll=0.02,
+        )
 
     @staticmethod
     def _operator_details(

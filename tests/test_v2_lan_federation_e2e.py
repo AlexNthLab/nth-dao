@@ -165,7 +165,6 @@ def test_plugin_mode_pulls_signed_task_between_real_http_nodes(
 ) -> None:
     """The reviewed plugin path, not the legacy poller, imports node B's feed."""
     import nth_dao.web.market_federation_poll as poll
-    import nth_dao.plugins.network as plugin_network
 
     source_port = _free_port()
     source_url = f"http://127.0.0.1:{source_port}"
@@ -211,8 +210,6 @@ def test_plugin_mode_pulls_signed_task_between_real_http_nodes(
             "_resolve_safe_gossip_ip",
             lambda _url, **_kwargs: "127.0.0.1",
         )
-        monkeypatch.setattr(poll, "_ip_is_internal", lambda _address: False)
-        monkeypatch.setattr(plugin_network, "_public_ip", lambda value: value)
         target_app = create_app(
             target_workspace,
             require_console_auth=False,

@@ -2734,6 +2734,42 @@ def _require_console_bearer_for_governance_mutation(request: Request) -> None:
         raise HTTPException(status_code=401, detail="missing or invalid console token")
 
 
+def _require_federation_operator(request: Request) -> None:
+    """Authorize host-network and seed-registry mutations.
+
+    A valid CapToken authenticates a delegated Agent, but no delegated
+    capability currently grants control over this node's federation network
+    targets.  Keep that authority with the console principal.  Development
+    apps which explicitly disable console authentication remain usable only
+    from the loopback interface (or Starlette's in-process test client).
+    """
+
+    if bool(getattr(request.app.state, "nth_require_console_auth", False)):
+        if not _has_console_bearer(request):
+            raise HTTPException(
+                status_code=403,
+                detail="federation administration requires the console principal",
+            )
+        return
+
+    client_host = (
+        str(request.client.host).strip()
+        if request.client is not None and request.client.host
+        else ""
+    )
+    if client_host == "testclient":
+        return
+    try:
+        loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        raise HTTPException(
+            status_code=403,
+            detail="federation administration requires a loopback client",
+        )
+
+
 def _enforce_recognition_policy_mutation_limit(
     request: Request,
     *,
@@ -21150,6 +21186,7 @@ def register_v2_routes(app: FastAPI) -> None:
         body: FederationPeerBody, request: Request,
     ) -> Dict[str, Any]:
         """Add or remove an operator-managed seed peer URL."""
+        _require_federation_operator(request)
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
@@ -21208,6 +21245,8 @@ def register_v2_routes(app: FastAPI) -> None:
         imported; DID-only or unverifiable peers remain visible in
         ``discovered_peers`` but are skipped for task/product federation.
         """
+        if body.add or body.refresh:
+            _require_federation_operator(request)
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
@@ -21229,6 +21268,7 @@ def register_v2_routes(app: FastAPI) -> None:
     @app.post("/api/v2/market/federation/refresh")
     def v2_market_fed_refresh(request: Request) -> Dict[str, Any]:
         """Synchronously pull configured federation peers once."""
+        _require_federation_operator(request)
         ws = _state_workspace(request)
         peers = _read_fed_peers(ws)
         learned_peers = _read_learned_fed_peers(ws)

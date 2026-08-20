@@ -32,6 +32,8 @@ from nth_dao.plugins import (
     schema_digest,
 )
 from nth_dao.canonical_json import canonical_json
+from nth_dao.plugins.audit import PluginAuditLog
+from nth_dao.util.io import InterProcessLock
 
 
 EMPTY_SCHEMA_BODY = {
@@ -757,6 +759,92 @@ def test_corrupt_plugin_audit_fails_closed(tmp_path: Path) -> None:
         match="chain breaks|hash mismatch|invalid JSON",
     ):
         PluginHost(workspace_root=tmp_path)
+
+
+def test_plugin_audit_reader_waits_for_cross_process_writer_lock(
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    log = PluginAuditLog(audit_path)
+    log.append(
+        "plugin.registered",
+        "org.nth-dao.test",
+        {"manifest_digest": ARTIFACT_DIGEST},
+    )
+    external_writer = InterProcessLock(audit_path, timeout=2.0)
+    external_writer.acquire()
+    entered = threading.Event()
+    finished = threading.Event()
+    records = []
+
+    def read_snapshot() -> None:
+        entered.set()
+        records.extend(log.read_verified())
+        finished.set()
+
+    reader = threading.Thread(target=read_snapshot, daemon=True)
+    reader.start()
+    assert entered.wait(1.0)
+    assert finished.wait(0.15) is False
+    external_writer.release()
+    reader.join(2.0)
+
+    assert finished.is_set()
+    assert len(records) == 1
+
+
+def test_plugin_audit_lock_timeout_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = PluginAuditLog(tmp_path / "audit.jsonl")
+    monkeypatch.setattr(
+        log.lock,
+        "acquire",
+        lambda: (_ for _ in ()).throw(TimeoutError("busy")),
+    )
+
+    with pytest.raises(PluginAuditError, match="lock timed out"):
+        log.read_verified()
+
+
+def test_plugin_audit_lock_io_failure_is_normalized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = PluginAuditLog(tmp_path / "audit.jsonl")
+    monkeypatch.setattr(
+        log.lock,
+        "acquire",
+        lambda: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+
+    with pytest.raises(PluginAuditError, match="lock is unavailable"):
+        log.read_verified()
+
+
+def test_plugin_audit_append_directory_failure_is_normalized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = PluginAuditLog(tmp_path / "missing" / "audit.jsonl")
+    monkeypatch.setattr(log.lock, "acquire", lambda: True)
+    monkeypatch.setattr(log.lock, "release", lambda: None)
+    original_mkdir = Path.mkdir
+
+    def fail_audit_mkdir(path: Path, *args, **kwargs):
+        if path == log.path.parent:
+            raise OSError("read-only filesystem")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_audit_mkdir)
+
+    with pytest.raises(PluginAuditError, match="cannot append plugin audit"):
+        log.append(
+            "plugin.registered",
+            "org.nth-dao.test",
+            {"manifest_digest": ARTIFACT_DIGEST},
+        )
 
 
 def test_hash_valid_plugin_audit_with_invalid_event_details_fails_closed(

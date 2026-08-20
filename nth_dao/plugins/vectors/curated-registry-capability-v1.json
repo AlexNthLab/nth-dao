@@ -1,0 +1,24 @@
+{
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "schema_version": 1,
+  "id": "curated-registry-capability-v1",
+  "capability": {
+    "capability_id": "org.nth-dao.discovery.curated-registry",
+    "version": "2.0.0",
+    "input_schema_digest": "sha256:973184918990071ebfe0825bfefa8690baffcbd4a60e85d3b0b7cc404d4ac592",
+    "output_schema_digest": "sha256:f3b359c141716bd737f93b6f10fbab703bf81515cd26357cbde3fe1b5805478f",
+    "effects": [
+      "filesystem-read",
+      "filesystem-write",
+      "network-read"
+    ],
+    "consistency": "C1",
+    "privacy": "workspace",
+    "security": "verified-input",
+    "cardinality": "many",
+    "deterministic": false,
+    "retention": "durable",
+    "failure_semantics": "retry-safe"
+  },
+  "expected_digest": "sha256:fc84b13371e00ac7047962e40a577fc9461c494d7fc3cdbce8e88fadbdcad76f"
+}

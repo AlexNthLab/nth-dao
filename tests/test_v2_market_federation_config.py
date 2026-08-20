@@ -15,7 +15,13 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
 
+from nth_dao.cap_token import (
+    AUTH_SCHEME_CAP_TOKEN,
+    CAP_A2A_TASK_GET,
+    encode_authorization_header,
+)
 from nth_dao.did_key import encode_ed25519_did_key
+from nth_dao.identity import AgentIdentity
 from nth_dao.web import create_app
 from nth_dao.web.market_federation_poll import FederationCache
 
@@ -171,6 +177,59 @@ def test_federation_status_requires_bearer_when_console_auth_is_enabled(
     )
 
     assert response.status_code == 200, response.text
+
+
+def test_cap_token_cannot_administer_federation_network_targets(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=True)
+    client = TestClient(app)
+    console_headers = {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+    }
+    helper = AgentIdentity.generate(label="federation-read-helper")
+    issued = client.post(
+        "/api/cap_tokens/issue",
+        json={
+            "subject_did": helper.as_did(),
+            "capabilities": [CAP_A2A_TASK_GET],
+        },
+        headers=console_headers,
+    )
+    assert issued.status_code == 200, issued.text
+    cap_headers = {
+        "Authorization": (
+            f"{AUTH_SCHEME_CAP_TOKEN} "
+            f"{encode_authorization_header(issued.json()['token'])}"
+        ),
+    }
+
+    add = client.post(
+        "/api/v2/market/federation/peers",
+        json={"peer_url": "http://169.254.169.254", "action": "add"},
+        headers=cap_headers,
+    )
+    refresh = client.post(
+        "/api/v2/market/federation/refresh",
+        headers=cap_headers,
+    )
+    discover = client.post(
+        "/api/v2/market/federation/discover",
+        json={"actor_id": "admin", "add": True, "refresh": False},
+        headers=cap_headers,
+    )
+
+    assert add.status_code == 403, add.text
+    assert refresh.status_code == 403, refresh.text
+    assert discover.status_code == 403, discover.text
+    assert not (tmp_path / "federation" / "peers.json").exists()
+
+    allowed = client.post(
+        "/api/v2/market/federation/peers",
+        json={"peer_url": "http://127.0.0.1:8081", "action": "add"},
+        headers=console_headers,
+    )
+    assert allowed.status_code == 200, allowed.text
 
 
 def test_public_peer_directory_does_not_expose_private_operator_seed(

@@ -186,8 +186,13 @@ def test_web_runtime_registers_plugin_but_does_not_auto_authorize_or_enable(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["audit"] == {"ok": True, "reason": "ok"}
-    assert body["plugins"][0]["plugin_id"] == status.plugin_id
-    assert "last_error" not in body["plugins"][0]
+    plugin_rows = {
+        item["plugin_id"]: item
+        for item in body["plugins"]
+    }
+    assert plugin_rows[status.plugin_id]["state"] == "installed"
+    assert plugin_rows[status.plugin_id]["desired_enabled"] is False
+    assert "last_error" not in plugin_rows[status.plugin_id]
 
 
 def test_web_plugin_invocation_updates_the_market_visible_cache(tmp_path: Path) -> None:

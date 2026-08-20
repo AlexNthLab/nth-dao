@@ -481,7 +481,7 @@ def register_federation_discovery(
             workspace,
             cache=cache,
             get_seed_peers=get_seed_peers,
-            verify_seed_peer=trust_kernel.verify_seed,
+            verify_seed_peer=trust_kernel.verify_configured_seed,
             verify_gossip_peer=trust_kernel.verify_gossip,
             announce_self=announce_self,
             hello_interval_s=hello_interval_s,

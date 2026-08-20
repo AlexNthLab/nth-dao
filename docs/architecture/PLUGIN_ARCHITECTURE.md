@@ -285,12 +285,48 @@ fail-closed across process restarts and never silently falls back to the
 legacy network path. Plugin code still owns no hidden thread: FastAPI lifespan
 owns, stops, and joins the consumer worker.
 
+The second reference provider is an optional curated-registry accelerator. It
+is installed but unauthorized and disabled by default, reads its opt-in HTTPS
+index URL from `NTH_CURATED_REGISTRY_URL`, and requires the publisher trust root
+in `NTH_CURATED_REGISTRY_PUBLISHER_DID`. Its v2 index is signed and carries a
+monotonic version plus a bounded issued/expiry window. The host persists each
+publisher's accepted version and signed-envelope digest so an old index cannot
+be replayed after restart, while an identical interrupted refresh can retry.
+Bounded index rows are merely candidate peer URLs with optional DID
+hints. A host-owned admission service, not provider code, independently DNS
+checks and IP-pins every row, verifies the peer's signed identity card,
+constrains any DID hint, and applies the same TTL/network quotas as gossip
+peers. DNS uses bounded daemon workers and HTTPS uses an absolute socket
+deadline, so a stalled resolver cannot block lifecycle control indefinitely.
+Registry and gossip hints always require public HTTPS. An operator-configured
+seed or source-bound LAN discovery result may explicitly use private HTTP(S),
+but it receives a `configured` endpoint scope and still uses a pinned IP,
+signed identity card, bounded response, and absolute deadline.
+
+Manual refresh uses a non-blocking per-plugin lease and a per-operator rate
+limit. The global lifecycle lock is released before network I/O; PluginHost's
+generation and active-call accounting make concurrent disable revoke the
+provider and wait for the bounded invocation. Before any refresh side effect,
+the host appends a `plugin.refresh.started` intent. Completion or failure binds
+the same invocation ID, and unmatched intents are exposed in plugin status for
+crash/audit recovery. Successful imports become ordinary learned peers and are
+reverified again by federation polling before use. A registry outage or
+malicious row cannot erase local state or forge a verified peer result.
+Because accepted publisher versions and learned peers are persisted, the
+capability declares durable retention and retry-safe failure semantics. A
+workspace-wide lease covers version acceptance through every learned-peer
+write, so an older process cannot resume stale side effects after a newer
+index. Retrying the same version is allowed only when its signed-envelope
+digest is identical; lower versions and same-version content conflicts fail
+closed. Legacy v1 version-only state requires one publisher version increment
+before this retry guarantee becomes available.
+
 Migration order:
 
 1. plugin manifest, capability contract, registry, and lifecycle tests;
 2. federation discovery as a reviewed built-in provider;
 3. optional curated registry discovery as an accelerator whose results are
-   reverified by the trust kernel;
+   reverified by the trust kernel (reference provider implemented);
 4. agent backends, then transport and message retention providers;
 5. settlement and payment providers only after subprocess isolation and
    mandate-bound commit tests exist.

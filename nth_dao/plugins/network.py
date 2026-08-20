@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
 from nth_dao.did_key import is_did_key
+from nth_dao.federation_transport import validate_configured_peer_ip
 
 
 def _public_ip(value: str) -> str:
@@ -24,6 +25,13 @@ def _public_ip(value: str) -> str:
     ):
         raise ValueError("verified peer resolved_ip must be globally routable")
     return str(address)
+
+
+def _configured_ip(value: str) -> str:
+    try:
+        return validate_configured_peer_ip(value)
+    except ValueError as exc:
+        raise ValueError("configured peer resolved_ip is not allowed") from exc
 
 
 def normalize_peer_url(value: str) -> str:
@@ -60,12 +68,18 @@ class VerifiedPeerEndpoint:
     resolved_ip: str
     verified_at_ms: int
     expires_at_ms: int
+    network_scope: str = "public"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "url", normalize_peer_url(self.url))
         if not isinstance(self.did, str) or not is_did_key(self.did):
             raise ValueError("verified peer did must be an Ed25519 did:key")
-        object.__setattr__(self, "resolved_ip", _public_ip(self.resolved_ip))
+        if self.network_scope not in {"public", "configured"}:
+            raise ValueError("verified peer network_scope is invalid")
+        if self.network_scope == "public" and urlsplit(self.url).scheme != "https":
+            raise ValueError("public verified peer URL must use HTTPS")
+        validate_ip = _public_ip if self.network_scope == "public" else _configured_ip
+        object.__setattr__(self, "resolved_ip", validate_ip(self.resolved_ip))
         if type(self.verified_at_ms) is not int or type(self.expires_at_ms) is not int:
             raise TypeError("verified peer timestamps must be integers")
         if self.verified_at_ms < 0 or not self.verified_at_ms < self.expires_at_ms:

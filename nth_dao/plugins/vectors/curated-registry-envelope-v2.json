@@ -1,0 +1,21 @@
+{
+  "format": "nth-dao-curated-registry-conformance-v1",
+  "schema_version": 1,
+  "id": "curated-registry-envelope-v2",
+  "verify_at_ms": 1787184000000,
+  "expected_publisher_did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+  "document": {
+    "format": "nth-dao-peer-registry-v2",
+    "publisher_did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+    "version": 7,
+    "issued_at": "2026-08-20T00:00:00+00:00",
+    "expires_at": "2026-08-20T12:00:00+00:00",
+    "peers": [
+      {
+        "peer_url": "https://peer.example",
+        "did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"
+      }
+    ],
+    "sig": "2fb877f283906590606cabf72343d306cef79de61c69f72335a10af2d6b7d955ac04768cc85b3374f1f6baad7d3f8c307120d61306fa7d23d07600de97c5c403"
+  }
+}

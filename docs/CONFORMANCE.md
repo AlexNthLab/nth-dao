@@ -92,6 +92,23 @@ Version 2 declares both network read and network write because reverse hello
 announcements are observable outbound effects. Consumers must not treat the
 earlier read-only capability shape as compatible with this contract.
 
+The optional curated-registry accelerator freezes its distinct capability in
+`nth_dao/plugins/vectors/curated-registry-capability-v1.json`. Registry index
+wire format `nth-dao-peer-registry-v2` is an Ed25519-signed envelope bound to a
+locally pinned publisher DID. Conforming consumers enforce its monotonic
+version plus same-version envelope-digest equality, issued/expiry window,
+response size, and row count before considering rows. An identical envelope
+is retry-safe after partial failure; a lower version or same-version content
+conflict is rejected. Rows remain hints, not authorities: consumers reject non-HTTPS
+candidates, independently resolve and pin each candidate IP, verify its signed
+DID identity card, compare any registry DID hint, and apply local learned-peer
+admission limits before reporting success. DNS and HTTPS share bounded caller
+deadlines; a resolver stall cannot hold the capability indefinitely.
+`nth_dao/plugins/vectors/curated-registry-envelope-v2.json` freezes one public
+signed envelope for byte-exact cross-implementation verification; it contains
+no private key. Passing either vector alone does not prove runtime admission
+checks; the negative and integration suites enforce them in the Python host.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

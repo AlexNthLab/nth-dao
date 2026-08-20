@@ -11,12 +11,20 @@ from __future__ import annotations
 import hmac
 import json
 import re
+import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from nth_dao.federation_transport import (
+    get_configured_peer_bytes_pinned,
+    get_https_bytes_pinned,
+    resolve_configured_peer_ip,
+    resolve_safe_public_https_ip,
+)
 from nth_dao.plugins.network import VerifiedPeerEndpoint, normalize_peer_url
 
 
@@ -26,6 +34,27 @@ FEDERATION_PROTOCOL = "nth-dao-federation-v1"
 MAX_FEDERATION_IDENTITY_CARD_BYTES = 64 * 1024
 MAX_FEDERATION_IDENTITY_TEXT = 256
 _BINDING_TTL_MS = 300_000
+
+
+@dataclass(frozen=True)
+class VerifiedFederationIdentity:
+    """A fresh endpoint binding plus metadata safe for learned-peer storage."""
+
+    endpoint: VerifiedPeerEndpoint
+    pubkey_hex: str
+    identity_url: str
+    card_kind: str
+    federation_protocol: str
+
+    def learned_metadata(self) -> Dict[str, Any]:
+        return {
+            "peer_url": self.endpoint.url,
+            "did": self.endpoint.did,
+            "pubkey_hex": self.pubkey_hex,
+            "identity_url": self.identity_url,
+            "card_kind": self.card_kind,
+            "federation_protocol": self.federation_protocol,
+        }
 
 
 def normalize_federation_peer_url(value: str) -> str:
@@ -68,13 +97,18 @@ def open_federation_identity_card(
     url: str,
     timeout_seconds: float,
     resolved_ip: str = "",
+    *,
+    public_https_only: bool = False,
 ) -> bytes:
     """Fetch one bounded card, optionally pinned to a prevalidated IP."""
 
     if resolved_ip:
-        from nth_dao.web.market_federation_poll import _urllib_get_bytes_pinned
-
-        return _urllib_get_bytes_pinned(
+        fetch = (
+            get_https_bytes_pinned
+            if public_https_only
+            else get_configured_peer_bytes_pinned
+        )
+        return fetch(
             url,
             resolved_ip,
             timeout_s=timeout_seconds,
@@ -211,6 +245,7 @@ def fetch_and_verify_federation_identity(
     timeout_seconds: float,
     expected_did: str = "",
     resolved_ip: str = "",
+    public_https_only: bool = False,
 ) -> tuple[Optional[Dict[str, Any]], str]:
     """Fetch and verify the identity card for one peer origin."""
 
@@ -221,8 +256,20 @@ def fetch_and_verify_federation_identity(
             card_url,
             timeout_seconds,
             resolved_ip,
+            public_https_only=public_https_only,
         )
-        card = json.loads(raw.decode("utf-8"))
+        def reject_duplicates(pairs):
+            document = {}
+            for key, value in pairs:
+                if key in document:
+                    raise ValueError(f"identity card repeats field {key!r}")
+                document[key] = value
+            return document
+
+        card = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+        )
     except (
         OSError,
         urllib.error.URLError,
@@ -247,28 +294,89 @@ class FederationTrustKernel:
 
     api_version = FEDERATION_TRUST_API_VERSION
 
-    def verify_seed(self, peer_url: str) -> Optional[VerifiedPeerEndpoint]:
-        from nth_dao.web.market_federation_poll import _resolve_safe_gossip_ip
-
+    def verify_seed_identity(
+        self,
+        peer_url: str,
+        *,
+        timeout_seconds: float = 5.0,
+        public_https_only: bool = True,
+    ) -> Optional[VerifiedFederationIdentity]:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not 0.25 <= float(timeout_seconds) <= 10.0
+        ):
+            raise ValueError("federation identity timeout must be between 0.25 and 10")
+        deadline = time.monotonic() + float(timeout_seconds)
         normalized = normalize_peer_url(peer_url)
-        resolved_ip = _resolve_safe_gossip_ip(normalized)
+        resolver = (
+            resolve_safe_public_https_ip
+            if public_https_only
+            else resolve_configured_peer_ip
+        )
+        resolved_ip = resolver(
+            normalized,
+            timeout_s=min(1.0, float(timeout_seconds)),
+        )
         if resolved_ip is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining < 0.05:
             return None
         metadata, _error = fetch_and_verify_federation_identity(
             normalized,
-            timeout_seconds=5.0,
+            timeout_seconds=remaining,
             resolved_ip=resolved_ip,
+            public_https_only=public_https_only,
         )
         if metadata is None:
             return None
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        return VerifiedPeerEndpoint(
+        endpoint = VerifiedPeerEndpoint(
             url=normalized,
             did=str(metadata["did"]),
             resolved_ip=resolved_ip,
             verified_at_ms=now,
             expires_at_ms=now + _BINDING_TTL_MS,
+            network_scope="public" if public_https_only else "configured",
         )
+        return VerifiedFederationIdentity(
+            endpoint=endpoint,
+            pubkey_hex=str(metadata["pubkey_hex"]),
+            identity_url=str(metadata["identity_url"]),
+            card_kind=str(metadata["card_kind"]),
+            federation_protocol=str(metadata["federation_protocol"]),
+        )
+
+    def verify_seed(self, peer_url: str) -> Optional[VerifiedPeerEndpoint]:
+        verified = self.verify_seed_identity(peer_url)
+        return verified.endpoint if verified is not None else None
+
+    def verify_public_hint_identity(
+        self,
+        peer_url: str,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> Optional[VerifiedFederationIdentity]:
+        """Verify an untrusted registry/gossip hint as public HTTPS only."""
+
+        return self.verify_seed_identity(
+            peer_url,
+            timeout_seconds=timeout_seconds,
+            public_https_only=True,
+        )
+
+    def verify_configured_seed(
+        self,
+        peer_url: str,
+    ) -> Optional[VerifiedPeerEndpoint]:
+        """Verify an operator-selected HTTP(S) or private-LAN seed."""
+
+        verified = self.verify_seed_identity(
+            peer_url,
+            public_https_only=False,
+        )
+        return verified.endpoint if verified is not None else None
 
     def verify_gossip(self, peer_url: str, resolved_ip: str) -> Optional[str]:
         normalized = normalize_peer_url(peer_url)
@@ -276,6 +384,7 @@ class FederationTrustKernel:
             normalized,
             timeout_seconds=5.0,
             resolved_ip=resolved_ip,
+            public_https_only=True,
         )
         if metadata is None:
             return None
@@ -297,6 +406,7 @@ __all__ = [
     "FederationTrustKernel",
     "MAX_FEDERATION_IDENTITY_CARD_BYTES",
     "MAX_FEDERATION_IDENTITY_TEXT",
+    "VerifiedFederationIdentity",
     "fetch_and_verify_federation_identity",
     "normalize_federation_peer_url",
     "open_federation_identity_card",

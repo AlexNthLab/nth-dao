@@ -807,6 +807,12 @@ class WebState:
             workspace_root=workspace,
         )
         self.plugin_lifecycle_lock = threading.RLock()
+        self.curated_registry_refresh_lock = threading.Lock()
+        self.curated_registry_refresh_limiter = RateLimiter(
+            max_per_window=6,
+            window_seconds=60.0,
+            max_tracked_keys=128,
+        )
         self.membership = MembershipManager(workspace)
         self.groups = GroupManager(workspace, membership=self.membership)
         self.registry = AgentRegistry(str(workspace / "team_agents"))
@@ -1174,6 +1180,10 @@ class RevokeCapTokenPayload(BaseModel):
 
 class PluginActionPayload(BaseModel):
     actor_id: str = Field(min_length=1, max_length=256)
+
+
+class CuratedRegistryRefreshPayload(PluginActionPayload):
+    limit: int = Field(default=32, ge=1, le=64)
 
 
 class JoinPayload(BaseModel):
@@ -1926,7 +1936,10 @@ class _UDPLANPublisher:
 def _register_builtin_plugins(state: WebState) -> None:
     """Register reviewed adapters without granting or enabling effects."""
 
-    from nth_dao.plugins.builtin import register_federation_discovery
+    from nth_dao.plugins.builtin import (
+        register_curated_registry_discovery,
+        register_federation_discovery,
+    )
     from nth_dao.web import v2_api
 
     announce_self = None
@@ -1958,6 +1971,14 @@ def _register_builtin_plugins(state: WebState) -> None:
         get_seed_peers=lambda: v2_api._read_fed_peers(state.workspace),
         announce_self=announce_self,
         max_duration_s=v2_api._market_fed_cycle_budget_s(),
+    )
+    register_curated_registry_discovery(
+        state.plugin_host,
+        state.workspace,
+        get_registry_url=lambda: os.environ.get("NTH_CURATED_REGISTRY_URL", ""),
+        get_registry_publisher_did=lambda: os.environ.get(
+            "NTH_CURATED_REGISTRY_PUBLISHER_DID", "",
+        ),
     )
 
 
@@ -3092,12 +3113,21 @@ def create_app(
             raise HTTPException(status_code=400, detail="actor_id is required")
         _require_member(state, actor_id)
         audit_ok, _audit_reason = state.plugin_host.verify_audit()
+        incomplete_refreshes = []
+        if audit_ok:
+            try:
+                incomplete_refreshes = list(
+                    state.plugin_host.incomplete_refreshes()
+                )
+            except PluginAuditError:
+                audit_ok = False
         return {
             "host_api": state.plugin_host.host_api,
             "audit": {
                 "ok": audit_ok,
                 "reason": "ok" if audit_ok else "verification-failed",
             },
+            "incomplete_refreshes": incomplete_refreshes,
             "plugins": [
                 {
                     "plugin_id": item.plugin_id,
@@ -3259,7 +3289,11 @@ def create_app(
                         )
                 raise HTTPException(
                     status_code=503,
-                    detail="federation plugin runtime activation failed",
+                    detail=(
+                        "federation plugin runtime activation failed"
+                        if is_federation
+                        else "plugin runtime activation failed"
+                    ),
                 ) from exc
             return {
                 "changed": True,
@@ -3396,6 +3430,135 @@ def create_app(
                 "result": result,
                 "plugin": _plugin_status_document(FEDERATION_DISCOVERY_PLUGIN_ID),
             }
+
+    @app.post("/api/plugins/registry/refresh")
+    def curated_registry_plugin_refresh_endpoint(
+        request: Request,
+        payload: CuratedRegistryRefreshPayload,
+    ) -> dict[str, Any]:
+        from nth_dao.plugins.builtin import (
+            CURATED_REGISTRY_CAPABILITY_ID,
+            CURATED_REGISTRY_PLUGIN_ID,
+        )
+
+        operator = _require_plugin_operator(request, payload)
+
+        if not state.curated_registry_refresh_lock.acquire(blocking=False):
+            raise HTTPException(
+                status_code=409,
+                detail="curated registry refresh is already running",
+            )
+        try:
+            with state.plugin_lifecycle_lock:
+                current = _plugin_status_or_404(CURATED_REGISTRY_PLUGIN_ID)
+                if current.state != "enabled":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="curated registry plugin is not enabled",
+                    )
+                binding = state.plugin_host.resolve_one(
+                    CURATED_REGISTRY_CAPABILITY_ID,
+                )
+                refresh_limit = state.curated_registry_refresh_limiter.check(
+                    f"{operator['principal_type']}:{operator['actor_id']}"
+                )
+                if not refresh_limit.allowed:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="curated registry refresh rate limit exceeded",
+                        headers={
+                            "Retry-After": str(
+                                max(
+                                    1,
+                                    int(
+                                        refresh_limit.retry_after_seconds + 0.999
+                                    ),
+                                )
+                            )
+                        },
+                    )
+            try:
+                result = state.plugin_host.invoke_audited_refresh(
+                    binding,
+                    {"limit": payload.limit},
+                    authority=InvocationAuthority(
+                        principal=f"local-operator:{payload.actor_id}",
+                        capability_ids=frozenset(
+                            {CURATED_REGISTRY_CAPABILITY_ID}
+                        ),
+                    ),
+                    operator=operator,
+                )
+            except PluginAuditError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="plugin audit commit failed",
+                ) from exc
+            except (PluginDependencyError, PluginInvocationError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="curated registry capability is unavailable",
+                ) from exc
+            except PluginSchemaError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="plugin contract violation",
+                ) from exc
+            except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="curated registry refresh failed",
+                ) from exc
+            return {
+                "refreshed": True,
+                "result": result,
+                "plugin": _plugin_status_document(CURATED_REGISTRY_PLUGIN_ID),
+            }
+        finally:
+            state.curated_registry_refresh_lock.release()
+
+    @app.post("/api/plugins/{plugin_id}/refreshes/{invocation_id}/abort")
+    def plugin_refresh_abort_endpoint(
+        request: Request,
+        plugin_id: str,
+        invocation_id: str,
+        payload: PluginActionPayload,
+    ) -> dict[str, Any]:
+        """Reconcile one crash-left refresh without claiming it succeeded."""
+
+        operator = _require_plugin_operator(request, payload)
+        _plugin_status_or_404(plugin_id)
+        try:
+            state.plugin_host.abort_incomplete_refresh(
+                plugin_id,
+                invocation_id,
+                operator=operator,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="refresh invocation id is invalid",
+            ) from exc
+        except PluginInvocationError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="refresh intent is not pending",
+            ) from exc
+        except PluginLifecycleError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="refresh invocation is still active",
+            ) from exc
+        except PluginAuditError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="plugin audit commit failed",
+            ) from exc
+        return {
+            "aborted": True,
+            "invocation_id": invocation_id,
+            "plugin": _plugin_status_document(plugin_id),
+        }
 
     @app.get("/api/summary")
     def summary(actor_id: str = DEFAULT_ADMIN_ID) -> dict[str, Any]:

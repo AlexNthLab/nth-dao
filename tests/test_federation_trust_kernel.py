@@ -63,7 +63,6 @@ def test_kernel_pins_signed_identity_fetch_to_the_validated_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import nth_dao.plugins.federation_trust as trust
-    import nth_dao.web.market_federation_poll as poll
 
     identity = AgentIdentity.generate(label="remote")
     peer_url = "https://peer.example"
@@ -71,13 +70,21 @@ def test_kernel_pins_signed_identity_fetch_to_the_validated_ip(
     calls = []
 
     monkeypatch.setattr(
-        poll,
-        "_resolve_safe_gossip_ip",
-        lambda url: calls.append(("resolve", url)) or "93.184.216.34",
+        trust,
+        "resolve_safe_public_https_ip",
+        lambda url, **_kwargs: calls.append(("resolve", url)) or "93.184.216.34",
     )
 
-    def open_card(url: str, timeout_seconds: float, resolved_ip: str = "") -> bytes:
-        calls.append(("fetch", url, timeout_seconds, resolved_ip))
+    def open_card(
+        url: str,
+        timeout_seconds: float,
+        resolved_ip: str = "",
+        *,
+        public_https_only: bool = False,
+    ) -> bytes:
+        calls.append(
+            ("fetch", url, timeout_seconds, resolved_ip, public_https_only)
+        )
         return json.dumps(card).encode("utf-8")
 
     monkeypatch.setattr(trust, "open_federation_identity_card", open_card)
@@ -87,28 +94,55 @@ def test_kernel_pins_signed_identity_fetch_to_the_validated_ip(
     assert endpoint is not None
     assert endpoint.did == identity.as_did()
     assert endpoint.resolved_ip == "93.184.216.34"
-    assert calls == [
-        ("resolve", peer_url),
-        (
-            "fetch",
-            f"{peer_url}/.well-known/nth-dao/identity.json",
-            5.0,
-            "93.184.216.34",
+    assert calls[0] == ("resolve", peer_url)
+    assert calls[1][0] == "fetch"
+    assert calls[1][1] == f"{peer_url}/.well-known/nth-dao/identity.json"
+    assert 4.0 <= calls[1][2] <= 5.0
+    assert calls[1][3] == "93.184.216.34"
+    assert calls[1][4] is True
+
+
+def test_kernel_has_an_explicit_operator_configured_lan_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.plugins.federation_trust as trust
+
+    identity = AgentIdentity.generate(label="lan-remote")
+    peer_url = "http://127.0.0.1:8765"
+    card = _signed_card(identity, peer_url)
+    calls = []
+    monkeypatch.setattr(
+        trust,
+        "resolve_configured_peer_ip",
+        lambda url, **_kwargs: calls.append(("resolve", url)) or "127.0.0.1",
+    )
+    monkeypatch.setattr(
+        trust,
+        "open_federation_identity_card",
+        lambda _url, _timeout, _ip, **kwargs: (
+            calls.append(("fetch", kwargs["public_https_only"]))
+            or json.dumps(card).encode("utf-8")
         ),
-    ]
+    )
+
+    endpoint = FederationTrustKernel().verify_configured_seed(peer_url)
+
+    assert endpoint is not None
+    assert endpoint.did == identity.as_did()
+    assert endpoint.resolved_ip == "127.0.0.1"
+    assert calls == [("resolve", peer_url), ("fetch", False)]
 
 
 def test_kernel_rejects_private_binding_even_if_resolver_regresses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import nth_dao.plugins.federation_trust as trust
-    import nth_dao.web.market_federation_poll as poll
 
     identity = AgentIdentity.generate(label="remote")
     monkeypatch.setattr(
-        poll,
-        "_resolve_safe_gossip_ip",
-        lambda _url: "10.0.0.7",
+        trust,
+        "resolve_safe_public_https_ip",
+        lambda _url, **_kwargs: "10.0.0.7",
     )
     monkeypatch.setattr(
         trust,
@@ -124,14 +158,13 @@ def test_kernel_rejects_a_valid_signature_bound_to_another_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import nth_dao.plugins.federation_trust as trust
-    import nth_dao.web.market_federation_poll as poll
 
     identity = AgentIdentity.generate(label="remote")
     card = _signed_card(identity, "https://other.example")
     monkeypatch.setattr(
-        poll,
-        "_resolve_safe_gossip_ip",
-        lambda _url: "93.184.216.34",
+        trust,
+        "resolve_safe_public_https_ip",
+        lambda _url, **_kwargs: "93.184.216.34",
     )
     monkeypatch.setattr(
         trust,
@@ -140,3 +173,25 @@ def test_kernel_rejects_a_valid_signature_bound_to_another_origin(
     )
 
     assert FederationTrustKernel().verify_seed("https://peer.example") is None
+
+
+def test_identity_fetch_rejects_duplicate_wire_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nth_dao.plugins.federation_trust as trust
+
+    monkeypatch.setattr(
+        trust,
+        "open_federation_identity_card",
+        lambda *_args, **_kwargs: b'{"kind":"first","kind":"second"}',
+    )
+
+    metadata, error = trust.fetch_and_verify_federation_identity(
+        "https://peer.example",
+        timeout_seconds=1.0,
+        resolved_ip="93.184.216.34",
+        public_https_only=True,
+    )
+
+    assert metadata is None
+    assert "repeats field" in error

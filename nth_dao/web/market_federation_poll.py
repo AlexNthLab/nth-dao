@@ -26,6 +26,7 @@ from urllib.parse import urlencode, urlsplit
 
 from nth_dao.execution_receipt import now_ms
 from nth_dao.did_key import is_did_key
+from nth_dao.federation_transport import validate_configured_peer_ip
 from nth_dao.market.announcement import (
     TaskAnnouncement,
     announcement_federation_key,
@@ -851,17 +852,21 @@ def federate_once(
             if verified_seed_ips is not None:
                 resolved_ip = verified_seed_ips.get(peer)
                 try:
-                    safe_ip = ipaddress.ip_address(resolved_ip or "")
+                    safe_ip = validate_configured_peer_ip(resolved_ip or "")
                 except ValueError:
-                    safe_ip = None
-                if safe_ip is None or _ip_is_internal(safe_ip):
+                    safe_ip = ""
+                # Operator-configured seeds may intentionally be private-LAN or
+                # loopback peers. Their IP is still pinned to the signed
+                # identity fetch; only gossip-discovered hints require public
+                # HTTPS and the strict internal-address rejection above.
+                if not safe_ip:
                     logger.warning("fed: rejected configured seed IP binding %s", peer)
                     continue
                 key = _gossip_host_key(peer)
                 if key is None:
                     logger.warning("fed: rejected configured seed origin %s", peer)
                     continue
-                pinned_ips[key] = str(safe_ip)
+                pinned_ips[key] = safe_ip
             verified_peer_dids[peer] = peer_did
         peer_did = verified_peer_dids.get(peer, "")
         if not peer_did:

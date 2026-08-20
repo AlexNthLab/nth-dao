@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -20,7 +22,15 @@ class PluginAuditError(RuntimeError):
 
 
 _FIELDS = frozenset(
-    {"seq", "recorded_at", "event_type", "plugin_id", "details", "previous_hash", "event_hash"}
+    {
+        "seq",
+        "recorded_at",
+        "event_type",
+        "plugin_id",
+        "details",
+        "previous_hash",
+        "event_hash",
+    }
 )
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _PLUGIN_ID_RE = re.compile(
@@ -32,14 +42,17 @@ _MAX_AUDIT_LINE_BYTES = 64 * 1024
 _MAX_AUDIT_RECORDS = 100_000
 _EVENT_DETAIL_FIELDS = {
     "plugin.registered": frozenset({"manifest_digest"}),
-    "plugin.upgraded": frozenset(
-        {"previous_manifest_digest", "manifest_digest"}
-    ),
+    "plugin.upgraded": frozenset({"previous_manifest_digest", "manifest_digest"}),
     "plugin.authorized": frozenset({"grants"}),
     "plugin.enable.succeeded": frozenset({"manifest_digest"}),
     "plugin.enable.failed": frozenset({"error_type", "cleanup_failed"}),
     "plugin.disable.succeeded": frozenset(),
     "plugin.disable.failed": frozenset({"error_type"}),
+    "plugin.refresh.started": frozenset({"invocation_id"}),
+    "plugin.refresh.completed": frozenset(
+        {"invocation_id", "result_digest", "result_count"}
+    ),
+    "plugin.refresh.aborted": frozenset({"invocation_id", "error_type"}),
     "plugin.refresh.succeeded": frozenset(),
     "plugin.refresh.failed": frozenset({"error_type"}),
     "plugin.revoked": frozenset(),
@@ -52,6 +65,9 @@ _OPERATOR_EVENT_TYPES = frozenset(
         "plugin.enable.failed",
         "plugin.disable.succeeded",
         "plugin.disable.failed",
+        "plugin.refresh.started",
+        "plugin.refresh.completed",
+        "plugin.refresh.aborted",
         "plugin.refresh.succeeded",
         "plugin.refresh.failed",
         "plugin.revoked",
@@ -82,7 +98,9 @@ def _load_json_object(line: str, *, line_number: int) -> Dict[str, Any]:
 
 def _validate_details(event_type: str, details: Any, *, line_number: int) -> None:
     if not isinstance(details, dict):
-        raise PluginAuditError(f"plugin audit details are invalid at line {line_number}")
+        raise PluginAuditError(
+            f"plugin audit details are invalid at line {line_number}"
+        )
     expected = _EVENT_DETAIL_FIELDS.get(event_type)
     actual = frozenset(details)
     allowed = {expected}
@@ -116,10 +134,37 @@ def _validate_details(event_type: str, details: Any, *, line_number: int) -> Non
         if digest_field not in details:
             continue
         digest = details[digest_field]
-        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        if not isinstance(digest, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", digest
+        ):
             raise PluginAuditError(
                 f"plugin audit manifest digest is invalid at line {line_number}"
             )
+    if "result_digest" in details:
+        digest = details["result_digest"]
+        if not isinstance(digest, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            digest,
+        ):
+            raise PluginAuditError(
+                f"plugin audit result digest is invalid at line {line_number}"
+            )
+    if "invocation_id" in details:
+        invocation_id = details["invocation_id"]
+        if not isinstance(invocation_id, str) or not re.fullmatch(
+            r"[0-9a-f]{32}",
+            invocation_id,
+        ):
+            raise PluginAuditError(
+                f"plugin audit invocation_id is invalid at line {line_number}"
+            )
+    if "result_count" in details and (
+        type(details["result_count"]) is not int
+        or not 0 <= details["result_count"] <= 4096
+    ):
+        raise PluginAuditError(
+            f"plugin audit result_count is invalid at line {line_number}"
+        )
     if "grants" in details:
         grants = details["grants"]
         if (
@@ -163,10 +208,14 @@ def _validate_record(item: Dict[str, Any], *, index: int, previous_hash: str) ->
     if not isinstance(item["plugin_id"], str) or not _PLUGIN_ID_RE.fullmatch(
         item["plugin_id"]
     ):
-        raise PluginAuditError(f"plugin audit plugin_id is invalid at line {line_number}")
+        raise PluginAuditError(
+            f"plugin audit plugin_id is invalid at line {line_number}"
+        )
     event_type = item["event_type"]
     if not isinstance(event_type, str) or event_type not in _EVENT_DETAIL_FIELDS:
-        raise PluginAuditError(f"plugin audit event_type is invalid at line {line_number}")
+        raise PluginAuditError(
+            f"plugin audit event_type is invalid at line {line_number}"
+        )
     recorded_at = item["recorded_at"]
     try:
         parsed_at = datetime.fromisoformat(recorded_at)
@@ -181,14 +230,67 @@ def _validate_record(item: Dict[str, Any], *, index: int, previous_hash: str) ->
     _validate_details(event_type, item["details"], line_number=line_number)
 
 
+def _pending_refreshes(
+    records: tuple[Dict[str, Any], ...] | list[Dict[str, Any]],
+) -> Dict[str, Dict[str, str]]:
+    pending: Dict[str, Dict[str, str]] = {}
+    used: set[str] = set()
+    for item in records:
+        event_type = item["event_type"]
+        if event_type not in {
+            "plugin.refresh.started",
+            "plugin.refresh.completed",
+            "plugin.refresh.aborted",
+        }:
+            continue
+        invocation_id = item["details"]["invocation_id"]
+        if event_type == "plugin.refresh.started":
+            if invocation_id in used:
+                raise PluginAuditError("plugin refresh invocation is duplicated")
+            used.add(invocation_id)
+            pending[invocation_id] = {
+                "invocation_id": invocation_id,
+                "plugin_id": item["plugin_id"],
+                "recorded_at": item["recorded_at"],
+            }
+            continue
+        started = pending.get(invocation_id)
+        if started is None or started["plugin_id"] != item["plugin_id"]:
+            raise PluginAuditError(
+                "plugin refresh terminal event has no matching intent"
+            )
+        pending.pop(invocation_id)
+    return pending
+
+
 class PluginAuditLog:
     """Append and verify bounded lifecycle metadata without storing secrets."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.lock = InterProcessLock(self.path, timeout=5.0)
+        self._thread_lock = threading.RLock()
 
-    def read_verified(self) -> tuple[Dict[str, Any], ...]:
+    @contextmanager
+    def _exclusive(self):
+        with self._thread_lock:
+            try:
+                self.lock.acquire()
+            except TimeoutError as exc:
+                raise PluginAuditError("plugin audit lock timed out") from exc
+            except OSError as exc:
+                raise PluginAuditError("plugin audit lock is unavailable") from exc
+            try:
+                yield
+            finally:
+                try:
+                    self.lock.release()
+                except OSError as exc:
+                    raise PluginAuditError(
+                        "plugin audit lock release failed"
+                    ) from exc
+
+    def _read_verified_unlocked(self) -> tuple[Dict[str, Any], ...]:
         if not self.path.exists():
             return ()
         try:
@@ -215,10 +317,19 @@ class PluginAuditLog:
             core = {key: item[key] for key in item if key != "event_hash"}
             expected = hashlib.sha256(canonical_json(core)).hexdigest()
             if item["event_hash"] != expected:
-                raise PluginAuditError(f"plugin audit hash mismatch at line {index + 1}")
+                raise PluginAuditError(
+                    f"plugin audit hash mismatch at line {index + 1}"
+                )
             records.append(item)
             previous_hash = expected
+        _pending_refreshes(records)
         return tuple(records)
+
+    def read_verified(self) -> tuple[Dict[str, Any], ...]:
+        """Read one stable snapshot while excluding cross-process appenders."""
+
+        with self._exclusive():
+            return self._read_verified_unlocked()
 
     def append(
         self,
@@ -234,8 +345,20 @@ class PluginAuditLog:
             raise TypeError("plugin audit details must be an object")
         details_copy = json.loads(canonical_json(dict(details)).decode("utf-8"))
         _validate_details(event_type, details_copy, line_number=1)
-        with self.lock:
-            records = self.read_verified()
+        with self._exclusive():
+            records = self._read_verified_unlocked()
+            if event_type in {
+                "plugin.refresh.started",
+                "plugin.refresh.completed",
+                "plugin.refresh.aborted",
+            }:
+                proposed = {
+                    "event_type": event_type,
+                    "plugin_id": plugin_id,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "details": details_copy,
+                }
+                _pending_refreshes([*records, proposed])
             core = {
                 "seq": len(records),
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -251,11 +374,16 @@ class PluginAuditLog:
             encoded = canonical_json(item) + b"\n"
             if len(encoded) > _MAX_AUDIT_LINE_BYTES:
                 raise PluginAuditError("plugin audit record exceeds its size limit")
-            existing_size = self.path.stat().st_size if self.path.exists() else 0
+            try:
+                existing_size = self.path.stat().st_size if self.path.exists() else 0
+            except OSError as exc:
+                raise PluginAuditError(
+                    "cannot inspect plugin audit before append"
+                ) from exc
             if existing_size + len(encoded) > _MAX_AUDIT_BYTES:
                 raise PluginAuditError("plugin audit exceeds its size limit")
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("ab") as stream:
                     stream.write(encoded)
                     stream.flush()
@@ -319,6 +447,12 @@ class PluginAuditLog:
             elif event_type == "plugin.uninstalled":
                 state.pop(plugin_id, None)
         return state
+
+    def incomplete_refreshes(self) -> tuple[Dict[str, str], ...]:
+        """Return durable refresh intents without a terminal audit event."""
+
+        pending = _pending_refreshes(self.read_verified())
+        return tuple(pending[key] for key in sorted(pending))
 
 
 __all__ = ["PluginAuditError", "PluginAuditLog"]
