@@ -50,6 +50,20 @@ _DEFAULT_MAX_RECORDS_PER_PEER = 2_000
 _DEFAULT_MAX_CACHE_RECORDS = 10_000
 _DEFAULT_MAX_CACHE_RECORDS_PER_SOURCE = 2_000
 _DEFAULT_MAX_CACHE_BYTES = 64 * 1024 * 1024
+_MAX_FEDERATION_ERROR_CODE_BYTES = 128
+
+
+def _federation_error_code(value: Any) -> str:
+    """Return a bounded non-sensitive diagnostic code for cache/status use."""
+    if not isinstance(value, str) or not value:
+        return ""
+    if (
+        len(value.encode("utf-8")) <= _MAX_FEDERATION_ERROR_CODE_BYTES
+        and value[0].isalpha()
+        and all(char.isalnum() or char in "._-" for char in value)
+    ):
+        return value
+    return "federation-cycle-failed"
 _DEFAULT_FULL_RECONCILE_MS = 60_000
 
 
@@ -1295,7 +1309,7 @@ class FederationCache:
                 self._source_cursors[source] = (did, cursor, last_full_ms)
             self._rebuild_offer_index_locked()
             self._last_refresh_ms = observed_at
-            self._last_error = str(error or "")[:500]
+            self._last_error = _federation_error_code(error)
             self._last_peer_count = max(0, int(peer_count or 0))
 
     def evict_source(self, source: str) -> None:
@@ -1482,11 +1496,12 @@ def start_poller(
                         else set()
                     )
                     cache.mark_error(
-                        str(exc), peer_count=len(configured | learned),
+                        type(exc).__name__,
+                        peer_count=len(configured | learned),
                     )
                 except Exception:  # noqa: BLE001
                     pass
-                logger.warning("fed poller cycle failed: %s", exc)
+                logger.warning("fed poller cycle failed (%s)", type(exc).__name__)
             if shutdown.wait(interval_s):
                 break
 

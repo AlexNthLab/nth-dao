@@ -40,9 +40,24 @@ _EVENT_DETAIL_FIELDS = {
     "plugin.enable.failed": frozenset({"error_type", "cleanup_failed"}),
     "plugin.disable.succeeded": frozenset(),
     "plugin.disable.failed": frozenset({"error_type"}),
+    "plugin.refresh.succeeded": frozenset(),
+    "plugin.refresh.failed": frozenset({"error_type"}),
     "plugin.revoked": frozenset(),
     "plugin.uninstalled": frozenset(),
 }
+_OPERATOR_EVENT_TYPES = frozenset(
+    {
+        "plugin.authorized",
+        "plugin.enable.succeeded",
+        "plugin.enable.failed",
+        "plugin.disable.succeeded",
+        "plugin.disable.failed",
+        "plugin.refresh.succeeded",
+        "plugin.refresh.failed",
+        "plugin.revoked",
+        "plugin.uninstalled",
+    }
+)
 
 
 def _load_json_object(line: str, *, line_number: int) -> Dict[str, Any]:
@@ -69,10 +84,34 @@ def _validate_details(event_type: str, details: Any, *, line_number: int) -> Non
     if not isinstance(details, dict):
         raise PluginAuditError(f"plugin audit details are invalid at line {line_number}")
     expected = _EVENT_DETAIL_FIELDS.get(event_type)
-    if expected is None or frozenset(details) != expected:
+    actual = frozenset(details)
+    allowed = {expected}
+    if event_type in _OPERATOR_EVENT_TYPES and expected is not None:
+        allowed.add(expected | {"operator"})
+    if expected is None or actual not in allowed:
         raise PluginAuditError(
             f"plugin audit event details are invalid at line {line_number}"
         )
+    if "operator" in details:
+        operator = details["operator"]
+        if not isinstance(operator, dict) or set(operator) != {
+            "actor_id",
+            "principal_type",
+        }:
+            raise PluginAuditError(
+                f"plugin audit operator is invalid at line {line_number}"
+            )
+        for field, limit in (("principal_type", 64), ("actor_id", 256)):
+            value = operator[field]
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value.encode("utf-8")) > limit
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+            ):
+                raise PluginAuditError(
+                    f"plugin audit operator is invalid at line {line_number}"
+                )
     for digest_field in ("manifest_digest", "previous_manifest_digest"):
         if digest_field not in details:
             continue

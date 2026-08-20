@@ -39,6 +39,10 @@ from nth_dao.market.resource_descriptor import (
     MARKET_PUBLICATION_EXTENSION as _MARKET_PUBLICATION_EXTENSION,
     RESOURCE_DESCRIPTOR_EXTENSION as _MARKET_RESOURCE_PROFILE_EXTENSION,
 )
+from nth_dao.plugins.federation_trust import (
+    FEDERATION_IDENTITY_CARD_KIND as _FED_IDENTITY_CARD_KIND,
+    MAX_FEDERATION_IDENTITY_TEXT as _MAX_FED_IDENTITY_HEX,
+)
 from nth_dao.trade_rules.recognition_import_coordinator import (
     RuleRecognitionProofImportBusy as TradeRuleRecognitionImportBusy,
 )
@@ -9413,9 +9417,6 @@ def _market_fed_announce_self(request: Request):
     return announce
 
 
-_MAX_FED_IDENTITY_CARD_BYTES = 64 * 1024
-_MAX_FED_IDENTITY_HEX = 256
-_FED_IDENTITY_CARD_KIND = "nth-dao-identity-card-v1"
 _MAX_FED_DISCOVERY_CANDIDATES = 32
 _MAX_FED_SEED_PEERS = 128
 _MAX_FED_CONFIG_BYTES = 512 * 1024
@@ -9468,25 +9469,9 @@ def _normalize_configured_fed_peer(url: str) -> str:
     for development and two-PC testing. Automatically gossiped peers remain
     restricted by market_federation_poll._is_safe_gossip_url before use.
     """
-    from urllib.parse import urlunsplit
+    from nth_dao.plugins.federation_trust import normalize_federation_peer_url
 
-    raw = str(url or "").strip()
-    if not raw:
-        raise ValueError("peer_url is required")
-    try:
-        parsed = urlsplit(raw)
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError("peer_url is not a valid URL") from exc
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("peer_url must start with http:// or https://")
-    if not parsed.hostname:
-        raise ValueError("peer_url must include a host")
-    if parsed.username or parsed.password:
-        raise ValueError("peer_url must not include credentials")
-    if parsed.query or parsed.fragment:
-        raise ValueError("peer_url must not include query or fragment")
-    path = parsed.path.rstrip("/")
-    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+    return normalize_federation_peer_url(str(url or ""))
 
 
 def _resolve_operator_trade_peer_ips(url: str) -> tuple[str, ...]:
@@ -9967,39 +9952,16 @@ def _discovered_source_ip(source_addr: str) -> Optional[str]:
     except (TypeError, ValueError):
         return None
 
-class _RejectFederationRedirect(urllib.request.HTTPRedirectHandler):
-    """Do not follow identity-card redirects during discovery preflight."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def _open_federation_identity_card(
     url: str,
     timeout_seconds: float,
     resolved_ip: str = "",
 ) -> bytes:
-    """Fetch a bounded identity card without following redirects."""
-    if resolved_ip:
-        from .market_federation_poll import _urllib_get_bytes_pinned
+    """Compatibility wrapper around the reviewed federation trust kernel."""
 
-        return _urllib_get_bytes_pinned(
-            url,
-            resolved_ip,
-            timeout_s=timeout_seconds,
-            max_bytes=_MAX_FED_IDENTITY_CARD_BYTES,
-        )
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json"},
-        method="GET",
-    )
-    opener = urllib.request.build_opener(_RejectFederationRedirect())
-    with opener.open(request, timeout=timeout_seconds) as response:  # noqa: S310
-        body = response.read(_MAX_FED_IDENTITY_CARD_BYTES + 1)
-    if len(body) > _MAX_FED_IDENTITY_CARD_BYTES:
-        raise ValueError("identity card exceeds 64 KiB limit")
-    return body
+    from nth_dao.plugins.federation_trust import open_federation_identity_card
+
+    return open_federation_identity_card(url, timeout_seconds, resolved_ip)
 
 
 def _verify_federation_identity_card(
@@ -10008,115 +9970,15 @@ def _verify_federation_identity_card(
     *,
     expected_challenge: str | None = None,
 ) -> tuple[Optional[Dict[str, Any]], str]:
-    """Verify a peer's signed identity card and bind it to ``peer_url``.
+    """Compatibility wrapper around the reviewed federation trust kernel."""
 
-    This is an authenticity/self-consistency check, not a governance trust
-    decision. It proves that the card was signed by the named Ed25519 key and
-    advertises the same federation URL. A fresh echoed challenge additionally
-    rejects stale cards, but is not channel binding and cannot by itself defeat
-    a live relay. Trust roots, transport security, endorsements, and membership
-    policy remain separate concerns.
-    """
-    try:
-        normalized_peer = _normalize_configured_fed_peer(peer_url)
-    except ValueError as exc:
-        return None, str(exc)
-    if not isinstance(card, dict):
-        return None, "identity card must be a JSON object"
-    if card.get("kind") != _FED_IDENTITY_CARD_KIND:
-        return None, "unsupported identity card kind"
+    from nth_dao.plugins.federation_trust import verify_federation_identity_card
 
-    pubkey_hex = card.get("pubkey_hex")
-    did = card.get("did")
-    signature_hex = card.get("sig")
-    if (
-        not isinstance(pubkey_hex, str)
-        or len(pubkey_hex) != 64
-        or not re.fullmatch(r"[0-9a-fA-F]{64}", pubkey_hex)
-    ):
-        return None, "identity card pubkey_hex is not an Ed25519 key"
-    if (
-        not isinstance(did, str)
-        or len(did) > _MAX_FED_IDENTITY_HEX
-    ):
-        return None, "identity card did is missing or too long"
-    if (
-        not isinstance(signature_hex, str)
-        or len(signature_hex) != 128
-        or not re.fullmatch(r"[0-9a-fA-F]{128}", signature_hex)
-    ):
-        return None, "identity card signature is malformed"
-
-    try:
-        from nth_dao.did_key import decode_ed25519_did_key_hex, is_did_key
-
-        if not is_did_key(did):
-            return None, "identity card did is not a did:key Ed25519 identifier"
-        did_pubkey_hex = decode_ed25519_did_key_hex(did)
-        if not hmac.compare_digest(did_pubkey_hex.lower(), pubkey_hex.lower()):
-            return None, "identity card did does not match pubkey_hex"
-
-        from nth_dao.identity import canonical_json
-        from nacl.signing import VerifyKey
-
-        unsigned = dict(card)
-        unsigned.pop("sig", None)
-        VerifyKey(bytes.fromhex(pubkey_hex)).verify(
-            canonical_json(unsigned), bytes.fromhex(signature_hex),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return None, f"identity card signature verification failed: {exc}"
-
-    federation = card.get("federation")
-    if not isinstance(federation, dict):
-        return None, "identity card has no federation directory"
-    if federation.get("protocol") != "nth-dao-federation-v1":
-        return None, "unsupported federation protocol"
-    if federation.get("enabled") is not True:
-        return None, "peer federation is not enabled"
-    try:
-        claimed_peer = _normalize_configured_fed_peer(
-            str(federation.get("peer_url") or "")
-        )
-    except ValueError:
-        return None, "identity card federation.peer_url is invalid"
-    if claimed_peer != normalized_peer:
-        return None, "identity card federation.peer_url does not match discovery"
-    if "base_url" in card:
-        try:
-            card_base = _normalize_configured_fed_peer(str(card["base_url"]))
-        except ValueError:
-            return None, "identity card base_url is invalid"
-        if card_base != normalized_peer:
-            return None, "identity card base_url does not match discovery"
-    challenge_present = "challenge" in card
-    challenge = card.get("challenge", "")
-    if expected_challenge is None:
-        if challenge_present:
-            return None, "identity card returned an unsolicited challenge"
-    else:
-        if (
-            not isinstance(expected_challenge, str)
-            or re.fullmatch(r"[0-9a-f]{64}", expected_challenge) is None
-        ):
-            return None, "expected identity challenge is invalid"
-        if (
-            not isinstance(challenge, str)
-            or re.fullmatch(r"[0-9a-f]{64}", challenge) is None
-            or not hmac.compare_digest(challenge, expected_challenge)
-        ):
-            return None, "identity card challenge did not match"
-
-    metadata = {
-        "peer_url": normalized_peer,
-        "identity_url": f"{normalized_peer}/.well-known/nth-dao/identity.json",
-        "did": did,
-        "pubkey_hex": pubkey_hex.lower(),
-        "verified_at": datetime.now(timezone.utc).isoformat(),
-        "card_kind": _FED_IDENTITY_CARD_KIND,
-        "federation_protocol": "nth-dao-federation-v1",
-    }
-    return metadata, ""
+    return verify_federation_identity_card(
+        peer_url,
+        card,
+        expected_challenge=expected_challenge,
+    )
 
 
 def _fetch_and_verify_federation_identity(
@@ -10869,38 +10731,299 @@ def _read_fed_peers(ws: Optional[Path]) -> List[str]:
     return out
 
 
+_FED_RUNTIME_PREFERENCES = frozenset({"legacy", "plugin", "suspended"})
+_MAX_FED_RUNTIME_PREFERENCE_BYTES = 4096
+
+
+def _fed_runtime_preference_file(ws: Optional[Path]) -> Optional[Path]:
+    if ws is None:
+        return None
+    return ws / ".nth" / "plugin-host" / "federation-runtime.json"
+
+
+def _fed_runtime_owner_target(ws: Optional[Path]) -> Optional[Path]:
+    if ws is None:
+        return None
+    return ws / ".nth" / "plugin-host" / "federation-runtime-owner"
+
+
+def _claim_market_fed_runtime_owner(
+    state: Any,
+    ws: Optional[Path],
+    *,
+    timeout_s: float = 0.05,
+) -> bool:
+    """Hold an OS lock for the lifetime of this process-owned runtime."""
+    if getattr(state, "market_fed_runtime_owner_lock", None) is not None:
+        return True
+    target = _fed_runtime_owner_target(ws)
+    if target is None:
+        return False
+    owner_lock = InterProcessLock(target, timeout=timeout_s, poll=0.01)
+    try:
+        owner_lock.acquire()
+    except TimeoutError:
+        return False
+    state.market_fed_runtime_owner_lock = owner_lock
+    return True
+
+
+def _release_market_fed_runtime_owner(state: Any) -> None:
+    owner_lock = getattr(state, "market_fed_runtime_owner_lock", None)
+    state.market_fed_runtime_owner_lock = None
+    if owner_lock is not None:
+        owner_lock.release()
+
+
+def _read_fed_runtime_preference(ws: Optional[Path]) -> str:
+    """Read the operator-selected runtime, defaulting old workspaces to legacy."""
+    path = _fed_runtime_preference_file(ws)
+    if path is None:
+        return "legacy"
+    try:
+        if path.exists() and path.stat().st_size > _MAX_FED_RUNTIME_PREFERENCE_BYTES:
+            logger.warning("federation runtime preference is oversized; failing closed")
+            return "suspended"
+        document = safe_load_json(path, fallback=None)
+    except OSError as exc:
+        logger.warning(
+            "federation runtime preference unavailable (%s)",
+            type(exc).__name__,
+        )
+        return "suspended"
+    if document is None:
+        # ``safe_load_json`` returns the fallback for malformed JSON as well
+        # as a missing file. Only absence preserves the legacy compatibility
+        # default; a present but unreadable preference must fail closed.
+        try:
+            return "suspended" if path.exists() else "legacy"
+        except OSError:
+            return "suspended"
+    if (
+        not isinstance(document, dict)
+        or type(document.get("version")) is not int
+        or document.get("version") != 1
+    ):
+        logger.warning("invalid federation runtime preference; failing closed")
+        return "suspended"
+    mode = document.get("mode")
+    if not isinstance(mode, str) or mode not in _FED_RUNTIME_PREFERENCES:
+        logger.warning("unknown federation runtime preference; failing closed")
+        return "suspended"
+    return str(mode)
+
+
+def _write_fed_runtime_preference(ws: Optional[Path], mode: str) -> None:
+    if mode not in _FED_RUNTIME_PREFERENCES:
+        raise ValueError("invalid federation runtime preference")
+    path = _fed_runtime_preference_file(ws)
+    if path is None:
+        raise RuntimeError("workspace unavailable")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with InterProcessLock(path, timeout=2.0):
+        atomic_write_json(path, {"version": 1, "mode": mode})
+
+
+def _initialize_fed_runtime_preference(state: Any, ws: Optional[Path]) -> str:
+    """Synchronize process state with the cross-process preference file."""
+    mode = _read_fed_runtime_preference(ws)
+    state.market_fed_runtime_preference = mode
+    plugin_enabled = False
+    nth_state = getattr(state, "nth", None)
+    host = getattr(nth_state, "plugin_host", None)
+    if host is not None:
+        from nth_dao.plugins.builtin import FEDERATION_DISCOVERY_PLUGIN_ID
+
+        try:
+            plugin_enabled = (
+                host.status(FEDERATION_DISCOVERY_PLUGIN_ID).state == "enabled"
+            )
+        except KeyError:
+            plugin_enabled = False
+    state.market_fed_plugin_suspended = mode == "suspended" or (
+        mode == "plugin" and not plugin_enabled
+    )
+    return mode
+
+
 def _launch_market_fed_poller(
     request: Request, cache: Any, ws: Optional[Path],
 ) -> None:
     """Start one lifecycle-owned federation poller under the caller's lock."""
-    from .market_federation_poll import start_poller
-
     state = request.app.state
     interval = _env_float(
         "NTH_FED_POLL_INTERVAL_S", 20.0, minimum=1.0, maximum=3600.0,
     )
     stop_event = threading.Event()
-    thread = start_poller(
+    if not _claim_market_fed_runtime_owner(state, ws):
+        logger.warning(
+            "federation runtime is owned by another process; poller not started",
+        )
+        return
+    mode = _initialize_fed_runtime_preference(state, ws)
+    binding = _enabled_federation_plugin_binding(request)
+    if mode == "suspended" or (mode == "plugin" and binding is None):
+        _release_market_fed_runtime_owner(state)
+        return
+    if mode == "legacy":
+        binding = None
+    try:
+        if binding is not None:
+            thread = _start_plugin_market_fed_poller(
+                binding,
+                cache,
+                stop_event=stop_event,
+                interval_s=interval,
+                principal="local-system:federation-poller",
+            )
+            mode = "plugin"
+        else:
+            thread = _start_legacy_market_fed_poller(
+                request,
+                cache,
+                ws,
+                stop_event=stop_event,
+                interval_s=interval,
+            )
+            mode = "legacy"
+    except Exception:
+        _release_market_fed_runtime_owner(state)
+        raise
+
+    state.market_fed_poller_stop_event = stop_event
+    state.market_fed_poller_thread = thread
+    state.market_fed_poller_started = True
+    state.market_fed_poller_mode = mode
+    logger.info(
+        "nth market federation %s poller started (%d peers, %.0fs)",
+        mode,
+        len(set(_read_fed_peers(ws)) | set(_read_learned_fed_peers(ws))),
+        interval,
+    )
+
+
+def _start_legacy_market_fed_poller(
+    request: Request,
+    cache: Any,
+    ws: Optional[Path],
+    *,
+    stop_event: threading.Event,
+    interval_s: float,
+):
+    """Start the pre-plugin compatibility poller."""
+    from .market_federation_poll import start_poller
+
+    return start_poller(
         lambda: _read_fed_peers(ws),
         cache,
         get_untrusted_peers=lambda: _read_learned_fed_peers(ws),
         announce_self=_market_fed_announce_self(request),
         stop_event=stop_event,
-        interval_s=interval,
+        interval_s=interval_s,
         verify_gossip_peer=_market_fed_gossip_identity_verifier(
             request, persist_learned=True,
         ),
         verify_seed_peer=_market_fed_gossip_identity_verifier(request),
         max_duration_s=_market_fed_cycle_budget_s(),
     )
-    state.market_fed_poller_stop_event = stop_event
-    state.market_fed_poller_thread = thread
-    state.market_fed_poller_started = True
-    logger.info(
-        "nth market federation poller started (%d peers, %.0fs)",
-        len(set(_read_fed_peers(ws)) | set(_read_learned_fed_peers(ws))),
-        interval,
+
+
+def _start_plugin_market_fed_poller(
+    binding: Any,
+    cache: Any,
+    *,
+    stop_event: threading.Event,
+    interval_s: float,
+    principal: str,
+):
+    """Invoke the enabled discovery capability until revoked or stopped."""
+    from nth_dao.plugins import InvocationAuthority, PluginHostError, PluginSchemaError
+    from nth_dao.plugins.builtin import FEDERATION_DISCOVERY_CAPABILITY_ID
+
+    authority = InvocationAuthority(
+        principal=principal,
+        capability_ids=frozenset({FEDERATION_DISCOVERY_CAPABILITY_ID}),
     )
+
+    def run() -> None:
+        try:
+            while not stop_event.is_set():
+                try:
+                    result = binding.invoke({}, authority=authority)
+                    known_peers = int(result.get("known_peers", 0))
+                    if known_peers <= 0:
+                        break
+                except (PluginHostError, PluginSchemaError) as exc:
+                    cache.mark_error(type(exc).__name__, peer_count=0)
+                    logger.warning(
+                        "federation plugin poller stopped (%s)",
+                        type(exc).__name__,
+                    )
+                    break
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    cache.mark_error(type(exc).__name__, peer_count=0)
+                    logger.warning(
+                        "federation plugin cycle failed (%s)",
+                        type(exc).__name__,
+                    )
+                if stop_event.wait(interval_s):
+                    break
+        finally:
+            stop_event.set()
+
+    thread = threading.Thread(
+        target=run,
+        name="nth-market-federation-plugin",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _enabled_federation_plugin_binding(request: Request):
+    """Resolve the built-in federation capability only while enabled."""
+    from nth_dao.plugins import PluginDependencyError
+    from nth_dao.plugins.builtin import (
+        FEDERATION_DISCOVERY_CAPABILITY_ID,
+        FEDERATION_DISCOVERY_PLUGIN_ID,
+    )
+
+    nth_state = getattr(request.app.state, "nth", None)
+    host = getattr(nth_state, "plugin_host", None)
+    if host is None:
+        return None
+    try:
+        if host.status(FEDERATION_DISCOVERY_PLUGIN_ID).state != "enabled":
+            return None
+        return host.resolve_one(FEDERATION_DISCOVERY_CAPABILITY_ID)
+    except (KeyError, PluginDependencyError):
+        return None
+
+
+def _stop_market_fed_poller(
+    state: Any,
+    *,
+    timeout_s: float = 10.0,
+    release_owner: bool = True,
+) -> bool:
+    """Stop one poller; retain ownership state if its thread is still alive."""
+    stop_event = getattr(state, "market_fed_poller_stop_event", None)
+    if stop_event is not None and hasattr(stop_event, "set"):
+        stop_event.set()
+    thread = getattr(state, "market_fed_poller_thread", None)
+    if thread is not None and hasattr(thread, "join"):
+        thread.join(timeout=timeout_s)
+    if thread is not None and hasattr(thread, "is_alive") and thread.is_alive():
+        logger.warning("federation poller did not stop in time")
+        return False
+    state.market_fed_poller_started = False
+    state.market_fed_poller_stop_event = None
+    state.market_fed_poller_thread = None
+    state.market_fed_poller_mode = ""
+    if release_owner:
+        _release_market_fed_runtime_owner(state)
+    return True
+
 
 def _clear_finished_market_fed_poller(state: Any) -> None:
     """Clear a stopped poller only after its thread has really exited."""
@@ -10917,6 +11040,8 @@ def _clear_finished_market_fed_poller(state: Any) -> None:
     state.market_fed_poller_started = False
     state.market_fed_poller_stop_event = None
     state.market_fed_poller_thread = None
+    state.market_fed_poller_mode = ""
+    _release_market_fed_runtime_owner(state)
 
 
 def _state_market_fed_cache(request: Request):
@@ -10924,9 +11049,12 @@ def _state_market_fed_cache(request: Request):
     state = request.app.state
     _clear_finished_market_fed_poller(state)
     ws = _state_workspace(request)
+    _initialize_fed_runtime_preference(state, ws)
     has_peers = bool(_read_fed_peers(ws) or _read_learned_fed_peers(ws))
     cache = getattr(state, "market_fed_cache", None)
     if not has_peers:
+        return cache
+    if getattr(state, "market_fed_plugin_suspended", False):
         return cache
     if cache is not None and getattr(state, "market_fed_poller_started", False):
         return cache
@@ -11136,10 +11264,15 @@ def _ensure_market_fed_cache_for_update(request: Request):
             cache = FederationCache()
             state.market_fed_cache = cache
         ws = _state_workspace(request)
+        _initialize_fed_runtime_preference(state, ws)
         peers = _read_fed_peers(ws)
         learned_peers = _read_learned_fed_peers(ws)
-        if (peers or learned_peers) and not getattr(
-            state, "market_fed_poller_started", False
+        if (
+            (peers or learned_peers)
+            and not getattr(state, "market_fed_plugin_suspended", False)
+            and not getattr(
+                state, "market_fed_poller_started", False
+            )
         ):
             _launch_market_fed_poller(request, cache, ws)
     return cache
@@ -11249,7 +11382,7 @@ def _discover_and_import_market_federation(
             )
         except Exception as exc:  # noqa: BLE001
             cache.mark_error(
-                str(exc),
+                type(exc).__name__,
                 peer_count=len(set(peers) | set(_read_learned_fed_peers(ws))),
             )
 
@@ -11265,6 +11398,90 @@ def _discover_and_import_market_federation(
     ]
     request.app.state.market_fed_last_discovery = dict(status)
     return status
+
+
+def activate_market_federation_plugin(app: FastAPI) -> bool:
+    """Switch federation polling to the enabled Trust Kernel capability.
+
+    Returns ``True`` when a plugin poller is running. An enabled plugin with
+    no configured or learned peers is valid and returns ``False``.
+    """
+    request = Request({"type": "http", "app": app})
+    state = app.state
+    with _FED_POLLER_LOCK:
+        ws = _state_workspace(request)
+        _initialize_fed_runtime_preference(state, ws)
+        _clear_finished_market_fed_poller(state)
+        if not _claim_market_fed_runtime_owner(state, ws):
+            raise RuntimeError(
+                "federation runtime is owned by another workspace process"
+            )
+        existing_mode = str(getattr(state, "market_fed_poller_mode", "") or "")
+        if (
+            existing_mode == "plugin"
+            and getattr(state, "market_fed_poller_started", False)
+        ):
+            state.market_fed_plugin_suspended = False
+            return True
+        if getattr(state, "market_fed_poller_started", False):
+            if not _stop_market_fed_poller(state, release_owner=False):
+                raise RuntimeError(
+                    "existing federation poller did not stop; plugin activation aborted"
+                )
+        state.market_fed_plugin_suspended = False
+        if _enabled_federation_plugin_binding(request) is None:
+            raise RuntimeError("federation plugin is not enabled")
+        _write_fed_runtime_preference(ws, "plugin")
+        state.market_fed_runtime_preference = "plugin"
+        if not (_read_fed_peers(ws) or _read_learned_fed_peers(ws)):
+            return False
+        cache = getattr(state, "market_fed_cache", None)
+        if cache is None:
+            from .market_federation_poll import FederationCache
+
+            cache = FederationCache()
+            state.market_fed_cache = cache
+        _launch_market_fed_poller(request, cache, ws)
+        if getattr(state, "market_fed_poller_mode", "") != "plugin":
+            raise RuntimeError("federation plugin poller did not start")
+        return True
+
+
+def claim_market_federation_runtime_owner(app: FastAPI) -> None:
+    """Reserve this workspace runtime before mutating PluginHost state."""
+    request = Request({"type": "http", "app": app})
+    with _FED_POLLER_LOCK:
+        ws = _state_workspace(request)
+        if not _claim_market_fed_runtime_owner(app.state, ws):
+            raise RuntimeError(
+                "federation runtime is owned by another workspace process"
+            )
+
+
+def abandon_market_federation_runtime_owner(app: FastAPI) -> None:
+    """Release a reservation that never became a running poller."""
+    with _FED_POLLER_LOCK:
+        if not getattr(app.state, "market_fed_poller_started", False):
+            _release_market_fed_runtime_owner(app.state)
+
+
+def suspend_market_federation_plugin(app: FastAPI) -> bool:
+    """Stop plugin polling and forbid implicit legacy fallback this process."""
+    state = app.state
+    with _FED_POLLER_LOCK:
+        ws = _state_workspace(Request({"type": "http", "app": app}))
+        if not _claim_market_fed_runtime_owner(state, ws):
+            raise RuntimeError(
+                "federation runtime is owned by another workspace process"
+            )
+        state.market_fed_plugin_suspended = True
+        try:
+            _write_fed_runtime_preference(ws, "suspended")
+        except Exception:
+            _stop_market_fed_poller(state)
+            raise
+        state.market_fed_runtime_preference = "suspended"
+        return _stop_market_fed_poller(state)
 
 
 def start_market_federation_runtime(app: FastAPI) -> None:
@@ -11326,20 +11543,7 @@ def stop_market_federation_runtime(app: FastAPI) -> None:
     else:
         state.market_fed_discovery_stop_event = None
         state.market_fed_discovery_thread = None
-    stop_event = getattr(state, "market_fed_poller_stop_event", None)
-    if stop_event is not None and hasattr(stop_event, "set"):
-        stop_event.set()
-    thread = getattr(state, "market_fed_poller_thread", None)
-    if thread is not None and hasattr(thread, "join"):
-        thread.join(timeout=10.0)
-    if thread is not None and hasattr(thread, "is_alive") and thread.is_alive():
-        logger.warning(
-            "federation poller is still stopping after the shutdown timeout",
-        )
-        return
-    state.market_fed_poller_started = False
-    state.market_fed_poller_stop_event = None
-    state.market_fed_poller_thread = None
+    _stop_market_fed_poller(state)
 
 
 def _market_announcement_compatibility_status(
@@ -11454,6 +11658,10 @@ def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
 def _market_fed_status(request: Request) -> Dict[str, Any]:
     _clear_finished_market_fed_poller(request.app.state)
     ws = _state_workspace(request)
+    runtime_preference = _initialize_fed_runtime_preference(
+        request.app.state,
+        ws,
+    )
     cache = getattr(request.app.state, "market_fed_cache", None)
     status = (
         cache.status()
@@ -11511,6 +11719,13 @@ def _market_fed_status(request: Request) -> Dict[str, Any]:
         "poller_started": bool(
             getattr(request.app.state, "market_fed_poller_started", False)
         ),
+        "poller_mode": str(
+            getattr(request.app.state, "market_fed_poller_mode", "") or ""
+        ),
+        "plugin_suspended": bool(
+            getattr(request.app.state, "market_fed_plugin_suspended", False)
+        ),
+        "runtime_preference": runtime_preference,
         "announcement_compatibility": _market_announcement_compatibility_status(
             ws,
             _state_node_identity(request),

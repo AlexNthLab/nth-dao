@@ -28,7 +28,7 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nth_dao.a2a_card import (
     A2A_SPEC_VERSION as _A2A_SPEC_VERSION,
@@ -90,7 +90,17 @@ from nth_dao.mandate import (
 )
 from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
 from nth_dao.orchestration import MissionStore
-from nth_dao.plugins import PluginHost, PluginHostPolicy
+from nth_dao.plugins import (
+    InvocationAuthority,
+    PluginAuditError,
+    PluginAuthorizationError,
+    PluginDependencyError,
+    PluginHost,
+    PluginHostPolicy,
+    PluginInvocationError,
+    PluginLifecycleError,
+    PluginSchemaError,
+)
 from nth_dao.web.rate_limit import (
     PersistentRateLimiter,
     RateLimiter,
@@ -779,7 +789,10 @@ class _MtimeCache:
 
 class WebState:
     def __init__(self, workspace: Path):
+        from nth_dao.web.market_federation_poll import FederationCache
+
         self.workspace = workspace
+        self.market_fed_cache = FederationCache()
         self.plugin_host = PluginHost(
             policy=PluginHostPolicy(
                 allowed_permissions=frozenset(
@@ -793,6 +806,7 @@ class WebState:
             ),
             workspace_root=workspace,
         )
+        self.plugin_lifecycle_lock = threading.RLock()
         self.membership = MembershipManager(workspace)
         self.groups = GroupManager(workspace, membership=self.membership)
         self.registry = AgentRegistry(str(workspace / "team_agents"))
@@ -1156,6 +1170,10 @@ class IssueCapTokenPayload(BaseModel):
 
 class RevokeCapTokenPayload(BaseModel):
     token_id: str
+
+
+class PluginActionPayload(BaseModel):
+    actor_id: str = Field(min_length=1, max_length=256)
 
 
 class JoinPayload(BaseModel):
@@ -1909,44 +1927,36 @@ def _register_builtin_plugins(state: WebState) -> None:
     """Register reviewed adapters without granting or enabling effects."""
 
     from nth_dao.plugins.builtin import register_federation_discovery
-    from nth_dao.plugins.network import VerifiedPeerEndpoint
     from nth_dao.web import v2_api
-    from nth_dao.web.market_federation_poll import _resolve_safe_gossip_ip
 
-    def verify_seed(peer_url: str) -> Optional[VerifiedPeerEndpoint]:
-        resolved_ip = _resolve_safe_gossip_ip(peer_url)
-        if resolved_ip is None:
-            return None
-        metadata, _error = v2_api._fetch_and_verify_federation_identity(
-            peer_url,
-            timeout_seconds=5.0,
-            resolved_ip=resolved_ip,
-        )
-        if metadata is None:
-            return None
-        now = int(time.time() * 1000)
-        return VerifiedPeerEndpoint(
-            url=peer_url,
-            did=str(metadata["did"]),
-            resolved_ip=resolved_ip,
-            verified_at_ms=now,
-            expires_at_ms=now + 300_000,
-        )
+    announce_self = None
+    public_base_url = _configured_public_base_url()
+    node_did = state.node_identity.as_did() if state.node_identity is not None else ""
+    if public_base_url and node_did:
+        try:
+            from nth_dao.discovery.federation_registry import (
+                normalize_learned_peer_url,
+            )
 
-    def verify_gossip(peer_url: str, resolved_ip: str) -> Optional[str]:
-        metadata, _error = v2_api._fetch_and_verify_federation_identity(
-            peer_url,
-            timeout_seconds=5.0,
-            resolved_ip=resolved_ip,
-        )
-        return str(metadata["did"]) if metadata is not None else None
+            public_base_url = normalize_learned_peer_url(public_base_url)
+        except ValueError:
+            public_base_url = ""
+        if public_base_url:
+            def announce_self(peers):
+                from nth_dao.web.market_federation_poll import announce_peer_hello
+
+                return announce_peer_hello(
+                    list(peers),
+                    peer_url=public_base_url,
+                    did=node_did,
+                )
 
     register_federation_discovery(
         state.plugin_host,
         state.workspace,
+        cache=state.market_fed_cache,
         get_seed_peers=lambda: v2_api._read_fed_peers(state.workspace),
-        verify_seed_peer=verify_seed,
-        verify_gossip_peer=verify_gossip,
+        announce_self=announce_self,
         max_duration_s=v2_api._market_fed_cycle_budget_s(),
     )
 
@@ -1955,7 +1965,10 @@ def create_app(
     workspace: str | Path | None = None,
     *,
     require_console_auth: bool | None = None,
+    allow_unauthenticated_plugin_admin: bool = False,
 ) -> FastAPI:
+    if type(allow_unauthenticated_plugin_admin) is not bool:
+        raise TypeError("allow_unauthenticated_plugin_admin must be a boolean")
     if require_console_auth is None:
         # Existing unit tests construct explicit temporary workspaces and
         # assert route-level membership/permission semantics. The real
@@ -2071,8 +2084,12 @@ def create_app(
     app.add_middleware(_FederationBodyLimitMiddleware)
 
     app.state.nth = state
+    app.state.market_fed_cache = state.market_fed_cache
     app.state.nth_console_token = _load_or_create_console_token()
     app.state.nth_require_console_auth = require_console_auth
+    app.state.nth_allow_unauthenticated_plugin_admin = (
+        allow_unauthenticated_plugin_admin
+    )
     app.state.nth_public_base_url = _configured_public_base_url()
     # 公网部署可关掉"页面内嵌 token"(NTH_CONSOLE_TOKEN_IN_PAGE=0)。
     app.state.nth_embed_console_token = _embed_console_token_in_page()
@@ -3074,23 +3091,311 @@ def create_app(
         if not actor_id:
             raise HTTPException(status_code=400, detail="actor_id is required")
         _require_member(state, actor_id)
-        audit_ok, audit_reason = state.plugin_host.verify_audit()
+        audit_ok, _audit_reason = state.plugin_host.verify_audit()
         return {
             "host_api": state.plugin_host.host_api,
-            "audit": {"ok": audit_ok, "reason": audit_reason},
+            "audit": {
+                "ok": audit_ok,
+                "reason": "ok" if audit_ok else "verification-failed",
+            },
             "plugins": [
                 {
                     "plugin_id": item.plugin_id,
                     "state": item.state,
                     "desired_enabled": item.desired_enabled,
+                    "declared_permissions": list(item.declared_permissions),
                     "authorized_permissions": list(item.authorized_permissions),
                     "provided_capabilities": list(item.provided_capabilities),
                     "risk_tier": item.risk_tier,
-                    "last_error": item.last_error,
+                    "last_error_type": (
+                        item.last_error.partition(":")[0][:128]
+                        if item.last_error
+                        else ""
+                    ),
                 }
                 for item in state.plugin_host.list_status()
             ],
         }
+
+    def _plugin_status_or_404(plugin_id: str):
+        try:
+            return state.plugin_host.status(plugin_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="plugin not found") from exc
+
+    def _plugin_status_document(plugin_id: str) -> dict[str, Any]:
+        item = _plugin_status_or_404(plugin_id)
+        error_type = item.last_error.partition(":")[0] if item.last_error else ""
+        return {
+            "plugin_id": item.plugin_id,
+            "state": item.state,
+            "desired_enabled": item.desired_enabled,
+            "declared_permissions": list(item.declared_permissions),
+            "authorized_permissions": list(item.authorized_permissions),
+            "provided_capabilities": list(item.provided_capabilities),
+            "risk_tier": item.risk_tier,
+            "last_error_type": error_type[:128],
+        }
+
+    def _require_plugin_operator(
+        request: Request,
+        payload: PluginActionPayload,
+    ) -> dict[str, str]:
+        """Bind high-risk plugin lifecycle actions to the console principal."""
+        principal = get_request_principal(request)
+        if bool(getattr(app.state, "nth_require_console_auth", False)):
+            _require_console_principal(request)
+        else:
+            if principal.get("type") != "anonymous" or not bool(
+                getattr(
+                    app.state,
+                    "nth_allow_unauthenticated_plugin_admin",
+                    False,
+                )
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="plugin administration requires the local console",
+                )
+            client_host = request.client.host if request.client is not None else ""
+            if client_host != "testclient":
+                try:
+                    is_loopback = ipaddress.ip_address(client_host).is_loopback
+                except ValueError:
+                    is_loopback = False
+                if not is_loopback:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="plugin administration requires a loopback client",
+                    )
+        _require_admin(state, payload.actor_id)
+        principal_type = (
+            "console"
+            if principal.get("type") == "console"
+            else "anonymous-local"
+        )
+        return {
+            "principal_type": principal_type,
+            "actor_id": payload.actor_id,
+        }
+
+    @app.post("/api/plugins/{plugin_id}/enable")
+    def plugin_enable_endpoint(
+        request: Request,
+        plugin_id: str,
+        payload: PluginActionPayload,
+    ) -> dict[str, Any]:
+        from nth_dao.plugins.builtin import FEDERATION_DISCOVERY_PLUGIN_ID
+        from nth_dao.web import v2_api
+
+        operator = _require_plugin_operator(request, payload)
+        with state.plugin_lifecycle_lock:
+            current = _plugin_status_or_404(plugin_id)
+            is_federation = plugin_id == FEDERATION_DISCOVERY_PLUGIN_ID
+            if is_federation:
+                try:
+                    v2_api.claim_market_federation_runtime_owner(app)
+                except RuntimeError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="federation runtime is owned by another process",
+                    ) from exc
+            if current.state == "enabled":
+                if is_federation:
+                    try:
+                        v2_api.activate_market_federation_plugin(app)
+                    except (OSError, RuntimeError) as exc:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="federation plugin runtime activation failed",
+                        ) from exc
+                return {
+                    "changed": False,
+                    "plugin": _plugin_status_document(plugin_id),
+                }
+            try:
+                state.plugin_host.authorize(
+                    plugin_id,
+                    set(current.declared_permissions),
+                    operator=operator,
+                )
+                state.plugin_host.enable(plugin_id, operator=operator)
+                if is_federation:
+                    v2_api.activate_market_federation_plugin(app)
+            except PluginAuthorizationError as exc:
+                if is_federation:
+                    v2_api.abandon_market_federation_runtime_owner(app)
+                raise HTTPException(
+                    status_code=403,
+                    detail="plugin authorization denied",
+                ) from exc
+            except PluginAuditError as exc:
+                if is_federation:
+                    v2_api.abandon_market_federation_runtime_owner(app)
+                raise HTTPException(
+                    status_code=503,
+                    detail="plugin audit commit failed",
+                ) from exc
+            except (PluginDependencyError, PluginLifecycleError) as exc:
+                if is_federation:
+                    v2_api.abandon_market_federation_runtime_owner(app)
+                raise HTTPException(
+                    status_code=409,
+                    detail="plugin lifecycle transition rejected",
+                ) from exc
+            except (OSError, RuntimeError) as exc:
+                if is_federation:
+                    try:
+                        state.plugin_host.disable(plugin_id, operator=operator)
+                    except PluginLifecycleError:
+                        logger.warning(
+                            "federation plugin activation rollback failed",
+                        )
+                    try:
+                        v2_api.suspend_market_federation_plugin(app)
+                    except (OSError, RuntimeError):
+                        logger.warning(
+                            "federation runtime suspension persistence failed",
+                        )
+                raise HTTPException(
+                    status_code=503,
+                    detail="federation plugin runtime activation failed",
+                ) from exc
+            return {
+                "changed": True,
+                "plugin": _plugin_status_document(plugin_id),
+            }
+
+    @app.post("/api/plugins/{plugin_id}/disable")
+    def plugin_disable_endpoint(
+        request: Request,
+        plugin_id: str,
+        payload: PluginActionPayload,
+    ) -> dict[str, Any]:
+        from nth_dao.plugins.builtin import FEDERATION_DISCOVERY_PLUGIN_ID
+        from nth_dao.web import v2_api
+
+        operator = _require_plugin_operator(request, payload)
+        with state.plugin_lifecycle_lock:
+            _plugin_status_or_404(plugin_id)
+            is_federation = plugin_id == FEDERATION_DISCOVERY_PLUGIN_ID
+            if is_federation:
+                try:
+                    v2_api.claim_market_federation_runtime_owner(app)
+                except RuntimeError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="federation runtime is owned by another process",
+                    ) from exc
+            lifecycle_error = None
+            try:
+                changed = state.plugin_host.disable(plugin_id, operator=operator)
+            except PluginDependencyError as exc:
+                if is_federation:
+                    v2_api.abandon_market_federation_runtime_owner(app)
+                raise HTTPException(
+                    status_code=409,
+                    detail="plugin dependency prevents disable",
+                ) from exc
+            except PluginLifecycleError as exc:
+                changed = False
+                lifecycle_error = exc
+            if is_federation:
+                try:
+                    stopped = v2_api.suspend_market_federation_plugin(app)
+                except (OSError, RuntimeError) as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "federation plugin disabled but suspension was not persisted"
+                        ),
+                    ) from exc
+                if not stopped:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "federation plugin disabled but its poller is still stopping"
+                        ),
+                    )
+            if lifecycle_error is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="plugin cleanup failed after routing was revoked",
+                ) from lifecycle_error
+            return {
+                "changed": changed,
+                "plugin": _plugin_status_document(plugin_id),
+            }
+
+    @app.post("/api/plugins/federation/refresh")
+    def federation_plugin_refresh_endpoint(
+        request: Request,
+        payload: PluginActionPayload,
+    ) -> dict[str, Any]:
+        from nth_dao.plugins.builtin import (
+            FEDERATION_DISCOVERY_CAPABILITY_ID,
+            FEDERATION_DISCOVERY_PLUGIN_ID,
+        )
+
+        operator = _require_plugin_operator(request, payload)
+
+        def record_refresh(error_type: str = "") -> None:
+            try:
+                state.plugin_host.record_refresh(
+                    FEDERATION_DISCOVERY_PLUGIN_ID,
+                    operator=operator,
+                    error_type=error_type,
+                )
+            except PluginAuditError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="plugin audit commit failed",
+                ) from exc
+
+        with state.plugin_lifecycle_lock:
+            current = _plugin_status_or_404(FEDERATION_DISCOVERY_PLUGIN_ID)
+            if current.state != "enabled":
+                raise HTTPException(
+                    status_code=409,
+                    detail="federation plugin is not enabled",
+                )
+            try:
+                binding = state.plugin_host.resolve_one(
+                    FEDERATION_DISCOVERY_CAPABILITY_ID,
+                )
+                result = binding.invoke(
+                    {},
+                    authority=InvocationAuthority(
+                        principal=f"local-operator:{payload.actor_id}",
+                        capability_ids=frozenset(
+                            {FEDERATION_DISCOVERY_CAPABILITY_ID}
+                        ),
+                    ),
+                )
+            except (PluginDependencyError, PluginInvocationError) as exc:
+                record_refresh(type(exc).__name__)
+                raise HTTPException(
+                    status_code=409,
+                    detail="federation capability is unavailable",
+                ) from exc
+            except PluginSchemaError as exc:
+                record_refresh(type(exc).__name__)
+                raise HTTPException(
+                    status_code=502,
+                    detail="plugin contract violation",
+                ) from exc
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                record_refresh(type(exc).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail="federation refresh failed",
+                ) from exc
+            record_refresh()
+            return {
+                "refreshed": True,
+                "result": result,
+                "plugin": _plugin_status_document(FEDERATION_DISCOVERY_PLUGIN_ID),
+            }
 
     @app.get("/api/summary")
     def summary(actor_id: str = DEFAULT_ADMIN_ID) -> dict[str, Any]:

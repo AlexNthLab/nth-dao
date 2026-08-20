@@ -846,7 +846,12 @@ def test_federated_revision_chain_import_recovers_after_restart_without_cache(
     ]
 
     restarted_app = create_app(target_root, require_console_auth=False)
-    assert not hasattr(restarted_app.state, "market_fed_cache")
+    # The plugin-capable runtime now constructs one shared Market cache at
+    # app creation. Recovery must still prove it does not depend on volatile
+    # entries surviving the restart.
+    assert restarted_app.state.market_fed_cache.status()[
+        "cached_announcements"
+    ] == 0
     restarted = TestClient(restarted_app)
     recovered = restarted.post(
         path,

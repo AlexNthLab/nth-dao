@@ -92,17 +92,22 @@ Every plugin declares a bounded manifest before activation:
 {
   "manifest_version": 1,
   "plugin_id": "org.nth-dao.discovery.federation",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "host_api": "1.0",
   "kind": "discovery.provider",
   "runtime": "builtin",
   "provides": [
     {
       "capability_id": "org.nth-dao.discovery.federation",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "input_schema_digest": "sha256:<64 lowercase hex characters>",
       "output_schema_digest": "sha256:<64 lowercase hex characters>",
-      "effects": ["filesystem-read", "filesystem-write", "network-read"],
+      "effects": [
+        "filesystem-read",
+        "filesystem-write",
+        "network-read",
+        "network-write"
+      ],
       "consistency": "C1",
       "privacy": "workspace",
       "security": "verified-input",
@@ -199,6 +204,12 @@ it is not signed and is not authoritative against an attacker who can rewrite
 the entire workspace. The host restores grants and the desired state from this
 projection but never auto-enables a plugin after restart.
 
+Web-initiated authorization, enable, disable, and manual refresh events also
+bind the authenticated principal class and the authorized membership actor.
+Legacy audit records without this attribution remain readable. A local console
+running with authentication disabled is recorded honestly as
+`anonymous-local`, never upgraded to an authenticated console identity.
+
 A reviewed built-in whose manifest digest changes must use the explicit
 upgrade registration path. The audit binds the previous and replacement
 digests, then clears every grant and the desired-enabled flag. Code upgrades
@@ -250,10 +261,29 @@ it does not rewrite the federation protocol.
 
 The web runtime statically registers this reviewed adapter and exposes its
 status through `/api/plugins`. Registration deliberately does not authorize,
-enable, or invoke network access. The existing federation poller remains the
-production consumer until an operator activation API and a capability-based
-consumer migration are reviewed; the reference plugin must not be described
-as having replaced that path yet.
+enable, or invoke network access. An administrator can explicitly enable it
+through `/api/plugins/{plugin_id}/enable`; the web-owned periodic worker then
+invokes federation discovery only through the revocable capability binding.
+The adapter and Market views share one bounded cache, so plugin results are
+visible without a second projection or wire format.
+
+The built-in manifest's artifact digest covers the adapter, federation
+traversal/cache, peer registry, verified network binding, and the focused
+signed-identity trust kernel. The production registration API constructs that
+kernel itself and does not accept replacement peer-verification or HTTP-read
+callbacks. Seed selection, shared cache ownership, and optional reverse hello
+remain typed host services; they cannot turn an unverified hint into a trusted
+peer. The FastAPI application is not part of the artifact, so unrelated Web/UI
+edits do not invalidate plugin authorization. Low-level provider constructors
+retain dependency injection only for isolated tests and are not the reviewed
+registration boundary.
+
+Workspaces that have never selected a plugin runtime retain the legacy poller
+as a compatibility fallback. Once the operator enables or disables the
+federation plugin, that preference is persisted locally. Explicit disable is
+fail-closed across process restarts and never silently falls back to the
+legacy network path. Plugin code still owns no hidden thread: FastAPI lifespan
+owns, stops, and joins the consumer worker.
 
 Migration order:
 

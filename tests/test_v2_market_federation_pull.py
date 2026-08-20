@@ -385,7 +385,7 @@ def test_remote_claim_removes_task_from_next_signed_snapshot(
     )
 
 
-def test_federation_cache_error_retains_bounded_non_actionable_hint() -> None:
+def test_federation_cache_error_retains_sanitized_non_actionable_hint() -> None:
     identity = AgentIdentity.generate(label="remote")
     ann = sign_announcement(
         publisher=identity,
@@ -410,7 +410,7 @@ def test_federation_cache_error_retains_bounded_non_actionable_hint() -> None:
     status = cache.status()
     assert status["cached_announcements"] == 1
     assert status["stale_announcements"] == 1
-    assert status["last_error"] == "refresh failed"
+    assert status["last_error"] == "federation-cycle-failed"
 
 
 def test_federation_cache_isolates_input_and_snapshot_mutations() -> None:

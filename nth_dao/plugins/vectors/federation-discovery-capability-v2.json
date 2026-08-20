@@ -1,0 +1,25 @@
+{
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "schema_version": 1,
+  "id": "federation-discovery-capability-v2",
+  "capability": {
+    "capability_id": "org.nth-dao.discovery.federation",
+    "version": "2.0.0",
+    "input_schema_digest": "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+    "output_schema_digest": "sha256:ecdc35bf141dde251c7728a08fb41c5572b1a18602a65cf56a6479c1255454c0",
+    "effects": [
+      "filesystem-read",
+      "filesystem-write",
+      "network-read",
+      "network-write"
+    ],
+    "consistency": "C1",
+    "privacy": "workspace",
+    "security": "verified-input",
+    "cardinality": "many",
+    "deterministic": false,
+    "retention": "ephemeral",
+    "failure_semantics": "retry-safe"
+  },
+  "expected_digest": "sha256:d273e2ca0fd0c2dc33858cea600926ebe373b49825b613e33b065cf00f836906"
+}

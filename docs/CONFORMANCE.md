@@ -86,6 +86,12 @@ canonical-JSON normalization, a 1 MiB document ceiling, revocable local
 authority, and current permission grants; those runtime controls are covered
 by Python tests and are not yet cross-language conformance vectors.
 
+The federation discovery reference plugin separately freezes its capability
+contract in `nth_dao/plugins/vectors/federation-discovery-capability-v2.json`.
+Version 2 declares both network read and network write because reverse hello
+announcements are observable outbound effects. Consumers must not treat the
+earlier read-only capability shape as compatible with this contract.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

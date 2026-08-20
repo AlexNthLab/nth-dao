@@ -1,8 +1,9 @@
 """Built-in adapter for the existing signed market federation protocol.
 
 This module wraps the current implementation; it does not define a second
-feed format or weaken peer verification. Network traversal remains on demand
-in host API v1 so enabling the plugin does not create a hidden worker thread.
+feed format or weaken peer verification. The provider remains on demand: the
+web runtime owns any periodic worker and invokes it only through a revocable
+PluginHost binding after explicit operator activation.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 from itertools import islice
+import logging
 from pathlib import Path
 import threading
 import time
@@ -31,7 +33,10 @@ from nth_dao.plugins.host import (
     PluginInvocationContext,
 )
 from nth_dao.plugins.network import VerifiedPeerEndpoint, normalize_peer_url
+from nth_dao.plugins.federation_trust import FederationTrustKernel
 
+
+logger = logging.getLogger(__name__)
 
 FEDERATION_DISCOVERY_PLUGIN_ID = "org.nth-dao.discovery.federation"
 FEDERATION_DISCOVERY_CAPABILITY_ID = "org.nth-dao.discovery.federation"
@@ -67,10 +72,15 @@ FEDERATION_DISCOVERY_OUTPUT_SCHEMA: Dict[str, Any] = {
 
 FEDERATION_DISCOVERY_CONTRACT = CapabilityContract(
     capability_id=FEDERATION_DISCOVERY_CAPABILITY_ID,
-    version="1.0.0",
+    version="2.0.0",
     input_schema_digest=schema_digest(FEDERATION_DISCOVERY_INPUT_SCHEMA),
     output_schema_digest=schema_digest(FEDERATION_DISCOVERY_OUTPUT_SCHEMA),
-    effects=("filesystem-read", "filesystem-write", "network-read"),
+    effects=(
+        "filesystem-read",
+        "filesystem-write",
+        "network-read",
+        "network-write",
+    ),
     consistency="C1",
     privacy="workspace",
     security="verified-input",
@@ -92,13 +102,14 @@ _MAX_SEED_URL_BYTES = 2048
 _ARTIFACT_CLOSURE_PATHS = (
     "nth_dao/discovery/federation_registry.py",
     "nth_dao/plugins/builtin/federation_discovery.py",
+    "nth_dao/plugins/federation_trust.py",
     "nth_dao/plugins/network.py",
     "nth_dao/web/market_federation_poll.py",
 )
 
 
 def _artifact_closure_digest() -> str:
-    """Bind the manifest to the adapter and its direct execution closure."""
+    """Bind the manifest to plugin code, excluding injected host services."""
 
     root = Path(__file__).parents[3]
     files = []
@@ -117,7 +128,7 @@ def federation_discovery_manifest() -> PluginManifest:
     return PluginManifest(
         manifest_version=1,
         plugin_id=FEDERATION_DISCOVERY_PLUGIN_ID,
-        version="1.0.0",
+        version="2.0.0",
         host_api=PLUGIN_HOST_API_VERSION,
         kind="discovery.provider",
         runtime="builtin",
@@ -157,9 +168,12 @@ class FederationDiscoveryProvider:
         self,
         workspace: Path,
         *,
+        cache: Any = None,
         get_seed_peers: Callable[[], Sequence[str]],
         verify_seed_peer: Callable[[str], Optional[VerifiedPeerEndpoint]],
         verify_gossip_peer: Callable[[str, str], Optional[str]],
+        announce_self: Optional[Callable[[Sequence[str]], Any]] = None,
+        hello_interval_s: float = 300.0,
         http_get: Optional[Callable[[str, str], Any]] = None,
         max_duration_s: float = 30.0,
     ) -> None:
@@ -167,6 +181,14 @@ class FederationDiscoveryProvider:
             raise TypeError("get_seed_peers must be callable")
         if not callable(verify_seed_peer) or not callable(verify_gossip_peer):
             raise TypeError("federation peer verification callbacks are required")
+        if announce_self is not None and not callable(announce_self):
+            raise TypeError("announce_self must be callable or None")
+        if isinstance(hello_interval_s, bool) or not isinstance(
+            hello_interval_s, (int, float)
+        ):
+            raise TypeError("hello_interval_s must be numeric")
+        if not 60.0 <= float(hello_interval_s) <= 86_400.0:
+            raise ValueError("hello_interval_s must be between 60 and 86400 seconds")
         if isinstance(max_duration_s, bool) or not isinstance(max_duration_s, (int, float)):
             raise TypeError("max_duration_s must be numeric")
         if not 0.1 <= float(max_duration_s) <= 300.0:
@@ -176,9 +198,25 @@ class FederationDiscoveryProvider:
         self._get_seed_peers = get_seed_peers
         self._verify_seed_peer = verify_seed_peer
         self._verify_gossip_peer = verify_gossip_peer
+        self._announce_self = announce_self
+        self._hello_interval_s = float(hello_interval_s)
+        self._last_hello_at = 0.0
         self._http_get = http_get
         self._max_duration_s = float(max_duration_s)
-        self._cache = self._new_cache()
+        self._cache = cache if cache is not None else self._new_cache()
+        required_cache_methods = {
+            "apply_cycle",
+            "mark_error",
+            "replace_all",
+            "since_for_source",
+            "snapshot",
+            "status",
+        }
+        if any(
+            not callable(getattr(self._cache, method, None))
+            for method in required_cache_methods
+        ):
+            raise TypeError("federation cache does not implement the required protocol")
         self._active = True
         self._last_known_peer_count = 0
         self._state_lock = threading.Lock()
@@ -250,6 +288,21 @@ class FederationDiscoveryProvider:
             peer_count = 0
             try:
                 seeds = list(self._seed_peers())
+                hello_now = time.monotonic()
+                if (
+                    seeds
+                    and self._announce_self is not None
+                    and hello_now - self._last_hello_at >= self._hello_interval_s
+                ):
+                    try:
+                        self._announce_self(tuple(seeds))
+                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                        logger.warning(
+                            "federation plugin reverse hello failed (%s)",
+                            type(exc).__name__,
+                        )
+                    finally:
+                        self._last_hello_at = hello_now
                 learned = [
                     item.peer_url
                     for item in self.peer_store.active()
@@ -295,14 +348,11 @@ class FederationDiscoveryProvider:
                     )
                     cycle_error = ""
                     if report.cancelled:
-                        cycle_error = "federation cycle cancelled"
+                        cycle_error = "cycle-cancelled"
                     elif report.deadline_exhausted:
-                        cycle_error = "federation cycle deadline exhausted"
+                        cycle_error = "cycle-deadline-exhausted"
                     elif incomplete:
-                        cycle_error = (
-                            f"federation cycle incomplete: {incomplete} of "
-                            f"{len(report.attempted_sources)} sources failed verification or pull"
-                        )
+                        cycle_error = "cycle-incomplete"
                     self._cache.apply_cycle(
                         entries,
                         completed_sources=report.completed_sources,
@@ -314,7 +364,7 @@ class FederationDiscoveryProvider:
                     )
             except Exception as exc:
                 self._cache.mark_error(
-                    f"{type(exc).__name__}: {exc}",
+                    type(exc).__name__,
                     peer_count=peer_count,
                 )
                 raise
@@ -360,17 +410,23 @@ class FederationDiscoveryPlugin:
         self,
         workspace: Path,
         *,
+        cache: Any = None,
         get_seed_peers: Callable[[], Sequence[str]],
         verify_seed_peer: Callable[[str], Optional[VerifiedPeerEndpoint]],
         verify_gossip_peer: Callable[[str, str], Optional[str]],
+        announce_self: Optional[Callable[[Sequence[str]], Any]] = None,
+        hello_interval_s: float = 300.0,
         http_get: Optional[Callable[[str, str], Any]] = None,
         max_duration_s: float = 30.0,
     ) -> None:
         self._arguments = {
             "workspace": workspace,
+            "cache": cache,
             "get_seed_peers": get_seed_peers,
             "verify_seed_peer": verify_seed_peer,
             "verify_gossip_peer": verify_gossip_peer,
+            "announce_self": announce_self,
+            "hello_interval_s": hello_interval_s,
             "http_get": http_get,
             "max_duration_s": max_duration_s,
         }
@@ -402,24 +458,33 @@ def register_federation_discovery(
     host: PluginHost,
     workspace: Path,
     *,
+    cache: Any = None,
     get_seed_peers: Callable[[], Sequence[str]],
-    verify_seed_peer: Callable[[str], Optional[VerifiedPeerEndpoint]],
-    verify_gossip_peer: Callable[[str, str], Optional[str]],
-    http_get: Optional[Callable[[str, str], Any]] = None,
+    announce_self: Optional[Callable[[Sequence[str]], Any]] = None,
+    hello_interval_s: float = 300.0,
     max_duration_s: float = 30.0,
 ) -> PluginManifest:
-    """Install the reviewed adapter without authorizing or enabling it."""
+    """Install the reviewed adapter without authorizing or enabling it.
+
+    Peer verification is intentionally not injectable through this production
+    registration boundary.  The concrete, versioned trust kernel is part of
+    the manifest's artifact closure.  Lower-level provider constructors retain
+    dependency injection solely for isolated protocol tests.
+    """
     if not isinstance(host, PluginHost):
         raise TypeError("host must be a PluginHost")
     item = federation_discovery_manifest()
+    trust_kernel = FederationTrustKernel()
 
     def factory() -> FederationDiscoveryPlugin:
         return FederationDiscoveryPlugin(
             workspace,
+            cache=cache,
             get_seed_peers=get_seed_peers,
-            verify_seed_peer=verify_seed_peer,
-            verify_gossip_peer=verify_gossip_peer,
-            http_get=http_get,
+            verify_seed_peer=trust_kernel.verify_seed,
+            verify_gossip_peer=trust_kernel.verify_gossip,
+            announce_self=announce_self,
+            hello_interval_s=hello_interval_s,
             max_duration_s=max_duration_s,
         )
 

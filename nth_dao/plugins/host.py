@@ -208,6 +208,7 @@ class ProviderBinding:
 class PluginStatus:
     plugin_id: str
     state: str
+    declared_permissions: Tuple[str, ...]
     authorized_permissions: Tuple[str, ...]
     provided_capabilities: Tuple[str, ...]
     risk_tier: int
@@ -362,7 +363,13 @@ class PluginHost:
                 desired_enabled=bool(persisted and persisted.get("desired_enabled")),
             )
 
-    def authorize(self, plugin_id: str, permissions: frozenset[str] | set[str]) -> None:
+    def authorize(
+        self,
+        plugin_id: str,
+        permissions: frozenset[str] | set[str],
+        *,
+        operator: Mapping[str, str] | None = None,
+    ) -> None:
         grants = frozenset(permissions)
         if any(not isinstance(item, str) for item in grants):
             raise TypeError("plugin permission grants must be strings")
@@ -396,14 +403,19 @@ class PluginHost:
             self._audit(
                 "plugin.authorized",
                 plugin_id,
-                {"grants": sorted(grants)},
+                self._operator_details({"grants": sorted(grants)}, operator),
             )
             record.grants = grants
             record.state = "authorized" if grants else "installed"
             self._persisted[plugin_id]["grants"] = sorted(grants)
             record.last_error = ""
 
-    def enable(self, plugin_id: str) -> Tuple[ProviderBinding, ...]:
+    def enable(
+        self,
+        plugin_id: str,
+        *,
+        operator: Mapping[str, str] | None = None,
+    ) -> Tuple[ProviderBinding, ...]:
         deadline = time.monotonic() + self.lifecycle_timeout_s
         with self._condition:
             record = self._require_record(plugin_id)
@@ -464,7 +476,10 @@ class PluginHost:
                 self._audit(
                     "plugin.enable.succeeded",
                     plugin_id,
-                    {"manifest_digest": record.manifest.digest},
+                    self._operator_details(
+                        {"manifest_digest": record.manifest.digest},
+                        operator,
+                    ),
                 )
                 for capability_id, binding in bindings.items():
                     self._providers.setdefault(capability_id, {})[plugin_id] = binding
@@ -507,7 +522,13 @@ class PluginHost:
                     self._audit(
                         "plugin.enable.failed",
                         plugin_id,
-                        {"error_type": type(exc).__name__, "cleanup_failed": bool(cleanup_error)},
+                        self._operator_details(
+                            {
+                                "error_type": type(exc).__name__,
+                                "cleanup_failed": bool(cleanup_error),
+                            },
+                            operator,
+                        ),
                     )
                 except PluginAuditError as audit_exc:
                     record.last_error = f"{record.last_error}; audit failed: {audit_exc}"[:1000]
@@ -516,7 +537,12 @@ class PluginHost:
                 f"plugin {plugin_id!r} failed to start: {record.last_error}"
             ) from exc
 
-    def disable(self, plugin_id: str) -> bool:
+    def disable(
+        self,
+        plugin_id: str,
+        *,
+        operator: Mapping[str, str] | None = None,
+    ) -> bool:
         deadline = time.monotonic() + self.lifecycle_timeout_s
         with self._condition:
             record = self._require_record(plugin_id)
@@ -585,7 +611,10 @@ class PluginHost:
                     self._audit(
                         "plugin.disable.failed",
                         plugin_id,
-                        {"error_type": type(cleanup_error).__name__},
+                        self._operator_details(
+                            {"error_type": type(cleanup_error).__name__},
+                            operator,
+                        ),
                     )
                 except PluginAuditError as audit_exc:
                     record.last_error = (
@@ -598,7 +627,11 @@ class PluginHost:
             record.runtime = None
             record.stop_operation = None
             try:
-                self._audit("plugin.disable.succeeded", plugin_id, {})
+                self._audit(
+                    "plugin.disable.succeeded",
+                    plugin_id,
+                    self._operator_details({}, operator),
+                )
             except PluginAuditError as exc:
                 record.state = "failed"
                 record.last_error = f"PluginAuditError: {exc}"[:1000]
@@ -727,6 +760,7 @@ class PluginHost:
             return PluginStatus(
                 plugin_id=plugin_id,
                 state=record.state,
+                declared_permissions=record.manifest.permissions,
                 authorized_permissions=tuple(sorted(record.grants)),
                 provided_capabilities=tuple(sorted(record.bindings)),
                 risk_tier=record.manifest.risk_tier,
@@ -740,6 +774,7 @@ class PluginHost:
                 PluginStatus(
                     plugin_id=plugin_id,
                     state=record.state,
+                    declared_permissions=record.manifest.permissions,
                     authorized_permissions=tuple(sorted(record.grants)),
                     provided_capabilities=tuple(sorted(record.bindings)),
                     risk_tier=record.manifest.risk_tier,
@@ -757,6 +792,36 @@ class PluginHost:
         except PluginAuditError as exc:
             return False, str(exc)
         return True, "ok"
+
+    def record_refresh(
+        self,
+        plugin_id: str,
+        *,
+        operator: Mapping[str, str],
+        error_type: str = "",
+    ) -> None:
+        """Commit operator attribution for a manual provider refresh."""
+        with self._lock:
+            self._require_record(plugin_id)
+            event_type = (
+                "plugin.refresh.failed" if error_type else "plugin.refresh.succeeded"
+            )
+            details: Dict[str, Any] = {"error_type": error_type} if error_type else {}
+            self._audit(
+                event_type,
+                plugin_id,
+                self._operator_details(details, operator),
+            )
+
+    @staticmethod
+    def _operator_details(
+        details: Mapping[str, Any],
+        operator: Mapping[str, str] | None,
+    ) -> Dict[str, Any]:
+        result = dict(details)
+        if operator is not None:
+            result["operator"] = dict(operator)
+        return result
 
     def _audit(
         self,

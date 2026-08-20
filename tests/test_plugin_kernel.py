@@ -786,6 +786,34 @@ def test_hash_valid_plugin_audit_with_invalid_event_details_fails_closed(
         PluginHost(workspace_root=tmp_path)
 
 
+def test_plugin_audit_rejects_invalid_operator_attribution(tmp_path: Path) -> None:
+    item = manifest()
+    host = PluginHost(workspace_root=tmp_path)
+    register(host, item, lambda: Runtime({item.provides[0].capability_id: Provider()}))
+    audit_path = tmp_path / ".nth" / "plugin-host" / "audit.jsonl"
+    first = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+    core = {
+        "seq": 1,
+        "recorded_at": "2026-08-20T00:00:00+00:00",
+        "event_type": "plugin.authorized",
+        "plugin_id": item.plugin_id,
+        "details": {
+            "grants": [],
+            "operator": {"actor_id": "admin"},
+        },
+        "previous_hash": first["event_hash"],
+    }
+    forged = {
+        **core,
+        "event_hash": hashlib.sha256(canonical_json(core)).hexdigest(),
+    }
+    with audit_path.open("ab") as stream:
+        stream.write(canonical_json(forged) + b"\n")
+
+    with pytest.raises(PluginAuditError, match="operator is invalid"):
+        PluginHost(workspace_root=tmp_path)
+
+
 def test_hash_valid_plugin_audit_cannot_skip_registration(tmp_path: Path) -> None:
     audit_path = tmp_path / ".nth" / "plugin-host" / "audit.jsonl"
     audit_path.parent.mkdir(parents=True)
