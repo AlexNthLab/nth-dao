@@ -724,6 +724,8 @@ def federate_once(
     resolve: Callable[..., list] = socket.getaddrinfo,
     verify_gossip_peer: Optional[Callable[[str, str], Optional[str]]] = None,
     verify_seed_peer: Optional[Callable[[str], Optional[str]]] = None,
+    verified_seed_ips: Optional[Dict[str, str]] = None,
+    pinned_http_get: Optional[Callable[[str, str], Any]] = None,
     max_duration_s: float = 0.0,
     cancelled: Optional[Callable[[], bool]] = None,
     start_offset: int = 0,
@@ -779,8 +781,11 @@ def federate_once(
             raise TimeoutError("federation cycle deadline or shutdown reached")
         key = _gossip_host_key(url)
         resolved_ip = pinned_ips.get(key) if key is not None else None
-        if resolved_ip and http_get is _urllib_get_json:
-            return _urllib_get_json_pinned(url, resolved_ip)
+        if resolved_ip:
+            if pinned_http_get is not None:
+                return pinned_http_get(url, resolved_ip)
+            if http_get is _urllib_get_json:
+                return _urllib_get_json_pinned(url, resolved_ip)
         return http_get(url)
 
     def gossip_peer_identity(url: str, resolved_ip: str) -> str:
@@ -829,6 +834,20 @@ def federate_once(
             if not peer_did:
                 logger.warning("fed: rejected configured seed identity %s", peer)
                 continue
+            if verified_seed_ips is not None:
+                resolved_ip = verified_seed_ips.get(peer)
+                try:
+                    safe_ip = ipaddress.ip_address(resolved_ip or "")
+                except ValueError:
+                    safe_ip = None
+                if safe_ip is None or _ip_is_internal(safe_ip):
+                    logger.warning("fed: rejected configured seed IP binding %s", peer)
+                    continue
+                key = _gossip_host_key(peer)
+                if key is None:
+                    logger.warning("fed: rejected configured seed origin %s", peer)
+                    continue
+                pinned_ips[key] = str(safe_ip)
             verified_peer_dids[peer] = peer_did
         peer_did = verified_peer_dids.get(peer, "")
         if not peer_did:

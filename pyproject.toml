@@ -88,6 +88,7 @@ namespaces = false
 "nth_dao" = ["INTEGRATION_GUIDE.md"]
 "nth_dao.conformance" = ["vectors.json"]
 "nth_dao.market" = ["vectors/*.json"]
+"nth_dao.plugins" = ["vectors/*.json"]
 "nth_dao.trade_rules" = ["schemas/*.json", "vectors/*.json"]
 "nth_dao.web" = ["static/*.html", "static/*.svg", "static/assets/*"]
 

@@ -18664,6 +18664,26 @@ def register_v2_routes(app: FastAPI) -> None:
                 )
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
+            recovery_worker = getattr(
+                request.app.state.nth,
+                "trade_dispute_statement_recovery_worker",
+                None,
+            )
+            if recovery_worker is not None:
+                try:
+                    queued = recovery_worker.wake(
+                        statement_digest,
+                        urgent_for_s=5.0,
+                    )
+                    if not queued:
+                        logger.warning(
+                            "trade Dispute Statement targeted recovery queue is full"
+                        )
+                except (RuntimeError, TypeError, ValueError) as wake_exc:
+                    logger.warning(
+                        "trade Dispute Statement targeted recovery wake failed (%s)",
+                        type(wake_exc).__name__,
+                    )
             raise HTTPException(
                 status_code=503,
                 detail=(

@@ -11008,14 +11008,29 @@ def test_dispute_statement_runtime_worker_anchors_retained_remote_ack(
     target = f"{path}/{created['statement_digest']}/deliver"
 
     with TestClient(app) as client:
+        recovery_worker = app.state.nth.trade_dispute_statement_recovery_worker
+        real_wake = recovery_worker.wake
+        wake_calls = []
+
+        def fail_wake(statement_digest, *, urgent_for_s=0.0):
+            wake_calls.append((statement_digest, urgent_for_s))
+            raise RuntimeError("injected wake failure")
+
+        monkeypatch.setattr(recovery_worker, "wake", fail_wake)
         failed = client.post(
             target,
             json={"target_url": "http://peer.example"},
             headers=headers,
         )
         assert failed.status_code == 503, failed.text
+        assert wake_calls == [(created["statement_digest"], 5.0)]
         coordinator._anchor = real_anchor
-        deadline = time.monotonic() + 3.0
+        monkeypatch.setattr(recovery_worker, "wake", real_wake)
+        assert real_wake(created["statement_digest"], urgent_for_s=5.0) is True
+        # Urgent wake retries immediately, but recovery still re-verifies the
+        # retained Order/Receipt/Review/ACK chain and commits with SQLite FULL
+        # sync. This is eventual correctness, not a machine-speed 3 second SLO.
+        deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             retained = app.state.nth.trade_dispute_statement_dispatch_store.get(
                 created["statement_digest"]

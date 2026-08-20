@@ -75,6 +75,17 @@ It additionally fixes the shared Profile ID grammar, the 190-character wire
 limit, and negative non-string/uppercase cases. Implementations must not coerce
 non-string Profile IDs before validation.
 
+Plugin Host API v1 ships a separate deterministic vector at
+`nth_dao/plugins/vectors/manifest-v1.json`. It fixes the byte-exact manifest,
+capability-contract digest, schema digest, permission/effect binding, and
+fail-closed negative cases. Passing the vector proves manifest compatibility;
+it does not authenticate a publisher, authorize a permission, sandbox Python,
+or allow third-party runtime loading. Host API v1 accepts reviewed built-ins
+only. Runtime invocation additionally enforces strict input/output schemas,
+canonical-JSON normalization, a 1 MiB document ceiling, revocable local
+authority, and current permission grants; those runtime controls are covered
+by Python tests and are not yet cross-language conformance vectors.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

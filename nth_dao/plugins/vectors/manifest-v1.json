@@ -1,0 +1,137 @@
+{
+  "format": "nth-dao-plugin-manifest-conformance-v1",
+  "schema_version": 1,
+  "positive": {
+    "id": "plugin-manifest-001",
+    "schema": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "schema_digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+    "capability_digest": "sha256:0e9dd4130f65ea2127c171b03a8a938dbfd635450b7e0995d10e7c6ade71301e",
+    "manifest_digest": "sha256:7a7a6ea7a5480f8c96f05edcc7ebadf2458db9687d30a4103d67b8ae1a0d2953",
+    "expected_canonical_hex": "7b2261727469666163745f646967657374223a227368613235363a62663835343839316565333238616364373338333538323830656363656262366563343238346234623831386164633038323330663762623464376133326638222c22686f73745f617069223a22312e30222c226b696e64223a22646973636f766572792e70726f7669646572222c226d616e69666573745f76657273696f6e223a312c227065726d697373696f6e73223a5b2266696c6573797374656d2e726561642e776f726b7370616365222c2266696c6573797374656d2e77726974652e776f726b7370616365222c226e6574776f726b2e636c69656e74225d2c22706c7567696e5f6964223a226f72672e6e74682d64616f2e636f6e666f726d616e63652e646973636f76657279222c2270726f6f66223a22222c2270726f7669646573223a5b7b226361706162696c6974795f6964223a226f72672e6e74682d64616f2e636f6e666f726d616e63652e646973636f76657279222c2263617264696e616c697479223a226d616e79222c22636f6e73697374656e6379223a224331222c2264657465726d696e6973746963223a66616c73652c2265666665637473223a5b2266696c6573797374656d2d72656164222c2266696c6573797374656d2d7772697465222c226e6574776f726b2d72656164225d2c226661696c7572655f73656d616e74696373223a2272657472792d73616665222c22696e7075745f736368656d615f646967657374223a227368613235363a63643161343633633436643632363431333434343764623137613863336337616265356239613234383863366437353966656136366461316639366231333365222c226f75747075745f736368656d615f646967657374223a227368613235363a63643161343633633436643632363431333434343764623137613863336337616265356239613234383863366437353966656136366461316639366231333365222c2270726976616379223a22776f726b7370616365222c22726574656e74696f6e223a22657068656d6572616c222c227365637572697479223a2276657269666965642d696e707574222c2276657273696f6e223a22312e302e30227d5d2c227075626c69736865725f646964223a22222c227265717569726573223a5b5d2c2272756e74696d65223a226275696c74696e222c2276657273696f6e223a22312e302e30227d",
+    "manifest": {
+      "manifest_version": 1,
+      "plugin_id": "org.nth-dao.conformance.discovery",
+      "version": "1.0.0",
+      "host_api": "1.0",
+      "kind": "discovery.provider",
+      "runtime": "builtin",
+      "provides": [
+        {
+          "capability_id": "org.nth-dao.conformance.discovery",
+          "version": "1.0.0",
+          "input_schema_digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+          "output_schema_digest": "sha256:cd1a463c46d6264134447db17a8c3c7abe5b9a2488c6d759fea66da1f96b133e",
+          "effects": [
+            "filesystem-read",
+            "filesystem-write",
+            "network-read"
+          ],
+          "consistency": "C1",
+          "privacy": "workspace",
+          "security": "verified-input",
+          "cardinality": "many",
+          "deterministic": false,
+          "retention": "ephemeral",
+          "failure_semantics": "retry-safe"
+        }
+      ],
+      "requires": [],
+      "permissions": [
+        "filesystem.read.workspace",
+        "filesystem.write.workspace",
+        "network.client"
+      ],
+      "artifact_digest": "sha256:bf854891ee328acd738358280eccebb6ec4284b4b818adc08230f7bb4d7a32f8",
+      "publisher_did": "",
+      "proof": ""
+    }
+  },
+  "negative": [
+    {
+      "id": "plugin-manifest-unknown-field",
+      "path": "extra",
+      "value": true,
+      "expected_error": "fields are invalid"
+    },
+    {
+      "id": "plugin-manifest-runtime-not-supported",
+      "path": "runtime",
+      "value": "python-entry-point",
+      "expected_error": "builtin plugins only"
+    },
+    {
+      "id": "plugin-manifest-permission-order",
+      "path": "permissions",
+      "value": [
+        "network.client",
+        "filesystem.write.workspace",
+        "filesystem.read.workspace"
+      ],
+      "expected_error": "sorted and unique"
+    },
+    {
+      "id": "plugin-manifest-effect-without-permission",
+      "path": "permissions",
+      "value": [
+        "filesystem.read.workspace",
+        "filesystem.write.workspace"
+      ],
+      "expected_error": "undeclared permissions"
+    },
+    {
+      "id": "plugin-manifest-permission-without-effect",
+      "path": "permissions",
+      "value": [
+        "artifact.read",
+        "filesystem.read.workspace",
+        "filesystem.write.workspace",
+        "network.client"
+      ],
+      "expected_error": "not declared by capability effects"
+    }
+  ],
+  "schema_negative": [
+    {
+      "id": "plugin-schema-open-object",
+      "schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {}
+      },
+      "expected_error": "explicitly false"
+    },
+    {
+      "id": "plugin-schema-regex-unsupported",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "string",
+            "pattern": "(a+)+$"
+          }
+        }
+      },
+      "expected_error": "unsupported keywords"
+    },
+    {
+      "id": "plugin-schema-complex-enum",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "enum": [{}]
+          }
+        }
+      },
+      "expected_error": "scalar values"
+    }
+  ]
+}

@@ -18,6 +18,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -89,6 +90,7 @@ from nth_dao.mandate import (
 )
 from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
 from nth_dao.orchestration import MissionStore
+from nth_dao.plugins import PluginHost, PluginHostPolicy
 from nth_dao.web.rate_limit import (
     PersistentRateLimiter,
     RateLimiter,
@@ -126,6 +128,9 @@ _TRADE_ORDER_BOOT_RECOVERY_BATCH = 1_000
 _TRADE_ORDER_BOOT_RECOVERY_MAX_PASSES = 5
 _TRADE_EXECUTION_RECOVERY_POLL_SECONDS = 30.0
 _TRADE_DISPUTE_RECOVERY_POLL_SECONDS = 30.0
+_TRADE_DISPUTE_URGENT_MAX_TARGETS = 256
+_TRADE_DISPUTE_URGENT_MAX_ATTEMPTS = 5
+_TRADE_DISPUTE_URGENT_BASE_BACKOFF_SECONDS = 0.05
 _TRADE_DISPUTE_STATEMENT_DELIVERY_PATH = re.compile(
     r"/api/v2/trade/federation/orders/"
     r"sha256:[0-9a-f]{64}/execution-receipts/"
@@ -775,6 +780,19 @@ class _MtimeCache:
 class WebState:
     def __init__(self, workspace: Path):
         self.workspace = workspace
+        self.plugin_host = PluginHost(
+            policy=PluginHostPolicy(
+                allowed_permissions=frozenset(
+                    {
+                        "filesystem.read.workspace",
+                        "filesystem.write.workspace",
+                        "network.client",
+                    }
+                ),
+                max_risk_tier=3,
+            ),
+            workspace_root=workspace,
+        )
         self.membership = MembershipManager(workspace)
         self.groups = GroupManager(workspace, membership=self.membership)
         self.registry = AgentRegistry(str(workspace / "team_agents"))
@@ -914,6 +932,7 @@ class WebState:
             )
             self.trade_dispute_statement_dispatch_store = None
         self.trade_dispute_statement_dispatch: Optional[Any] = None
+        self.trade_dispute_statement_recovery_worker: Optional[Any] = None
         self.trade_dispute_statement_projection_lock = threading.RLock()
         self.trade_dispute_statement_projection_token: Optional[Any] = None
         self.trade_dispute_statement_projection_events: tuple[Any, ...] = ()
@@ -1488,6 +1507,31 @@ def _recover_trade_dispute_statement_dispatch_acknowledgements(
         lock.release()
 
 
+def _recover_trade_dispute_statement_dispatch_acknowledgement(
+    state: WebState,
+    statement_digest: str,
+) -> bool:
+    """Recover one retained ACK without scanning unrelated statements."""
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", statement_digest) is None:
+        raise ValueError("Dispute Statement digest is invalid")
+    lock = getattr(state, "trade_dispute_statement_recovery_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        raise RuntimeError(
+            "Dispute Statement acknowledgement recovery is already running"
+        )
+    try:
+        coordinator = state.trade_dispute_statement_dispatch
+        if state.spine is None or coordinator is None:
+            raise RuntimeError(
+                "Dispute Statement acknowledgement recovery is unavailable"
+            )
+        record = coordinator.recover_acknowledgement(statement_digest)
+        return bool(record is not None and record.anchor_event_id)
+    finally:
+        lock.release()
+
+
 class _TradeExecutionRecoveryWorker:
     """Lifecycle-owned recovery for crash-interrupted Receipt audit writes."""
 
@@ -1545,8 +1589,10 @@ class _TradeDisputeStatementRecoveryWorker:
     def __init__(self, state: WebState) -> None:
         self._state = state
         self._cancel = threading.Event()
+        self._wake_event = threading.Event()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._urgent_targets: OrderedDict[str, dict[str, float | int]] = OrderedDict()
 
     def start(self) -> None:
         if (
@@ -1558,6 +1604,7 @@ class _TradeDisputeStatementRecoveryWorker:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._cancel.clear()
+            self._wake_event.clear()
             self._thread = threading.Thread(
                 target=self._run,
                 name="nth-trade-dispute-audit-recovery",
@@ -1568,14 +1615,137 @@ class _TradeDisputeStatementRecoveryWorker:
 
     def stop(self) -> None:
         self._cancel.set()
+        self._wake_event.set()
         with self._lock:
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
 
+    def wake(
+        self,
+        statement_digest: str | None = None,
+        *,
+        urgent_for_s: float = 0.0,
+    ) -> bool:
+        """Interrupt idle wait and optionally queue one exact ACK recovery."""
+
+        if (
+            isinstance(urgent_for_s, bool)
+            or not isinstance(urgent_for_s, (int, float))
+            or not 0.0 <= float(urgent_for_s) <= 30.0
+        ):
+            raise ValueError("urgent_for_s must be between zero and 30 seconds")
+        if statement_digest is not None and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", statement_digest
+        ) is None:
+            raise ValueError("statement_digest is invalid")
+        queued = False
+        if statement_digest is not None:
+            now = time.monotonic()
+            with self._lock:
+                existing = self._urgent_targets.get(statement_digest)
+                if existing is None and len(self._urgent_targets) >= (
+                    _TRADE_DISPUTE_URGENT_MAX_TARGETS
+                ):
+                    return False
+                expires_at = now + max(float(urgent_for_s), 1.0)
+                if existing is None:
+                    self._urgent_targets[statement_digest] = {
+                        "attempts": 0,
+                        "next_at": now,
+                        "expires_at": expires_at,
+                    }
+                queued = True
+        self._wake_event.set()
+        return queued
+
+    def _take_due_target(self) -> tuple[str, dict[str, float | int]] | None:
+        now = time.monotonic()
+        with self._lock:
+            for digest in tuple(self._urgent_targets):
+                item = self._urgent_targets[digest]
+                if (
+                    now >= float(item["expires_at"])
+                    or int(item["attempts"]) >= _TRADE_DISPUTE_URGENT_MAX_ATTEMPTS
+                ):
+                    self._urgent_targets.pop(digest, None)
+                    continue
+                if now >= float(item["next_at"]):
+                    return digest, self._urgent_targets.pop(digest)
+        return None
+
+    def _retry_target(
+        self,
+        statement_digest: str,
+        item: dict[str, float | int],
+    ) -> None:
+        attempts = int(item["attempts"]) + 1
+        now = time.monotonic()
+        if (
+            attempts >= _TRADE_DISPUTE_URGENT_MAX_ATTEMPTS
+            or now >= float(item["expires_at"])
+        ):
+            return
+        item["attempts"] = attempts
+        item["next_at"] = now + min(
+            _TRADE_DISPUTE_URGENT_BASE_BACKOFF_SECONDS * (2 ** (attempts - 1)),
+            1.0,
+        )
+        with self._lock:
+            newer = self._urgent_targets.get(statement_digest)
+            if newer is None:
+                self._urgent_targets[statement_digest] = item
+            else:
+                newer["attempts"] = max(
+                    int(newer["attempts"]),
+                    attempts,
+                )
+                newer["next_at"] = max(
+                    float(newer["next_at"]),
+                    float(item["next_at"]),
+                )
+                newer["expires_at"] = min(
+                    float(newer["expires_at"]),
+                    float(item["expires_at"]),
+                )
+
+    def _next_wait_seconds(self) -> float:
+        with self._lock:
+            next_times = [float(item["next_at"]) for item in self._urgent_targets.values()]
+        if not next_times:
+            return _TRADE_DISPUTE_RECOVERY_POLL_SECONDS
+        return max(
+            0.0,
+            min(
+                _TRADE_DISPUTE_RECOVERY_POLL_SECONDS,
+                min(next_times) - time.monotonic(),
+            ),
+        )
+
     def _run(self) -> None:
         try:
             while not self._cancel.is_set():
+                target = self._take_due_target()
+                if target is not None:
+                    statement_digest, target_state = target
+                    try:
+                        recovered = (
+                            _recover_trade_dispute_statement_dispatch_acknowledgement(
+                                self._state,
+                                statement_digest,
+                            )
+                        )
+                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                        logger.warning(
+                            "targeted trade Dispute Statement acknowledgement "
+                            "recovery failed for %s (%s)",
+                            statement_digest,
+                            type(exc).__name__,
+                        )
+                        recovered = False
+                    if not recovered:
+                        self._retry_target(statement_digest, target_state)
+                    continue
                 has_more = False
                 try:
                     report = _recover_trade_dispute_statement_audits(
@@ -1586,7 +1756,7 @@ class _TradeDisputeStatementRecoveryWorker:
                         "trade Dispute Statement audit background recovery failed (%s)",
                         type(exc).__name__,
                     )
-                    report = {"has_more": False}
+                    report = {"has_more": False, "failed": 1}
                 has_more = has_more or report["has_more"]
                 try:
                     dispatch_report = (
@@ -1600,11 +1770,12 @@ class _TradeDisputeStatementRecoveryWorker:
                         "recovery failed (%s)",
                         type(exc).__name__,
                     )
-                    dispatch_report = {"has_more": False}
+                    dispatch_report = {"has_more": False, "failed": 1}
                 has_more = has_more or dispatch_report["has_more"]
                 if has_more:
                     continue
-                self._cancel.wait(_TRADE_DISPUTE_RECOVERY_POLL_SECONDS)
+                self._wake_event.wait(self._next_wait_seconds())
+                self._wake_event.clear()
         finally:
             with self._lock:
                 self._thread = None
@@ -1734,6 +1905,52 @@ class _UDPLANPublisher:
                 logger.debug("UDP LAN responder stop failed: %s", exc)
 
 
+def _register_builtin_plugins(state: WebState) -> None:
+    """Register reviewed adapters without granting or enabling effects."""
+
+    from nth_dao.plugins.builtin import register_federation_discovery
+    from nth_dao.plugins.network import VerifiedPeerEndpoint
+    from nth_dao.web import v2_api
+    from nth_dao.web.market_federation_poll import _resolve_safe_gossip_ip
+
+    def verify_seed(peer_url: str) -> Optional[VerifiedPeerEndpoint]:
+        resolved_ip = _resolve_safe_gossip_ip(peer_url)
+        if resolved_ip is None:
+            return None
+        metadata, _error = v2_api._fetch_and_verify_federation_identity(
+            peer_url,
+            timeout_seconds=5.0,
+            resolved_ip=resolved_ip,
+        )
+        if metadata is None:
+            return None
+        now = int(time.time() * 1000)
+        return VerifiedPeerEndpoint(
+            url=peer_url,
+            did=str(metadata["did"]),
+            resolved_ip=resolved_ip,
+            verified_at_ms=now,
+            expires_at_ms=now + 300_000,
+        )
+
+    def verify_gossip(peer_url: str, resolved_ip: str) -> Optional[str]:
+        metadata, _error = v2_api._fetch_and_verify_federation_identity(
+            peer_url,
+            timeout_seconds=5.0,
+            resolved_ip=resolved_ip,
+        )
+        return str(metadata["did"]) if metadata is not None else None
+
+    register_federation_discovery(
+        state.plugin_host,
+        state.workspace,
+        get_seed_peers=lambda: v2_api._read_fed_peers(state.workspace),
+        verify_seed_peer=verify_seed,
+        verify_gossip_peer=verify_gossip,
+        max_duration_s=v2_api._market_fed_cycle_budget_s(),
+    )
+
+
 def create_app(
     workspace: str | Path | None = None,
     *,
@@ -1749,10 +1966,15 @@ def create_app(
     root = _resolve_safe_workspace(workspace)
     state = WebState(root)
     _bootstrap(state)
+    try:
+        _register_builtin_plugins(state)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("reviewed plugin registration failed (%s)", type(exc).__name__)
     mdns_publisher = _MDNSPublisher(state)
     udp_lan_publisher = _UDPLANPublisher(state)
     trade_execution_recovery = _TradeExecutionRecoveryWorker(state)
     trade_dispute_recovery = _TradeDisputeStatementRecoveryWorker(state)
+    state.trade_dispute_statement_recovery_worker = trade_dispute_recovery
 
     # Network services are owned by FastAPI lifespan, not create_app().
     # This keeps application construction side-effect free and prevents
@@ -2845,6 +3067,29 @@ def create_app(
             "backend_git": _BACKEND_GIT_REV,
             "backend_started_at": _BACKEND_STARTED_AT,
             "now": datetime.now().isoformat(),
+        }
+
+    @app.get("/api/plugins")
+    def plugin_status_endpoint(actor_id: str = "") -> dict[str, Any]:
+        if not actor_id:
+            raise HTTPException(status_code=400, detail="actor_id is required")
+        _require_member(state, actor_id)
+        audit_ok, audit_reason = state.plugin_host.verify_audit()
+        return {
+            "host_api": state.plugin_host.host_api,
+            "audit": {"ok": audit_ok, "reason": audit_reason},
+            "plugins": [
+                {
+                    "plugin_id": item.plugin_id,
+                    "state": item.state,
+                    "desired_enabled": item.desired_enabled,
+                    "authorized_permissions": list(item.authorized_permissions),
+                    "provided_capabilities": list(item.provided_capabilities),
+                    "risk_tier": item.risk_tier,
+                    "last_error": item.last_error,
+                }
+                for item in state.plugin_host.list_status()
+            ],
         }
 
     @app.get("/api/summary")
