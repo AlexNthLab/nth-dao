@@ -1,0 +1,20 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "goal": {"maxLength": 8192, "type": "string"},
+    "max_tokens": {"maximum": 1000000, "minimum": 1, "type": "integer"},
+    "model": {"maxLength": 256, "type": "string"},
+    "operation": {
+      "enum": ["cancel", "close", "open", "probe", "status", "turn"],
+      "type": "string"
+    },
+    "prompt": {"maxLength": 262144, "type": "string"},
+    "session_id": {"maxLength": 128, "minLength": 1, "type": "string"},
+    "system_prompt": {"maxLength": 65536, "type": "string"},
+    "temperature_milli": {"maximum": 2000, "minimum": 0, "type": "integer"},
+    "timeout_ms": {"maximum": 3600000, "minimum": 100, "type": "integer"},
+    "turn_id": {"maxLength": 128, "minLength": 1, "type": "string"}
+  },
+  "required": ["operation"],
+  "type": "object"
+}

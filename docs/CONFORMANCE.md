@@ -109,6 +109,24 @@ signed envelope for byte-exact cross-implementation verification; it contains
 no private key. Passing either vector alone does not prove runtime admission
 checks; the negative and integration suites enforce them in the Python host.
 
+The offline agent-provider reference freezes its capability descriptor in
+`agent-session-capability-v1.json`, with complete versioned input/output schemas
+and operation cases in the adjacent `agent-session-*-v1.json` files. The cases
+bind operation-specific required/allowed fields, identifier lexical rules,
+canonical bytes (including a Unicode vector), positive documents, negative
+documents, the 1 MiB canonical-UTF-8 wire ceiling, and output state semantics.
+A protocol digest covers the capability, both schemas, wire limits, and input/output
+operation rules. Runtime
+tests additionally prove principal-scoped ownership, global and per-principal
+capacity, idle-lease reclamation, in-flight lease protection, fail-fast busy
+handling, turn-ID deduplication, concurrent cancellation, semantic Host
+validation, binding revocation, and host-controlled model/resource/tool policy.
+A Node.js consumer independently verifies the frozen canonical bytes and hashes.
+A real provider may
+reuse the wire protocol only while declaring its process, network, filesystem,
+and credential effects truthfully. These vectors prove neither model quality
+nor safe external process isolation.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

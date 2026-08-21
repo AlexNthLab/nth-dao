@@ -1,0 +1,243 @@
+{
+  "canonical_examples": [
+    {
+      "canonical_utf8": "{\"operation\":\"turn\",\"prompt\":\"hello\",\"session_id\":\"session-1\",\"timeout_ms\":10000,\"turn_id\":\"turn-1\"}",
+      "document": {
+        "operation": "turn",
+        "prompt": "hello",
+        "session_id": "session-1",
+        "timeout_ms": 10000,
+        "turn_id": "turn-1"
+      },
+      "sha256": "sha256:a87bbaa1642136603bafea007761a0eb42feebc00fcc5a67d701a3a4310c2507"
+    },
+    {
+      "canonical_utf8": "{\"operation\":\"turn\",\"prompt\":\"line1\\n\u4f60\u597d\ud83d\ude00\",\"session_id\":\"\u4f1a\u8bdd-1\",\"turn_id\":\"\u8f6e\u6b21-1\"}",
+      "document": {
+        "operation": "turn",
+        "prompt": "line1\n\u4f60\u597d\ud83d\ude00",
+        "session_id": "\u4f1a\u8bdd-1",
+        "turn_id": "\u8f6e\u6b21-1"
+      },
+      "sha256": "sha256:095f56a8b8677b7a3bdf5d4e090ccda2e8b6db2dcc17b2f00aed8c29f8168a80"
+    }
+  ],
+  "format": "nth-dao-agent-session-wire-cases-v1",
+  "identifier_rules": {
+    "session_id": {
+      "forbidden_codepoints": ["U+0000-U+001F", "U+007F"],
+      "max_length": 128,
+      "min_length": 1,
+      "trimmed": true
+    },
+    "turn_id": {
+      "forbidden_codepoints": ["U+0000-U+001F", "U+007F"],
+      "max_length": 128,
+      "min_length": 1,
+      "trimmed": true
+    }
+  },
+  "invalid_inputs": [
+    {
+      "document": {"operation": "turn", "prompt": "hello", "session_id": "session-1"},
+      "reason": "turn_id-required"
+    },
+    {
+      "document": {"operation": "probe", "session_id": "smuggled"},
+      "reason": "operation-field-smuggling"
+    },
+    {
+      "document": {
+        "goal": "x",
+        "operation": "open",
+        "session_id": "session-1",
+        "turn_id": "wrong-scope"
+      },
+      "reason": "turn-id-is-operation-scoped"
+    },
+    {
+      "document": {"goal": "x", "operation": "open", "session_id": " padded "},
+      "reason": "identifier-must-be-trimmed"
+    }
+  ],
+  "invalid_outputs": [
+    {
+      "document": {
+        "backend_id": "mock",
+        "capabilities": {
+          "max_context_tokens": 100000,
+          "notes": "",
+          "supports_multi_turn": true,
+          "supports_streaming": false,
+          "supports_system_prompt": true,
+          "supports_tools": true
+        },
+        "content": "",
+        "detail": "",
+        "duration_ms": 0,
+        "error": "",
+        "final_status": "",
+        "finish_reason": "",
+        "input_tokens": 0,
+        "latency_ms": 0,
+        "lease_remaining_ms": -1,
+        "operation": "status",
+        "output_tokens": 0,
+        "ready": true,
+        "replayed": false,
+        "session_id": "session-1",
+        "state": "active",
+        "tool_calls": [],
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_turns": 0,
+        "turn_id": ""
+      },
+      "reason": "negative-lease"
+    }
+  ],
+  "invalid_semantic_outputs": [
+    {
+      "document": {
+        "backend_id": "mock",
+        "capabilities": {"max_context_tokens": 100000, "notes": "", "supports_multi_turn": true, "supports_streaming": false, "supports_system_prompt": true, "supports_tools": true},
+        "content": "", "detail": "", "duration_ms": 0, "error": "", "final_status": "completed", "finish_reason": "", "input_tokens": 0, "latency_ms": 0, "lease_remaining_ms": 0,
+        "operation": "turn", "output_tokens": 0, "ready": false, "replayed": true, "session_id": "", "state": "closed", "tool_calls": [], "total_input_tokens": 0, "total_output_tokens": 0, "total_turns": 0, "turn_id": ""
+      },
+      "reason": "turn-lifecycle-and-identifiers"
+    },
+    {
+      "document": {
+        "backend_id": "mock",
+        "capabilities": {"max_context_tokens": 100000, "notes": "", "supports_multi_turn": true, "supports_streaming": false, "supports_system_prompt": true, "supports_tools": true},
+        "content": "done", "detail": "", "duration_ms": 1, "error": "", "final_status": "", "finish_reason": "tool_call", "input_tokens": 1, "latency_ms": 1, "lease_remaining_ms": 900000,
+        "operation": "turn", "output_tokens": 1, "ready": true, "replayed": false, "session_id": "session-1", "state": "active", "tool_calls": [], "total_input_tokens": 1, "total_output_tokens": 1, "total_turns": 1, "turn_id": "turn-1"
+      },
+      "reason": "tool-call-finish-without-tool"
+    },
+    {
+      "document": {
+        "backend_id": "mock",
+        "capabilities": {"max_context_tokens": 100000, "notes": "", "supports_multi_turn": true, "supports_streaming": false, "supports_system_prompt": true, "supports_tools": true},
+        "content": "", "detail": "", "duration_ms": 1, "error": "", "final_status": "", "finish_reason": "", "input_tokens": 0, "latency_ms": 0, "lease_remaining_ms": 0,
+        "operation": "probe", "output_tokens": 0, "ready": false, "replayed": false, "session_id": "", "state": "ready", "tool_calls": [], "total_input_tokens": 0, "total_output_tokens": 0, "total_turns": 0, "turn_id": ""
+      },
+      "reason": "probe-ready-state-mismatch"
+    }
+  ],
+  "operation_rules": {
+    "cancel": {
+      "allowed": ["operation", "session_id"],
+      "required": ["operation", "session_id"]
+    },
+    "close": {
+      "allowed": ["operation", "session_id"],
+      "required": ["operation", "session_id"]
+    },
+    "open": {
+      "allowed": [
+        "goal",
+        "max_tokens",
+        "model",
+        "operation",
+        "session_id",
+        "temperature_milli",
+        "timeout_ms"
+      ],
+      "required": ["goal", "operation", "session_id"]
+    },
+    "probe": {
+      "allowed": ["operation", "timeout_ms"],
+      "required": ["operation"]
+    },
+    "status": {
+      "allowed": ["operation", "session_id"],
+      "required": ["operation", "session_id"]
+    },
+    "turn": {
+      "allowed": [
+        "operation",
+        "prompt",
+        "session_id",
+        "system_prompt",
+        "timeout_ms",
+        "turn_id"
+      ],
+      "required": ["operation", "prompt", "session_id", "turn_id"]
+    }
+  },
+  "output_rules": {
+    "common": {
+      "document_max_bytes": 1048576,
+      "max_tokens_semantics": "maximum-output-tokens-per-turn",
+      "replayed_allowed_operations": ["turn"],
+      "tool_call_ids": "non-empty-and-unique",
+      "turn_tokens_must_not_exceed_totals": true
+    },
+    "operations": {
+      "cancel": {"final_status": ["interrupted"], "ready": [true], "session_id": "required", "state": ["cancelled"], "turn_id": "empty"},
+      "close": {"final_status": ["completed", "error", "interrupted", "timeout"], "ready": [true], "session_id": "required", "state": ["closed"], "turn_id": "empty"},
+      "open": {"final_status": [""], "ready": [true], "session_id": "required", "state": ["active"], "turn_id": "empty"},
+      "probe": {"final_status": [""], "ready_state": {"false": "unavailable", "true": "ready"}, "session_id": "empty", "turn_id": "empty"},
+      "status": {"final_status": [""], "ready": [true], "session_id": "required", "state": ["active"], "turn_id": "empty"},
+      "turn": {"final_status": [""], "finish_reason": ["error", "length", "stop", "timeout", "tool_call"], "ready": [true], "session_id": "required", "state": ["active"], "turn_id": "required"}
+    }
+  },
+  "schema_version": 1,
+  "valid_inputs": [
+    {"operation": "probe", "timeout_ms": 5000},
+    {
+      "goal": "review code",
+      "operation": "open",
+      "session_id": "session-1",
+      "timeout_ms": 120000
+    },
+    {
+      "operation": "turn",
+      "prompt": "hello",
+      "session_id": "session-1",
+      "timeout_ms": 10000,
+      "turn_id": "turn-1"
+    },
+    {"operation": "status", "session_id": "session-1"},
+    {"operation": "close", "session_id": "session-1"},
+    {"operation": "cancel", "session_id": "session-1"}
+  ],
+  "valid_outputs": [
+    {
+      "backend_id": "mock",
+      "capabilities": {
+        "max_context_tokens": 100000,
+        "notes": "Deterministic offline reference provider.",
+        "supports_multi_turn": true,
+        "supports_streaming": false,
+        "supports_system_prompt": true,
+        "supports_tools": true
+      },
+      "content": "Mock response to: 'hello'",
+      "detail": "",
+      "duration_ms": 1,
+      "error": "",
+      "final_status": "",
+      "finish_reason": "stop",
+      "input_tokens": 1,
+      "latency_ms": 1,
+      "lease_remaining_ms": 900000,
+      "operation": "turn",
+      "output_tokens": 6,
+      "ready": true,
+      "replayed": false,
+      "session_id": "session-1",
+      "state": "active",
+      "tool_calls": [],
+      "total_input_tokens": 1,
+      "total_output_tokens": 6,
+      "total_turns": 1,
+      "turn_id": "turn-1"
+    }
+  ],
+  "wire_limits": {
+    "max_document_bytes": 1048576,
+    "size_unit": "canonical-json-utf8-bytes"
+  }
+}

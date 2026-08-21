@@ -45,57 +45,8 @@ except ImportError:
 # Backward-compatible: existing PR 1–7 code keeps working under nth_dao.
 #
 
-# PR 1–2: core runtime + 4 memory providers
-from team_layer import TeamAgent, TeamMemoryManager
-from team_layer.memory_providers import (
-    SoulProvider,
-    UserModelProvider,
-    VectorProvider,
-    LedgerProvider,
-)
-
-# PR 3: 5-stage context compression pipeline
-from team_layer.compression import CompressionPipeline, CompressionStage
-
-# PR 4: EvoLoop self-evolution
-from team_layer.evolution import (
-    EvoLoop,
-    EvoTrigger,
-    Reflector,
-    Verifier,
-    EvolutionGate,
-)
-
-# PR 5: multi-terminal sync
-from team_layer.git_sync import (
-    SyncConfig,
-    LogCollector,
-    SkillLoader,
-    CentralAggregator,
-)
-
-# PR 6: Blackboard shared workspace
-from team_layer.blackboard import (
-    Blackboard,
-    BlackboardEntry,
-    BlackboardProvider,
-    Scope,
-    render_kanban,
-    render_table,
-)
-
-# PR 7: AgentBackend ABC + 6 built-in backends
-from team_layer.backends import (
-    AgentBackend,
-    BackendCapabilities,
-    BackendRegistry,
-    BackendUnavailableError,
-    SessionConfig,
-    SessionSummary,
-    TokenUsage,
-    TurnResponse,
-    default_registry,
-)
+# Legacy runtime exports are resolved lazily below. Importing a protocol-only
+# module must not execute backend package initializers or probe local CLIs.
 
 #
 # PR 8: new — Discovery + Orchestration + attach()
@@ -338,8 +289,56 @@ from .group_registry import (
     apply_proposal,
     normalize_group_name,
 )
-from .attach import attach, TeamSession
-from .agent_daemon import AgentDaemon, DaemonConfig
+from .attach import TeamSession, attach
+
+_LAZY_EXPORTS = {
+    "TeamAgent": ("team_layer", "TeamAgent"),
+    "TeamMemoryManager": ("team_layer", "TeamMemoryManager"),
+    "SoulProvider": ("team_layer.memory_providers", "SoulProvider"),
+    "UserModelProvider": ("team_layer.memory_providers", "UserModelProvider"),
+    "VectorProvider": ("team_layer.memory_providers", "VectorProvider"),
+    "LedgerProvider": ("team_layer.memory_providers", "LedgerProvider"),
+    "CompressionPipeline": ("team_layer.compression", "CompressionPipeline"),
+    "CompressionStage": ("team_layer.compression", "CompressionStage"),
+    "EvoLoop": ("team_layer.evolution", "EvoLoop"),
+    "EvoTrigger": ("team_layer.evolution", "EvoTrigger"),
+    "Reflector": ("team_layer.evolution", "Reflector"),
+    "Verifier": ("team_layer.evolution", "Verifier"),
+    "EvolutionGate": ("team_layer.evolution", "EvolutionGate"),
+    "SyncConfig": ("team_layer.git_sync", "SyncConfig"),
+    "LogCollector": ("team_layer.git_sync", "LogCollector"),
+    "SkillLoader": ("team_layer.git_sync", "SkillLoader"),
+    "CentralAggregator": ("team_layer.git_sync", "CentralAggregator"),
+    "Blackboard": ("team_layer.blackboard", "Blackboard"),
+    "BlackboardEntry": ("team_layer.blackboard", "BlackboardEntry"),
+    "BlackboardProvider": ("team_layer.blackboard", "BlackboardProvider"),
+    "Scope": ("team_layer.blackboard", "Scope"),
+    "render_kanban": ("team_layer.blackboard", "render_kanban"),
+    "render_table": ("team_layer.blackboard", "render_table"),
+    "AgentBackend": ("team_layer.backends", "AgentBackend"),
+    "BackendCapabilities": ("team_layer.backends", "BackendCapabilities"),
+    "BackendRegistry": ("team_layer.backends", "BackendRegistry"),
+    "BackendUnavailableError": ("team_layer.backends", "BackendUnavailableError"),
+    "SessionConfig": ("team_layer.backends", "SessionConfig"),
+    "SessionSummary": ("team_layer.backends", "SessionSummary"),
+    "TokenUsage": ("team_layer.backends", "TokenUsage"),
+    "TurnResponse": ("team_layer.backends", "TurnResponse"),
+    "default_registry": ("team_layer.backends", "default_registry"),
+    "AgentDaemon": ("nth_dao.agent_daemon", "AgentDaemon"),
+    "DaemonConfig": ("nth_dao.agent_daemon", "DaemonConfig"),
+}
+
+
+def __getattr__(name):
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    module_name, attribute = target
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
 
 __all__ = [
     # Facade re-exports (team_layer PR 1–7)

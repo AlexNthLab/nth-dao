@@ -1939,6 +1939,7 @@ def _register_builtin_plugins(state: WebState) -> None:
     from nth_dao.plugins.builtin import (
         register_curated_registry_discovery,
         register_federation_discovery,
+        register_mock_agent_provider,
     )
     from nth_dao.web import v2_api
 
@@ -1980,6 +1981,7 @@ def _register_builtin_plugins(state: WebState) -> None:
             "NTH_CURATED_REGISTRY_PUBLISHER_DID", "",
         ),
     )
+    register_mock_agent_provider(state.plugin_host)
 
 
 def create_app(

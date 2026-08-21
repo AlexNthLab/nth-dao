@@ -1,6 +1,20 @@
 """NTH DAO plugin contracts and the reviewed built-in plugin host."""
 
 from .audit import PluginAuditError, PluginAuditLog
+from .agent_provider import (
+    AGENT_SESSION_CAPABILITY_ID,
+    AGENT_SESSION_CAPABILITY_VERSION,
+    AGENT_SESSION_CONTRACT,
+    AGENT_SESSION_INPUT_SCHEMA,
+    AGENT_SESSION_MAX_DOCUMENT_BYTES,
+    AGENT_SESSION_OUTPUT_SCHEMA,
+    agent_session_operation_rule,
+    agent_session_protocol_digest,
+    agent_session_protocol_document,
+    validate_agent_session_input,
+    validate_agent_session_identifier,
+    validate_agent_session_output,
+)
 
 from .contracts import (
     CAPABILITY_CARDINALITIES,
@@ -46,6 +60,18 @@ from .schema import PluginSchemaError, validate_instance, validate_schema
 from .network import VerifiedPeerEndpoint, normalize_peer_url
 
 __all__ = [
+    "AGENT_SESSION_CAPABILITY_ID",
+    "AGENT_SESSION_CAPABILITY_VERSION",
+    "AGENT_SESSION_CONTRACT",
+    "AGENT_SESSION_INPUT_SCHEMA",
+    "AGENT_SESSION_MAX_DOCUMENT_BYTES",
+    "AGENT_SESSION_OUTPUT_SCHEMA",
+    "agent_session_operation_rule",
+    "agent_session_protocol_digest",
+    "agent_session_protocol_document",
+    "validate_agent_session_input",
+    "validate_agent_session_identifier",
+    "validate_agent_session_output",
     "CAPABILITY_CARDINALITIES",
     "CAPABILITY_EFFECTS",
     "CONSISTENCY_CLASSES",

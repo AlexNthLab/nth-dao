@@ -1,0 +1,96 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "backend_id": {"maxLength": 128, "minLength": 1, "type": "string"},
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "max_context_tokens": {"minimum": 0, "type": "integer"},
+        "notes": {"maxLength": 2048, "type": "string"},
+        "supports_multi_turn": {"type": "boolean"},
+        "supports_streaming": {"type": "boolean"},
+        "supports_system_prompt": {"type": "boolean"},
+        "supports_tools": {"type": "boolean"}
+      },
+      "required": [
+        "max_context_tokens",
+        "notes",
+        "supports_multi_turn",
+        "supports_streaming",
+        "supports_system_prompt",
+        "supports_tools"
+      ],
+      "type": "object"
+    },
+    "content": {"maxLength": 524288, "type": "string"},
+    "detail": {"maxLength": 4096, "type": "string"},
+    "duration_ms": {"minimum": 0, "type": "integer"},
+    "error": {"maxLength": 4096, "type": "string"},
+    "final_status": {
+      "enum": ["", "completed", "error", "interrupted", "timeout"],
+      "type": "string"
+    },
+    "finish_reason": {
+      "enum": ["", "error", "length", "stop", "timeout", "tool_call"],
+      "type": "string"
+    },
+    "input_tokens": {"minimum": 0, "type": "integer"},
+    "latency_ms": {"minimum": 0, "type": "integer"},
+    "lease_remaining_ms": {"minimum": 0, "type": "integer"},
+    "operation": {
+      "enum": ["cancel", "close", "open", "probe", "status", "turn"],
+      "type": "string"
+    },
+    "output_tokens": {"minimum": 0, "type": "integer"},
+    "ready": {"type": "boolean"},
+    "replayed": {"type": "boolean"},
+    "session_id": {"maxLength": 128, "type": "string"},
+    "state": {
+      "enum": ["active", "cancelled", "closed", "ready", "unavailable"],
+      "type": "string"
+    },
+    "tool_calls": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments_json": {"maxLength": 65536, "type": "string"},
+          "id": {"maxLength": 256, "minLength": 1, "type": "string"},
+          "name": {"maxLength": 256, "minLength": 1, "type": "string"}
+        },
+        "required": ["arguments_json", "id", "name"],
+        "type": "object"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "total_input_tokens": {"minimum": 0, "type": "integer"},
+    "total_output_tokens": {"minimum": 0, "type": "integer"},
+    "total_turns": {"minimum": 0, "type": "integer"},
+    "turn_id": {"maxLength": 128, "type": "string"}
+  },
+  "required": [
+    "backend_id",
+    "capabilities",
+    "content",
+    "detail",
+    "duration_ms",
+    "error",
+    "finish_reason",
+    "final_status",
+    "input_tokens",
+    "latency_ms",
+    "lease_remaining_ms",
+    "operation",
+    "output_tokens",
+    "ready",
+    "replayed",
+    "session_id",
+    "state",
+    "tool_calls",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_turns",
+    "turn_id"
+  ],
+  "type": "object"
+}

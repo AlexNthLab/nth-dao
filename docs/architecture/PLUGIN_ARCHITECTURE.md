@@ -321,12 +321,72 @@ digest is identical; lower versions and same-version content conflicts fail
 closed. Legacy v1 version-only state requires one publisher version increment
 before this retry guarantee becomes available.
 
+### Agent provider reference
+
+The first `agent.provider` reference freezes
+`org.nth-dao.agent.session` v1 as a bounded, principal-scoped session
+capability. Its wire operations are `probe`, `open`, `turn`, `status`,
+`close`, and `cancel`. Prompts are confidential and sessions are ephemeral.
+Every turn carries a caller-stable `turn_id`; a provider must cache the result
+for the session lease, return it with `replayed=true` on an identical retry,
+and reject reuse of that ID with different input. Numeric model controls use integer
+`temperature_milli` and `timeout_ms` fields because canonical JSON rejects
+floating-point values. `open.max_tokens` is the maximum output-token count for
+each turn. A provider must enforce it, and an adapter must reject a response
+whose reported `output_tokens` exceeds it; accepting the configuration is not
+proof that the provider honored the budget.
+
+The complete protocol document also fixes a 1 MiB canonical-JSON UTF-8 limit
+for both directions and operation-specific output state rules. A schema-valid
+response is still rejected unless identifiers, `ready`/state, final status,
+turn counters, replay marker, error, and tool-call fields agree with the
+operation. Implementations must apply both schema and semantic validation.
+
+Invocation input cannot select an executable, import path, environment,
+credential, working directory, tool policy, or arbitrary backend options.
+Those controls remain host-owned. The explicit
+`nth_dao.plugins.agent_backend_adapter.PluginAgentBackend` proxy implements
+the existing `AgentBackend` interface over a compatible provider binding, so
+`attach()` and orchestration do not gain a parallel Agent facade. The proxy
+checks the schema digests, major version, privacy class, and failure semantics
+instead of trusting a matching capability name alone.
+
+The distribution currently registers only a self-contained offline Mock
+provider. It has no external effects, runtime loader, or permissions and
+remains disabled by default. It caps global and per-principal sessions, uses a
+15-minute renewable idle lease, limits turns per session, rejects concurrent
+turns with a fail-fast busy result, protects an in-flight turn from idle
+reaping, and lets idempotent `cancel` bypass the turn lock. Its wire capability reports
+`supports_streaming=false` because this contract has no streaming operation. This is
+a conformance and lifecycle sample, not a claim that Claude Code, Codex, or
+Hermes has migrated to the plugin host. Those providers must reuse the
+existing supervised subprocess/A2A isolation boundary and declare process,
+network, and credential effects truthfully before they can implement the same
+wire shape. Direct in-process wrapping of those real providers is rejected.
+Importing the wire contract or PluginHost does not import the legacy
+`team_layer` package. The package facade resolves legacy runtime exports lazily,
+and only callers that explicitly request `PluginAgentBackend`, call `attach`,
+or request a legacy backend load those modules. The Mock artifact digest binds
+an explicit reviewed source set and detects ordinary local/package drift. It is
+unsigned, excludes the Python/package trust base and transitive import graph,
+and is not publisher attestation. A changed built-in manifest resets grants and
+returns to disabled state; external plugin distribution remains out of scope
+until signed, immutable build artifacts are supported.
+
+`PluginAgentBackend` adds host-owned policy above the language-neutral wire:
+an optional model must be allowlisted, session token and timeout controls may
+only narrow configured ceilings, and a returned tool call is exposed only when
+both the adapter policy and that session requested the exact tool name. The
+provider never receives executable paths, credentials, environment variables,
+or an authority to execute a tool merely because it proposed one.
+
 Migration order:
 
 1. plugin manifest, capability contract, registry, and lifecycle tests;
 2. federation discovery as a reviewed built-in provider;
 3. optional curated registry discovery as an accelerator whose results are
    reverified by the trust kernel (reference provider implemented);
-4. agent backends, then transport and message retention providers;
+4. agent backends (offline reference implemented; supervised external
+   providers remain), then transport and message retention providers;
 5. settlement and payment providers only after subprocess isolation and
    mandate-bound commit tests exist.

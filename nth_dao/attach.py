@@ -37,7 +37,53 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Union, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Union,
+    runtime_checkable,
+)
+
+from .discovery import AgentRegistry, PeerFinder
+from .groups import GroupManager, Message, MessageKind
+from .identity import AgentIdentity
+from .membership import MembershipManager
+from .orchestration import Mission, MissionRunner, MissionStore
+
+class _RuntimeAgentBackend(Protocol):
+    backend_id: str
+
+    def preflight_check(self, *, timeout: float = 5.0) -> Any: ...
+
+
+class _RuntimeBlackboard(Protocol):
+    def post(self, **kwargs: Any) -> Any: ...
+
+
+class _RuntimeTeamAgent(Protocol):
+    def finalize(self) -> Any: ...
+
+
+class _RuntimeTeamMemoryManager(Protocol):
+    def initialize(self, context: Dict[str, Any]) -> Any: ...
+
+
+if TYPE_CHECKING:
+    from team_layer import TeamAgent, TeamMemoryManager
+    from team_layer.backends import AgentBackend
+    from team_layer.blackboard import Blackboard
+else:
+    # Preserve useful runtime annotations without importing the optional
+    # legacy backend package. attach() uses concrete local imports only when a
+    # session is actually constructed.
+    AgentBackend = _RuntimeAgentBackend
+    Blackboard = _RuntimeBlackboard
+    TeamAgent = _RuntimeTeamAgent
+    TeamMemoryManager = _RuntimeTeamMemoryManager
 
 
 def _detect_gpu() -> Dict[str, Any]:
@@ -174,22 +220,6 @@ def _capture_env_metadata() -> Dict[str, Any]:
     }
     env.update(_detect_gpu())
     return env
-
-from team_layer import TeamAgent, TeamMemoryManager
-from team_layer.backends import AgentBackend, default_registry
-from team_layer.blackboard import Blackboard, BlackboardProvider
-from team_layer.memory_providers import (
-    LedgerProvider,
-    SoulProvider,
-    UserModelProvider,
-    VectorProvider,
-)
-
-from .discovery import AgentRegistry, PeerFinder
-from .orchestration import Mission, MissionRunner, MissionStore
-from .membership import MembershipManager
-from .identity import AgentIdentity
-from .groups import GroupManager
 
 logger = logging.getLogger("nth_dao.attach")
 
@@ -581,6 +611,20 @@ def attach(
         PermissionError: when the team's join_policy denies this agent_id (and
         no valid join_token / approval is present).
     """
+    # The legacy backend runtime is deliberately loaded only when callers
+    # construct a TeamSession. Importing ``nth_dao`` or the language-neutral
+    # plugin protocol must not execute backend registration or import optional
+    # CLI integrations as a side effect.
+    from team_layer import TeamAgent, TeamMemoryManager
+    from team_layer.backends import AgentBackend, default_registry
+    from team_layer.blackboard import Blackboard, BlackboardProvider
+    from team_layer.memory_providers import (
+        LedgerProvider,
+        SoulProvider,
+        UserModelProvider,
+        VectorProvider,
+    )
+
     workspace = Path(workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -634,7 +678,6 @@ def attach(
         # Always emit, success or failure - the audit chain must show
         # WHY the attach succeeded or refused, not just attaches that
         # went through.
-        import dataclasses as _dc
         from .event_bus import EventBus
         _audit_bus = EventBus(workspace, identity=agent_identity)
         _audit_bus.emit(

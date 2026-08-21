@@ -156,11 +156,20 @@ class CapabilitySchemas:
         self,
         input_schema: Mapping[str, Any],
         output_schema: Mapping[str, Any],
+        *,
+        input_validator: Callable[[Mapping[str, Any]], None] | None = None,
+        output_validator: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         validate_schema(input_schema, path="$input_schema")
         validate_schema(output_schema, path="$output_schema")
         self._input_schema = deepcopy(dict(input_schema))
         self._output_schema = deepcopy(dict(output_schema))
+        if input_validator is not None and not callable(input_validator):
+            raise TypeError("input_validator must be callable")
+        if output_validator is not None and not callable(output_validator):
+            raise TypeError("output_validator must be callable")
+        self._input_validator = input_validator
+        self._output_validator = output_validator
 
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -780,11 +789,15 @@ class PluginHost:
         try:
             request_body = _json_boundary_copy(payload, label="capability input")
             validate_instance(request_body, schemas._input_schema, path="$input")
+            if schemas._input_validator is not None:
+                schemas._input_validator(request_body)
             response = provider.invoke(request_body, context)
             if not isinstance(response, Mapping):
                 raise PluginSchemaError("capability output must be an object")
             response_body = _json_boundary_copy(response, label="capability output")
             validate_instance(response_body, schemas._output_schema, path="$output")
+            if schemas._output_validator is not None:
+                schemas._output_validator(response_body)
             return response_body
         finally:
             with self._condition:

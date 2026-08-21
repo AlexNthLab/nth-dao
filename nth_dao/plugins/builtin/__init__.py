@@ -24,6 +24,13 @@ from .federation_discovery import (
     federation_discovery_manifest,
     register_federation_discovery,
 )
+from .mock_agent_provider import (
+    MOCK_AGENT_PROVIDER_PLUGIN_ID,
+    MockAgentProviderPlugin,
+    MockAgentSessionProvider,
+    mock_agent_provider_manifest,
+    register_mock_agent_provider,
+)
 
 __all__ = [
     "CURATED_REGISTRY_CAPABILITY_ID",
@@ -42,8 +49,13 @@ __all__ = [
     "FederationDiscoveryCycle",
     "FederationDiscoveryPlugin",
     "FederationDiscoveryProvider",
+    "MOCK_AGENT_PROVIDER_PLUGIN_ID",
+    "MockAgentProviderPlugin",
+    "MockAgentSessionProvider",
     "curated_registry_manifest",
     "federation_discovery_manifest",
+    "mock_agent_provider_manifest",
     "register_curated_registry_discovery",
     "register_federation_discovery",
+    "register_mock_agent_provider",
 ]
