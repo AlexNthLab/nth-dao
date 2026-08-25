@@ -16316,8 +16316,9 @@ def test_dispute_statement_fetch_rejects_signature_tamper_and_request_rebinding(
         _dispute_statement_fetch_fixture(tmp_path)
     )
     request_tamper = request.to_dict()
+    request_proof = request_tamper["proof"]["proof_value"]
     request_tamper["proof"]["proof_value"] = (
-        "B" + request_tamper["proof"]["proof_value"][1:]
+        ("A" if request_proof[0] != "A" else "B") + request_proof[1:]
     )
     assert not verify_trade_dispute_statement_fetch_request(
         request_tamper,
@@ -16329,8 +16330,9 @@ def test_dispute_statement_fetch_rejects_signature_tamper_and_request_rebinding(
     )[0]
 
     response_tamper = response.to_dict()
+    response_proof = response_tamper["proof"]["proof_value"]
     response_tamper["proof"]["proof_value"] = (
-        "B" + response_tamper["proof"]["proof_value"][1:]
+        ("A" if response_proof[0] != "A" else "B") + response_proof[1:]
     )
     assert not verify_trade_dispute_statement_fetch_response(
         response_tamper,

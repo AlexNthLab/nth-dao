@@ -1,0 +1,197 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "accepted": {
+      "type": "boolean"
+    },
+    "acknowledged": {
+      "type": "boolean"
+    },
+    "acknowledged_count": {
+      "maximum": 64,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "batch_sha256": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "delivery_guarantee": {
+      "enum": [
+        "ephemeral-at-least-once-until-ack"
+      ],
+      "type": "string"
+    },
+    "delivery_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "detail": {
+      "maxLength": 2048,
+      "type": "string"
+    },
+    "expires_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "found": {
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_at_ms": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delivery_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "envelope_json": {
+            "maxLength": 524288,
+            "minLength": 2,
+            "type": "string"
+          },
+          "envelope_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "expires_at_ms": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "transport_delivery_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted_at_ms",
+          "delivery_id",
+          "envelope_json",
+          "envelope_sha256",
+          "expires_at_ms",
+          "transport_delivery_id"
+        ],
+        "type": "object"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "lease_expires_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "lease_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "local_route_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "max_batch_size": {
+      "maximum": 64,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_envelope_bytes": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_lease_ms": {
+      "maximum": 300000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_ttl_seconds": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "operation": {
+      "enum": [
+        "ack",
+        "probe",
+        "receive",
+        "send"
+      ],
+      "type": "string"
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "receive_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "state": {
+      "enum": [
+        "",
+        "acknowledged",
+        "expired",
+        "leased",
+        "queued"
+      ],
+      "type": "string"
+    },
+    "supports_ack": {
+      "type": "boolean"
+    },
+    "supports_streaming": {
+      "type": "boolean"
+    },
+    "transport_delivery_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "transport_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "accepted",
+    "acknowledged",
+    "acknowledged_count",
+    "batch_sha256",
+    "delivery_guarantee",
+    "delivery_id",
+    "detail",
+    "expires_at_ms",
+    "found",
+    "items",
+    "lease_expires_at_ms",
+    "lease_id",
+    "local_route_id",
+    "max_batch_size",
+    "max_envelope_bytes",
+    "max_lease_ms",
+    "max_ttl_seconds",
+    "operation",
+    "ready",
+    "receive_id",
+    "replayed",
+    "state",
+    "supports_ack",
+    "supports_streaming",
+    "transport_id",
+    "transport_delivery_id"
+  ],
+  "type": "object"
+}

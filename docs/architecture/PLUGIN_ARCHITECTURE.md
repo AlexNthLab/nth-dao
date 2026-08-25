@@ -172,7 +172,10 @@ with a 1 MiB document limit. These constraints keep schema metadata
 enforceable at the call boundary rather than advisory.
 
 C2, C3, and C4 capabilities must also register both input and output semantic
-validators. The Host runs those validators around every invocation and rejects
+validators. Capabilities whose responses carry request identity or limits must
+also register an exchange validator, and resource-addressed effects must use an
+authority validator before provider invocation. The Host runs those validators
+around every invocation and rejects
 an operation-tagged response that does not echo its request operation. This
 prevents accidental omission of CAS or state-machine validation merely because
 the base schema digest matches. A no-op or dishonest validator cannot be
@@ -484,6 +487,39 @@ logs, disks, backups, or remote replicas. A future durable provider must
 declare its real filesystem or network effects and a distinct exact contract
 profile even when it implements the same wire schema.
 
+### Transport boundary
+
+`org.nth-dao.transport.delivery` v1 moves opaque canonical-JSON protocol
+envelopes without becoming an identity, membership, mandate, or message
+authority. The Host verifies authorization before send and must reverify the
+received envelope's signature and protocol semantics after delivery. A route
+ID is an opaque provider locator, not a URL, DID resolution result, or proof of
+the remote sender.
+
+The v1 operations are `probe`, `send`, `receive`, and `ack`. `delivery_id`
+binds immutable send input, while `receive_id` binds one expiring exclusive
+lease. Acknowledgement atomically closes the complete batch using its lease ID
+and ordered content digest. An unacknowledged batch may be delivered again
+after lease expiry, so application handlers remain idempotent. The ephemeral
+profile provides at-least-once delivery only within the provider lifetime; it
+is neither durable delivery nor exactly-once processing.
+
+The reviewed `org.nth-dao.transport.loopback` provider is a bounded,
+in-memory conformance sample. It derives each local inbox route from the
+Host-selected principal, accepts no caller-supplied source identity, has no
+network or filesystem effects, and is installed disabled. It does not replace
+gossip, A2A, Channel persistence, or federation discovery. Future HTTP,
+Bluetooth, relay, or other transports must declare their actual effects and
+exact capability profile; sharing method names does not make a network
+provider compatible with the local ephemeral profile. Provider-scoped
+transport delivery IDs disambiguate equal caller IDs from different senders.
+Unexpired acknowledgement evidence is never evicted; capacity exhaustion
+fails closed. Empty receive IDs retain their binding only through the requested
+lease. Terminal non-empty claim evidence has a separate five-minute retry
+window, while sender delivery tombstones remain until the envelope expires.
+Byte, claim, and idempotency quotas are isolated per invoking principal as well
+as globally.
+
 Migration order:
 
 1. plugin manifest, capability contract, registry, and lifecycle tests;
@@ -492,6 +528,8 @@ Migration order:
    reverified by the trust kernel (reference provider implemented);
 4. agent backends (offline reference and fixed-DID supervised A2A bridge
    implemented; signed remote cancellation remains), message retention
-   (ephemeral reference implemented), then transport providers;
+   (ephemeral reference implemented), then transport providers (local
+   loopback contract and disabled reference implemented; network adapters
+   remain);
 5. settlement and payment providers only after subprocess isolation and
    mandate-bound commit tests exist.

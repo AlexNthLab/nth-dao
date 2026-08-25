@@ -455,6 +455,54 @@ def test_c2_registration_requires_semantic_validators_and_operation_echo() -> No
         )
 
 
+def test_host_runs_exchange_validator_after_output_validation() -> None:
+    token_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"token": {"type": "string", "minLength": 1}},
+        "required": ["token"],
+    }
+    cap = CapabilityContract(
+        capability_id="org.nth-dao.test.exchange-binding",
+        version="1.0.0",
+        input_schema_digest=schema_digest(token_schema),
+        output_schema_digest=schema_digest(token_schema),
+        effects=("none",),
+        consistency="C1",
+        privacy="workspace",
+        security="verified-input",
+        cardinality="one",
+        deterministic=True,
+        retention="none",
+        failure_semantics="retry-safe",
+    )
+    item = manifest(provides=(cap,))
+    provider = Provider({"token": "substituted"})
+
+    def bind_exchange(request, response) -> None:
+        if response["token"] != request["token"]:
+            raise PluginSchemaError("exchange token mismatch")
+
+    host = PluginHost()
+    host.register_builtin(
+        item,
+        lambda: Runtime({cap.capability_id: provider}),
+        schemas={
+            cap.capability_id: CapabilitySchemas(
+                token_schema,
+                token_schema,
+                exchange_validator=bind_exchange,
+            )
+        },
+    )
+    binding = host.enable(item.plugin_id)[0]
+    with pytest.raises(PluginSchemaError, match="exchange token mismatch"):
+        binding.invoke(
+            {"token": "original"},
+            authority=authority(cap.capability_id),
+        )
+
+
 def test_schema_rejects_unbounded_objects_and_regex_patterns() -> None:
     with pytest.raises(PluginSchemaError, match="explicitly false"):
         CapabilitySchemas(

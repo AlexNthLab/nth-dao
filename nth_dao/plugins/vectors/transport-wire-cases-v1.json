@@ -1,0 +1,209 @@
+{
+  "batch_digest_examples": [
+    {
+      "items": [
+        {
+          "accepted_at_ms": 1750000000000,
+          "delivery_id": "delivery-1",
+          "envelope_json": "{\"id\":\"message-1\",\"payload\":{\"body\":\"hello\"},\"type\":\"chat.message\"}",
+          "envelope_sha256": "865679c8b2f4c55844b9d285e4f1b3e39bb753d66aee7f42ea17ab0254739ba9",
+          "expires_at_ms": 1750000060000,
+          "transport_delivery_id": "delivery:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "sha256": "8322712703ac0d3b7a99410faed514a4fdeb29c259c16f3c41b43c7d8e1f03c9"
+    }
+  ],
+  "canonical_examples": [
+    {
+      "canonical_utf8": "{\"id\":\"message-1\",\"payload\":{\"body\":\"hello\"},\"type\":\"chat.message\"}",
+      "document": {
+        "id": "message-1",
+        "payload": {
+          "body": "hello"
+        },
+        "type": "chat.message"
+      },
+      "sha256": "865679c8b2f4c55844b9d285e4f1b3e39bb753d66aee7f42ea17ab0254739ba9"
+    }
+  ],
+  "canonicalization": {
+    "encoding": "utf-8",
+    "floats": "forbidden",
+    "integer_range": [
+      -9007199254740991,
+      9007199254740991
+    ],
+    "object_keys": "unicode-codepoint-ascending",
+    "root": "object",
+    "whitespace": "none"
+  },
+  "error_model": {
+    "claim-closed": {
+      "meaning": "the receive id already names an acknowledged or expired claim",
+      "retryable": false
+    },
+    "conflict": {
+      "meaning": "an id already binds different immutable input",
+      "retryable": false
+    },
+    "delivery-not-found": {
+      "meaning": "the requested delivery is not live in this provider",
+      "retryable": false
+    },
+    "expired": {
+      "meaning": "the envelope expiry is not in the future",
+      "retryable": false
+    },
+    "inactive": {
+      "meaning": "the provider is not currently active",
+      "retryable": true
+    },
+    "lease-conflict": {
+      "meaning": "the acknowledgement does not bind the active receive lease",
+      "retryable": false
+    },
+    "lease-expired": {
+      "meaning": "the receive lease ended before acknowledgement",
+      "retryable": false
+    },
+    "limit-exceeded": {
+      "meaning": "the request exceeds a provider limit",
+      "retryable": false
+    },
+    "quota-exceeded": {
+      "meaning": "temporary provider or principal capacity is exhausted",
+      "retryable": true
+    }
+  },
+  "error_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "enum": [
+          "claim-closed",
+          "conflict",
+          "delivery-not-found",
+          "expired",
+          "inactive",
+          "lease-conflict",
+          "lease-expired",
+          "limit-exceeded",
+          "quota-exceeded"
+        ],
+        "type": "string"
+      },
+      "detail": {
+        "maxLength": 512,
+        "minLength": 1,
+        "type": "string"
+      },
+      "retryable": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "code",
+      "detail",
+      "retryable"
+    ],
+    "type": "object"
+  },
+  "identifier_rules": {
+    "direct_urls": "forbidden",
+    "max_chars": 256,
+    "path_segments": [
+      "dot-and-dot-dot-forbidden",
+      "empty-forbidden"
+    ],
+    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+    "route_semantics": "opaque-provider-route-id-not-authority"
+  },
+  "operation_rules": {
+    "ack": {
+      "allowed": [
+        "batch_sha256",
+        "lease_id",
+        "operation",
+        "receive_id"
+      ],
+      "required": [
+        "batch_sha256",
+        "lease_id",
+        "operation",
+        "receive_id"
+      ]
+    },
+    "probe": {
+      "allowed": [
+        "operation"
+      ],
+      "required": [
+        "operation"
+      ]
+    },
+    "receive": {
+      "allowed": [
+        "lease_ms",
+        "limit",
+        "operation",
+        "receive_id"
+      ],
+      "required": [
+        "lease_ms",
+        "limit",
+        "operation",
+        "receive_id"
+      ]
+    },
+    "send": {
+      "allowed": [
+        "delivery_id",
+        "destination_route_id",
+        "envelope_json",
+        "envelope_sha256",
+        "expires_at_ms",
+        "operation"
+      ],
+      "required": [
+        "delivery_id",
+        "destination_route_id",
+        "envelope_json",
+        "envelope_sha256",
+        "expires_at_ms",
+        "operation"
+      ]
+    }
+  },
+  "semantics": {
+    "ack": "atomically-acknowledge-the-entire-leased-batch",
+    "authority": "host-owned-never-derived-from-transport-metadata",
+    "batch_digest": "ordered-full-descriptor-with-envelope-sha256",
+    "delivery": "ephemeral-at-least-once-until-ack-within-provider-lifetime",
+    "envelope": "opaque-canonical-json-reverified-after-receive",
+    "receive": "caller-principal-inbox-with-expiring-exclusive-lease",
+    "response_binding": "host-validates-operation-identifiers-and-request-limits",
+    "retry": "ids-bind-immutable-input-within-provider-retention-window",
+    "route_authorization": "explicit-host-resource-scope-before-provider-invocation",
+    "source": "provider-must-not-accept-a-caller-supplied-source-identity"
+  },
+  "valid_errors": [
+    {
+      "code": "quota-exceeded",
+      "detail": "principal capacity is exhausted",
+      "retryable": true
+    },
+    {
+      "code": "conflict",
+      "detail": "delivery id changed",
+      "retryable": false
+    }
+  ],
+  "wire_limits": {
+    "max_batch_size": 64,
+    "max_document_bytes": 1048576,
+    "max_envelope_bytes": 524288,
+    "max_lease_ms": 300000,
+    "max_safe_integer": 9007199254740991
+  }
+}

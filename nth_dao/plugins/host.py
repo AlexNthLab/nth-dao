@@ -109,6 +109,7 @@ class InvocationAuthority:
     capability_ids: frozenset[str]
     mandate_digest: str = ""
     idempotency_key: str = ""
+    resource_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.principal, str) or not self.principal.strip():
@@ -127,6 +128,15 @@ class InvocationAuthority:
         ):
             if not isinstance(value, str) or len(value.encode("utf-8")) > 512:
                 raise ValueError(f"invocation {label} must be bounded text")
+        if not isinstance(self.resource_ids, frozenset):
+            object.__setattr__(self, "resource_ids", frozenset(self.resource_ids))
+        if len(self.resource_ids) > 256 or any(
+            not isinstance(item, str)
+            or not item
+            or len(item.encode("utf-8")) > 512
+            for item in self.resource_ids
+        ):
+            raise ValueError("invocation resource_ids must contain bounded text")
 
 
 @dataclass(frozen=True)
@@ -159,6 +169,12 @@ class CapabilitySchemas:
         *,
         input_validator: Callable[[Mapping[str, Any]], None] | None = None,
         output_validator: Callable[[Mapping[str, Any]], None] | None = None,
+        exchange_validator: (
+            Callable[[Mapping[str, Any], Mapping[str, Any]], None] | None
+        ) = None,
+        authority_validator: (
+            Callable[[Mapping[str, Any], InvocationAuthority], None] | None
+        ) = None,
     ) -> None:
         validate_schema(input_schema, path="$input_schema")
         validate_schema(output_schema, path="$output_schema")
@@ -168,8 +184,14 @@ class CapabilitySchemas:
             raise TypeError("input_validator must be callable")
         if output_validator is not None and not callable(output_validator):
             raise TypeError("output_validator must be callable")
+        if exchange_validator is not None and not callable(exchange_validator):
+            raise TypeError("exchange_validator must be callable")
+        if authority_validator is not None and not callable(authority_validator):
+            raise TypeError("authority_validator must be callable")
         self._input_validator = input_validator
         self._output_validator = output_validator
+        self._exchange_validator = exchange_validator
+        self._authority_validator = authority_validator
 
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -796,6 +818,8 @@ class PluginHost:
             validate_instance(request_body, schemas._input_schema, path="$input")
             if schemas._input_validator is not None:
                 schemas._input_validator(request_body)
+            if schemas._authority_validator is not None:
+                schemas._authority_validator(request_body, authority)
             response = provider.invoke(request_body, context)
             if not isinstance(response, Mapping):
                 raise PluginSchemaError("capability output must be an object")
@@ -812,6 +836,8 @@ class PluginHost:
                 )
             if schemas._output_validator is not None:
                 schemas._output_validator(response_body)
+            if schemas._exchange_validator is not None:
+                schemas._exchange_validator(request_body, response_body)
             return response_body
         finally:
             with self._condition:

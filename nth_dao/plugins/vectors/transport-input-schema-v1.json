@@ -1,0 +1,68 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "batch_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "type": "string"
+    },
+    "delivery_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "destination_route_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "envelope_json": {
+      "maxLength": 524288,
+      "minLength": 2,
+      "type": "string"
+    },
+    "envelope_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "type": "string"
+    },
+    "expires_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "lease_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "lease_ms": {
+      "maximum": 300000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "limit": {
+      "maximum": 64,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "operation": {
+      "enum": [
+        "ack",
+        "probe",
+        "receive",
+        "send"
+      ],
+      "type": "string"
+    },
+    "receive_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "operation"
+  ],
+  "type": "object"
+}
