@@ -71,8 +71,22 @@ def test_roster_corrupt_file_is_failsafe(tmp_path: Path) -> None:
 
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir(parents=True)
-    (agents_dir / "roster.json").write_text("{ not json", encoding="utf-8")
-    assert AgentRoster(tmp_path).all() == []
+    roster_path = agents_dir / "roster.json"
+    corrupt_content = "{ not json"
+    roster_path.write_text(corrupt_content, encoding="utf-8")
+    roster = AgentRoster(tmp_path)
+    assert roster.all() == []
+    with pytest.raises(ValueError, match="not valid JSON"):
+        roster.get_by_did("did:key:zPersistent")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        roster.add(
+            identity_file=roster.allocate_identity_file(),
+            kind="mock",
+            label="must-not-overwrite",
+            capabilities=[],
+            did="did:key:zNew",
+        )
+    assert roster_path.read_text(encoding="utf-8") == corrupt_content
 
 
 def test_roster_rejects_identity_file_outside_owned_tree(tmp_path: Path) -> None:
@@ -189,6 +203,58 @@ def test_restore_skips_disabled_slot_without_deleting_identity(tmp_path: Path) -
 
     assert spawned == []
     assert identity_file.exists()
+
+
+def test_restore_keeps_spawned_agent_when_plugin_registration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.web.agent_roster import AgentRoster
+    from nth_dao.web.v2_api import _restore_persistent_agents
+    import nth_dao.web.supervised_agent_plugin as bridge
+
+    roster = AgentRoster(tmp_path)
+    identity_file = Path(roster.allocate_identity_file())
+    identity_file.parent.mkdir(parents=True)
+    identity_file.write_text("placeholder", encoding="utf-8")
+    roster.add(
+        identity_file=str(identity_file),
+        kind="mock",
+        label="restored",
+        capabilities=[],
+        did="did:key:zRosterHint",
+    )
+    records = []
+
+    class FakeSupervisor:
+        def spawn(self, **kwargs):
+            record = SimpleNamespace(did="did:key:zLiveChild", kwargs=kwargs)
+            records.append(record)
+            return record
+
+    def fail_registration(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("plugin registry unavailable")
+
+    monkeypatch.setattr(
+        bridge,
+        "ensure_supervised_agent_plugin",
+        fail_registration,
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                nth=SimpleNamespace(
+                    workspace=tmp_path,
+                    node_identity=SimpleNamespace(can_sign=True),
+                    cap_tokens=object(),
+                )
+            )
+        )
+    )
+    _restore_persistent_agents(request, FakeSupervisor())
+    assert len(records) == 1
+    assert records[0].kwargs["identity_file"] == str(identity_file)
 
 
 def test_legacy_duplicate_backend_rows_migrate_once_to_explicit_slots(

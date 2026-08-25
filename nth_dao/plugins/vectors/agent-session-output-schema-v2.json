@@ -1,0 +1,212 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "backend_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_context_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "supports_multi_turn": {
+          "type": "boolean"
+        },
+        "supports_streaming": {
+          "type": "boolean"
+        },
+        "supports_system_prompt": {
+          "type": "boolean"
+        },
+        "supports_temperature": {
+          "type": "boolean"
+        },
+        "supports_tools": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "max_context_tokens",
+        "notes",
+        "supports_multi_turn",
+        "supports_streaming",
+        "supports_system_prompt",
+        "supports_temperature",
+        "supports_tools"
+      ]
+    },
+    "content": {
+      "type": "string",
+      "maxLength": 524288
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "finish_reason": {
+      "type": "string",
+      "enum": [
+        "",
+        "error",
+        "length",
+        "stop",
+        "timeout",
+        "tool_call"
+      ]
+    },
+    "final_status": {
+      "type": "string",
+      "enum": [
+        "",
+        "completed",
+        "error",
+        "interrupted",
+        "timeout"
+      ]
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "lease_remaining_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "cancel",
+        "close",
+        "open",
+        "probe",
+        "status",
+        "turn"
+      ]
+    },
+    "output_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "receipt_content_hash": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "receipt_id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "session_id": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "active",
+        "cancelled",
+        "closed",
+        "ready",
+        "unavailable"
+      ]
+    },
+    "tool_calls": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "arguments_json": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "arguments_json",
+          "id",
+          "name"
+        ]
+      }
+    },
+    "total_input_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_output_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_turns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "turn_id": {
+      "type": "string",
+      "maxLength": 128
+    }
+  },
+  "required": [
+    "backend_id",
+    "capabilities",
+    "content",
+    "detail",
+    "duration_ms",
+    "error",
+    "finish_reason",
+    "final_status",
+    "input_tokens",
+    "latency_ms",
+    "lease_remaining_ms",
+    "operation",
+    "output_tokens",
+    "ready",
+    "receipt_content_hash",
+    "receipt_id",
+    "replayed",
+    "session_id",
+    "state",
+    "tool_calls",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_turns",
+    "turn_id"
+  ]
+}

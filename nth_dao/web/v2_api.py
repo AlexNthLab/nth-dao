@@ -1179,6 +1179,7 @@ class SpawnResponseM(_Model):
     pid: Optional[int] = None
     cap_token_id: Optional[str] = None
     a2a_port: Optional[int] = None
+    provider_plugin_id: Optional[str] = None
     agent: AgentEntryM
 
 
@@ -3805,6 +3806,10 @@ async def _drive_supervised_agent_ask(
     request: Request,
     did: str,
     payload: Dict[str, Any],
+    *,
+    expected_agent_id: str = "",
+    expected_a2a_port: Optional[int] = None,
+    on_dispatch: Optional[Callable[[], None]] = None,
 ) -> Tuple[int, Any, Any, Optional[Dict[str, str]]]:
     """Drive one live supervised agent via /a2a/ask.
 
@@ -3824,12 +3829,23 @@ async def _drive_supervised_agent_ask(
             r.did == did
             and r.a2a_port is not None
             and r.alive
+            and (
+                not expected_agent_id
+                or str(getattr(r, "agent_id", "") or "") == expected_agent_id
+            )
+            and (
+                expected_a2a_port is None
+                or getattr(r, "a2a_port", None) == expected_a2a_port
+            )
         )
     ]
     if not matching:
         raise HTTPException(
             status_code=404,
-            detail=f"no live supervised agent for did={did!r} with an a2a_port",
+            detail=(
+                f"no live supervised agent for did={did!r} with the expected "
+                "agent_id and a2a_port"
+            ),
         )
     rec = matching[0]
 
@@ -3863,12 +3879,25 @@ async def _drive_supervised_agent_ask(
     forward_timeout = _a2a_forward_timeout(
         "ask", body_bytes, backend_kind=getattr(rec, "kind", None),
     )
+    dispatch_lock = threading.Lock()
+    dispatch_marked = False
+
+    def _mark_dispatched_once() -> None:
+        nonlocal dispatch_marked
+        if on_dispatch is None:
+            return
+        with dispatch_lock:
+            if dispatch_marked:
+                return
+            on_dispatch()
+            dispatch_marked = True
 
     def _do_forward() -> Tuple[int, bytes]:
         with _work_scope_lease(request, rec):
             req = urllib.request.Request(
                 url, data=body_bytes, headers=headers, method="POST",
             )
+            _mark_dispatched_once()
             try:
                 with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
                     return resp.status, _read_local_a2a_body(resp)
@@ -4665,6 +4694,18 @@ def _auto_prepare_supervised_agents(request: Request, sup: Any) -> None:
                 continue
         prepared.append(rec)
 
+    for rec in prepared:
+        try:
+            from .supervised_agent_plugin import ensure_supervised_agent_plugin
+
+            ensure_supervised_agent_plugin(request.app, sup, rec)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "v2_api: auto agent %s provider registration failed: %s",
+                str(getattr(rec, "did", "") or "")[:24],
+                exc,
+            )
+
     join_channels = _env_csv("NTH_AUTO_AGENT_JOIN_CHANNELS")
     if not join_channels or not prepared:
         if prepared:
@@ -4764,7 +4805,7 @@ def _restore_persistent_agents(request: Request, sup: Any) -> None:
                     previous_revision[:12],
                     scope.revision[:12],
                 )
-            sup.spawn(
+            rec = sup.spawn(
                 kind=str(e.get("kind", "mock")),
                 label=str(e.get("label", "")),
                 capabilities=list(e.get("capabilities") or []),
@@ -4772,11 +4813,22 @@ def _restore_persistent_agents(request: Request, sup: Any) -> None:
                 identity_file=idf,
                 work_scope=scope,
             )
-            restored += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "v2_api: restore agent failed (did=%s): %s",
                 str(e.get("did", "?"))[:24],
+                exc,
+            )
+            continue
+        restored += 1
+        try:
+            from .supervised_agent_plugin import ensure_supervised_agent_plugin
+
+            ensure_supervised_agent_plugin(request.app, sup, rec)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "v2_api: restored agent %s but provider registration failed: %s",
+                str(getattr(rec, "did", e.get("did", "?")) or "?")[:24],
                 exc,
             )
     if restored:
@@ -23099,6 +23151,20 @@ def register_v2_routes(app: FastAPI) -> None:
                 logger.warning(
                     "v2_api: agent spawned but roster persist failed: %s", exc
                 )
+        provider_plugin_id = None
+        try:
+            from .supervised_agent_plugin import ensure_supervised_agent_plugin
+
+            provider_plugin_id = ensure_supervised_agent_plugin(
+                request.app,
+                sup,
+                record,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "v2_api: agent spawned but provider registration failed: %s",
+                exc,
+            )
         return {
             "agent_id": record.agent_id,
             "did": record.did,
@@ -23107,6 +23173,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "pid": record.pid,
             "cap_token_id": record.cap_token_id,
             "a2a_port": record.a2a_port,
+            "provider_plugin_id": provider_plugin_id,
             "agent": record.to_agent_entry(),
         }
 
@@ -23130,6 +23197,21 @@ def register_v2_routes(app: FastAPI) -> None:
         # Capture the DID before stop() removes the supervisor record.
         rec = sup.get(agent_id)
         did = getattr(rec, "did", "") if rec is not None else ""
+        persistent_plugin: Optional[bool] = None
+        roster = None
+        if did:
+            try:
+                ws = _state_workspace(request)
+                if ws is not None:
+                    from .agent_roster import AgentRoster
+
+                    roster = AgentRoster(ws)
+                    persistent_plugin = roster.get_by_did(did) is not None
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "v2_api: could not classify stopped agent persistence: %s",
+                    exc,
+                )
         ok = sup.stop(agent_id)
         if not ok:
             raise HTTPException(
@@ -23138,17 +23220,46 @@ def register_v2_routes(app: FastAPI) -> None:
             )
         if did:
             try:
-                ws = _state_workspace(request)
-                if ws is not None:
-                    from .agent_roster import AgentRoster
-
-                    roster = AgentRoster(ws)
+                if roster is not None:
                     roster.disable_by_did(did, reason="operator-stop")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "v2_api: agent stopped but roster disable failed: %s", exc
                 )
-        return {"agent_id": agent_id, "stopped": True}
+        provider_plugin_id = ""
+        provider_plugin_cleanup = "not-installed"
+        if did:
+            try:
+                from nth_dao.plugins import PluginLifecycleError
+                from .supervised_agent_plugin import retire_supervised_agent_plugin
+
+                provider_plugin_id, provider_plugin_cleanup = (
+                    retire_supervised_agent_plugin(
+                        request.app,
+                        did,
+                        # Unknown roster state fails safe: preserve the plugin.
+                        keep_installed=persistent_plugin is not False,
+                    )
+                )
+            except PluginLifecycleError as exc:
+                provider_plugin_cleanup = "cleanup-failed"
+                logger.warning(
+                    "v2_api: agent stopped but provider cleanup failed for %s: %s",
+                    did[:24],
+                    exc,
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                provider_plugin_cleanup = "cleanup-failed"
+                logger.warning(
+                    "v2_api: agent stopped but provider lifecycle lookup failed: %s",
+                    exc,
+                )
+        return {
+            "agent_id": agent_id,
+            "stopped": True,
+            "provider_plugin_id": provider_plugin_id,
+            "provider_plugin_cleanup": provider_plugin_cleanup,
+        }
 
     @app.get("/api/v2/agents/{did}/ping")
     def v2_agents_ping(did: str, request: Request) -> Dict[str, Any]:

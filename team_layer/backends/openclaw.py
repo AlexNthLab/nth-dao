@@ -127,7 +127,11 @@ class OpenClawBackend(AgentBackend):
             "system_prompt": system_prompt,
             "model": self.model,
             "max_tokens": self._session_config.max_tokens,
-            "temperature": self._session_config.temperature,
+            "temperature": (
+                0.7
+                if self._session_config.temperature is None
+                else self._session_config.temperature
+            ),
             "metadata": {"backend": self.backend_id},
         }
 
@@ -192,6 +196,7 @@ class OpenClawBackend(AgentBackend):
             supports_tools=True,
             supports_system_prompt=True,
             supports_multi_turn=True,  # ACP
+            supports_temperature=True,
             max_context_tokens=200_000,
             notes=(
                 "OpenClaw via ACP HTTP. "

@@ -20,6 +20,9 @@ from nth_dao.plugins.agent_provider import (
     AGENT_SESSION_INPUT_SCHEMA,
     AGENT_SESSION_MAX_DOCUMENT_BYTES,
     AGENT_SESSION_OUTPUT_SCHEMA,
+    AGENT_SESSION_LEGACY_CAPABILITY_VERSION,
+    AGENT_SESSION_V1_CONTRACT,
+    AGENT_SESSION_V1_OUTPUT_SCHEMA,
     agent_session_operation_rule,
     agent_session_protocol_digest,
     agent_session_protocol_document,
@@ -37,15 +40,16 @@ VECTOR_PATH = (
     / "nth_dao"
     / "plugins"
     / "vectors"
-    / "agent-session-capability-v1.json"
+    / "agent-session-capability-v2.json"
 )
 VECTOR_DIR = VECTOR_PATH.parent
+LEGACY_VECTOR_PATH = VECTOR_DIR / "agent-session-capability-v1.json"
 
 
 def test_agent_session_contract_matches_checked_in_vector() -> None:
     vector = json.loads(VECTOR_PATH.read_text(encoding="utf-8"))
     assert vector["format"] == "nth-dao-plugin-capability-conformance-v1"
-    assert vector["schema_version"] == 1
+    assert vector["schema_version"] == 2
     assert vector["capability"] == AGENT_SESSION_CONTRACT.to_dict()
     assert vector["expected_digest"] == AGENT_SESSION_CONTRACT.digest
     input_schema = json.loads(
@@ -69,6 +73,30 @@ def test_agent_session_contract_matches_checked_in_vector() -> None:
     )
     assert vector["expected_protocol_digest"] == agent_session_protocol_digest()
     CapabilitySchemas(AGENT_SESSION_INPUT_SCHEMA, AGENT_SESSION_OUTPUT_SCHEMA)
+
+
+def test_legacy_agent_session_contract_and_vectors_remain_verifiable() -> None:
+    vector = json.loads(LEGACY_VECTOR_PATH.read_text(encoding="utf-8"))
+    assert vector["schema_version"] == 1
+    assert vector["capability"] == AGENT_SESSION_V1_CONTRACT.to_dict()
+    assert vector["expected_digest"] == AGENT_SESSION_V1_CONTRACT.digest
+    assert vector["expected_protocol_digest"] == agent_session_protocol_digest(
+        AGENT_SESSION_LEGACY_CAPABILITY_VERSION
+    )
+    output_schema = json.loads(
+        (VECTOR_DIR / vector["output_schema"]).read_text(encoding="utf-8")
+    )
+    assert output_schema == AGENT_SESSION_V1_OUTPUT_SCHEMA
+    cases = json.loads(
+        (VECTOR_DIR / vector["operation_vectors"]).read_text(encoding="utf-8")
+    )
+    for document in cases["valid_outputs"]:
+        validate_agent_session_output(
+            document,
+            version=AGENT_SESSION_LEGACY_CAPABILITY_VERSION,
+        )
+        with pytest.raises(PluginSchemaError):
+            validate_agent_session_output(document)
 
 
 def test_agent_session_cross_implementation_wire_cases() -> None:
@@ -147,7 +175,7 @@ for (const item of vectors.canonical_examples) {
 }
 """
     result = subprocess.run(
-        [node, "-e", script, str(VECTOR_DIR / "agent-session-wire-cases-v1.json")],
+        [node, "-e", script, str(VECTOR_DIR / "agent-session-wire-cases-v2.json")],
         capture_output=True,
         text=True,
         timeout=10,
@@ -212,6 +240,7 @@ def test_capability_projection_rejects_invalid_metadata_instead_of_coercing() ->
         supports_multi_turn = True
         supports_streaming = False
         supports_system_prompt = True
+        supports_temperature = False
         supports_tools = False
 
     assert capability_document(Capabilities())["supports_streaming"] is False

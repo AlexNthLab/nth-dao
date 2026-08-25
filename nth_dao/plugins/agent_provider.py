@@ -19,7 +19,8 @@ from .contracts import CapabilityContract, schema_digest
 from .schema import PluginSchemaError, validate_instance
 
 AGENT_SESSION_CAPABILITY_ID = "org.nth-dao.agent.session"
-AGENT_SESSION_CAPABILITY_VERSION = "1.0.0"
+AGENT_SESSION_CAPABILITY_VERSION = "2.0.0"
+AGENT_SESSION_LEGACY_CAPABILITY_VERSION = "1.0.0"
 AGENT_SESSION_MAX_DOCUMENT_BYTES = 1_048_576
 
 _MAX_SESSION_ID_CHARS = 128
@@ -41,6 +42,7 @@ _CAPABILITIES_SCHEMA: Dict[str, Any] = {
         "supports_multi_turn": {"type": "boolean"},
         "supports_streaming": {"type": "boolean"},
         "supports_system_prompt": {"type": "boolean"},
+        "supports_temperature": {"type": "boolean"},
         "supports_tools": {"type": "boolean"},
     },
     "required": [
@@ -49,6 +51,7 @@ _CAPABILITIES_SCHEMA: Dict[str, Any] = {
         "supports_multi_turn",
         "supports_streaming",
         "supports_system_prompt",
+        "supports_temperature",
         "supports_tools",
     ],
 }
@@ -123,6 +126,8 @@ AGENT_SESSION_OUTPUT_SCHEMA: Dict[str, Any] = {
         },
         "output_tokens": {"type": "integer", "minimum": 0},
         "ready": {"type": "boolean"},
+        "receipt_content_hash": {"type": "string", "maxLength": 64},
+        "receipt_id": {"type": "string", "maxLength": 256},
         "replayed": {"type": "boolean"},
         "session_id": {"type": "string", "maxLength": _MAX_SESSION_ID_CHARS},
         "state": {
@@ -154,6 +159,8 @@ AGENT_SESSION_OUTPUT_SCHEMA: Dict[str, Any] = {
         "operation",
         "output_tokens",
         "ready",
+        "receipt_content_hash",
+        "receipt_id",
         "replayed",
         "session_id",
         "state",
@@ -164,6 +171,21 @@ AGENT_SESSION_OUTPUT_SCHEMA: Dict[str, Any] = {
         "turn_id",
     ],
 }
+
+# Version 1 did not advertise temperature support or Receipt references. Keep
+# its exact schema and digest available so existing providers remain
+# interoperable without making the current schema permissive.
+AGENT_SESSION_V1_OUTPUT_SCHEMA: Dict[str, Any] = deepcopy(
+    AGENT_SESSION_OUTPUT_SCHEMA
+)
+_v1_capabilities_schema = AGENT_SESSION_V1_OUTPUT_SCHEMA["properties"][
+    "capabilities"
+]
+del _v1_capabilities_schema["properties"]["supports_temperature"]
+_v1_capabilities_schema["required"].remove("supports_temperature")
+for _v1_receipt_field in ("receipt_content_hash", "receipt_id"):
+    del AGENT_SESSION_V1_OUTPUT_SCHEMA["properties"][_v1_receipt_field]
+    AGENT_SESSION_V1_OUTPUT_SCHEMA["required"].remove(_v1_receipt_field)
 
 _AGENT_SESSION_OPERATION_RULES = {
     "cancel": {
@@ -211,6 +233,9 @@ _AGENT_SESSION_OUTPUT_RULES_DOCUMENT = {
     "common": {
         "document_max_bytes": AGENT_SESSION_MAX_DOCUMENT_BYTES,
         "max_tokens_semantics": "maximum-output-tokens-per-turn",
+        "receipt_references": (
+            "v2-turn-only-paired-id-and-lowercase-sha256-content-hash"
+        ),
         "replayed_allowed_operations": ["turn"],
         "tool_call_ids": "non-empty-and-unique",
         "turn_tokens_must_not_exceed_totals": True,
@@ -276,6 +301,36 @@ AGENT_SESSION_CONTRACT = CapabilityContract(
     failure_semantics="at-most-once",
 )
 
+AGENT_SESSION_SUPERVISED_CONTRACT = CapabilityContract(
+    capability_id=AGENT_SESSION_CAPABILITY_ID,
+    version=AGENT_SESSION_CAPABILITY_VERSION,
+    input_schema_digest=schema_digest(AGENT_SESSION_INPUT_SCHEMA),
+    output_schema_digest=schema_digest(AGENT_SESSION_OUTPUT_SCHEMA),
+    effects=("network-read", "network-write"),
+    consistency="C0",
+    privacy="confidential",
+    security="verified-input",
+    cardinality="many",
+    deterministic=False,
+    retention="durable",
+    failure_semantics="at-most-once",
+)
+
+AGENT_SESSION_V1_CONTRACT = CapabilityContract(
+    capability_id=AGENT_SESSION_CAPABILITY_ID,
+    version=AGENT_SESSION_LEGACY_CAPABILITY_VERSION,
+    input_schema_digest=schema_digest(AGENT_SESSION_INPUT_SCHEMA),
+    output_schema_digest=schema_digest(AGENT_SESSION_V1_OUTPUT_SCHEMA),
+    effects=("none",),
+    consistency="C0",
+    privacy="confidential",
+    security="verified-input",
+    cardinality="many",
+    deterministic=False,
+    retention="ephemeral",
+    failure_semantics="at-most-once",
+)
+
 
 def agent_session_operation_rule(operation: str) -> tuple[frozenset[str], frozenset[str]]:
     """Return immutable allowed/required fields for one wire operation."""
@@ -286,11 +341,25 @@ def agent_session_operation_rule(operation: str) -> tuple[frozenset[str], frozen
     return frozenset(rule["allowed"]), frozenset(rule["required"])
 
 
-def agent_session_protocol_document() -> Dict[str, Any]:
-    """Return the complete language-neutral v1 protocol document."""
+def agent_session_protocol_document(
+    version: str = AGENT_SESSION_CAPABILITY_VERSION,
+) -> Dict[str, Any]:
+    """Return one complete, versioned language-neutral protocol document."""
+
+    if version == AGENT_SESSION_CAPABILITY_VERSION:
+        contract = AGENT_SESSION_CONTRACT
+        output_schema = AGENT_SESSION_OUTPUT_SCHEMA
+    elif version == AGENT_SESSION_LEGACY_CAPABILITY_VERSION:
+        contract = AGENT_SESSION_V1_CONTRACT
+        output_schema = AGENT_SESSION_V1_OUTPUT_SCHEMA
+    else:
+        raise ValueError("unsupported agent session protocol version")
+    output_rules = deepcopy(_AGENT_SESSION_OUTPUT_RULES_DOCUMENT)
+    if version == AGENT_SESSION_LEGACY_CAPABILITY_VERSION:
+        output_rules["common"].pop("receipt_references", None)
 
     return {
-        "capability": AGENT_SESSION_CONTRACT.to_dict(),
+        "capability": contract.to_dict(),
         "input_schema": deepcopy(AGENT_SESSION_INPUT_SCHEMA),
         "identifier_rules": {
             "session_id": {
@@ -313,8 +382,8 @@ def agent_session_protocol_document() -> Dict[str, Any]:
             }
             for operation, rule in sorted(_AGENT_SESSION_OPERATION_RULES.items())
         },
-        "output_rules": deepcopy(_AGENT_SESSION_OUTPUT_RULES_DOCUMENT),
-        "output_schema": deepcopy(AGENT_SESSION_OUTPUT_SCHEMA),
+        "output_rules": output_rules,
+        "output_schema": deepcopy(output_schema),
         "wire_limits": {
             "max_document_bytes": AGENT_SESSION_MAX_DOCUMENT_BYTES,
             "size_unit": "canonical-json-utf8-bytes",
@@ -322,8 +391,11 @@ def agent_session_protocol_document() -> Dict[str, Any]:
     }
 
 
-def agent_session_protocol_digest() -> str:
-    return f"sha256:{hashlib.sha256(canonical_json(agent_session_protocol_document())).hexdigest()}"
+def agent_session_protocol_digest(
+    version: str = AGENT_SESSION_CAPABILITY_VERSION,
+) -> str:
+    document = agent_session_protocol_document(version)
+    return f"sha256:{hashlib.sha256(canonical_json(document)).hexdigest()}"
 
 
 def validate_agent_session_identifier(value: Any, *, field: str) -> str:
@@ -379,13 +451,23 @@ def validate_agent_session_input(value: Mapping[str, Any]) -> None:
             raise PluginSchemaError(f"$input.{field} is invalid") from exc
 
 
-def validate_agent_session_output(value: Mapping[str, Any]) -> None:
+def validate_agent_session_output(
+    value: Mapping[str, Any],
+    *,
+    version: str = AGENT_SESSION_CAPABILITY_VERSION,
+) -> None:
     """Validate one response including operation-specific state semantics."""
 
     if not isinstance(value, Mapping):
         raise PluginSchemaError("$output must be an object")
+    if version == AGENT_SESSION_CAPABILITY_VERSION:
+        output_schema = AGENT_SESSION_OUTPUT_SCHEMA
+    elif version == AGENT_SESSION_LEGACY_CAPABILITY_VERSION:
+        output_schema = AGENT_SESSION_V1_OUTPUT_SCHEMA
+    else:
+        raise PluginSchemaError("$output protocol version is unsupported")
     _validate_agent_session_document_size(value, path="$output")
-    validate_instance(value, AGENT_SESSION_OUTPUT_SCHEMA, path="$output")
+    validate_instance(value, output_schema, path="$output")
     operation = value["operation"]
 
     session_id = value["session_id"]
@@ -408,6 +490,25 @@ def validate_agent_session_output(value: Mapping[str, Any]) -> None:
 
     if value["replayed"] and operation != "turn":
         raise PluginSchemaError("$output.replayed is only valid for turn")
+    if version == AGENT_SESSION_CAPABILITY_VERSION:
+        receipt_id = value["receipt_id"]
+        receipt_hash = value["receipt_content_hash"]
+        if bool(receipt_id) != bool(receipt_hash):
+            raise PluginSchemaError("$output Receipt references must be paired")
+        if receipt_id and (
+            receipt_id != receipt_id.strip()
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in receipt_id)
+        ):
+            raise PluginSchemaError("$output.receipt_id is invalid")
+        if receipt_hash and (
+            len(receipt_hash) != 64
+            or any(char not in "0123456789abcdef" for char in receipt_hash)
+        ):
+            raise PluginSchemaError(
+                "$output.receipt_content_hash is not lowercase SHA-256 hex"
+            )
+        if operation != "turn" and (receipt_id or receipt_hash):
+            raise PluginSchemaError("$output Receipt references are turn-only")
     if value["input_tokens"] > value["total_input_tokens"]:
         raise PluginSchemaError("$output input tokens exceed session total")
     if value["output_tokens"] > value["total_output_tokens"]:
@@ -502,6 +603,8 @@ def _validate_idle_output(
         or value["input_tokens"]
         or value["output_tokens"]
         or value["latency_ms"]
+        or value.get("receipt_content_hash", "")
+        or value.get("receipt_id", "")
         or value["replayed"]
         or value["tool_calls"]
     ):
@@ -527,6 +630,7 @@ def capability_document(value: Any) -> Dict[str, Any]:
         "supports_multi_turn",
         "supports_streaming",
         "supports_system_prompt",
+        "supports_temperature",
         "supports_tools",
     )
     values = {name: getattr(value, name, None) for name in boolean_fields}
@@ -544,8 +648,12 @@ __all__ = [
     "AGENT_SESSION_CAPABILITY_VERSION",
     "AGENT_SESSION_CONTRACT",
     "AGENT_SESSION_INPUT_SCHEMA",
+    "AGENT_SESSION_LEGACY_CAPABILITY_VERSION",
     "AGENT_SESSION_MAX_DOCUMENT_BYTES",
     "AGENT_SESSION_OUTPUT_SCHEMA",
+    "AGENT_SESSION_SUPERVISED_CONTRACT",
+    "AGENT_SESSION_V1_CONTRACT",
+    "AGENT_SESSION_V1_OUTPUT_SCHEMA",
     "agent_session_operation_rule",
     "agent_session_protocol_digest",
     "agent_session_protocol_document",

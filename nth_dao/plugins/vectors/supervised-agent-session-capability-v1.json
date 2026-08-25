@@ -1,0 +1,46 @@
+{
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "schema_version": 1,
+  "id": "supervised-agent-session-capability-v1",
+  "capability": {
+    "capability_id": "org.nth-dao.agent.session",
+    "version": "1.0.0",
+    "input_schema_digest": "sha256:315529e25d91279987c51ced95f1f6518617e2c66d79f0eb605359b522c9ba27",
+    "output_schema_digest": "sha256:46cefd7b4639697819064bfa5edb14e03874b8a86e2eb18084e789af41c406b3",
+    "effects": [
+      "network-read",
+      "network-write"
+    ],
+    "consistency": "C0",
+    "privacy": "confidential",
+    "security": "verified-input",
+    "cardinality": "many",
+    "deterministic": false,
+    "retention": "ephemeral",
+    "failure_semantics": "at-most-once"
+  },
+  "expected_digest": "sha256:cec3ee43699f0c877fab3861951f5445a788b0eb65abf2b494bcb3d6c9082ecf",
+  "permissions": [
+    "network.client"
+  ],
+  "target_binding": {
+    "agent_did": "did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnQ",
+    "caller_selectable": false,
+    "plugin_id": "org.nth-dao.agent.s0f536da10ef660eab6efd14a",
+    "plugin_id_rule": "org.nth-dao.agent.s + first-24-lowercase-hex(sha256(utf8(agent_did)))"
+  },
+  "runtime_requirements": {
+    "authorization_out_of_band": true,
+    "cancel_requires_target_confirmation": true,
+    "receipt_binding_fields": [
+      "agent_did",
+      "agent_link_job_id",
+      "execution_request_sha256",
+      "method",
+      "request_sha256",
+      "requested_model",
+      "response_sha256"
+    ],
+    "receipt_must_be_verified_and_persisted_before_success": true
+  }
+}

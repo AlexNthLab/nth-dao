@@ -90,6 +90,28 @@ class AgentRoster:
             return []
         return [x for x in items if isinstance(x, dict)]
 
+    def _load_strict(self) -> List[Dict[str, Any]]:
+        """Load a roster for security-sensitive lifecycle decisions.
+
+        A missing roster means there are no persistent agents. Corrupt or
+        unreadable data is different: callers must preserve resources rather
+        than misclassifying a persistent agent as ephemeral.
+        """
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except json.JSONDecodeError as exc:
+            raise ValueError("agent roster is not valid JSON") from exc
+        except OSError as exc:
+            raise OSError("agent roster could not be read") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
+            raise ValueError("agent roster must contain an agents list")
+        items = data["agents"]
+        if any(not isinstance(item, dict) for item in items):
+            raise ValueError("agent roster contains a non-object entry")
+        return items
+
     def _save(self, items: List[Dict[str, Any]]) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".json.tmp")
@@ -107,7 +129,7 @@ class AgentRoster:
         """Add explicit slot lifecycle and disable hidden legacy duplicates."""
 
         with InterProcessLock(self._path):
-            items = self._load()
+            items = self._load_strict()
             legacy_by_kind: Dict[str, List[int]] = {}
             changed = False
             for index, item in enumerate(items):
@@ -146,12 +168,13 @@ class AgentRoster:
                 "persistent agent identity_file must live under agents/identities"
             )
         with InterProcessLock(self._path):
+            items = self._load_strict()
             existing = next(
-                (x for x in self._load() if x.get("identity_file") == identity_file),
+                (x for x in items if x.get("identity_file") == identity_file),
                 None,
             )
             items = [
-                x for x in self._load() if x.get("identity_file") != identity_file
+                x for x in items if x.get("identity_file") != identity_file
             ]
             items.append({
                 "slot_id": str((existing or {}).get("slot_id") or uuid.uuid4().hex),
@@ -175,7 +198,7 @@ class AgentRoster:
         """Disable one persistent slot without deleting identity material."""
 
         with InterProcessLock(self._path):
-            items = self._load()
+            items = self._load_strict()
             disabled: Optional[Dict[str, Any]] = None
             for item in items:
                 if item.get("did") != did or item.get("enabled", True) is False:
@@ -190,10 +213,22 @@ class AgentRoster:
                 self._save(items)
             return disabled
 
+    def get_by_did(self, did: str) -> Optional[Dict[str, Any]]:
+        """Return one persistent slot using strict lifecycle-safe loading."""
+
+        if not isinstance(did, str) or not did:
+            return None
+        with InterProcessLock(self._path):
+            item = next(
+                (row for row in self._load_strict() if row.get("did") == did),
+                None,
+            )
+            return dict(item) if item is not None else None
+
     def remove_by_did(self, did: str) -> Optional[Dict[str, Any]]:
         """Remove one persistent row by DID and return it for audit/cleanup."""
         with InterProcessLock(self._path):
-            items = self._load()
+            items = self._load_strict()
             removed: Optional[Dict[str, Any]] = None
             kept: List[Dict[str, Any]] = []
             for x in items:

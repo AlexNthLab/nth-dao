@@ -324,9 +324,12 @@ before this retry guarantee becomes available.
 ### Agent provider reference
 
 The first `agent.provider` reference freezes
-`org.nth-dao.agent.session` v1 as a bounded, principal-scoped session
+`org.nth-dao.agent.session` v2 as a bounded, principal-scoped session
 capability. Its wire operations are `probe`, `open`, `turn`, `status`,
 `close`, and `cancel`. Prompts are confidential and sessions are ephemeral.
+The v1 contract remains accepted only with its exact historical schema and
+digest. V2 adds explicit temperature-support advertisement; it does not mutate
+v1 in place.
 Every turn carries a caller-stable `turn_id`; a provider must cache the result
 for the session lease, return it with `replayed=true` on an identical retry,
 and reject reuse of that ID with different input. Numeric model controls use integer
@@ -348,21 +351,88 @@ Those controls remain host-owned. The explicit
 `nth_dao.plugins.agent_backend_adapter.PluginAgentBackend` proxy implements
 the existing `AgentBackend` interface over a compatible provider binding, so
 `attach()` and orchestration do not gain a parallel Agent facade. The proxy
-checks the schema digests, major version, privacy class, and failure semantics
-instead of trusting a matching capability name alone.
+accepts only complete, exact contract profiles: legacy v1, the ephemeral v2
+profile, or the supervised durable-network v2 profile. Schema, effects,
+consistency, privacy, security, retention, and failure semantics must all
+match; a matching capability name or version is insufficient.
 
-The distribution currently registers only a self-contained offline Mock
-provider. It has no external effects, runtime loader, or permissions and
-remains disabled by default. It caps global and per-principal sessions, uses a
+The distribution always registers a self-contained offline Mock provider. It
+has no external effects, runtime loader, or permissions and remains disabled
+by default. It caps global and per-principal sessions, uses a
 15-minute renewable idle lease, limits turns per session, rejects concurrent
 turns with a fail-fast busy result, protects an in-flight turn from idle
 reaping, and lets idempotent `cancel` bypass the turn lock. Its wire capability reports
-`supports_streaming=false` because this contract has no streaming operation. This is
-a conformance and lifecycle sample, not a claim that Claude Code, Codex, or
-Hermes has migrated to the plugin host. Those providers must reuse the
-existing supervised subprocess/A2A isolation boundary and declare process,
-network, and credential effects truthfully before they can implement the same
-wire shape. Direct in-process wrapping of those real providers is rejected.
+`supports_streaming=false` because this contract has no streaming operation.
+This is a conformance and lifecycle sample.
+
+Each successfully spawned or restored localhost A2A Agent is now also
+registered as a distinct, fixed-DID supervised provider. Registration leaves
+it unauthorized and disabled. Its manifest declares network read/write and
+`network.client`; the plugin never receives the child port, CapToken, command,
+environment, credential, or workspace path. A Host-owned invoker reuses the
+existing supervisor, work-scope lease, CapToken refresh, localhost A2A, signed
+Receipt verification, and Receipt persistence path. A successful turn is
+accepted only after the Receipt is bound to the fixed target DID, plugin turn,
+method, prompt hash, response hash, requested model, and the canonical digest
+of all Host-owned execution controls. The target cannot be selected in an
+invocation document. Goal is bound into that digest even though the current
+child does not consume it as prompt text. The provider reports temperature and
+multi-turn support truthfully and rejects unsupported overrides. Until a
+tokenizer-specific accounting contract exists, the output budget uses UTF-8
+bytes as a conservative upper bound rather than claiming exact model tokens.
+The v2 turn response carries the paired `receipt_id` and
+`receipt_content_hash`; `PluginAgentBackend` preserves them in
+`TurnResponse.metadata`. They identify the verified audit artifact but do not
+prove that the Agent's answer is factually correct.
+
+The Web invoker persists a workspace-local, inter-process-locked state machine.
+State v3 binds a stable execution-target revision derived from DID, Agent ID,
+backend kind, declared capabilities, work-scope access, and work revision. A
+localhost port change is transport churn and does not change that revision; a
+changed execution scope causes old state recovery to fail closed under the
+original logical turn key.
+Target lookup completes before `prepared` is written. `dispatched` is written
+immediately before the coroutine crosses the A2A boundary, and `completed` is
+written only after the signed Receipt and response bindings pass one shared
+validator. A prepared turn may be resumed; a dispatched turn may only be
+reconciled from a matching verified Receipt. If the Receipt proves execution
+but the response body was lost, the state records that fact and refuses to
+execute again. Retrying an outcome-unknown turn runs that reconciliation path;
+it does not cross the A2A dispatch boundary again. A received response which
+fails envelope, budget, or Receipt validation enters a terminal `rejected`
+state with no response body persisted and cannot be re-executed. Completed
+response bodies have a seven-day local replay window;
+expired results are atomically reduced to hash/Receipt tombstones. The bounded
+hot cache may evict an older completed response body, but writes a sharded
+tombstone first and never evicts idempotency evidence. Capacity is consumed by
+unresolved hot states; saturation by those states fails closed. This
+provides local at-most-once dispatch across crashes; it does not claim remote
+exactly-once semantics. The supervised provider therefore declares durable,
+confidential retention rather than claiming ephemeral storage.
+Child and invoker free-text errors are not returned or persisted because they
+may contain local paths, command lines, credentials, or provider output.
+
+Stopping an ephemeral supervised Agent disables and uninstalls its generated
+plugin registration. A persistent roster Agent is disabled while its plugin
+and identity material are retained. If the roster is unreadable or malformed,
+cleanup fails safe and retains the plugin rather than guessing that it is
+ephemeral.
+
+The production manifest's reviewed source set includes the Web invoker and
+the CapToken, Supervisor, child A2A, work-scope, bounded-response, and Receipt
+trust path. A change anywhere on that path changes the manifest digest; Host
+API v1 then clears prior grants and returns the plugin to disabled. This digest
+is still an unsigned local change detector, not publisher attestation or a
+complete transitive Python build proof.
+
+The current SDK/CLI child backends cannot reliably interrupt a provider call.
+The bridge therefore returns an unconfirmed cancellation failure for an
+in-flight turn instead of killing an entire child and calling that a
+session-scoped acknowledgement. Idle sessions can still close or cancel
+locally. A future child cancellation protocol must bind target DID, session,
+turn, authorization, and a signed stop acknowledgement before this behavior
+can change. Direct in-process wrapping of Claude Code, Codex, or Hermes remains
+rejected.
 Importing the wire contract or PluginHost does not import the legacy
 `team_layer` package. The package facade resolves legacy runtime exports lazily,
 and only callers that explicitly request `PluginAgentBackend`, call `attach`,
@@ -386,7 +456,8 @@ Migration order:
 2. federation discovery as a reviewed built-in provider;
 3. optional curated registry discovery as an accelerator whose results are
    reverified by the trust kernel (reference provider implemented);
-4. agent backends (offline reference implemented; supervised external
-   providers remain), then transport and message retention providers;
+4. agent backends (offline reference and fixed-DID supervised A2A bridge
+   implemented; signed remote cancellation remains), then transport and
+   message retention providers;
 5. settlement and payment providers only after subprocess isolation and
    mandate-bound commit tests exist.

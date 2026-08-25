@@ -1,0 +1,26 @@
+{
+  "capability": {
+    "capability_id": "org.nth-dao.agent.session",
+    "version": "2.0.0",
+    "input_schema_digest": "sha256:315529e25d91279987c51ced95f1f6518617e2c66d79f0eb605359b522c9ba27",
+    "output_schema_digest": "sha256:a56dd896b33a1d85d26e39fb6294f3570d24f00bb387d31c509e25bf64bcb39e",
+    "effects": [
+      "none"
+    ],
+    "consistency": "C0",
+    "privacy": "confidential",
+    "security": "verified-input",
+    "cardinality": "many",
+    "deterministic": false,
+    "retention": "ephemeral",
+    "failure_semantics": "at-most-once"
+  },
+  "expected_digest": "sha256:a0c0007b9c870a6bcf5aefd75e1f98f3277d11610ee4e1e1af6122ee50aaccee",
+  "expected_protocol_digest": "sha256:8fdaaf2f81b8b052cd5c1e04db74dc551aca01e5fcac69cb0b1016ec2ed83bc0",
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "id": "agent-session-capability-v2",
+  "input_schema": "agent-session-input-schema-v2.json",
+  "operation_vectors": "agent-session-wire-cases-v2.json",
+  "output_schema": "agent-session-output-schema-v2.json",
+  "schema_version": 2
+}

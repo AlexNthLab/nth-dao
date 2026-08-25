@@ -90,6 +90,7 @@ class _Capabilities:
     supports_tools: bool = True
     supports_system_prompt: bool = True
     supports_multi_turn: bool = True
+    supports_temperature: bool = False
     max_context_tokens: int = 100_000
     notes: str = "Deterministic offline reference provider."
 
@@ -283,6 +284,8 @@ class MockAgentSessionProvider:
             "operation": operation,
             "output_tokens": 0,
             "ready": bool(ready),
+            "receipt_content_hash": "",
+            "receipt_id": "",
             "replayed": False,
             "session_id": session_id,
             "state": state,
@@ -308,6 +311,10 @@ class MockAgentSessionProvider:
         context: PluginInvocationContext,
     ) -> Dict[str, Any]:
         session_id = self._session_id(payload)
+        if "temperature_milli" in payload:
+            raise PluginInvocationError(
+                "mock agent provider does not support temperature control"
+            )
         key = (context.authority.principal, session_id)
         with self._lock:
             self._require_active()

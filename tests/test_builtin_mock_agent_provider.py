@@ -16,7 +16,10 @@ import nth_dao.plugins.builtin.mock_agent_provider as mock_provider_module
 from nth_dao.plugins import (
     AGENT_SESSION_CAPABILITY_ID,
     AGENT_SESSION_INPUT_SCHEMA,
+    AGENT_SESSION_LEGACY_CAPABILITY_VERSION,
     AGENT_SESSION_OUTPUT_SCHEMA,
+    AGENT_SESSION_V1_CONTRACT,
+    AGENT_SESSION_V1_OUTPUT_SCHEMA,
     CapabilitySchemas,
     InvocationAuthority,
     PluginAuthorizationError,
@@ -73,6 +76,8 @@ def _wire_response(*, operation: str, session_id: str, state: str) -> dict:
         "operation": operation,
         "output_tokens": 0,
         "ready": True,
+        "receipt_content_hash": "",
+        "receipt_id": "",
         "replayed": False,
         "session_id": session_id,
         "state": state,
@@ -162,6 +167,113 @@ def test_plugin_agent_backend_round_trip(tmp_path: Path) -> None:
     assert summary.backend_id == "mock"
     assert summary.final_status == "completed"
     assert host.disable(item.plugin_id) is True
+
+
+def test_explicit_default_temperature_is_not_mistaken_for_unspecified(
+    tmp_path: Path,
+) -> None:
+    host, _, binding = _enabled_binding(tmp_path)
+    backend = PluginAgentBackend(
+        binding,
+        authority=_authority(),
+        backend_id="mock",
+    )
+    assert SessionConfig(session_id="default", goal="test").temperature is None
+    with pytest.raises(ValueError, match="does not support temperature"):
+        backend.start_session(
+            SessionConfig(
+                session_id="explicit-default",
+                goal="test",
+                temperature=0.7,
+            )
+        )
+    backend.start_session(SessionConfig(session_id="unspecified", goal="test"))
+    assert backend.end_session().total_turns == 0
+    host.disable(binding.plugin_id)
+
+
+def test_temperature_precision_is_rejected_before_provider_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, _, binding = _enabled_binding(tmp_path)
+    backend = PluginAgentBackend(
+        binding,
+        authority=_authority(),
+        backend_id="mock",
+    )
+    calls = []
+    monkeypatch.setattr(
+        backend,
+        "_invoke",
+        lambda payload: calls.append(payload),
+    )
+
+    with pytest.raises(ValueError, match="three decimal"):
+        backend.start_session(
+            SessionConfig(
+                session_id="over-precise",
+                goal="test",
+                temperature=0.7001,
+            )
+        )
+
+    assert calls == []
+    host.disable(binding.plugin_id)
+
+
+def test_plugin_agent_backend_accepts_exact_legacy_v1_contract(tmp_path: Path) -> None:
+    class LegacyProvider:
+        def invoke(self, payload, context):
+            del context
+            assert payload["operation"] == "probe"
+            response = _wire_response(operation="probe", session_id="", state="ready")
+            del response["capabilities"]["supports_temperature"]
+            del response["receipt_content_hash"]
+            del response["receipt_id"]
+            return response
+
+    class Runtime:
+        def start(self, context):
+            del context
+            return {AGENT_SESSION_CAPABILITY_ID: LegacyProvider()}
+
+        def stop(self):
+            return None
+
+    host = _host(tmp_path)
+    manifest = replace(
+        mock_agent_provider_manifest(),
+        plugin_id="org.nth-dao.agent.legacy-v1",
+        version="0.9.0",
+        provides=(AGENT_SESSION_V1_CONTRACT,),
+        artifact_digest="sha256:" + "4" * 64,
+    )
+    host.register_builtin(
+        manifest,
+        Runtime,
+        schemas={
+            AGENT_SESSION_CAPABILITY_ID: CapabilitySchemas(
+                AGENT_SESSION_INPUT_SCHEMA,
+                AGENT_SESSION_V1_OUTPUT_SCHEMA,
+                input_validator=validate_agent_session_input,
+                output_validator=lambda value: validate_agent_session_output(
+                    value,
+                    version=AGENT_SESSION_LEGACY_CAPABILITY_VERSION,
+                ),
+            )
+        },
+    )
+    host.authorize(manifest.plugin_id, set())
+    binding = host.enable(manifest.plugin_id)[0]
+    backend = PluginAgentBackend(
+        binding,
+        authority=_authority(),
+        backend_id="mock",
+    )
+
+    assert backend.preflight_check().ok is True
+    assert backend.capabilities().supports_temperature is False
 
 
 def test_plugin_agent_backend_preserves_canonical_tool_arguments(tmp_path: Path) -> None:
@@ -626,6 +738,26 @@ def test_plugin_agent_backend_rejects_same_id_with_incompatible_contract(
             authority=_authority(),
             backend_id="mock",
         )
+    assert host.status(binding.plugin_id).state == "enabled"
+
+
+def test_plugin_agent_backend_rejects_unapproved_effect_and_retention_profiles(
+    tmp_path: Path,
+) -> None:
+    host, _, binding = _enabled_binding(tmp_path)
+    incompatible_contracts = (
+        replace(binding.contract, effects=("filesystem-write",)),
+        replace(binding.contract, retention="durable"),
+    )
+
+    for contract in incompatible_contracts:
+        with pytest.raises(ValueError, match="incompatible"):
+            PluginAgentBackend(
+                replace(binding, contract=contract),
+                authority=_authority(),
+                backend_id="mock",
+            )
+
     assert host.status(binding.plugin_id).state == "enabled"
 
 

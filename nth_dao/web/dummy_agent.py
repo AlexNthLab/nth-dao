@@ -2493,6 +2493,19 @@ def _build_a2a_ask_receipt(
     agent_link_job_id = _safe_str(params.get("agent_link_job_id"))
     if agent_link_job_id:
         payload["agent_link_job_id"] = agent_link_job_id
+    execution_request_sha256 = _safe_str(
+        params.get("execution_request_sha256")
+    )
+    if execution_request_sha256:
+        if (
+            len(execution_request_sha256) != 64
+            or any(
+                char not in "0123456789abcdef"
+                for char in execution_request_sha256
+            )
+        ):
+            return None, "invalid-execution-request-digest"
+        payload["execution_request_sha256"] = execution_request_sha256
     timeline = [
         TimelineEntry(
             timestamp=int(ended_at_ms),

@@ -2045,6 +2045,19 @@ def create_app(
                 manager.close()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("AgentLink manager shutdown failed: %s", exc)
+        try:
+            from .supervised_agent_plugin import disable_supervised_agent_plugins
+
+            plugin_outcomes = disable_supervised_agent_plugins(app_instance)
+            for plugin_id, outcome in plugin_outcomes.items():
+                if outcome.startswith("cleanup-failed"):
+                    logger.warning(
+                        "supervised provider shutdown failed for %s: %s",
+                        plugin_id,
+                        outcome,
+                    )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("supervised provider shutdown failed: %s", exc)
         supervisor = getattr(app_instance.state, "v2_supervisor", None)
         if supervisor is not None:
             try:

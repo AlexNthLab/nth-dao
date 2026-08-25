@@ -18,7 +18,6 @@ import abc
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -66,7 +65,9 @@ class SessionConfig:
     session_id: str
     goal: str
     model: Optional[str] = None
-    temperature: float = 0.7
+    # None means the caller did not request a temperature override. Backends
+    # may then choose their own default; an explicit 0.7 remains explicit.
+    temperature: Optional[float] = None
     max_tokens: int = 4096
     timeout: int = 120
     workdir: Optional[Path] = None
@@ -113,6 +114,9 @@ class BackendCapabilities:
     supports_tools: bool = False
     supports_system_prompt: bool = True
     supports_multi_turn: bool = True
+    # A false value means SessionConfig.temperature is not an execution
+    # control for this backend. Adapters must reject every explicit override.
+    supports_temperature: bool = False
     max_context_tokens: int = 8192
     # USD / 1k tokens 0
     cost_per_1k_input: float = 0.0

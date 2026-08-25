@@ -109,9 +109,12 @@ signed envelope for byte-exact cross-implementation verification; it contains
 no private key. Passing either vector alone does not prove runtime admission
 checks; the negative and integration suites enforce them in the Python host.
 
-The offline agent-provider reference freezes its capability descriptor in
-`agent-session-capability-v1.json`, with complete versioned input/output schemas
-and operation cases in the adjacent `agent-session-*-v1.json` files. The cases
+The offline agent-provider reference freezes its current capability descriptor in
+`agent-session-capability-v2.json`, with complete versioned input/output schemas
+and operation cases in the adjacent `agent-session-*-v2.json` files. The original
+v1 files remain immutable compatibility vectors; v1 lacks the explicit
+`supports_temperature` capability flag and is validated against its own closed
+output schema rather than a permissive union. The cases
 bind operation-specific required/allowed fields, identifier lexical rules,
 canonical bytes (including a Unicode vector), positive documents, negative
 documents, the 1 MiB canonical-UTF-8 wire ceiling, and output state semantics.
@@ -126,6 +129,37 @@ A real provider may
 reuse the wire protocol only while declaring its process, network, filesystem,
 and credential effects truthfully. These vectors prove neither model quality
 nor safe external process isolation.
+
+The supervised localhost A2A bridge freezes its effectful contract and fixed
+target derivation in
+`nth_dao/plugins/vectors/supervised-agent-session-capability-v2.json`. Its v1
+descriptor is retained separately for compatibility. Unlike
+the offline provider, it declares network read/write and requires the single
+`network.client` permission. The target is an Ed25519 `did:key` selected when
+the Host registers the plugin; an invocation cannot supply or replace it.
+Runtime success additionally requires a verified, durably persisted signed
+Receipt bound to the target DID, turn binding, method, request hash, response
+hash, requested model, and a canonical digest of every Host-owned execution
+control. A v2 turn response exposes the paired `receipt_id` and lowercase
+SHA-256 `receipt_content_hash`; non-turn operations and v1 responses do not.
+These are audit references, not a truth verdict. The bridge records `prepared`
+only after target preflight and records
+`dispatched` immediately before crossing the A2A boundary. Completed results
+may be replayed after restart and are reverified against the same Receipt rules
+as the live response. A dispatched turn is reconciled from a matching verified
+Receipt when possible; otherwise it remains outcome-unknown. Retrying the same
+turn performs reconciliation only and never dispatches it again. A response
+which arrives but fails envelope, budget, or Receipt validation enters the
+terminal `rejected` state and also cannot be re-executed. Result bodies have a
+bounded replay lifetime, after which the
+state is reduced to a hash/Receipt tombstone without permitting re-execution.
+State v3 also binds the stable Agent/backend/work-scope revision while excluding
+ephemeral localhost port changes.
+This is local at-most-once dispatch, not distributed exactly-once execution.
+A conforming implementation must report cancellation failure unless its
+execution boundary confirms that the in-flight turn stopped.
+Passing this descriptor vector alone does not prove those runtime properties;
+the negative and real-child integration tests enforce them in Python.
 
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It

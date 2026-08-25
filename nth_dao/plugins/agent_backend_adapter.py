@@ -30,18 +30,17 @@ from nth_dao.canonical_json import canonical_json
 
 from .agent_provider import (
     AGENT_SESSION_CAPABILITY_ID,
-    AGENT_SESSION_INPUT_SCHEMA,
-    AGENT_SESSION_OUTPUT_SCHEMA,
+    AGENT_SESSION_CONTRACT,
+    AGENT_SESSION_LEGACY_CAPABILITY_VERSION,
+    AGENT_SESSION_SUPERVISED_CONTRACT,
+    AGENT_SESSION_V1_CONTRACT,
     validate_agent_session_input,
     validate_agent_session_output,
 )
-from .contracts import schema_digest
 from .host import InvocationAuthority, PluginInvocationError, ProviderBinding
 
 
 _MAX_ERROR_CHARS = 4_096
-
-
 class PluginAgentBackend(AgentBackend):
     """Adapt one enabled agent-session capability to ``AgentBackend``.
 
@@ -66,18 +65,12 @@ class PluginAgentBackend(AgentBackend):
             raise TypeError("binding must be a ProviderBinding")
         if binding.contract.capability_id != AGENT_SESSION_CAPABILITY_ID:
             raise ValueError("binding does not provide the agent session capability")
-        if (
-            binding.contract.major_version != 1
-            or binding.contract.input_schema_digest
-            != schema_digest(AGENT_SESSION_INPUT_SCHEMA)
-            or binding.contract.output_schema_digest
-            != schema_digest(AGENT_SESSION_OUTPUT_SCHEMA)
-            or binding.contract.privacy != "confidential"
-            or binding.contract.security != "verified-input"
-            or binding.contract.consistency != "C0"
-            or binding.contract.retention != "ephemeral"
-            or binding.contract.failure_semantics != "at-most-once"
-        ):
+        approved_contracts = (
+            AGENT_SESSION_V1_CONTRACT,
+            AGENT_SESSION_CONTRACT,
+            AGENT_SESSION_SUPERVISED_CONTRACT,
+        )
+        if binding.contract not in approved_contracts:
             raise ValueError("binding has an incompatible agent session contract")
         if not isinstance(authority, InvocationAuthority):
             raise TypeError("authority must be an InvocationAuthority")
@@ -112,6 +105,7 @@ class PluginAgentBackend(AgentBackend):
         self._max_session_tokens = max_session_tokens
         self._max_timeout_ms = int(float(max_timeout_s) * 1_000)
         self._binding = binding
+        self._protocol_version = binding.contract.version
         self._authority = authority
         self._active = False
         self._capabilities = BackendCapabilities()
@@ -127,8 +121,13 @@ class PluginAgentBackend(AgentBackend):
 
     def _invoke(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         result = self._binding.invoke(payload, authority=self._authority)
-        validate_agent_session_output(result)
-        return result
+        validate_agent_session_output(result, version=self._protocol_version)
+        normalized = dict(result)
+        if self._protocol_version == AGENT_SESSION_LEGACY_CAPABILITY_VERSION:
+            capabilities = dict(result["capabilities"])
+            capabilities["supports_temperature"] = False
+            normalized["capabilities"] = capabilities
+        return normalized
 
     def _invoke_expected(
         self,
@@ -240,21 +239,57 @@ class PluginAgentBackend(AgentBackend):
             timeout_ms = int(float(config.timeout) * 1_000)
             if not 100 <= timeout_ms <= self._max_timeout_ms:
                 raise ValueError("session timeout exceeds the host policy")
-            if (
+            if config.temperature is not None and (
                 isinstance(config.temperature, bool)
                 or not isinstance(config.temperature, (int, float))
                 or not math.isfinite(config.temperature)
                 or not 0 <= float(config.temperature) <= 2
             ):
-                raise ValueError("session temperature must be between 0 and 2")
+                raise ValueError(
+                    "session temperature must be None or a number between 0 and 2"
+                )
+            temperature_milli: int | None = None
+            if config.temperature is not None:
+                scaled_temperature = float(config.temperature) * 1_000.0
+                rounded_temperature = round(scaled_temperature)
+                if not math.isclose(
+                    scaled_temperature,
+                    float(rounded_temperature),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    raise ValueError(
+                        "session temperature supports at most three decimal places"
+                    )
+                temperature_milli = int(rounded_temperature)
             payload: Dict[str, Any] = {
                 "goal": config.goal,
                 "max_tokens": config.max_tokens,
                 "operation": "open",
                 "session_id": config.session_id,
-                "temperature_milli": int(float(config.temperature) * 1_000),
                 "timeout_ms": timeout_ms,
             }
+            if config.temperature is not None:
+                probe = self._invoke(
+                    {"operation": "probe", "timeout_ms": timeout_ms}
+                )
+                if (
+                    probe["operation"] != "probe"
+                    or probe["backend_id"] != self.backend_id
+                    or not probe["ready"]
+                    or probe["state"] != "ready"
+                ):
+                    raise PluginInvocationError(
+                        "agent provider is not ready for session creation"
+                    )
+                probed_capabilities = self._effective_capabilities(
+                    probe["capabilities"]
+                )
+                if not probed_capabilities.supports_temperature:
+                    raise ValueError(
+                        "agent provider does not support temperature overrides"
+                    )
+                payload["temperature_milli"] = temperature_milli
             if config.model is not None:
                 payload["model"] = config.model
             validate_agent_session_input(payload)
@@ -280,6 +315,10 @@ class PluginAgentBackend(AgentBackend):
                 if not self._active or self._session_config is None:
                     raise RuntimeError("plugin agent session is not active")
                 if self._pending_turn is None:
+                    if self._turn_count and not self._capabilities.supports_multi_turn:
+                        raise RuntimeError(
+                            "agent provider does not support multiple turns"
+                        )
                     pending = (secrets.token_hex(16), prompt, system_prompt)
                 else:
                     pending = self._pending_turn
@@ -330,6 +369,20 @@ class PluginAgentBackend(AgentBackend):
                         arguments=arguments,
                     )
                 )
+            metadata = {
+                "provider_plugin_id": self._binding.plugin_id,
+                "replayed": bool(result["replayed"]),
+                "turn_id": turn_id,
+            }
+            receipt_id = str(result.get("receipt_id", ""))
+            receipt_hash = str(result.get("receipt_content_hash", ""))
+            if receipt_id and receipt_hash:
+                metadata.update(
+                    {
+                        "receipt_content_hash": receipt_hash,
+                        "receipt_id": receipt_id,
+                    }
+                )
             response = TurnResponse(
                 content=str(result["content"]),
                 finish_reason=str(result["finish_reason"]),
@@ -337,11 +390,7 @@ class PluginAgentBackend(AgentBackend):
                 tool_calls=tool_calls,
                 latency_seconds=int(result["latency_ms"]) / 1_000.0,
                 error=str(result["error"]) or None,
-                metadata={
-                    "provider_plugin_id": self._binding.plugin_id,
-                    "replayed": bool(result["replayed"]),
-                    "turn_id": turn_id,
-                },
+                metadata=metadata,
             )
             with self._state_lock:
                 if (
@@ -461,6 +510,7 @@ def _capabilities_from_document(value: Mapping[str, Any]) -> BackendCapabilities
         supports_tools=bool(value["supports_tools"]),
         supports_system_prompt=bool(value["supports_system_prompt"]),
         supports_multi_turn=bool(value["supports_multi_turn"]),
+        supports_temperature=bool(value["supports_temperature"]),
         max_context_tokens=int(value["max_context_tokens"]),
         notes=str(value["notes"]),
     )

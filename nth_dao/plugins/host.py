@@ -744,7 +744,12 @@ class PluginHost:
         if not isinstance(authority, InvocationAuthority):
             raise PluginAuthorizationError("capability invocation requires local authority")
         with self._lock:
-            record = self._require_record(binding.plugin_id)
+            try:
+                record = self._require_record(binding.plugin_id)
+            except KeyError as exc:
+                raise PluginInvocationError(
+                    "provider binding is disabled, stale, or uninstalled"
+                ) from exc
             current = record.bindings.get(binding.contract.capability_id)
             if (
                 record.state != "enabled"
@@ -874,7 +879,9 @@ class PluginHost:
                 state=record.state,
                 declared_permissions=record.manifest.permissions,
                 authorized_permissions=tuple(sorted(record.grants)),
-                provided_capabilities=tuple(sorted(record.bindings)),
+                provided_capabilities=tuple(
+                    sorted(item.capability_id for item in record.manifest.provides)
+                ),
                 risk_tier=record.manifest.risk_tier,
                 desired_enabled=record.desired_enabled,
                 last_error=record.last_error,
@@ -888,7 +895,9 @@ class PluginHost:
                     state=record.state,
                     declared_permissions=record.manifest.permissions,
                     authorized_permissions=tuple(sorted(record.grants)),
-                    provided_capabilities=tuple(sorted(record.bindings)),
+                    provided_capabilities=tuple(
+                        sorted(item.capability_id for item in record.manifest.provides)
+                    ),
                     risk_tier=record.manifest.risk_tier,
                     desired_enabled=record.desired_enabled,
                     last_error=record.last_error,
