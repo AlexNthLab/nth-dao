@@ -171,6 +171,15 @@ and each invocation input and output is normalized through canonical JSON
 with a 1 MiB document limit. These constraints keep schema metadata
 enforceable at the call boundary rather than advisory.
 
+C2, C3, and C4 capabilities must also register both input and output semantic
+validators. The Host runs those validators around every invocation and rejects
+an operation-tagged response that does not echo its request operation. This
+prevents accidental omission of CAS or state-machine validation merely because
+the base schema digest matches. A no-op or dishonest validator cannot be
+detected mechanically: validators remain reviewed in-process code, not proof
+of provider correctness, and their source artifact remains part of the plugin
+trust decision.
+
 ## Lifecycle And Authorization
 
 The lifecycle is deliberately split:
@@ -450,6 +459,31 @@ both the adapter policy and that session requested the exact tool name. The
 provider never receives executable paths, credentials, environment variables,
 or an authority to execute a tool merely because it proposed one.
 
+### Message storage boundary
+
+`org.nth-dao.message.store` v1 defines a closed, language-neutral storage
+capability for opaque canonical-JSON message documents. The Host remains
+responsible for membership, signatures, mandates, and choosing the invocation
+principal. `InvocationAuthority` is a host-selected in-process scope, not a
+remote signature or identity proof; Host API v1 trusts the embedding
+application to derive it from an already verified boundary. Providers isolate
+records by that local principal and by an explicit namespace; callers cannot
+supply or override a principal in the wire document. Namespaces are opaque
+identifiers, never filesystem paths, so durable providers must hash or encode
+them before storage. Message IDs are immutable idempotency keys bound to the
+complete stored record, while list cursors use monotonically increasing
+sequence values. Destructive operations also bind the expected sequence and
+content digest, preventing delayed requests from deleting a replacement.
+
+The reviewed `org.nth-dao.message.memory` provider is installed disabled and
+does not replace or dual-write the existing Channel JSONL store. It is bounded
+by record, principal, byte, TTL, and document limits and supports an atomic
+in-process `consume` operation. Its deletion guarantee is explicitly
+`logical-only`: it does not claim secure erasure from process snapshots, swap,
+logs, disks, backups, or remote replicas. A future durable provider must
+declare its real filesystem or network effects and a distinct exact contract
+profile even when it implements the same wire schema.
+
 Migration order:
 
 1. plugin manifest, capability contract, registry, and lifecycle tests;
@@ -457,7 +491,7 @@ Migration order:
 3. optional curated registry discovery as an accelerator whose results are
    reverified by the trust kernel (reference provider implemented);
 4. agent backends (offline reference and fixed-DID supervised A2A bridge
-   implemented; signed remote cancellation remains), then transport and
-   message retention providers;
+   implemented; signed remote cancellation remains), message retention
+   (ephemeral reference implemented), then transport providers;
 5. settlement and payment providers only after subprocess isolation and
    mandate-bound commit tests exist.

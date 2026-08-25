@@ -1,0 +1,79 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "after_sequence": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "delivery_mode": {
+      "enum": [
+        "consume-on-read",
+        "read-many"
+      ],
+      "type": "string"
+    },
+    "expected_message_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "type": "string"
+    },
+    "expected_sequence": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "expires_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "limit": {
+      "maximum": 256,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "message_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "message_json": {
+      "maxLength": 524288,
+      "minLength": 2,
+      "type": "string"
+    },
+    "message_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "type": "string"
+    },
+    "namespace": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "consume",
+        "delete",
+        "get",
+        "list",
+        "probe",
+        "put"
+      ],
+      "type": "string"
+    },
+    "retention_mode": {
+      "enum": [
+        "session",
+        "ttl"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "operation"
+  ],
+  "type": "object"
+}

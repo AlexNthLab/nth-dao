@@ -1,0 +1,25 @@
+{
+  "capability": {
+    "capability_id": "org.nth-dao.message.store",
+    "cardinality": "many",
+    "consistency": "C2",
+    "deterministic": false,
+    "effects": [
+      "none"
+    ],
+    "failure_semantics": "at-most-once",
+    "input_schema_digest": "sha256:8e1f8ba5f21dad4b8548eee4ac763568ea94384468de0ab932c5fea168a1c369",
+    "output_schema_digest": "sha256:96750ca6c4a55ca6aa5aea2be09591bfe36ede3aa9302f9d113c527a3793e896",
+    "privacy": "confidential",
+    "retention": "ephemeral",
+    "security": "verified-input",
+    "version": "1.0.0"
+  },
+  "expected_digest": "sha256:8f5c8ca3671178f2e92324b8389103f7060f0f4c011f86fd7935f90e730dc67f",
+  "expected_protocol_digest": "sha256:6103425ea6aed8c8770c480def13a6191916be5d6d3f8fbaafc30c1053e19714",
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "input_schema": "message-store-input-schema-v1.json",
+  "operation_vectors": "message-store-wire-cases-v1.json",
+  "output_schema": "message-store-output-schema-v1.json",
+  "schema_version": 1
+}

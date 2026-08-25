@@ -396,6 +396,65 @@ def test_registration_rejects_schema_digest_mismatch_and_unknown_keywords() -> N
         )
 
 
+def test_c2_registration_requires_semantic_validators_and_operation_echo() -> None:
+    operation_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "operation": {"type": "string", "enum": ["read", "write"]}
+        },
+        "required": ["operation"],
+    }
+    cap = CapabilityContract(
+        capability_id="org.nth-dao.test.c2-operation",
+        version="1.0.0",
+        input_schema_digest=schema_digest(operation_schema),
+        output_schema_digest=schema_digest(operation_schema),
+        effects=("none",),
+        consistency="C2",
+        privacy="workspace",
+        security="verified-input",
+        cardinality="one",
+        deterministic=True,
+        retention="none",
+        failure_semantics="at-most-once",
+    )
+    item = manifest(provides=(cap,))
+
+    with pytest.raises(PluginContractError, match="requires input and output"):
+        PluginHost().register_builtin(
+            item,
+            lambda: Runtime({cap.capability_id: Provider()}),
+            schemas={
+                cap.capability_id: CapabilitySchemas(
+                    operation_schema,
+                    operation_schema,
+                )
+            },
+        )
+
+    provider = Provider({"operation": "write"})
+    host = PluginHost()
+    host.register_builtin(
+        item,
+        lambda: Runtime({cap.capability_id: provider}),
+        schemas={
+            cap.capability_id: CapabilitySchemas(
+                operation_schema,
+                operation_schema,
+                input_validator=lambda value: None,
+                output_validator=lambda value: None,
+            )
+        },
+    )
+    binding = host.enable(item.plugin_id)[0]
+    with pytest.raises(PluginSchemaError, match="does not match"):
+        binding.invoke(
+            {"operation": "read"},
+            authority=authority(cap.capability_id),
+        )
+
+
 def test_schema_rejects_unbounded_objects_and_regex_patterns() -> None:
     with pytest.raises(PluginSchemaError, match="explicitly false"):
         CapabilitySchemas(

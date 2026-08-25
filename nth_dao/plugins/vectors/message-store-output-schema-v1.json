@@ -1,0 +1,219 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "created_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "deleted": {
+      "type": "boolean"
+    },
+    "deletion_guarantee": {
+      "enum": [
+        "logical-only"
+      ],
+      "type": "string"
+    },
+    "delivery_mode": {
+      "enum": [
+        "",
+        "consume-on-read",
+        "read-many"
+      ],
+      "type": "string"
+    },
+    "detail": {
+      "maxLength": 2048,
+      "type": "string"
+    },
+    "expires_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "found": {
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at_ms": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delivery_mode": {
+            "enum": [
+              "consume-on-read",
+              "read-many"
+            ],
+            "type": "string"
+          },
+          "expires_at_ms": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "retention_mode": {
+            "enum": [
+              "session",
+              "ttl"
+            ],
+            "type": "string"
+          },
+          "sequence": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "created_at_ms",
+          "delivery_mode",
+          "expires_at_ms",
+          "message_id",
+          "message_sha256",
+          "retention_mode",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "max_message_bytes": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_records_per_principal": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_ttl_seconds": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "message_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "message_json": {
+      "maxLength": 524288,
+      "type": "string"
+    },
+    "message_sha256": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "namespace": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "next_sequence": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "operation": {
+      "enum": [
+        "consume",
+        "delete",
+        "get",
+        "list",
+        "probe",
+        "put"
+      ],
+      "type": "string"
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "retention_mode": {
+      "enum": [
+        "",
+        "session",
+        "ttl"
+      ],
+      "type": "string"
+    },
+    "sequence": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "store_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "supported_delivery_modes": {
+      "items": {
+        "enum": [
+          "consume-on-read",
+          "read-many"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "type": "array"
+    },
+    "supported_retention_modes": {
+      "items": {
+        "enum": [
+          "session",
+          "ttl"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "created_at_ms",
+    "deleted",
+    "deletion_guarantee",
+    "delivery_mode",
+    "detail",
+    "expires_at_ms",
+    "found",
+    "items",
+    "max_message_bytes",
+    "max_records_per_principal",
+    "max_ttl_seconds",
+    "message_id",
+    "message_json",
+    "message_sha256",
+    "namespace",
+    "next_sequence",
+    "operation",
+    "ready",
+    "replayed",
+    "retention_mode",
+    "sequence",
+    "store_id",
+    "supported_delivery_modes",
+    "supported_retention_modes"
+  ],
+  "type": "object"
+}

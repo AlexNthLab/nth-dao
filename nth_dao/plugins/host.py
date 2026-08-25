@@ -801,6 +801,15 @@ class PluginHost:
                 raise PluginSchemaError("capability output must be an object")
             response_body = _json_boundary_copy(response, label="capability output")
             validate_instance(response_body, schemas._output_schema, path="$output")
+            if (
+                binding.contract.consistency in {"C2", "C3", "C4"}
+                and "operation" in request_body
+                and "operation" in response_body
+                and response_body["operation"] != request_body["operation"]
+            ):
+                raise PluginSchemaError(
+                    "$output.operation does not match $input.operation"
+                )
             if schemas._output_validator is not None:
                 schemas._output_validator(response_body)
             return response_body
@@ -1183,6 +1192,13 @@ class PluginHost:
             if schema_digest(item._output_schema) != contract.output_schema_digest:
                 raise PluginContractError(
                     f"output schema digest mismatch for {capability_id!r}"
+                )
+            if contract.consistency in {"C2", "C3", "C4"} and (
+                item._input_validator is None or item._output_validator is None
+            ):
+                raise PluginContractError(
+                    f"{contract.consistency} capability {capability_id!r} requires "
+                    "input and output semantic validators"
                 )
             checked[capability_id] = item
         return checked

@@ -1,0 +1,773 @@
+{
+  "canonical_examples": [
+    {
+      "canonical_utf8": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+      "document": {
+        "body": "hello",
+        "kind": "chat"
+      },
+      "sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0"
+    },
+    {
+      "canonical_utf8": "{\"body\":\"你好 😀\",\"metadata\":{\"label\":\"交付\"}}",
+      "document": {
+        "body": "你好 😀",
+        "metadata": {
+          "label": "交付"
+        }
+      },
+      "sha256": "5638eae8181e3dd2718b9ac0a6c921787f3b667f53ff791df51443725fad31f8"
+    }
+  ],
+  "canonicalization": {
+    "encoding": "utf-8",
+    "floats": "forbidden",
+    "integer_range": "-(2^53-1)..(2^53-1)",
+    "object_keys": "non-empty-printable-ascii-1-to-256-bytes",
+    "serialization": "recursive-sorted-keys-compact-json"
+  },
+  "error_model": {
+    "already-applied": {
+      "meaning": "the requested destructive generation was already consumed or deleted",
+      "retryable": false
+    },
+    "conflict": {
+      "meaning": "the identifier already binds a different live record",
+      "retryable": false
+    },
+    "expired": {
+      "meaning": "the requested expiry is not in the future",
+      "retryable": false
+    },
+    "generation-not-found": {
+      "meaning": "the requested record generation does not exist",
+      "retryable": false
+    },
+    "inactive": {
+      "meaning": "the provider is not currently active",
+      "retryable": true
+    },
+    "limit-exceeded": {
+      "meaning": "the request exceeds a provider limit",
+      "retryable": false
+    },
+    "quota-exceeded": {
+      "meaning": "temporary provider or principal capacity is exhausted",
+      "retryable": true
+    },
+    "sequence-exhausted": {
+      "meaning": "the provider cannot allocate another portable sequence",
+      "retryable": false
+    },
+    "stale-generation": {
+      "meaning": "the destructive CAS does not match the live record generation",
+      "retryable": false
+    },
+    "unsupported-delivery-mode": {
+      "meaning": "the operation is incompatible with the record delivery mode",
+      "retryable": false
+    }
+  },
+  "format": "nth-dao-message-store-wire-cases-v1",
+  "identifier_rules": {
+    "grammar": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+    "namespace_separators": "single slash or colon; no trailing separator or Windows drive prefix",
+    "path_interpretation": "opaque identifier only; providers must hash or encode it before storage",
+    "path_segments": "dot-and-dot-dot-segments-forbidden",
+    "principal_scope": "records are isolated by the host-selected local invocation principal; Host API v1 does not authenticate remote origin"
+  },
+  "invalid_message_documents": [
+    {
+      "canonical_utf8": "{\"键\":\"value\"}",
+      "reason": "object key is not printable ASCII"
+    }
+  ],
+  "invalid_operation_inputs": [
+    {
+      "document": {
+        "message_id": "message-1",
+        "namespace": "group:alpha/channel:general",
+        "operation": "delete"
+      },
+      "reason": "delete lacks generation CAS"
+    },
+    {
+      "document": {
+        "message_id": "message-1",
+        "namespace": "group:alpha/channel:general",
+        "operation": "consume"
+      },
+      "reason": "consume lacks generation CAS"
+    },
+    {
+      "document": {
+        "namespace": "hidden",
+        "operation": "probe"
+      },
+      "reason": "probe carries an unexpected field"
+    }
+  ],
+  "invalid_semantic_inputs": [
+    {
+      "document": {
+        "delivery_mode": "read-many",
+        "expires_at_ms": 0,
+        "message_id": "message-1",
+        "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+        "message_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "namespace": "group:alpha/channel:general",
+        "operation": "put",
+        "retention_mode": "session"
+      },
+      "reason": "digest mismatch"
+    },
+    {
+      "document": {
+        "delivery_mode": "read-many",
+        "expires_at_ms": 0,
+        "message_id": "message-1",
+        "message_json": "{\"body\": \"hello\",\"kind\":\"chat\"}",
+        "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+        "namespace": "group:alpha/channel:general",
+        "operation": "put",
+        "retention_mode": "session"
+      },
+      "reason": "non-canonical JSON"
+    },
+    {
+      "document": {
+        "delivery_mode": "read-many",
+        "expires_at_ms": 1,
+        "message_id": "message-1",
+        "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+        "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+        "namespace": "group:alpha/channel:general",
+        "operation": "put",
+        "retention_mode": "session"
+      },
+      "reason": "session expiry forbidden"
+    },
+    {
+      "document": {
+        "delivery_mode": "read-many",
+        "expires_at_ms": 0,
+        "message_id": "message-1",
+        "message_json": "{\"value\":9007199254740992}",
+        "message_sha256": "3b0d9a238f369ef1d4cb7182e6ca467e10b5501cbab84e9c80d1d91053253504",
+        "namespace": "group:alpha/channel:general",
+        "operation": "put",
+        "retention_mode": "session"
+      },
+      "reason": "cross-language unsafe integer"
+    },
+    {
+      "document": {
+        "delivery_mode": "read-many",
+        "expires_at_ms": 0,
+        "message_id": "message-unicode-key",
+        "message_json": "{\"键\":\"value\"}",
+        "message_sha256": "99d4af748852151c73327a6cc6f18950f192d853ed1415c3ad086a6acd2b2dc3",
+        "namespace": "group:alpha/channel:general",
+        "operation": "put",
+        "retention_mode": "session"
+      },
+      "reason": "non-portable object key"
+    }
+  ],
+  "invalid_semantic_outputs": [
+    {
+      "document": {
+        "created_at_ms": 1750000000000,
+        "deleted": false,
+        "deletion_guarantee": "logical-only",
+        "delivery_mode": "consume-on-read",
+        "detail": "",
+        "expires_at_ms": 0,
+        "found": true,
+        "items": [],
+        "max_message_bytes": 524288,
+        "max_records_per_principal": 1024,
+        "max_ttl_seconds": 2592000,
+        "message_id": "message-1",
+        "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+        "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+        "namespace": "group:alpha/channel:general",
+        "next_sequence": 0,
+        "operation": "get",
+        "ready": true,
+        "replayed": false,
+        "retention_mode": "session",
+        "sequence": 1,
+        "store_id": "org.nth-dao.message.memory",
+        "supported_delivery_modes": [
+          "consume-on-read",
+          "read-many"
+        ],
+        "supported_retention_modes": [
+          "session",
+          "ttl"
+        ]
+      },
+      "reason": "get delivery mode mismatch"
+    },
+    {
+      "document": {
+        "created_at_ms": 1750000000000,
+        "deleted": false,
+        "deletion_guarantee": "logical-only",
+        "delivery_mode": "consume-on-read",
+        "detail": "",
+        "expires_at_ms": 0,
+        "found": true,
+        "items": [],
+        "max_message_bytes": 524288,
+        "max_records_per_principal": 1024,
+        "max_ttl_seconds": 2592000,
+        "message_id": "message-1",
+        "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+        "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+        "namespace": "group:alpha/channel:general",
+        "next_sequence": 0,
+        "operation": "consume",
+        "ready": true,
+        "replayed": false,
+        "retention_mode": "session",
+        "sequence": 1,
+        "store_id": "org.nth-dao.message.memory",
+        "supported_delivery_modes": [
+          "consume-on-read",
+          "read-many"
+        ],
+        "supported_retention_modes": [
+          "session",
+          "ttl"
+        ]
+      },
+      "reason": "consume must delete"
+    },
+    {
+      "document": {
+        "created_at_ms": 1750000000000,
+        "deleted": false,
+        "deletion_guarantee": "logical-only",
+        "delivery_mode": "read-many",
+        "detail": "",
+        "expires_at_ms": 0,
+        "found": true,
+        "items": [],
+        "max_message_bytes": 524288,
+        "max_records_per_principal": 1024,
+        "max_ttl_seconds": 2592000,
+        "message_id": "message-1",
+        "message_json": "",
+        "message_sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "namespace": "group:alpha/channel:general",
+        "next_sequence": 0,
+        "operation": "put",
+        "ready": true,
+        "replayed": false,
+        "retention_mode": "session",
+        "sequence": 1,
+        "store_id": "org.nth-dao.message.memory",
+        "supported_delivery_modes": [
+          "consume-on-read",
+          "read-many"
+        ],
+        "supported_retention_modes": [
+          "session",
+          "ttl"
+        ]
+      },
+      "reason": "non-lowercase digest"
+    },
+    {
+      "document": {
+        "created_at_ms": 0,
+        "deleted": true,
+        "deletion_guarantee": "logical-only",
+        "delivery_mode": "",
+        "detail": "",
+        "expires_at_ms": 0,
+        "found": false,
+        "items": [],
+        "max_message_bytes": 524288,
+        "max_records_per_principal": 1024,
+        "max_ttl_seconds": 2592000,
+        "message_id": "",
+        "message_json": "",
+        "message_sha256": "",
+        "namespace": "",
+        "next_sequence": 0,
+        "operation": "delete",
+        "ready": true,
+        "replayed": false,
+        "retention_mode": "",
+        "sequence": 0,
+        "store_id": "org.nth-dao.message.memory",
+        "supported_delivery_modes": [
+          "consume-on-read",
+          "read-many"
+        ],
+        "supported_retention_modes": [
+          "session",
+          "ttl"
+        ]
+      },
+      "reason": "delete flags disagree"
+    }
+  ],
+  "operation_rules": {
+    "consume": {
+      "allowed": [
+        "expected_message_sha256",
+        "expected_sequence",
+        "message_id",
+        "namespace",
+        "operation"
+      ],
+      "required": [
+        "expected_message_sha256",
+        "expected_sequence",
+        "message_id",
+        "namespace",
+        "operation"
+      ]
+    },
+    "delete": {
+      "allowed": [
+        "expected_message_sha256",
+        "expected_sequence",
+        "message_id",
+        "namespace",
+        "operation"
+      ],
+      "required": [
+        "expected_message_sha256",
+        "expected_sequence",
+        "message_id",
+        "namespace",
+        "operation"
+      ]
+    },
+    "get": {
+      "allowed": [
+        "message_id",
+        "namespace",
+        "operation"
+      ],
+      "required": [
+        "message_id",
+        "namespace",
+        "operation"
+      ]
+    },
+    "list": {
+      "allowed": [
+        "after_sequence",
+        "limit",
+        "namespace",
+        "operation"
+      ],
+      "required": [
+        "after_sequence",
+        "limit",
+        "namespace",
+        "operation"
+      ]
+    },
+    "probe": {
+      "allowed": [
+        "operation"
+      ],
+      "required": [
+        "operation"
+      ]
+    },
+    "put": {
+      "allowed": [
+        "delivery_mode",
+        "expires_at_ms",
+        "message_id",
+        "message_json",
+        "message_sha256",
+        "namespace",
+        "operation",
+        "retention_mode"
+      ],
+      "required": [
+        "delivery_mode",
+        "expires_at_ms",
+        "message_id",
+        "message_json",
+        "message_sha256",
+        "namespace",
+        "operation",
+        "retention_mode"
+      ]
+    }
+  },
+  "semantics": {
+    "consume": "generation-and-hash-cas-atomic-at-most-once-logical-delete",
+    "delete": "generation-and-hash-cas-logical-only-not-secure-erasure",
+    "get": "read-many-records-only",
+    "list": "metadata-only-in-increasing-sequence-order",
+    "put": "live-record-immutable-idempotent-by-complete-record",
+    "ttl": "absolute-unix-epoch-milliseconds"
+  },
+  "state_transition_vectors": [
+    {
+      "name": "delayed-delete-cannot-remove-replacement",
+      "principal": "group:alpha",
+      "steps": [
+        {
+          "expected_fields": {
+            "found": true,
+            "replayed": false,
+            "sequence": 1
+          },
+          "input": {
+            "delivery_mode": "read-many",
+            "expires_at_ms": 0,
+            "message_id": "message-aba",
+            "message_json": "{\"body\":\"A\",\"kind\":\"chat\"}",
+            "message_sha256": "53aa1c590f5a8c5a9873019a685da0f5ea56aec0d0dd4a4e1023883dac9a0711",
+            "namespace": "group:alpha/channel:general",
+            "operation": "put",
+            "retention_mode": "session"
+          }
+        },
+        {
+          "expected_fields": {
+            "deleted": true,
+            "found": true
+          },
+          "input": {
+            "expected_message_sha256": "53aa1c590f5a8c5a9873019a685da0f5ea56aec0d0dd4a4e1023883dac9a0711",
+            "expected_sequence": 1,
+            "message_id": "message-aba",
+            "namespace": "group:alpha/channel:general",
+            "operation": "delete"
+          }
+        },
+        {
+          "expected_fields": {
+            "found": true,
+            "replayed": false,
+            "sequence": 2
+          },
+          "input": {
+            "delivery_mode": "read-many",
+            "expires_at_ms": 0,
+            "message_id": "message-aba",
+            "message_json": "{\"body\":\"B\",\"kind\":\"chat\"}",
+            "message_sha256": "c634e56717d0d48aa60b43b0a26fafd94fbec2edcad0604ceb4f147dd439cc86",
+            "namespace": "group:alpha/channel:general",
+            "operation": "put",
+            "retention_mode": "session"
+          }
+        },
+        {
+          "expected_error": "stale-generation",
+          "input": {
+            "expected_message_sha256": "53aa1c590f5a8c5a9873019a685da0f5ea56aec0d0dd4a4e1023883dac9a0711",
+            "expected_sequence": 1,
+            "message_id": "message-aba",
+            "namespace": "group:alpha/channel:general",
+            "operation": "delete"
+          }
+        },
+        {
+          "expected_fields": {
+            "found": true,
+            "message_json": "{\"body\":\"B\",\"kind\":\"chat\"}",
+            "message_sha256": "c634e56717d0d48aa60b43b0a26fafd94fbec2edcad0604ceb4f147dd439cc86",
+            "sequence": 2
+          },
+          "input": {
+            "message_id": "message-aba",
+            "namespace": "group:alpha/channel:general",
+            "operation": "get"
+          }
+        }
+      ]
+    },
+    {
+      "name": "consume-replay-is-rejected",
+      "principal": "group:alpha",
+      "steps": [
+        {
+          "expected_fields": {
+            "found": true,
+            "replayed": false,
+            "sequence": 1
+          },
+          "input": {
+            "delivery_mode": "consume-on-read",
+            "expires_at_ms": 0,
+            "message_id": "message-consume",
+            "message_json": "{\"body\":\"one-shot\",\"kind\":\"chat\"}",
+            "message_sha256": "b277b2c492dcb5f8c6ed1f463fca70e3c6865ed28dfe5a1f82a2dae244b49d51",
+            "namespace": "group:alpha/channel:general",
+            "operation": "put",
+            "retention_mode": "session"
+          }
+        },
+        {
+          "expected_fields": {
+            "deleted": true,
+            "found": true,
+            "message_json": "{\"body\":\"one-shot\",\"kind\":\"chat\"}",
+            "message_sha256": "b277b2c492dcb5f8c6ed1f463fca70e3c6865ed28dfe5a1f82a2dae244b49d51",
+            "sequence": 1
+          },
+          "input": {
+            "expected_message_sha256": "b277b2c492dcb5f8c6ed1f463fca70e3c6865ed28dfe5a1f82a2dae244b49d51",
+            "expected_sequence": 1,
+            "message_id": "message-consume",
+            "namespace": "group:alpha/channel:general",
+            "operation": "consume"
+          }
+        },
+        {
+          "expected_error": "already-applied",
+          "input": {
+            "expected_message_sha256": "b277b2c492dcb5f8c6ed1f463fca70e3c6865ed28dfe5a1f82a2dae244b49d51",
+            "expected_sequence": 1,
+            "message_id": "message-consume",
+            "namespace": "group:alpha/channel:general",
+            "operation": "consume"
+          }
+        }
+      ]
+    },
+    {
+      "name": "delivery-mode-is-enforced",
+      "principal": "group:alpha",
+      "steps": [
+        {
+          "expected_fields": {
+            "found": true,
+            "replayed": false,
+            "sequence": 1
+          },
+          "input": {
+            "delivery_mode": "read-many",
+            "expires_at_ms": 0,
+            "message_id": "message-mode",
+            "message_json": "{\"body\":\"repeatable\",\"kind\":\"chat\"}",
+            "message_sha256": "9ea3472e775c2c8e31cb954ceef190a4d7b54ca459ef68786bbfa2a483aea71f",
+            "namespace": "group:alpha/channel:general",
+            "operation": "put",
+            "retention_mode": "session"
+          }
+        },
+        {
+          "expected_error": "unsupported-delivery-mode",
+          "input": {
+            "expected_message_sha256": "9ea3472e775c2c8e31cb954ceef190a4d7b54ca459ef68786bbfa2a483aea71f",
+            "expected_sequence": 1,
+            "message_id": "message-mode",
+            "namespace": "group:alpha/channel:general",
+            "operation": "consume"
+          }
+        }
+      ]
+    },
+    {
+      "name": "expired-ttl-is-rejected",
+      "principal": "group:alpha",
+      "steps": [
+        {
+          "expected_error": "expired",
+          "input": {
+            "delivery_mode": "read-many",
+            "expires_at_ms": 1750000000000,
+            "message_id": "message-expired",
+            "message_json": "{\"body\":\"late\",\"kind\":\"chat\"}",
+            "message_sha256": "e63aef2f1a59bd478c3ec0456d9bc6d28e29f57d6a7d4f4d176b136d0dfb3d68",
+            "namespace": "group:alpha/channel:general",
+            "operation": "put",
+            "retention_mode": "ttl"
+          }
+        }
+      ]
+    }
+  ],
+  "valid_inputs": [
+    {
+      "operation": "probe"
+    },
+    {
+      "delivery_mode": "read-many",
+      "expires_at_ms": 0,
+      "message_id": "message-1",
+      "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+      "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+      "namespace": "group:alpha/channel:general",
+      "operation": "put",
+      "retention_mode": "session"
+    },
+    {
+      "message_id": "message-1",
+      "namespace": "group:alpha/channel:general",
+      "operation": "get"
+    },
+    {
+      "expected_message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+      "expected_sequence": 1,
+      "message_id": "message-1",
+      "namespace": "group:alpha/channel:general",
+      "operation": "consume"
+    },
+    {
+      "expected_message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+      "expected_sequence": 1,
+      "message_id": "message-1",
+      "namespace": "group:alpha/channel:general",
+      "operation": "delete"
+    },
+    {
+      "after_sequence": 0,
+      "limit": 50,
+      "namespace": "group:alpha/channel:general",
+      "operation": "list"
+    }
+  ],
+  "valid_outputs": [
+    {
+      "created_at_ms": 0,
+      "deleted": false,
+      "deletion_guarantee": "logical-only",
+      "delivery_mode": "",
+      "detail": "",
+      "expires_at_ms": 0,
+      "found": false,
+      "items": [],
+      "max_message_bytes": 524288,
+      "max_records_per_principal": 1024,
+      "max_ttl_seconds": 2592000,
+      "message_id": "",
+      "message_json": "",
+      "message_sha256": "",
+      "namespace": "",
+      "next_sequence": 0,
+      "operation": "probe",
+      "ready": true,
+      "replayed": false,
+      "retention_mode": "",
+      "sequence": 0,
+      "store_id": "org.nth-dao.message.memory",
+      "supported_delivery_modes": [
+        "consume-on-read",
+        "read-many"
+      ],
+      "supported_retention_modes": [
+        "session",
+        "ttl"
+      ]
+    },
+    {
+      "created_at_ms": 1750000000000,
+      "deleted": false,
+      "deletion_guarantee": "logical-only",
+      "delivery_mode": "read-many",
+      "detail": "",
+      "expires_at_ms": 0,
+      "found": true,
+      "items": [],
+      "max_message_bytes": 524288,
+      "max_records_per_principal": 1024,
+      "max_ttl_seconds": 2592000,
+      "message_id": "message-1",
+      "message_json": "",
+      "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+      "namespace": "group:alpha/channel:general",
+      "next_sequence": 0,
+      "operation": "put",
+      "ready": true,
+      "replayed": false,
+      "retention_mode": "session",
+      "sequence": 1,
+      "store_id": "org.nth-dao.message.memory",
+      "supported_delivery_modes": [
+        "consume-on-read",
+        "read-many"
+      ],
+      "supported_retention_modes": [
+        "session",
+        "ttl"
+      ]
+    },
+    {
+      "created_at_ms": 1750000000000,
+      "deleted": false,
+      "deletion_guarantee": "logical-only",
+      "delivery_mode": "read-many",
+      "detail": "",
+      "expires_at_ms": 0,
+      "found": true,
+      "items": [],
+      "max_message_bytes": 524288,
+      "max_records_per_principal": 1024,
+      "max_ttl_seconds": 2592000,
+      "message_id": "message-1",
+      "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+      "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+      "namespace": "group:alpha/channel:general",
+      "next_sequence": 0,
+      "operation": "get",
+      "ready": true,
+      "replayed": false,
+      "retention_mode": "session",
+      "sequence": 1,
+      "store_id": "org.nth-dao.message.memory",
+      "supported_delivery_modes": [
+        "consume-on-read",
+        "read-many"
+      ],
+      "supported_retention_modes": [
+        "session",
+        "ttl"
+      ]
+    },
+    {
+      "created_at_ms": 1750000000000,
+      "deleted": true,
+      "deletion_guarantee": "logical-only",
+      "delivery_mode": "consume-on-read",
+      "detail": "",
+      "expires_at_ms": 0,
+      "found": true,
+      "items": [],
+      "max_message_bytes": 524288,
+      "max_records_per_principal": 1024,
+      "max_ttl_seconds": 2592000,
+      "message_id": "message-1",
+      "message_json": "{\"body\":\"hello\",\"kind\":\"chat\"}",
+      "message_sha256": "11e42e1976c7b60aabb1014501812915a68f9bb4d3db0b194e1ad755e02df1e0",
+      "namespace": "group:alpha/channel:general",
+      "next_sequence": 0,
+      "operation": "consume",
+      "ready": true,
+      "replayed": false,
+      "retention_mode": "session",
+      "sequence": 1,
+      "store_id": "org.nth-dao.message.memory",
+      "supported_delivery_modes": [
+        "consume-on-read",
+        "read-many"
+      ],
+      "supported_retention_modes": [
+        "session",
+        "ttl"
+      ]
+    }
+  ],
+  "wire_limits": {
+    "max_document_bytes": 1048576,
+    "max_items": 256,
+    "max_message_bytes": 524288,
+    "max_safe_integer": 9007199254740991,
+    "size_unit": "canonical-json-utf8-bytes"
+  }
+}
