@@ -1,0 +1,1093 @@
+{
+  "canonicalization": {
+    "encoding": "utf-8",
+    "floats": "forbidden",
+    "integer_range": "-(2^53-1)..(2^53-1)",
+    "object_keys": "non-empty-printable-ascii-1-to-256-bytes",
+    "serialization": "recursive-sorted-keys-compact-json"
+  },
+  "entry_rules": {
+    "capabilities": "sorted-unique-portable-identifiers",
+    "categories": "sorted-unique-lowercase-slugs",
+    "display_text": "title-has-no-controls-summary-allows-only-tab-cr-lf-controls",
+    "origin": "local-has-empty-source-peer-federated-has-non-empty-source-peer",
+    "projection_only": "must-be-true-and-never-grants-authority",
+    "publisher_did": "valid-ed25519-did-key",
+    "source_digest": "lowercase-sha256-content-address-with-prefix",
+    "source_locator": "opaque-public-hint-no-userinfo-no-automatic-dereference",
+    "time": "expiry-follows-publication-and-verification-does-not-precede-it"
+  },
+  "error_model": {
+    "conflict": {
+      "meaning": "the expected content digest does not match the live entry",
+      "retryable": false
+    },
+    "expired-entry": {
+      "meaning": "the entry is already beyond the index stale-retention horizon",
+      "retryable": false
+    },
+    "inactive": {
+      "meaning": "the provider is not currently active",
+      "retryable": true
+    },
+    "invalid-cursor": {
+      "meaning": "the search cursor is malformed or belongs to another principal",
+      "retryable": false
+    },
+    "limit-exceeded": {
+      "meaning": "the request exceeds a provider or wire limit",
+      "retryable": false
+    },
+    "quota-exceeded": {
+      "meaning": "temporary provider or principal capacity is exhausted",
+      "retryable": true
+    },
+    "stale-cursor": {
+      "meaning": "the index changed after the search page was created",
+      "retryable": true
+    }
+  },
+  "identifier_examples": {
+    "entry_id": "task:vector-alpha",
+    "source_protocol": "org.nth-dao.market.task-announcement.v3"
+  },
+  "negative_entries": [
+    {
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":false,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "name": "projection-only-required"
+    },
+    {
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "name": "source-digest-needs-prefix"
+    },
+    {
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\",\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "name": "categories-must-be-unique"
+    },
+    {
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://demo-user:demo-pass@peer/item\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "name": "public-locator-forbids-userinfo"
+    },
+    {
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"federated\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "name": "federated-origin-needs-peer"
+    },
+    {
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"unsafe\\u001btitle\",\"version\":\"1\"}",
+      "name": "title-forbids-controls"
+    }
+  ],
+  "negative_exchanges": [
+    {
+      "expected_error_contains": "entry_id does not match",
+      "name": "upsert-response-binds-entry-id",
+      "request": {
+        "entry_id": "task:vector-alpha",
+        "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "expected_entry_sha256": "",
+        "operation": "upsert"
+      },
+      "response": {
+        "changed": true,
+        "detail": "",
+        "entry_id": "task:vector-beta",
+        "entry_json": "",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "upsert",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "items exceed",
+      "name": "search-response-respects-request-limit",
+      "request": {
+        "categories": [
+          "tasks"
+        ],
+        "cursor": "",
+        "include_stale": false,
+        "intents": [
+          "request"
+        ],
+        "limit": 1,
+        "operation": "search",
+        "q": "review",
+        "source_protocols": [
+          "org.nth-dao.market.task-announcement.v3"
+        ]
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "score": 100
+          },
+          {
+            "entry_id": "task:vector-beta",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-beta\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1749999999999,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"source_locator\":\"nth://market/task/vector-beta\",\"source_object_id\":\"announcement-vector-beta\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector beta\",\"version\":\"1\"}",
+            "entry_sha256": "935340f14e1c0db2127a130deaf00c728727fb0fd8a8a9384dd64037366e0459",
+            "score": 90
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "categories",
+      "name": "search-response-binds-categories",
+      "request": {
+        "categories": [
+          "tasks"
+        ],
+        "cursor": "",
+        "include_stale": false,
+        "intents": [
+          "request"
+        ],
+        "limit": 20,
+        "operation": "search",
+        "q": "review",
+        "source_protocols": [
+          "org.nth-dao.market.task-announcement.v3"
+        ]
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"products\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "c74beb5588f340ed7f1cbe01bfc6d960e25b43dd59d03e32498db1f1bfc56c18",
+            "score": 100
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "intents",
+      "name": "search-response-binds-intents",
+      "request": {
+        "categories": [
+          "tasks"
+        ],
+        "cursor": "",
+        "include_stale": false,
+        "intents": [
+          "request"
+        ],
+        "limit": 20,
+        "operation": "search",
+        "q": "review",
+        "source_protocols": [
+          "org.nth-dao.market.task-announcement.v3"
+        ]
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"provide\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "b65c18d6dc2edeb0a8a9b53928fb59bb885c35fe162fbd5c8df61e99ae9e3b90",
+            "score": 100
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "source_protocols",
+      "name": "search-response-binds-source-protocols",
+      "request": {
+        "categories": [
+          "tasks"
+        ],
+        "cursor": "",
+        "include_stale": false,
+        "intents": [
+          "request"
+        ],
+        "limit": 20,
+        "operation": "search",
+        "q": "review",
+        "source_protocols": [
+          "org.nth-dao.market.task-announcement.v3"
+        ]
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.trade-offer.v1\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e28b689a06267e37a7599721c0481d35f9a2ed2e3329f673155afa790338359",
+            "score": 100
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "include_stale",
+      "name": "search-response-binds-stale-policy",
+      "request": {
+        "categories": [
+          "tasks"
+        ],
+        "cursor": "",
+        "include_stale": false,
+        "intents": [
+          "request"
+        ],
+        "limit": 20,
+        "operation": "search",
+        "q": "review",
+        "source_protocols": [
+          "org.nth-dao.market.task-announcement.v3"
+        ]
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":true,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "536f985e668a958c81693bcbc59968b6d5ba8a3531a780af2f85b9b4039fbd5e",
+            "score": 100
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "operation does not match",
+      "name": "response-binds-operation",
+      "request": {
+        "entry_id": "task:vector-alpha",
+        "operation": "get"
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": false,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "probe",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 0
+      }
+    }
+  ],
+  "negative_inputs": [
+    {
+      "input": {
+        "entry_id": "task:vector-alpha",
+        "expected_entry_sha256": "",
+        "operation": "remove"
+      },
+      "name": "remove-needs-cas-digest"
+    },
+    {
+      "input": {
+        "entry_id": "task:vector-alpha",
+        "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+        "entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "expected_entry_sha256": "",
+        "operation": "upsert"
+      },
+      "name": "upsert-digest-must-bind-entry"
+    }
+  ],
+  "negative_outputs": [
+    {
+      "expected_error_contains": "upsert flags are inconsistent",
+      "name": "upsert-must-change-or-replay",
+      "output": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "task:vector-alpha",
+        "entry_json": "",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "upsert",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "found flag does not match items",
+      "name": "search-found-binds-items",
+      "output": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": false,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "score": 100
+          },
+          {
+            "entry_id": "task:vector-beta",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-beta\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1749999999999,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"source_locator\":\"nth://market/task/vector-beta\",\"source_object_id\":\"announcement-vector-beta\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector beta\",\"version\":\"1\"}",
+            "entry_sha256": "935340f14e1c0db2127a130deaf00c728727fb0fd8a8a9384dd64037366e0459",
+            "score": 90
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "expected_error_contains": "entry_sha256 does not bind entry_json",
+      "name": "get-digest-binds-content",
+      "output": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "task:vector-alpha",
+        "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+        "entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "get",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    }
+  ],
+  "operation_rules": {
+    "get": {
+      "allowed": [
+        "entry_id",
+        "operation"
+      ],
+      "required": [
+        "entry_id",
+        "operation"
+      ]
+    },
+    "probe": {
+      "allowed": [
+        "operation"
+      ],
+      "required": [
+        "operation"
+      ]
+    },
+    "remove": {
+      "allowed": [
+        "entry_id",
+        "expected_entry_sha256",
+        "operation"
+      ],
+      "required": [
+        "entry_id",
+        "expected_entry_sha256",
+        "operation"
+      ]
+    },
+    "search": {
+      "allowed": [
+        "categories",
+        "cursor",
+        "include_stale",
+        "intents",
+        "limit",
+        "operation",
+        "q",
+        "source_protocols"
+      ],
+      "required": [
+        "categories",
+        "cursor",
+        "include_stale",
+        "intents",
+        "limit",
+        "operation",
+        "q",
+        "source_protocols"
+      ]
+    },
+    "upsert": {
+      "allowed": [
+        "entry_id",
+        "entry_json",
+        "entry_sha256",
+        "expected_entry_sha256",
+        "operation"
+      ],
+      "required": [
+        "entry_id",
+        "entry_json",
+        "entry_sha256",
+        "expected_entry_sha256",
+        "operation"
+      ]
+    }
+  },
+  "positive_exchanges": [
+    {
+      "request": {
+        "operation": "probe"
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": false,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "probe",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 0
+      }
+    },
+    {
+      "request": {
+        "entry_id": "task:vector-alpha",
+        "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "expected_entry_sha256": "",
+        "operation": "upsert"
+      },
+      "response": {
+        "changed": true,
+        "detail": "",
+        "entry_id": "task:vector-alpha",
+        "entry_json": "",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "upsert",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "request": {
+        "entry_id": "task:vector-alpha",
+        "operation": "get"
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "task:vector-alpha",
+        "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "get",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "request": {
+        "categories": [
+          "tasks"
+        ],
+        "cursor": "",
+        "include_stale": false,
+        "intents": [
+          "request"
+        ],
+        "limit": 20,
+        "operation": "search",
+        "q": "review",
+        "source_protocols": [
+          "org.nth-dao.market.task-announcement.v3"
+        ]
+      },
+      "response": {
+        "changed": false,
+        "detail": "",
+        "entry_id": "",
+        "entry_json": "",
+        "entry_sha256": "",
+        "found": true,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [
+          {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "score": 100
+          },
+          {
+            "entry_id": "task:vector-beta",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-beta\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1749999999999,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"source_locator\":\"nth://market/task/vector-beta\",\"source_object_id\":\"announcement-vector-beta\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector beta\",\"version\":\"1\"}",
+            "entry_sha256": "935340f14e1c0db2127a130deaf00c728727fb0fd8a8a9384dd64037366e0459",
+            "score": 90
+          }
+        ],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "search",
+        "ready": true,
+        "removed": false,
+        "replayed": false,
+        "revision": 1
+      }
+    },
+    {
+      "request": {
+        "entry_id": "task:vector-alpha",
+        "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "operation": "remove"
+      },
+      "response": {
+        "changed": true,
+        "detail": "",
+        "entry_id": "task:vector-alpha",
+        "entry_json": "",
+        "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+        "found": false,
+        "index_id": "org.nth-dao.market.memory-index",
+        "items": [],
+        "max_entries_per_principal": 2048,
+        "max_entry_bytes": 32768,
+        "next_cursor": "",
+        "operation": "remove",
+        "ready": true,
+        "removed": true,
+        "replayed": false,
+        "revision": 2
+      }
+    }
+  ],
+  "positive_inputs": [
+    {
+      "operation": "probe"
+    },
+    {
+      "entry_id": "task:vector-alpha",
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+      "expected_entry_sha256": "",
+      "operation": "upsert"
+    },
+    {
+      "entry_id": "task:vector-alpha",
+      "operation": "get"
+    },
+    {
+      "categories": [
+        "tasks"
+      ],
+      "cursor": "",
+      "include_stale": false,
+      "intents": [
+        "request"
+      ],
+      "limit": 20,
+      "operation": "search",
+      "q": "review",
+      "source_protocols": [
+        "org.nth-dao.market.task-announcement.v3"
+      ]
+    },
+    {
+      "entry_id": "task:vector-alpha",
+      "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+      "operation": "remove"
+    }
+  ],
+  "positive_outputs": [
+    {
+      "changed": false,
+      "detail": "",
+      "entry_id": "",
+      "entry_json": "",
+      "entry_sha256": "",
+      "found": false,
+      "index_id": "org.nth-dao.market.memory-index",
+      "items": [],
+      "max_entries_per_principal": 2048,
+      "max_entry_bytes": 32768,
+      "next_cursor": "",
+      "operation": "probe",
+      "ready": true,
+      "removed": false,
+      "replayed": false,
+      "revision": 0
+    },
+    {
+      "changed": true,
+      "detail": "",
+      "entry_id": "task:vector-alpha",
+      "entry_json": "",
+      "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+      "found": true,
+      "index_id": "org.nth-dao.market.memory-index",
+      "items": [],
+      "max_entries_per_principal": 2048,
+      "max_entry_bytes": 32768,
+      "next_cursor": "",
+      "operation": "upsert",
+      "ready": true,
+      "removed": false,
+      "replayed": false,
+      "revision": 1
+    },
+    {
+      "changed": false,
+      "detail": "",
+      "entry_id": "task:vector-alpha",
+      "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+      "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+      "found": true,
+      "index_id": "org.nth-dao.market.memory-index",
+      "items": [],
+      "max_entries_per_principal": 2048,
+      "max_entry_bytes": 32768,
+      "next_cursor": "",
+      "operation": "get",
+      "ready": true,
+      "removed": false,
+      "replayed": false,
+      "revision": 1
+    },
+    {
+      "changed": false,
+      "detail": "",
+      "entry_id": "",
+      "entry_json": "",
+      "entry_sha256": "",
+      "found": true,
+      "index_id": "org.nth-dao.market.memory-index",
+      "items": [
+        {
+          "entry_id": "task:vector-alpha",
+          "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+          "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+          "score": 100
+        },
+        {
+          "entry_id": "task:vector-beta",
+          "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-beta\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1749999999999,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"source_locator\":\"nth://market/task/vector-beta\",\"source_object_id\":\"announcement-vector-beta\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector beta\",\"version\":\"1\"}",
+          "entry_sha256": "935340f14e1c0db2127a130deaf00c728727fb0fd8a8a9384dd64037366e0459",
+          "score": 90
+        }
+      ],
+      "max_entries_per_principal": 2048,
+      "max_entry_bytes": 32768,
+      "next_cursor": "",
+      "operation": "search",
+      "ready": true,
+      "removed": false,
+      "replayed": false,
+      "revision": 1
+    },
+    {
+      "changed": true,
+      "detail": "",
+      "entry_id": "task:vector-alpha",
+      "entry_json": "",
+      "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+      "found": false,
+      "index_id": "org.nth-dao.market.memory-index",
+      "items": [],
+      "max_entries_per_principal": 2048,
+      "max_entry_bytes": 32768,
+      "next_cursor": "",
+      "operation": "remove",
+      "ready": true,
+      "removed": true,
+      "replayed": false,
+      "revision": 2
+    }
+  ],
+  "semantics": {
+    "authority": "search-projection-only-resolve-and-reverify-source-before-action",
+    "cursor": "opaque-principal-query-bound-expiring-snapshot-revision-token",
+    "remove": "content-digest-cas-idempotent-logical-removal",
+    "retry": "identical-mutations-replay-within-the-declared-window-while-provider-is-active",
+    "search": "provider-ranked-with-stable-entry-id-tie-break",
+    "stale_retention": "expired-entries-remain-queryable-with-include-stale-until-retention-ends",
+    "upsert": "content-digest-cas-idempotent-replacement"
+  },
+  "state_cases": [
+    {
+      "name": "mutation-replay-window",
+      "steps": [
+        {
+          "at_ms": 1750000000200,
+          "expect": {
+            "changed": true,
+            "replayed": false,
+            "revision": 1
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "expected_entry_sha256": "",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000000201,
+          "expect": {
+            "changed": false,
+            "replayed": true,
+            "revision": 1
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "expected_entry_sha256": "",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000000202,
+          "expect": {
+            "changed": true,
+            "removed": true,
+            "replayed": false,
+            "revision": 2
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "operation": "remove"
+          }
+        },
+        {
+          "at_ms": 1750000000203,
+          "expect": {
+            "changed": false,
+            "removed": true,
+            "replayed": true,
+            "revision": 2
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "operation": "remove"
+          }
+        },
+        {
+          "at_ms": 1750000300203,
+          "expect_error": "conflict",
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "operation": "remove"
+          }
+        }
+      ]
+    },
+    {
+      "name": "upsert-replay-survives-aba",
+      "steps": [
+        {
+          "at_ms": 1750000001000,
+          "expect": {
+            "changed": true,
+            "replayed": false,
+            "revision": 1
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "expected_entry_sha256": "",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000001001,
+          "expect": {
+            "changed": true,
+            "replayed": false,
+            "revision": 2
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Replacement generation.\",\"title\":\"Review vector alpha replacement\",\"version\":\"1\"}",
+            "entry_sha256": "f2a8bddc956a6d0a5cc8008e5f2d65c5f5a6b31643613f44e62b95f3a18c6482",
+            "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000001002,
+          "expect": {
+            "changed": false,
+            "replayed": true,
+            "revision": 1
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "expected_entry_sha256": "",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000001003,
+          "expect": {
+            "entry_sha256": "f2a8bddc956a6d0a5cc8008e5f2d65c5f5a6b31643613f44e62b95f3a18c6482",
+            "found": true,
+            "revision": 2
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "operation": "get"
+          }
+        }
+      ]
+    },
+    {
+      "name": "remove-replay-survives-recreation",
+      "steps": [
+        {
+          "at_ms": 1750000002000,
+          "expect": {
+            "changed": true,
+            "replayed": false,
+            "revision": 1
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+            "entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "expected_entry_sha256": "",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000002001,
+          "expect": {
+            "changed": true,
+            "removed": true,
+            "replayed": false,
+            "revision": 2
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "operation": "remove"
+          }
+        },
+        {
+          "at_ms": 1750000002002,
+          "expect": {
+            "changed": true,
+            "replayed": false,
+            "revision": 3
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Replacement generation.\",\"title\":\"Review vector alpha replacement\",\"version\":\"1\"}",
+            "entry_sha256": "f2a8bddc956a6d0a5cc8008e5f2d65c5f5a6b31643613f44e62b95f3a18c6482",
+            "expected_entry_sha256": "",
+            "operation": "upsert"
+          }
+        },
+        {
+          "at_ms": 1750000002003,
+          "expect": {
+            "changed": false,
+            "removed": true,
+            "replayed": true,
+            "revision": 2
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "expected_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+            "operation": "remove"
+          }
+        },
+        {
+          "at_ms": 1750000002004,
+          "expect": {
+            "entry_sha256": "f2a8bddc956a6d0a5cc8008e5f2d65c5f5a6b31643613f44e62b95f3a18c6482",
+            "found": true,
+            "revision": 3
+          },
+          "input": {
+            "entry_id": "task:vector-alpha",
+            "operation": "get"
+          }
+        }
+      ]
+    }
+  ],
+  "valid_entry": {
+    "capabilities": [
+      "code.review"
+    ],
+    "categories": [
+      "tasks"
+    ],
+    "entry_id": "task:vector-alpha",
+    "intents": [
+      "request"
+    ],
+    "last_verified_at_ms": 1750000000100,
+    "not_after_ms": 1750086400000,
+    "origin": "local",
+    "projection_only": true,
+    "published_at_ms": 1750000000000,
+    "publisher_did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+    "source_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_locator": "nth://market/task/vector-alpha",
+    "source_object_id": "announcement-vector-alpha",
+    "source_peer": "",
+    "source_protocol": "org.nth-dao.market.task-announcement.v3",
+    "stale": false,
+    "summary": "Resolve and verify the signed source before action.",
+    "title": "Review vector alpha",
+    "version": "1"
+  },
+  "valid_entry_json": "{\"capabilities\":[\"code.review\"],\"categories\":[\"tasks\"],\"entry_id\":\"task:vector-alpha\",\"intents\":[\"request\"],\"last_verified_at_ms\":1750000000100,\"not_after_ms\":1750086400000,\"origin\":\"local\",\"projection_only\":true,\"published_at_ms\":1750000000000,\"publisher_did\":\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\",\"source_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_locator\":\"nth://market/task/vector-alpha\",\"source_object_id\":\"announcement-vector-alpha\",\"source_peer\":\"\",\"source_protocol\":\"org.nth-dao.market.task-announcement.v3\",\"stale\":false,\"summary\":\"Resolve and verify the signed source before action.\",\"title\":\"Review vector alpha\",\"version\":\"1\"}",
+  "valid_entry_sha256": "2e841263c7c4615cfad74ccf2a2767b5daeb36358e26383e56c2f02f2df6a5fa",
+  "wire_limits": {
+    "max_cursor_age_ms": 300000,
+    "max_cursor_chars": 1024,
+    "max_document_bytes": 1048576,
+    "max_entry_bytes": 32768,
+    "max_list_items": 32,
+    "max_page_size": 20,
+    "max_query_chars": 200,
+    "max_safe_integer": 9007199254740991,
+    "mutation_replay_window_ms": 300000,
+    "size_unit": "canonical-json-utf8-bytes",
+    "stale_retention_ms": 300000
+  }
+}

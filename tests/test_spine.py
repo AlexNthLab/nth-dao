@@ -501,6 +501,57 @@ def test_append_unique_is_idempotent_and_rejects_key_reuse(
     assert len(first_log.verified_snapshot()) == 1
 
 
+def test_verified_semantic_lookup_reuses_indexes_without_rescanning(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    event, _created = log.append_unique(
+        "trade.operation.completed",
+        {"operation_id": "sha256:" + ("1" * 64)},
+        unique_payload_fields=("operation_id",),
+        ts_ms=1,
+    )
+
+    def unexpected_scan():
+        raise AssertionError("verified cache should satisfy semantic lookup")
+
+    monkeypatch.setattr(log, "_verified_events_unlocked", unexpected_scan)
+    monkeypatch.setattr(
+        log,
+        "_semantic_owners_unlocked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("semantic lookup must not copy the full index")
+        ),
+    )
+    assert log.find_unique_event(
+        "trade.operation.completed",
+        payload_field="operation_id",
+        payload_value="sha256:" + ("1" * 64),
+    ) == event
+    assert log.get_verified_event(event.event_id) == event
+    assert log.find_unique_event(
+        "trade.operation.completed",
+        payload_field="operation_id",
+        payload_value="sha256:" + ("2" * 64),
+    ) is None
+    assert log.get_verified_event("0" * 64) is None
+
+
+def test_verified_semantic_lookup_rejects_duplicate_keys(tmp_path: Path) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    payload = {"operation_id": "sha256:" + ("1" * 64)}
+    log.append("trade.operation.completed", payload, ts_ms=1)
+    log.append("trade.operation.completed", payload, ts_ms=2)
+
+    with pytest.raises(ValueError, match="duplicate semantic event keys"):
+        log.find_unique_event(
+            "trade.operation.completed",
+            payload_field="operation_id",
+            payload_value=payload["operation_id"],
+        )
+
+
 def test_append_unique_many_scans_once_and_prevalidates_conflicts(
     tmp_path: Path,
     monkeypatch,

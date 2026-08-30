@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A language-neutral `market.index` v1 plugin contract and a bounded,
+  principal-isolated in-memory reference provider. Entries are canonical,
+  content-addressed search projections that retain exact source protocol,
+  object, publisher, digest, and locator bindings; they never become listing
+  or execution authority. Mutations use content-digest CAS, identical retries
+  are idempotent, and five-minute HMAC-authenticated cursors bind principal,
+  normalized query, revision, snapshot time, and stable rank position. Expired
+  entries remain available for a bounded stale-audit window and are then
+  reclaimed with cursor invalidation and quota recovery. Wire compatibility,
+  non-authoritative protocol compatibility, and Host effect authorization are
+  separate checks, so a network index cannot inherit the local provider's
+  no-effect profile. The provider is installed disabled
+  and does not replace or dual-write the existing Market stores or REST path.
+  Checked-in schemas and wire vectors include an independent Node.js canonical
+  hash check. Settlement and real-funds execution remain disabled.
 - A language-neutral `nth-dao-plugin-rpc` v1 subprocess boundary for statically
   reviewed local workers. It copies each entry artifact from one verified read
   stream into a private workspace-local per-generation snapshot and executes
@@ -223,6 +238,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Local Dispute Statement creation now holds a workspace-scoped,
+  cross-process single-flight lease for the complete idempotent operation.
+  Concurrent retries with the same Order, Receipt, Review, and idempotency key
+  wait for and reuse one durable result instead of redundantly contending on
+  Rule resolution, Store, Outbox, and Spine locks and returning false 503s.
+  Conflicting content still returns 409, and lease timeout remains an explicit
+  retryable 503.
 - Spine verified-read caches now bind invalidation tokens to the complete log
   content, detecting same-size tampering even when filesystem timestamps are
   restored. Requester Fetch outbox updates reject timestamp regression before

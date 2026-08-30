@@ -595,6 +595,43 @@ window, while sender delivery tombstones remain until the envelope expires.
 Byte, claim, and idempotency quotas are isolated per invoking principal as well
 as globally.
 
+### Market index boundary
+
+`org.nth-dao.market.index` v1 is a closed, language-neutral search projection
+over Host-verified Task and Trade Offer discovery claims. It does not merge
+those source protocols and cannot create, amend, claim, negotiate, agree,
+deliver, settle, or certify a listing. Every projected entry binds the exact
+source protocol, source object ID, publisher DID, source content digest, and
+locator. A caller must resolve and independently reverify that exact signed
+source object before any action. An index result remains a publisher claim,
+not proof of truth, ownership, availability, price, inventory, or authority.
+
+The Host selects the local invocation principal; wire input cannot override
+it. `upsert` and `remove` use content-digest CAS, with identical retries
+remaining idempotent. Search filters are closed and bounded. Ranking is
+provider-specific, but every result includes an integer score and uses
+publication time plus entry ID as a stable tie-break. Pagination cursors are
+opaque, principal- and normalized-query-bound snapshot tokens. The reference
+provider rejects a cursor after that principal's index revision changes,
+after five minutes, or when filters/page size change rather than silently
+mixing pages from different views. Entry expiry is evaluated against the first
+page's fixed snapshot time within that bounded cursor lifetime.
+
+The reviewed `org.nth-dao.market.memory-index` provider is bounded by entry,
+principal, byte, tombstone, query, page, and document limits. Its cursor is
+authenticated with a process-local HMAC key. It is installed disabled and
+does not replace, dual-write, or become authoritative over the current Market
+feed, federation cache, Task store, Offer store, REST API, or UI. It is a
+conformance sample for future local, federated, community relay, or centralized
+accelerator indexes. Network and durable implementations must declare their
+actual effects and exact contract profile. Sharing the v1 capability ID and
+input/output schema digests establishes wire compatibility only; it does not
+make two provider profiles exact contract substitutes. A provider must also
+preserve the non-authoritative protocol semantics, and the Host must explicitly
+allow every declared external effect before selection. Checked-in JSON vectors freeze the
+entry schema, operation schemas, protocol digest, positive inputs, and one
+cross-language canonical content address.
+
 Migration order:
 
 1. plugin manifest, capability contract, registry, and lifecycle tests;
@@ -606,8 +643,10 @@ Migration order:
    (ephemeral reference implemented), then transport providers (local
    loopback contract and disabled reference implemented; network adapters
    remain);
-5. reviewed subprocess RPC foundation (implemented for static local workers;
+5. non-authoritative market index contract and bounded in-memory reference
+   (implemented; existing Market reads are not migrated or dual-written);
+6. reviewed subprocess RPC foundation (implemented for static local workers;
    OS sandbox and signed package loading remain);
-6. settlement and payment providers only after OS confinement, complete
+7. settlement and payment providers only after OS confinement, complete
    package verification, durable idempotency and mandate-bound commit tests
    exist.

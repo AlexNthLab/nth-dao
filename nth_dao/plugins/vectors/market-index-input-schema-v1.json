@@ -1,0 +1,84 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "categories": {
+      "items": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "cursor": {
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "entry_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "entry_json": {
+      "maxLength": 32768,
+      "minLength": 2,
+      "type": "string"
+    },
+    "entry_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "type": "string"
+    },
+    "expected_entry_sha256": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "include_stale": {
+      "type": "boolean"
+    },
+    "intents": {
+      "items": {
+        "enum": [
+          "exchange",
+          "provide",
+          "request"
+        ],
+        "type": "string"
+      },
+      "maxItems": 3,
+      "type": "array"
+    },
+    "limit": {
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "operation": {
+      "enum": [
+        "get",
+        "probe",
+        "remove",
+        "search",
+        "upsert"
+      ],
+      "type": "string"
+    },
+    "q": {
+      "maxLength": 200,
+      "type": "string"
+    },
+    "source_protocols": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    }
+  },
+  "required": [
+    "operation"
+  ],
+  "type": "object"
+}

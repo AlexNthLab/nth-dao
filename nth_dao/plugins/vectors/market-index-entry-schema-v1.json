@@ -1,0 +1,135 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "categories": {
+      "items": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    },
+    "entry_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "intents": {
+      "items": {
+        "enum": [
+          "exchange",
+          "provide",
+          "request"
+        ],
+        "type": "string"
+      },
+      "maxItems": 3,
+      "minItems": 1,
+      "type": "array"
+    },
+    "last_verified_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "not_after_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "origin": {
+      "enum": [
+        "federated",
+        "local"
+      ],
+      "type": "string"
+    },
+    "projection_only": {
+      "type": "boolean"
+    },
+    "published_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "publisher_did": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_digest": {
+      "maxLength": 71,
+      "minLength": 71,
+      "type": "string"
+    },
+    "source_locator": {
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "source_object_id": {
+      "maxLength": 512,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_peer": {
+      "maxLength": 512,
+      "type": "string"
+    },
+    "source_protocol": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "stale": {
+      "type": "boolean"
+    },
+    "summary": {
+      "maxLength": 2000,
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "version": {
+      "enum": [
+        "1"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "capabilities",
+    "categories",
+    "entry_id",
+    "intents",
+    "last_verified_at_ms",
+    "not_after_ms",
+    "origin",
+    "projection_only",
+    "published_at_ms",
+    "publisher_did",
+    "source_digest",
+    "source_locator",
+    "source_object_id",
+    "source_peer",
+    "source_protocol",
+    "stale",
+    "summary",
+    "title",
+    "version"
+  ],
+  "type": "object"
+}

@@ -68,6 +68,16 @@ Every entry must retain an exact pointer to its source object:
 - Task entries bind `announcement_id` and `federation_key`.
 - Offer entries bind `offer_digest` and the discovery announcement.
 
+The optional `market.index` plugin contract indexes a normalized,
+content-addressed form of this projection. It remains a replaceable search
+accelerator, not a new fact store. The current REST search path does not yet
+dual-write to or read from that provider. Local, federated, relay, or
+centralized index providers may share the contract only when their complete
+wire protocol. Their exact capability contract digests intentionally differ
+when effects, consistency, or retention differ. Compatibility therefore has
+three gates: identical v1 wire schemas, preserved non-authoritative index
+semantics, and explicit Host approval for every declared external effect.
+
 The projection may derive broad facets such as `tasks`, `products`,
 `services`, `digital-assets`, `exchanges`, and `other`. A facet is a search
 hint, not a claim that the resource exists or has been classified correctly.

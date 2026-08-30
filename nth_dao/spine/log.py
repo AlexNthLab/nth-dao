@@ -399,6 +399,17 @@ class SignedEventLog:
         fields: tuple[str, ...],
         events: tuple[SpineEvent, ...],
     ) -> dict[tuple[str, str], set[tuple[str, int]]]:
+        retained = self._semantic_index_unlocked(event_type, fields, events)
+        return {key: set(owners) for key, owners in retained.items()}
+
+    def _semantic_index_unlocked(
+        self,
+        event_type: str,
+        fields: tuple[str, ...],
+        events: tuple[SpineEvent, ...],
+    ) -> dict[tuple[str, str], set[tuple[str, int]]]:
+        """Return the internal verified semantic index without copying it."""
+
         cache_key = (event_type, fields)
         retained = self._semantic_cache.get(cache_key)
         if retained is None:
@@ -416,7 +427,7 @@ class SignedEventLog:
                 if len(self._semantic_cache) >= MAX_SPINE_SEMANTIC_INDEX_SHAPES:
                     self._semantic_cache.pop(next(iter(self._semantic_cache)))
                 self._semantic_cache[cache_key] = retained
-        return {key: set(owners) for key, owners in retained.items()}
+        return retained
 
     def _verified_events_cached_unlocked(
         self,
@@ -698,6 +709,8 @@ class SignedEventLog:
                 cached = self._verified_cache_by_id.get(event_id)
                 if cached is not None:
                     return cached
+                if self._verified_cache_token is not None:
+                    return None
                 return next(
                     (event for event in events if event.event_id == event_id),
                     None,
@@ -736,6 +749,77 @@ class SignedEventLog:
             unique_payload_fields=unique_payload_fields,
             ts_ms=ts_ms,
         )[0]
+
+    def find_unique_event(
+        self,
+        event_type: str,
+        *,
+        payload_field: str,
+        payload_value: str,
+    ) -> Optional[SpineEvent]:
+        """Return one verified semantic event through the cached unique index."""
+
+        for name, value in (
+            ("event_type", event_type),
+            ("payload_field", payload_field),
+            ("payload_value", payload_value),
+        ):
+            if not isinstance(value, str) or not value or len(value) > 2_048:
+                raise ValueError(f"{name} must be a bounded non-empty string")
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                self._recover_pending_append_unlocked()
+                ok, reason, events, _token = self._verified_events_cached_unlocked()
+                if not ok:
+                    raise ValueError(
+                        f"spine log at {self._path} is corrupt and cannot be "
+                        f"queried: {reason}"
+                    )
+                owners = self._semantic_index_unlocked(
+                    event_type,
+                    (payload_field,),
+                    events,
+                ).get((payload_field, payload_value), set())
+                if len(owners) > 1:
+                    raise ValueError("spine contains duplicate semantic event keys")
+                if not owners:
+                    return None
+                owner_kind, sequence = next(iter(owners))
+                if owner_kind != "existing" or not 0 <= sequence < len(events):
+                    raise RuntimeError("spine semantic index is inconsistent")
+                return events[sequence]
+
+    def get_verified_event(self, event_id: str) -> Optional[SpineEvent]:
+        """Return one verified event by content-addressed event id."""
+
+        if (
+            not isinstance(event_id, str)
+            or len(event_id) != 64
+            or any(char not in "0123456789abcdef" for char in event_id)
+        ):
+            raise ValueError("event_id must be a lowercase SHA-256 digest")
+        with self._lock:
+            with InterProcessLock(
+                self._path,
+                timeout=self._lock_timeout,
+            ):
+                self._recover_pending_append_unlocked()
+                ok, reason, events, _token = self._verified_events_cached_unlocked()
+                if not ok:
+                    raise ValueError(
+                        f"spine log at {self._path} is corrupt and cannot be "
+                        f"queried: {reason}"
+                    )
+                cached = self._verified_cache_by_id.get(event_id)
+                if cached is not None:
+                    return cached
+                return next(
+                    (event for event in events if event.event_id == event_id),
+                    None,
+                )
 
     def append_unique_many(
         self,

@@ -1,0 +1,26 @@
+{
+  "capability": {
+    "capability_id": "org.nth-dao.market.index",
+    "cardinality": "many",
+    "consistency": "C2",
+    "deterministic": false,
+    "effects": [
+      "none"
+    ],
+    "failure_semantics": "retry-safe",
+    "input_schema_digest": "sha256:1a07df179332567f0180f1272784c02fe1229f3f3cda2fa510e40f0d89ad301b",
+    "output_schema_digest": "sha256:3a7634fe61a9555b98122709e4c57bd04fe94dddff1c4c5adb15e425b7be1bb1",
+    "privacy": "public",
+    "retention": "ephemeral",
+    "security": "verified-input",
+    "version": "1.0.0"
+  },
+  "entry_schema": "market-index-entry-schema-v1.json",
+  "expected_digest": "sha256:cbdb318b12d2303d8efad9d356ac7568e1f4198042daa879c52b9396a67e5fb8",
+  "expected_protocol_digest": "sha256:bf67b87cce45403b6931a3ce149678bc6c47a0f13fa1df3b8be691512a1446b3",
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "input_schema": "market-index-input-schema-v1.json",
+  "operation_vectors": "market-index-wire-cases-v1.json",
+  "output_schema": "market-index-output-schema-v1.json",
+  "schema_version": 1
+}

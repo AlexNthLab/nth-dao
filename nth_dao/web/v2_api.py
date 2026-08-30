@@ -1919,10 +1919,26 @@ _MARKET_SEARCH_INTENTS = {"request", "provide", "exchange"}
 _MARKET_OFFER_CATEGORIES = {"products", "services", "digital-assets", "other"}
 _MARKET_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 _TRADE_DISPUTE_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+_TRADE_DISPUTE_STATEMENT_CREATE_LOCK_STRIPES = 256
+_TRADE_DISPUTE_STATEMENT_CREATE_LOCK_TIMEOUT_S = 30.0
 
 
 class TradeDisputeStatementCreateConflict(ValueError):
     """An idempotency key is already bound to another Statement request."""
+
+
+def _trade_dispute_statement_now() -> datetime:
+    """Return a UTC signing instant with stable millisecond wire precision."""
+
+    moment = datetime.now(timezone.utc)
+    micros = (moment.microsecond // 1_000) * 1_000
+    if micros == 0:
+        micros = 1_000
+    return moment.replace(microsecond=micros)
+
+
+def _trade_dispute_statement_timestamp(moment: datetime) -> str:
+    return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _trade_dispute_idempotency_key(request: Request) -> str:
@@ -1938,6 +1954,80 @@ def _trade_dispute_idempotency_key(request: Request) -> str:
     return value
 
 
+def _trade_dispute_statement_creation_lock_target(
+    workspace: Path,
+    *,
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    idempotency_key: str,
+) -> Path:
+    """Map a creation scope onto one fixed, workspace-local lock stripe."""
+
+    from nth_dao.canonical_json import canonical_json
+
+    from nth_dao.trade_rules import (
+        EXECUTION_RECEIPT_ID_PREFIX,
+        RECEIPT_REVIEW_ID_PREFIX,
+    )
+
+    route_patterns = (
+        (order_digest, r"sha256:[0-9a-f]{64}"),
+        (
+            execution_id,
+            rf"{re.escape(EXECUTION_RECEIPT_ID_PREFIX)}[0-9a-f]{{64}}",
+        ),
+        (review_id, rf"{re.escape(RECEIPT_REVIEW_ID_PREFIX)}[0-9a-f]{{64}}"),
+    )
+    if any(re.fullmatch(pattern, value) is None for value, pattern in route_patterns):
+        raise ValueError("invalid Dispute Statement route identifier")
+    operation_scope = canonical_json(
+        {
+            "execution_id": execution_id,
+            "idempotency_key": idempotency_key,
+            "order_digest": order_digest,
+            "review_id": review_id,
+            "version": 1,
+        }
+    )
+    scope_digest = hashlib.sha256(operation_scope).hexdigest()
+    stripe = int(scope_digest[:16], 16) % _TRADE_DISPUTE_STATEMENT_CREATE_LOCK_STRIPES
+    return (
+        workspace
+        / ".nth"
+        / "locks"
+        / "trade_dispute_statement_create"
+        / f"stripe-{stripe:03d}"
+    )
+
+
+def _trade_dispute_statement_creation_lock(
+    request: Request,
+    *,
+    order_digest: str,
+    execution_id: str,
+    review_id: str,
+    idempotency_key: str,
+) -> InterProcessLock:
+    """Return one cross-process single-flight lease for a create operation."""
+
+    workspace = _state_workspace(request)
+    if workspace is None:
+        raise RuntimeError("workspace unavailable for Statement creation lease")
+    target = _trade_dispute_statement_creation_lock_target(
+        workspace,
+        order_digest=order_digest,
+        execution_id=execution_id,
+        review_id=review_id,
+        idempotency_key=idempotency_key,
+    )
+    return InterProcessLock(
+        target,
+        timeout=_TRADE_DISPUTE_STATEMENT_CREATE_LOCK_TIMEOUT_S,
+        poll=0.01,
+    )
+
+
 def _reserve_trade_dispute_statement_creation(
     request: Request,
     *,
@@ -1946,13 +2036,8 @@ def _reserve_trade_dispute_statement_creation(
     execution_id: str,
     review_id: str,
     author_did: str,
-) -> tuple[str, str, datetime, str, bool]:
-    """Durably bind one retry key before creating signed Statement bytes.
-
-    The reservation is a local, signed Spine event. Its timestamp becomes the
-    logical Statement creation time, so an HTTP retry after a partial Store /
-    Spine failure recreates exactly the same content-addressed Statement.
-    """
+) -> tuple[str, str, bool]:
+    """Durably bind one retry key before validating or signing Statement bytes."""
 
     from nth_dao.trade_rules import (
         EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
@@ -1976,9 +2061,7 @@ def _reserve_trade_dispute_statement_creation(
     )
     operation_id = payload["operation_id"]
     request_digest = payload["request_digest"]
-    reserved_at_ms = int(datetime.now(timezone.utc).timestamp() * 1_000)
-    if reserved_at_ms % 1_000 == 0:
-        reserved_at_ms += 1
+    reserved_at_ms = int(_trade_dispute_statement_now().timestamp() * 1_000)
     try:
         event, created = spine.append_unique(
             EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
@@ -1988,17 +2071,16 @@ def _reserve_trade_dispute_statement_creation(
         )
     except ValueError as exc:
         try:
-            matches = [
-                event
-                for event in spine.verified_snapshot()
-                if event.type == EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED
-                and event.payload.get("operation_id") == operation_id
-            ]
+            existing = spine.find_unique_event(
+                EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
+                payload_field="operation_id",
+                payload_value=operation_id,
+            )
         except (OSError, RuntimeError, TypeError, ValueError):
             raise RuntimeError(
                 "unable to verify Dispute Statement creation reservation"
             ) from exc
-        if len(matches) == 1 and matches[0].payload != payload:
+        if existing is not None and existing.payload != payload:
             raise TradeDisputeStatementCreateConflict(
                 "Idempotency-Key is already bound to another Statement request"
             ) from exc
@@ -2009,14 +2091,259 @@ def _reserve_trade_dispute_statement_creation(
         raise RuntimeError(
             "Dispute Statement creation reservation is unauthorized or conflicting"
         )
-    created_moment = datetime.fromtimestamp(
-        event.ts_ms / 1_000,
-        tz=timezone.utc,
+    return operation_id, request_digest, created
+
+
+def _materialize_trade_dispute_statement_creation(
+    request: Request,
+    *,
+    operation_id: str,
+    request_digest: str,
+    create_statement: Callable[[str, datetime], Any],
+) -> tuple[Any, Any, bool]:
+    """Bind a retry operation to exact Statement bytes at signing time."""
+
+    from nth_dao.trade_rules import (
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
+        trade_dispute_statement_create_materialization_payload,
+        validate_trade_dispute_statement_create_materialization_binding,
+        validate_trade_dispute_statement_create_materialization_payload,
     )
-    created_at = created_moment.isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+
+    spine = _state_spine(request)
+    if spine is None:
+        raise RuntimeError("signed Spine unavailable for Statement materialization")
+    existing = spine.find_unique_event(
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
+        payload_field="operation_id",
+        payload_value=operation_id,
     )
-    return operation_id, request_digest, created_moment, created_at, created
+    if existing is not None:
+        event = existing
+        payload = validate_trade_dispute_statement_create_materialization_payload(
+            event.payload
+        )
+        if event.author_did != spine.signer_did:
+            raise RuntimeError(
+                "Dispute Statement creation materialization is unauthorized"
+            )
+        if payload["request_digest"] != request_digest:
+            raise TradeDisputeStatementCreateConflict(
+                "Dispute Statement creation materialization request mismatch"
+            )
+        created_at = payload["created_at"]
+        moment = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if event.ts_ms != int(moment.timestamp() * 1_000):
+            raise RuntimeError(
+                "Dispute Statement creation materialization time is inconsistent"
+            )
+        statement = create_statement(created_at, moment)
+        validate_trade_dispute_statement_create_materialization_binding(
+            event.payload,
+            operation_id=operation_id,
+            request_digest=request_digest,
+            statement=statement,
+        )
+        return statement, event, False
+
+    moment = _trade_dispute_statement_now()
+    created_at = _trade_dispute_statement_timestamp(moment)
+    statement = create_statement(created_at, moment)
+    payload = trade_dispute_statement_create_materialization_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+    event, created = spine.append_unique(
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
+        payload,
+        unique_payload_fields=("operation_id",),
+        ts_ms=int(moment.timestamp() * 1_000),
+    )
+    if event.author_did != spine.signer_did:
+        raise RuntimeError(
+            "Dispute Statement creation materialization is unauthorized"
+        )
+    validate_trade_dispute_statement_create_materialization_binding(
+        event.payload,
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+    if event.ts_ms != int(moment.timestamp() * 1_000):
+        raise RuntimeError(
+            "Dispute Statement creation materialization time is inconsistent"
+        )
+    return statement, event, created
+
+
+def _record_trade_dispute_statement_creation_completion(
+    request: Request,
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: Any,
+    audit_event_id: str,
+) -> tuple[Any, bool]:
+    """Append one signed result pointer for dependency-free HTTP replay."""
+
+    from nth_dao.trade_rules import (
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+        trade_dispute_statement_create_completion_payload,
+        validate_trade_dispute_statement_create_completion_payload,
+    )
+
+    spine = _state_spine(request)
+    if spine is None:
+        raise RuntimeError("signed Spine unavailable for Statement completion")
+    payload = trade_dispute_statement_create_completion_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+        audit_event_id=audit_event_id,
+    )
+    try:
+        event, created = spine.append_unique(
+            EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+            payload,
+            unique_payload_fields=("operation_id",),
+        )
+    except ValueError as exc:
+        existing = spine.find_unique_event(
+            EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+            payload_field="operation_id",
+            payload_value=operation_id,
+        )
+        if existing is not None and existing.payload == payload:
+            return existing, False
+        raise RuntimeError(
+            "Dispute Statement creation completion is conflicting"
+        ) from exc
+    if (
+        event.author_did != spine.signer_did
+        or validate_trade_dispute_statement_create_completion_payload(event.payload)
+        != payload
+    ):
+        raise RuntimeError(
+            "Dispute Statement creation completion is unauthorized or conflicting"
+        )
+    return event, created
+
+
+def _replay_trade_dispute_statement_creation(
+    request: Request,
+    *,
+    operation_id: str,
+    request_digest: str,
+    order: Any,
+    receipt: Any,
+    review: Any,
+    store: Any,
+) -> tuple[Any, Any] | None:
+    """Recover one completed result from signed Spine and retained bytes."""
+
+    from nth_dao.trade_rules import (
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
+        EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
+        validate_trade_dispute_statement_audit_payload,
+        validate_trade_dispute_statement_create_completion_payload,
+        validate_trade_dispute_statement_create_materialization_payload,
+        validate_trade_dispute_statement_unresolved_audit_binding,
+        validate_trade_dispute_statement_unresolved_completion_binding,
+        validate_trade_dispute_statement_unresolved_materialization_binding,
+    )
+
+    spine = _state_spine(request)
+    if spine is None:
+        raise RuntimeError("signed Spine unavailable for Statement replay")
+    completion_event = spine.find_unique_event(
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+        payload_field="operation_id",
+        payload_value=operation_id,
+    )
+    if completion_event is None:
+        return None
+    if completion_event.author_did != spine.signer_did:
+        raise RuntimeError("Dispute Statement creation completion is unauthorized")
+    completion = validate_trade_dispute_statement_create_completion_payload(
+        completion_event.payload
+    )
+    if completion["request_digest"] != request_digest:
+        raise RuntimeError("Dispute Statement creation completion request mismatch")
+    materialization_event = spine.find_unique_event(
+        EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
+        payload_field="operation_id",
+        payload_value=operation_id,
+    )
+    if materialization_event is None:
+        raise RuntimeError(
+            "Dispute Statement creation materialization anchor is unavailable"
+        )
+    materialization = (
+        validate_trade_dispute_statement_create_materialization_payload(
+            materialization_event.payload
+        )
+    )
+    if (
+        materialization_event.author_did != spine.signer_did
+        or materialization["request_digest"] != request_digest
+        or materialization_event.seq >= completion_event.seq
+    ):
+        raise RuntimeError(
+            "Dispute Statement creation materialization is unauthorized or unordered"
+        )
+    retained_event = spine.get_verified_event(completion["audit_event_id"])
+    if (
+        retained_event is None
+        or retained_event.type != EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
+        or materialization_event.seq >= retained_event.seq
+        or retained_event.seq >= completion_event.seq
+    ):
+        raise RuntimeError("Dispute Statement retained audit anchor is unavailable")
+    audit_payload = validate_trade_dispute_statement_audit_payload(
+        retained_event.payload
+    )
+    if (
+        retained_event.author_did != spine.signer_did
+        or audit_payload["statement_id"] != completion["statement_id"]
+        or audit_payload["statement_digest"] != completion["statement_digest"]
+    ):
+        raise RuntimeError("Dispute Statement completion does not bind its audit anchor")
+    statement = store.get_unresolved(
+        completion["statement_digest"],
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    if statement is None:
+        raise RuntimeError("completed Dispute Statement bytes are unavailable")
+    validate_trade_dispute_statement_unresolved_materialization_binding(
+        materialization_event.payload,
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+    validate_trade_dispute_statement_unresolved_completion_binding(
+        completion_event.payload,
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+        audit_event_id=retained_event.event_id,
+    )
+    validate_trade_dispute_statement_unresolved_audit_binding(
+        retained_event.payload,
+        statement=statement,
+    )
+    document = statement.to_dict()
+    if (
+        document["statement_id"] != completion["statement_id"]
+        or document["order_digest"] != audit_payload["order_digest"]
+        or document["review_id"] != audit_payload["review_id"]
+        or document["author_did"] != audit_payload["author_did"]
+    ):
+        raise RuntimeError("completed Dispute Statement bytes do not bind the audit anchor")
+    return statement, retained_event
 
 
 def _record_trade_dispute_statement_creation_failure(
@@ -18027,6 +18354,52 @@ def register_v2_routes(app: FastAPI) -> None:
         request: Request,
         response: Response,
     ) -> Dict[str, Any]:
+        """Serialize one idempotent creation across threads and processes."""
+
+        _require_console_bearer_for_sensitive_read(request)
+        idempotency_key = _trade_dispute_idempotency_key(request)
+        try:
+            creation_lock = _trade_dispute_statement_creation_lock(
+                request,
+                order_digest=order_digest,
+                execution_id=execution_id,
+                review_id=review_id,
+                idempotency_key=idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement creation lease is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
+        try:
+            try:
+                await run_in_threadpool(creation_lock.acquire)
+            except (OSError, RuntimeError, TimeoutError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade Dispute Statement creation is busy",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            return await _v2_trade_dispute_statement_create_locked(
+                order_digest,
+                execution_id,
+                review_id,
+                request,
+                response,
+            )
+        finally:
+            creation_lock.release()
+
+    async def _v2_trade_dispute_statement_create_locked(
+        order_digest: str,
+        execution_id: str,
+        review_id: str,
+        request: Request,
+        response: Response,
+    ) -> Dict[str, Any]:
         """Sign, retain, and audit one local party claim without executing it."""
 
         from nth_dao.trade_rules import (
@@ -18097,14 +18470,109 @@ def register_v2_routes(app: FastAPI) -> None:
                 detail="only an Order party can sign a Dispute Statement",
             )
         try:
+            (
+                operation_id,
+                request_digest,
+                reservation_created,
+            ) = _reserve_trade_dispute_statement_creation(
+                request,
+                body=body,
+                order_digest=order_digest,
+                execution_id=execution_id,
+                review_id=review_id,
+                author_did=identity.as_did(),
+            )
+        except TradeDisputeStatementCreateConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement idempotency reservation failed",
+                headers={"Retry-After": "1"},
+            ) from exc
+        if not reservation_created:
+            try:
+                replay = await run_in_threadpool(
+                    _replay_trade_dispute_statement_creation,
+                    request,
+                    operation_id=operation_id,
+                    request_digest=request_digest,
+                    order=order,
+                    receipt=receipt,
+                    review=review,
+                    store=store,
+                )
+            except TradeDisputeStatementStoreBusy as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade Dispute Statement store is busy",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            except TradeDisputeStatementStoreError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="trade Dispute Statement replay integrity conflict",
+                ) from exc
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade Dispute Statement replay is unavailable",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            if replay is not None:
+                statement, audit_event = replay
+                statement_document = statement.to_dict()
+                response.status_code = 200
+                return {
+                    "status": "dispute-statement-signed",
+                    "order_digest": order_digest,
+                    "execution_id": execution_id,
+                    "review_id": review_id,
+                    "dispute_id": statement_document["dispute_id"],
+                    "statement_id": statement_document["statement_id"],
+                    "statement_digest": (
+                        "sha256:"
+                        + hashlib.sha256(statement.canonical_bytes).hexdigest()
+                    ),
+                    "statement": statement_document,
+                    "statement_store_created": False,
+                    "audit_anchor_created": False,
+                    "audit_event_id": audit_event.event_id,
+                    "operation_id": operation_id,
+                    "reservation_created": False,
+                    "claim_status": "signed-unadjudicated-claim",
+                    "claim_adjudicated_or_proven_true": False,
+                }
+
+        async def _audit_creation_failure(reason_code: str) -> None:
+            try:
+                await run_in_threadpool(
+                    _record_trade_dispute_statement_creation_failure,
+                    request,
+                    operation_id=operation_id,
+                    request_digest=request_digest,
+                    reason_code=reason_code,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="trade Dispute Statement failure audit is incomplete",
+                    headers={"Retry-After": "1"},
+                ) from exc
+
+        try:
             package_resolver = _trade_order_rule_package_resolver(
                 request,
                 order_digest,
             )
         except RuntimeError as exc:
+            await _audit_creation_failure("dependency-unavailable")
             raise HTTPException(
                 status_code=503,
                 detail="trade Rule Package audit resolver unavailable",
+                headers={"Retry-After": "1"},
             ) from exc
 
         _trade_dispute_idempotency_key(request)
@@ -18133,12 +18601,10 @@ def register_v2_routes(app: FastAPI) -> None:
                     "trade Dispute Statement dependency is unavailable"
                 ) from exc
 
-        preflight_moment = datetime.now(timezone.utc)
-        if preflight_moment.microsecond == 0:
-            preflight_moment = preflight_moment.replace(microsecond=1)
-        preflight_created_at = preflight_moment.isoformat(
-            timespec="microseconds"
-        ).replace("+00:00", "Z")
+        preflight_moment = _trade_dispute_statement_now()
+        preflight_created_at = _trade_dispute_statement_timestamp(
+            preflight_moment
+        )
 
         def _preflight_statement() -> None:
             statement = _create_statement(
@@ -18157,88 +18623,54 @@ def register_v2_routes(app: FastAPI) -> None:
         try:
             await run_in_threadpool(_preflight_statement)
         except TradeDisputeStatementDependencyError as exc:
+            await _audit_creation_failure("dependency-unavailable")
             raise HTTPException(
                 status_code=503,
                 detail="trade Dispute Statement dependency is unavailable",
                 headers={"Retry-After": "1"},
             ) from exc
         except TradeDisputeStatementRejected as exc:
+            await _audit_creation_failure("statement-rejected")
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TradeDisputeStatementParentError as exc:
+            await _audit_creation_failure("parent-chain-unavailable")
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except TradeDisputeStatementStoreBusy as exc:
+            await _audit_creation_failure("store-busy")
             raise HTTPException(
                 status_code=503,
                 detail="trade Dispute Statement store is busy",
                 headers={"Retry-After": "1"},
             ) from exc
         except TradeDisputeStatementStoreCapacity as exc:
+            await _audit_creation_failure("store-capacity")
             raise HTTPException(
                 status_code=507,
                 detail="trade Dispute Statement graph capacity exceeded",
             ) from exc
         except TradeDisputeStatementStoreError as exc:
+            await _audit_creation_failure("store-integrity-conflict")
             raise HTTPException(
                 status_code=409,
                 detail="trade Dispute Statement integrity conflict",
             ) from exc
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            await _audit_creation_failure("persistence-incomplete")
             raise HTTPException(
                 status_code=503,
                 detail="trade Dispute Statement preflight failed",
                 headers={"Retry-After": "1"},
             ) from exc
-        try:
-            (
-                operation_id,
-                request_digest,
-                creation_moment,
-                created_at,
-                reservation_created,
-            ) = (
-                _reserve_trade_dispute_statement_creation(
-                    request,
-                    body=body,
-                    order_digest=order_digest,
-                    execution_id=execution_id,
-                    review_id=review_id,
-                    author_did=identity.as_did(),
-                )
-            )
-        except TradeDisputeStatementCreateConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except HTTPException:
-            raise
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="trade Dispute Statement idempotency reservation failed",
-                headers={"Retry-After": "1"},
-            ) from exc
-        observed_at_ms = int(creation_moment.timestamp() * 1_000)
 
-        async def _audit_creation_failure(
-            reason_code: str,
-        ) -> None:
-            try:
-                await run_in_threadpool(
-                    _record_trade_dispute_statement_creation_failure,
+        def _create_and_record_statement() -> Any:
+            statement, materialization_event, _materialization_created = (
+                _materialize_trade_dispute_statement_creation(
                     request,
                     operation_id=operation_id,
                     request_digest=request_digest,
-                    reason_code=reason_code,
+                    create_statement=_create_statement,
                 )
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "trade Dispute Statement failure audit is incomplete"
-                    ),
-                    headers={"Retry-After": "1"},
-                ) from exc
-
-        def _create_and_record_statement() -> Any:
-            statement = _create_statement(created_at, creation_moment)
+            )
             if statement.to_dict()["parent_statement_digests"]:
                 store.assert_complete_parent_chain(
                     statement,
@@ -18253,7 +18685,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 receipt=receipt,
                 order=order,
                 package_resolver=package_resolver,
-                observed_at_ms=observed_at_ms,
+                observed_at_ms=materialization_event.ts_ms,
             )
 
         try:
@@ -18310,6 +18742,22 @@ def register_v2_routes(app: FastAPI) -> None:
             order=order,
             package_resolver=package_resolver,
         )
+        try:
+            await run_in_threadpool(
+                _record_trade_dispute_statement_creation_completion,
+                request,
+                operation_id=operation_id,
+                request_digest=request_digest,
+                statement=result.statement,
+                audit_event_id=result.event.event_id,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            await _audit_creation_failure("persistence-incomplete")
+            raise HTTPException(
+                status_code=503,
+                detail="trade Dispute Statement completion audit is incomplete",
+                headers={"Retry-After": "1"},
+            ) from exc
         if not result.store_created:
             response.status_code = 200
         return {

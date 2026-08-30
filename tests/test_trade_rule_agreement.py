@@ -485,6 +485,21 @@ def _process_accept_audited_order(
         output.put(("error", type(exc).__name__, str(exc)))
 
 
+def _process_hold_interprocess_lock(target, entered, release, output):
+    lock = InterProcessLock(Path(target), timeout=5.0, poll=0.01)
+    try:
+        lock.acquire()
+        entered.set()
+        if not release.wait(timeout=10.0):
+            output.put(("error", "release-timeout"))
+            return
+        output.put(("ok",))
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
+    finally:
+        lock.release()
+
+
 def _setup(
     tmp_path,
     *,
@@ -3412,6 +3427,70 @@ def test_agreement_conformance_vector_is_current_and_self_verifying():
         reservation["payload"],
         **reservation["input"],
     ) == reservation["payload"]
+    materialization = stored[
+        "trade_dispute_statement_creation_materialization"
+    ]
+    assert materialization["event_type"] == (
+        trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED
+    )
+    assert trade_rules_api.trade_dispute_statement_create_materialization_payload(
+        **materialization["input"],
+        statement=dispute_statement,
+    ) == materialization["payload"]
+    assert (
+        trade_rules_api.validate_trade_dispute_statement_create_materialization_binding(
+            materialization["payload"],
+            **materialization["input"],
+            statement=dispute_statement,
+        )
+        == materialization["payload"]
+    )
+    for case in stored[
+        "trade_dispute_statement_creation_materialization_negative_cases"
+    ]:
+        with pytest.raises(
+            trade_rules_api.TradeDisputeStatementAuditError,
+            match=case["expected_reason"],
+        ):
+            trade_rules_api.validate_trade_dispute_statement_create_materialization_binding(
+                case["payload"],
+                **materialization["input"],
+                statement=dispute_statement,
+            )
+    completion = stored["trade_dispute_statement_creation_completion"]
+    assert completion["event_type"] == (
+        trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED
+    )
+    assert trade_rules_api.trade_dispute_statement_create_completion_payload(
+        **completion["input"],
+        statement=dispute_statement,
+    ) == completion["payload"]
+    assert (
+        trade_rules_api.validate_trade_dispute_statement_create_completion_binding(
+            completion["payload"],
+            **completion["input"],
+            statement=dispute_statement,
+        )
+        == completion["payload"]
+    )
+    for case in stored[
+        "trade_dispute_statement_creation_completion_negative_cases"
+    ]:
+        validator = (
+            trade_rules_api.validate_trade_dispute_statement_create_completion_binding
+            if case["validation"] == "binding"
+            else trade_rules_api.validate_trade_dispute_statement_create_completion_payload
+        )
+        kwargs = (
+            {**completion["input"], "statement": dispute_statement}
+            if case["validation"] == "binding"
+            else {}
+        )
+        with pytest.raises(
+            trade_rules_api.TradeDisputeStatementAuditError,
+            match=case["expected_reason"],
+        ):
+            validator(case["payload"], **kwargs)
 
     graph_vector = stored["trade_dispute_statement_graph_snapshot"]
     graph_records = [
@@ -9626,8 +9705,10 @@ def test_operator_dispute_statement_rejects_missing_parent_before_retention(
     missing = "sha256:" + ("f" * 64)
     body["parent_statement_digests"] = [missing]
 
-    response = TestClient(app).post(path, json=body, headers=headers)
-    graph_response = TestClient(app).get(path + "/graph", headers=headers)
+    client = TestClient(app)
+    response = client.post(path, json=body, headers=headers)
+    retry = client.post(path, json=body, headers=headers)
+    graph_response = client.get(path + "/graph", headers=headers)
     page = app.state.nth.trade_dispute_statements.list_for_review(
         review=review,
         receipt=receipt,
@@ -9636,6 +9717,7 @@ def test_operator_dispute_statement_rejects_missing_parent_before_retention(
     )
 
     assert response.status_code == 409, response.text
+    assert retry.status_code == 409, retry.text
     assert "parent chain is incomplete" in response.json()["detail"]
     assert graph_response.status_code == 200, graph_response.text
     assert graph_response.json()["graph"]["statement_count"] == 0
@@ -9651,11 +9733,22 @@ def test_operator_dispute_statement_rejects_missing_parent_before_retention(
         event.type == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
         for event in events
     )
-    assert not any(
-        event.type
-        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED
+    reservations = [
+        event
         for event in events
-    )
+        if event.type
+        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED
+    ]
+    failures = [
+        event
+        for event in events
+        if event.type
+        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED
+    ]
+    assert len(reservations) == 1
+    assert len(failures) == 1
+    assert failures[0].payload["operation_id"] == reservations[0].payload["operation_id"]
+    assert failures[0].payload["reason_code"] == "parent-chain-unavailable"
 
 
 def _operator_dispute_statement_request(
@@ -9741,11 +9834,23 @@ def test_operator_dispute_statement_preflight_maps_resolver_failure_to_503(
     assert response.status_code == 503, response.text
     assert response.headers["retry-after"] == "1"
     assert "dependency is unavailable" in response.json()["detail"]
-    assert not any(
-        event.type
+    events = app.state.nth.spine.verified_snapshot()
+    reservations = [
+        event
+        for event in events
+        if event.type
         == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED
-        for event in app.state.nth.spine.verified_snapshot()
-    )
+    ]
+    failures = [
+        event
+        for event in events
+        if event.type
+        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED
+    ]
+    assert len(reservations) == 1
+    assert len(failures) == 1
+    assert failures[0].payload["operation_id"] == reservations[0].payload["operation_id"]
+    assert failures[0].payload["reason_code"] == "dependency-unavailable"
 
 
 def test_operator_dispute_statement_audits_post_reservation_failure_and_recovers(
@@ -9759,6 +9864,17 @@ def test_operator_dispute_statement_audits_post_reservation_failure_and_recovers
             app,
             receiver_role="maker",
         )
+    )
+    reservation_time = datetime.now(timezone.utc).replace(microsecond=123000)
+    materialization_time = reservation_time + timedelta(
+        seconds=30,
+        microseconds=333000,
+    )
+    current_time = [reservation_time]
+    monkeypatch.setattr(
+        web_v2_api,
+        "_trade_dispute_statement_now",
+        lambda: current_time[0],
     )
     path, body, headers = _operator_dispute_statement_request(
         app,
@@ -9819,7 +9935,14 @@ def test_operator_dispute_statement_audits_post_reservation_failure_and_recovers
         event.type == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_RETAINED
         for event in events_after_failure
     )
+    assert not any(
+        event.type
+        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED
+        for event in events_after_failure
+    )
+    assert reservations[0].ts_ms == int(reservation_time.timestamp() * 1_000)
 
+    current_time[0] = materialization_time
     monkeypatch.setattr(
         web_v2_api,
         "_trade_order_rule_package_resolver",
@@ -9830,6 +9953,22 @@ def test_operator_dispute_statement_audits_post_reservation_failure_and_recovers
     assert recovered.status_code == 201, recovered.text
     assert recovered.json()["reservation_created"] is False
     assert recovered.json()["operation_id"] == failure_payload["operation_id"]
+    assert recovered.json()["statement"]["created_at"] == (
+        materialization_time.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
+    )
+    materializations = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type
+        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED
+    ]
+    assert len(materializations) == 1
+    assert materializations[0].ts_ms == int(
+        materialization_time.timestamp() * 1_000
+    )
+    assert reservations[0].seq < materializations[0].seq
     assert len(
         [
             event
@@ -9951,6 +10090,56 @@ def test_operator_dispute_statement_retry_is_content_idempotent(tmp_path):
     assert retry.json()["reservation_created"] is False
     assert retry.json()["statement_store_created"] is False
     assert len(page.statements) == 1
+
+
+def test_operator_dispute_statement_completed_retry_does_not_resolve_package(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-offline-replay-0001",
+    )
+    client = TestClient(app)
+    first = client.post(path, json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    def unexpected_resolver(*_args, **_kwargs):
+        raise AssertionError("completed replay must not resolve the Rule Package")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_trade_order_rule_package_resolver",
+        unexpected_resolver,
+    )
+    retry = client.post(path, json=body, headers=headers)
+
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["statement_id"] == first.json()["statement_id"]
+    assert retry.json()["statement_digest"] == first.json()["statement_digest"]
+    assert retry.json()["operation_id"] == first.json()["operation_id"]
+    assert retry.json()["reservation_created"] is False
+    assert retry.json()["statement_store_created"] is False
+    completions = [
+        event
+        for event in app.state.nth.spine.verified_snapshot()
+        if event.type
+        == trade_rules_api.EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED
+        and event.payload.get("operation_id") == first.json()["operation_id"]
+    ]
+    assert len(completions) == 1
 
 
 def test_operator_dispute_statement_requires_idempotency_key_without_writes(
@@ -10207,7 +10396,10 @@ def test_dispute_statement_runtime_worker_recovers_partial_write(
     assert app.state.nth.spine.verify_chain() == (True, "ok")
 
 
-def test_operator_dispute_statement_idempotency_key_reuse_conflicts(tmp_path):
+def test_operator_dispute_statement_idempotency_key_reuse_conflicts(
+    tmp_path,
+    monkeypatch,
+):
     app = create_app(tmp_path / "node", require_console_auth=True)
     _context, order, receipt, review, delivery, _public_path = (
         _live_dispute_statement_delivery(
@@ -10227,15 +10419,135 @@ def test_operator_dispute_statement_idempotency_key_reuse_conflicts(tmp_path):
     client = TestClient(app)
 
     first = client.post(path, json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    def unexpected_resolver(*_args, **_kwargs):
+        raise AssertionError("reservation conflict must precede package resolution")
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_trade_order_rule_package_resolver",
+        unexpected_resolver,
+    )
     conflict = client.post(
         path,
         json={**body, "reason_codes": ["different.claim"]},
         headers=headers,
     )
 
-    assert first.status_code == 201, first.text
     assert conflict.status_code == 409, conflict.text
     assert "Idempotency-Key" in conflict.json()["detail"]
+    retry = client.post(path, json=body, headers=headers)
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["statement_id"] == first.json()["statement_id"]
+
+
+def test_operator_dispute_statement_creation_lease_timeout_is_retryable(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path / "node", require_console_auth=True)
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key="dispute-create-busy-0001",
+    )
+
+    class BusyLease:
+        released = False
+
+        def acquire(self):
+            raise TimeoutError("simulated busy operation")
+
+        def release(self):
+            self.released = True
+
+    lease = BusyLease()
+    monkeypatch.setattr(
+        web_v2_api,
+        "_trade_dispute_statement_creation_lock",
+        lambda *_args, **_kwargs: lease,
+    )
+
+    response = TestClient(app).post(path, json=body, headers=headers)
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert response.json()["detail"] == "trade Dispute Statement creation is busy"
+    assert lease.released is True
+    assert not app.state.nth.trade_dispute_statements.root.exists()
+
+
+def test_operator_dispute_statement_cross_process_lease_is_retryable(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "node"
+    app = create_app(workspace, require_console_auth=True)
+    _context, order, receipt, review, delivery, _public_path = (
+        _live_dispute_statement_delivery(
+            tmp_path,
+            app,
+            receiver_role="maker",
+        )
+    )
+    idempotency_key = "dispute-create-cross-process-0001"
+    path, body, headers = _operator_dispute_statement_request(
+        app,
+        order,
+        receipt,
+        review,
+        delivery,
+        idempotency_key=idempotency_key,
+    )
+    lock_target = web_v2_api._trade_dispute_statement_creation_lock_target(
+        workspace,
+        order_digest=trade_order_digest(order),
+        execution_id=receipt.execution_id,
+        review_id=review.review_id,
+        idempotency_key=idempotency_key,
+    )
+    process_context = multiprocessing.get_context("spawn")
+    entered = process_context.Event()
+    release = process_context.Event()
+    output = process_context.Queue()
+    holder = process_context.Process(
+        target=_process_hold_interprocess_lock,
+        args=(str(lock_target), entered, release, output),
+    )
+    holder.start()
+    assert entered.wait(timeout=10.0)
+    monkeypatch.setattr(
+        web_v2_api,
+        "_TRADE_DISPUTE_STATEMENT_CREATE_LOCK_TIMEOUT_S",
+        0.1,
+    )
+
+    try:
+        busy = TestClient(app).post(path, json=body, headers=headers)
+    finally:
+        release.set()
+        holder.join(timeout=15.0)
+
+    assert holder.exitcode == 0
+    assert output.get(timeout=5.0) == ("ok",)
+    assert busy.status_code == 503, busy.text
+    assert busy.headers["retry-after"] == "1"
+    assert busy.json()["detail"] == "trade Dispute Statement creation is busy"
+    assert not app.state.nth.trade_dispute_statements.root.exists()
+
+    created = TestClient(app).post(path, json=body, headers=headers)
+    assert created.status_code == 201, created.text
 
 
 def test_operator_dispute_statement_concurrent_retry_creates_once(tmp_path):

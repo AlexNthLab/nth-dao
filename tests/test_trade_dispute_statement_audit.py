@@ -13,6 +13,7 @@ from nth_dao.trade_rules.agreement_order import TradeOrder
 from nth_dao.trade_rules.dispute_statement import (
     TradeDisputeStatement,
     TradeDisputeStatementRejected,
+    UnresolvedTradeDisputeStatement,
 )
 from nth_dao.trade_rules.dispute_statement_audit import (
     EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
@@ -20,11 +21,20 @@ from nth_dao.trade_rules.dispute_statement_audit import (
     TradeDisputeStatementAuditCoordinator,
     TradeDisputeStatementAuditError,
     trade_dispute_statement_audit_payload,
+    trade_dispute_statement_create_completion_payload,
     trade_dispute_statement_create_failure_payload,
+    trade_dispute_statement_create_materialization_payload,
     trade_dispute_statement_create_reservation_payload,
     validate_trade_dispute_statement_audit_binding,
     validate_trade_dispute_statement_audit_event,
     validate_trade_dispute_statement_audit_payload,
+    validate_trade_dispute_statement_create_completion_payload,
+    validate_trade_dispute_statement_create_completion_binding,
+    validate_trade_dispute_statement_create_materialization_binding,
+    validate_trade_dispute_statement_create_materialization_payload,
+    validate_trade_dispute_statement_unresolved_audit_binding,
+    validate_trade_dispute_statement_unresolved_completion_binding,
+    validate_trade_dispute_statement_unresolved_materialization_binding,
     validate_trade_dispute_statement_create_failure_payload,
     validate_trade_dispute_statement_create_reservation_binding,
     validate_trade_dispute_statement_create_reservation_payload,
@@ -136,6 +146,144 @@ def test_dispute_statement_creation_failure_payload_is_closed_and_bound():
             request_digest=payload["request_digest"],
             reason_code="invented-reason",
         )
+
+
+def test_dispute_statement_creation_completion_is_closed_and_bound(
+    dispute_artifacts,
+):
+    statement, review, receipt, order, _resolver = dispute_artifacts
+    payload = trade_dispute_statement_create_completion_payload(
+        operation_id="sha256:" + ("1" * 64),
+        request_digest="sha256:" + ("2" * 64),
+        statement=statement,
+        audit_event_id="3" * 64,
+    )
+
+    assert validate_trade_dispute_statement_create_completion_payload(payload) == payload
+    assert validate_trade_dispute_statement_create_completion_binding(
+        payload,
+        operation_id="sha256:" + ("1" * 64),
+        request_digest="sha256:" + ("2" * 64),
+        statement=statement,
+        audit_event_id="3" * 64,
+    ) == payload
+    with pytest.raises(
+        TradeDisputeStatementAuditError,
+        match="does not bind its result",
+    ):
+        validate_trade_dispute_statement_create_completion_binding(
+            payload,
+            operation_id="sha256:" + ("1" * 64),
+            request_digest="sha256:" + ("4" * 64),
+            statement=statement,
+            audit_event_id="3" * 64,
+        )
+    unresolved = UnresolvedTradeDisputeStatement.from_json(
+        statement.canonical_bytes,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    assert validate_trade_dispute_statement_unresolved_completion_binding(
+        payload,
+        operation_id="sha256:" + ("1" * 64),
+        request_digest="sha256:" + ("2" * 64),
+        statement=unresolved,
+        audit_event_id="3" * 64,
+    ) == payload
+    with pytest.raises(TypeError, match="fully verified"):
+        trade_dispute_statement_create_completion_payload(
+            operation_id="sha256:" + ("1" * 64),
+            request_digest="sha256:" + ("2" * 64),
+            statement=unresolved,
+            audit_event_id="3" * 64,
+        )
+    with pytest.raises(TypeError, match="fully verified"):
+        validate_trade_dispute_statement_create_completion_binding(
+            payload,
+            operation_id="sha256:" + ("1" * 64),
+            request_digest="sha256:" + ("2" * 64),
+            statement=unresolved,
+            audit_event_id="3" * 64,
+        )
+    audit_payload = trade_dispute_statement_audit_payload(statement)
+    with pytest.raises(TypeError, match="fully verified"):
+        trade_dispute_statement_audit_payload(unresolved)
+    assert validate_trade_dispute_statement_unresolved_audit_binding(
+        audit_payload,
+        statement=unresolved,
+    ) == audit_payload
+    with pytest.raises(
+        TradeDisputeStatementAuditError,
+        match="does not bind the signed claim",
+    ):
+        validate_trade_dispute_statement_unresolved_audit_binding(
+            {**audit_payload, "receipt_digest": "sha256:" + ("f" * 64)},
+            statement=unresolved,
+        )
+    assert payload["statement_id"] == statement.to_dict()["statement_id"]
+    for field, value in (
+        ("statement_digest", "sha256:BAD"),
+        ("statement_id", "invalid"),
+        ("audit_event_id", "BAD"),
+    ):
+        with pytest.raises(TradeDisputeStatementAuditError, match=field):
+            validate_trade_dispute_statement_create_completion_payload(
+                {**payload, field: value}
+            )
+
+
+def test_dispute_statement_creation_materialization_is_closed_and_bound(
+    dispute_artifacts,
+):
+    statement, review, receipt, order, _resolver = dispute_artifacts
+    operation_id = "sha256:" + ("1" * 64)
+    request_digest = "sha256:" + ("2" * 64)
+    payload = trade_dispute_statement_create_materialization_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+
+    assert (
+        validate_trade_dispute_statement_create_materialization_payload(payload)
+        == payload
+    )
+    assert validate_trade_dispute_statement_create_materialization_binding(
+        payload,
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    ) == payload
+
+    unresolved = UnresolvedTradeDisputeStatement.from_json(
+        statement.canonical_bytes,
+        review=review,
+        receipt=receipt,
+        order=order,
+    )
+    assert validate_trade_dispute_statement_unresolved_materialization_binding(
+        payload,
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=unresolved,
+    ) == payload
+
+    for field, value in (
+        ("request_digest", "sha256:" + ("3" * 64)),
+        ("statement_digest", "sha256:" + ("4" * 64)),
+        ("created_at", "2026-01-01T00:00:00.000001Z"),
+    ):
+        with pytest.raises(
+            TradeDisputeStatementAuditError,
+            match="does not bind signed bytes",
+        ):
+            validate_trade_dispute_statement_create_materialization_binding(
+                {**payload, field: value},
+                operation_id=operation_id,
+                request_digest=request_digest,
+                statement=statement,
+            )
 
 
 def test_dispute_statement_creation_reservation_is_closed_and_request_bound(
@@ -662,4 +810,8 @@ def test_dispute_statement_audit_is_public_api():
     assert (
         trade_rules_api.validate_trade_dispute_statement_create_reservation_binding
         is validate_trade_dispute_statement_create_reservation_binding
+    )
+    assert (
+        trade_rules_api.validate_trade_dispute_statement_unresolved_completion_binding
+        is validate_trade_dispute_statement_unresolved_completion_binding
     )

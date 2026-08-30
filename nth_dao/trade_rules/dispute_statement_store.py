@@ -29,6 +29,7 @@ from nth_dao.trade_rules.dispute_statement import (
     TradeDisputeStatementRejected,
     TradeDisputeStatementResolutionError,
     TradeDisputeStatementResolverRequired,
+    UnresolvedTradeDisputeStatement,
     trade_dispute_id,
 )
 from nth_dao.trade_rules.dispute_graph import (
@@ -737,7 +738,6 @@ class TradeDisputeStatementStore:
         # Public lookup semantics must not depend on whether the store already
         # exists: reject an invalid digest and invalid verification context
         # before answering that no matching statement is present.
-        self._path(statement_digest)
         verified_review, verified_receipt, verified_order = self._verified_context(
             review=review,
             receipt=receipt,
@@ -758,6 +758,47 @@ class TradeDisputeStatementStore:
         except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
             raise TradeDisputeStatementStoreError(
                 "stored dispute statement failed protocol verification"
+            ) from exc
+
+    def get_unresolved(
+        self,
+        statement_digest: str,
+        *,
+        review: TradeReceiptReview | dict[str, Any],
+        receipt: TradeExecutionReceipt | dict[str, Any],
+        order: TradeOrder | dict[str, Any],
+    ) -> UnresolvedTradeDisputeStatement | None:
+        """Read one signed local result without re-resolving Rule dependencies."""
+
+        self._path(statement_digest)
+        verified_review, verified_receipt, verified_order = self._verified_context(
+            review=review,
+            receipt=receipt,
+            order=order,
+        )
+        path = self._path(statement_digest)
+        if not self.root.exists():
+            return None
+        try:
+            with self._acquire():
+                try:
+                    record = self._read_record(path)
+                except FileNotFoundError:
+                    return None
+        except TimeoutError as exc:
+            raise TradeDisputeStatementStoreBusy(
+                "Trade Dispute Statement store is busy"
+            ) from exc
+        try:
+            return UnresolvedTradeDisputeStatement.from_json(
+                record.payload,
+                review=verified_review,
+                receipt=verified_receipt,
+                order=verified_order,
+            )
+        except (TradeDisputeStatementRejected, TypeError, ValueError) as exc:
+            raise TradeDisputeStatementStoreError(
+                "stored dispute statement failed unresolved protocol verification"
             ) from exc
 
     def _get_for_verified_context(

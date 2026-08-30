@@ -18,6 +18,7 @@ from nth_dao.trade_rules.dispute_statement import (
     TRADE_DISPUTE_STATEMENT_TYPES,
     TradeDisputeStatement,
     TradeDisputeStatementRejected,
+    UnresolvedTradeDisputeStatement,
 )
 from nth_dao.trade_rules.canonical import (
     TradeCanonicalJSONError,
@@ -43,6 +44,12 @@ EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED = (
 )
 EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED = (
     "trade.dispute.statement.create.attempt-failed"
+)
+EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED = (
+    "trade.dispute.statement.create.materialized"
+)
+EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED = (
+    "trade.dispute.statement.create.completed"
 )
 TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION = "1"
 TRADE_DISPUTE_STATEMENT_ASSERTION_STATUS = "signed-claim-not-adjudicated"
@@ -100,6 +107,26 @@ _CREATE_FAILURE_PAYLOAD_FIELDS = frozenset(
         "request_digest",
         "reason_code",
         "retryable",
+    }
+)
+_CREATE_COMPLETION_PAYLOAD_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "operation_id",
+        "request_digest",
+        "statement_id",
+        "statement_digest",
+        "audit_event_id",
+    }
+)
+_CREATE_MATERIALIZATION_PAYLOAD_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "operation_id",
+        "request_digest",
+        "statement_id",
+        "statement_digest",
+        "created_at",
     }
 )
 _CREATE_RESERVATION_PAYLOAD_FIELDS = frozenset(
@@ -248,6 +275,247 @@ def validate_trade_dispute_statement_create_reservation_binding(
     if payload != expected:
         raise TradeDisputeStatementAuditError(
             "Trade Dispute Statement creation reservation does not bind the request"
+        )
+    return payload
+
+
+def trade_dispute_statement_create_completion_payload(
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: TradeDisputeStatement,
+    audit_event_id: str,
+) -> dict[str, Any]:
+    """Bind one retry operation to its retained, audited Statement result."""
+
+    if not isinstance(statement, TradeDisputeStatement):
+        raise TypeError("statement must be a fully verified Trade Dispute Statement")
+    return _trade_dispute_statement_create_completion_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+        audit_event_id=audit_event_id,
+    )
+
+
+def _trade_dispute_statement_create_completion_payload(
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: TradeDisputeStatement | UnresolvedTradeDisputeStatement,
+    audit_event_id: str,
+) -> dict[str, Any]:
+    document = statement.to_dict()
+    return validate_trade_dispute_statement_create_completion_payload(
+        {
+            "protocol_version": TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION,
+            "operation_id": operation_id,
+            "request_digest": request_digest,
+            "statement_id": document["statement_id"],
+            "statement_digest": (
+                "sha256:" + hashlib.sha256(statement.canonical_bytes).hexdigest()
+            ),
+            "audit_event_id": audit_event_id,
+        }
+    )
+
+
+def trade_dispute_statement_create_materialization_payload(
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: TradeDisputeStatement,
+) -> dict[str, Any]:
+    """Bind an idempotent operation to exact bytes signed at the current attempt."""
+
+    if not isinstance(statement, TradeDisputeStatement):
+        raise TypeError("statement must be a fully verified Trade Dispute Statement")
+    return _trade_dispute_statement_create_materialization_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+
+
+def _trade_dispute_statement_create_materialization_payload(
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: TradeDisputeStatement | UnresolvedTradeDisputeStatement,
+) -> dict[str, Any]:
+    document = statement.to_dict()
+    return validate_trade_dispute_statement_create_materialization_payload(
+        {
+            "protocol_version": TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION,
+            "operation_id": operation_id,
+            "request_digest": request_digest,
+            "statement_id": document["statement_id"],
+            "statement_digest": (
+                "sha256:" + hashlib.sha256(statement.canonical_bytes).hexdigest()
+            ),
+            "created_at": document["created_at"],
+        }
+    )
+
+
+def validate_trade_dispute_statement_create_materialization_payload(
+    value: Any,
+) -> dict[str, Any]:
+    """Validate the closed signed-byte materialization mapping."""
+
+    if not isinstance(value, dict) or set(value) != _CREATE_MATERIALIZATION_PAYLOAD_FIELDS:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation materialization has missing or unknown fields"
+        )
+    if value["protocol_version"] != TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation materialization version is unsupported"
+        )
+    for field in ("operation_id", "request_digest", "statement_digest"):
+        if not isinstance(value[field], str) or _DIGEST.fullmatch(value[field]) is None:
+            raise TradeDisputeStatementAuditError(
+                f"Trade Dispute Statement creation materialization {field} is invalid"
+            )
+    if (
+        not isinstance(value["statement_id"], str)
+        or _STATEMENT_ID.fullmatch(value["statement_id"]) is None
+    ):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation materialization statement_id is invalid"
+        )
+    _canonical_timestamp(value["created_at"])
+    return dict(value)
+
+
+def validate_trade_dispute_statement_create_materialization_binding(
+    value: Any,
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: TradeDisputeStatement,
+) -> dict[str, Any]:
+    """Bind one materialization event to exact fully verified signed bytes."""
+
+    payload = validate_trade_dispute_statement_create_materialization_payload(value)
+    expected = trade_dispute_statement_create_materialization_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+    if payload != expected:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation materialization does not bind signed bytes"
+        )
+    return payload
+
+
+def validate_trade_dispute_statement_unresolved_materialization_binding(
+    value: Any,
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: UnresolvedTradeDisputeStatement,
+) -> dict[str, Any]:
+    """Bind replay metadata to signed bytes without resolving Rule dependencies."""
+
+    if not isinstance(statement, UnresolvedTradeDisputeStatement):
+        raise TypeError("statement must be an unresolved Trade Dispute Statement")
+    payload = validate_trade_dispute_statement_create_materialization_payload(value)
+    expected = _trade_dispute_statement_create_materialization_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+    )
+    if payload != expected:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation materialization does not bind signed bytes"
+        )
+    return payload
+
+
+def validate_trade_dispute_statement_create_completion_payload(
+    value: Any,
+) -> dict[str, Any]:
+    """Validate the closed result mapping for idempotent creation replay."""
+
+    if not isinstance(value, dict) or set(value) != _CREATE_COMPLETION_PAYLOAD_FIELDS:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation completion has missing or unknown fields"
+        )
+    if value["protocol_version"] != TRADE_DISPUTE_STATEMENT_AUDIT_PROTOCOL_VERSION:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation completion version is unsupported"
+        )
+    for field in ("operation_id", "request_digest", "statement_digest"):
+        if not isinstance(value[field], str) or _DIGEST.fullmatch(value[field]) is None:
+            raise TradeDisputeStatementAuditError(
+                f"Trade Dispute Statement creation completion {field} is invalid"
+            )
+    if (
+        not isinstance(value["statement_id"], str)
+        or _STATEMENT_ID.fullmatch(value["statement_id"]) is None
+    ):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation completion statement_id is invalid"
+        )
+    if (
+        not isinstance(value["audit_event_id"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["audit_event_id"]) is None
+    ):
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation completion audit_event_id is invalid"
+        )
+    return dict(value)
+
+
+def validate_trade_dispute_statement_create_completion_binding(
+    value: Any,
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: TradeDisputeStatement,
+    audit_event_id: str,
+) -> dict[str, Any]:
+    """Bind a completion to one exact request, Statement, and audit anchor."""
+
+    if not isinstance(statement, TradeDisputeStatement):
+        raise TypeError("statement must be a fully verified Trade Dispute Statement")
+    payload = validate_trade_dispute_statement_create_completion_payload(value)
+    expected = trade_dispute_statement_create_completion_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+        audit_event_id=audit_event_id,
+    )
+    if payload != expected:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation completion does not bind its result"
+        )
+    return payload
+
+
+def validate_trade_dispute_statement_unresolved_completion_binding(
+    value: Any,
+    *,
+    operation_id: str,
+    request_digest: str,
+    statement: UnresolvedTradeDisputeStatement,
+    audit_event_id: str,
+) -> dict[str, Any]:
+    """Bind replay metadata to signed bytes without resolving dependencies."""
+
+    if not isinstance(statement, UnresolvedTradeDisputeStatement):
+        raise TypeError("statement must be an unresolved Trade Dispute Statement")
+    payload = validate_trade_dispute_statement_create_completion_payload(value)
+    expected = _trade_dispute_statement_create_completion_payload(
+        operation_id=operation_id,
+        request_digest=request_digest,
+        statement=statement,
+        audit_event_id=audit_event_id,
+    )
+    if payload != expected:
+        raise TradeDisputeStatementAuditError(
+            "Trade Dispute Statement creation completion does not bind its result"
         )
     return payload
 
@@ -444,7 +712,13 @@ def trade_dispute_statement_audit_payload(
     """Build an exact, non-adjudicating audit binding for a verified claim."""
 
     if not isinstance(statement, TradeDisputeStatement):
-        raise TypeError("statement must be a TradeDisputeStatement")
+        raise TypeError("statement must be a fully verified Trade Dispute Statement")
+    return _trade_dispute_statement_audit_payload(statement)
+
+
+def _trade_dispute_statement_audit_payload(
+    statement: TradeDisputeStatement | UnresolvedTradeDisputeStatement,
+) -> dict[str, Any]:
     document = statement.to_dict()
     return validate_trade_dispute_statement_audit_payload(
         {
@@ -552,15 +826,27 @@ def _verified_context(
 def _assert_payload_binding(
     value: Any,
     *,
-    statement: TradeDisputeStatement,
+    statement: TradeDisputeStatement | UnresolvedTradeDisputeStatement,
 ) -> dict[str, Any]:
     payload = validate_trade_dispute_statement_audit_payload(value)
-    expected = trade_dispute_statement_audit_payload(statement)
+    expected = _trade_dispute_statement_audit_payload(statement)
     if payload != expected:
         raise TradeDisputeStatementAuditError(
             "Trade Dispute Statement Spine payload does not bind the signed claim"
         )
     return payload
+
+
+def validate_trade_dispute_statement_unresolved_audit_binding(
+    value: Any,
+    *,
+    statement: UnresolvedTradeDisputeStatement,
+) -> dict[str, Any]:
+    """Bind an anchor to signed local bytes without resolving Rule dependencies."""
+
+    if not isinstance(statement, UnresolvedTradeDisputeStatement):
+        raise TypeError("statement must be an unresolved Trade Dispute Statement")
+    return _assert_payload_binding(value, statement=statement)
 
 
 def validate_trade_dispute_statement_audit_event(
@@ -934,6 +1220,8 @@ class TradeDisputeStatementAuditCoordinator:
 
 __all__ = [
     "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED",
+    "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED",
+    "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED",
     "EVENT_TRADE_DISPUTE_STATEMENT_RETAINED",
     "EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED",
     "MAX_TRADE_DISPUTE_AUDIT_OBSERVED_AT_MS",
@@ -946,11 +1234,20 @@ __all__ = [
     "TradeDisputeStatementAuditResult",
     "trade_dispute_statement_audit_payload",
     "trade_dispute_statement_create_failure_payload",
+    "trade_dispute_statement_create_completion_payload",
+    "trade_dispute_statement_create_materialization_payload",
     "trade_dispute_statement_create_reservation_payload",
     "validate_trade_dispute_statement_audit_binding",
     "validate_trade_dispute_statement_audit_event",
     "validate_trade_dispute_statement_audit_payload",
+    "validate_trade_dispute_statement_unresolved_audit_binding",
+    "validate_trade_dispute_statement_unresolved_completion_binding",
+    "validate_trade_dispute_statement_unresolved_materialization_binding",
     "validate_trade_dispute_statement_create_failure_payload",
+    "validate_trade_dispute_statement_create_completion_payload",
+    "validate_trade_dispute_statement_create_completion_binding",
+    "validate_trade_dispute_statement_create_materialization_binding",
+    "validate_trade_dispute_statement_create_materialization_payload",
     "validate_trade_dispute_statement_create_reservation_binding",
     "validate_trade_dispute_statement_create_reservation_payload",
 ]

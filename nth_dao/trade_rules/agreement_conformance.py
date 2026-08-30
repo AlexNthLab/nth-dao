@@ -81,10 +81,14 @@ from nth_dao.trade_rules.dispute_statement import (
 )
 from nth_dao.trade_rules.dispute_statement_audit import (
     EVENT_TRADE_DISPUTE_STATEMENT_CREATE_ATTEMPT_FAILED,
+    EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+    EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
     EVENT_TRADE_DISPUTE_STATEMENT_CREATE_RESERVED,
     EVENT_TRADE_DISPUTE_STATEMENT_RETAINED,
     trade_dispute_statement_audit_payload,
     trade_dispute_statement_create_failure_payload,
+    trade_dispute_statement_create_completion_payload,
+    trade_dispute_statement_create_materialization_payload,
     trade_dispute_statement_create_reservation_payload,
 )
 from nth_dao.trade_rules.dispute_graph import project_trade_dispute_graph
@@ -983,6 +987,31 @@ def generate_vectors() -> dict[str, Any]:
                 **reservation_input
             )
         )
+        completion_input = {
+            "operation_id": reservation_payload["operation_id"],
+            "request_digest": reservation_payload["request_digest"],
+            "audit_event_id": "c" * 64,
+        }
+        materialization_input = {
+            "operation_id": reservation_payload["operation_id"],
+            "request_digest": reservation_payload["request_digest"],
+        }
+        materialization_payload = (
+            trade_dispute_statement_create_materialization_payload(
+                **materialization_input,
+                statement=dispute_statement,
+            )
+        )
+        materialization_bad_created_at = copy.deepcopy(materialization_payload)
+        materialization_bad_created_at["created_at"] = "2026-08-01T02:04:01Z"
+        completion_payload = trade_dispute_statement_create_completion_payload(
+            **completion_input,
+            statement=dispute_statement,
+        )
+        completion_bad_request = copy.deepcopy(completion_payload)
+        completion_bad_request["request_digest"] = "sha256:" + ("3" * 64)
+        completion_bad_audit_id = copy.deepcopy(completion_payload)
+        completion_bad_audit_id["audit_event_id"] = "invalid"
         future_dispute_statement = create_trade_dispute_statement(
             maker,
             review=conflicting_receipt_review,
@@ -1759,6 +1788,38 @@ def generate_vectors() -> dict[str, Any]:
                 "case": "failure-id-mismatch",
                 "payload": dispute_statement_creation_failure_bad_id,
                 "expected_reason": "failure_id binding is invalid",
+            },
+        ],
+        "trade_dispute_statement_creation_completion": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_CREATE_COMPLETED,
+            "input": completion_input,
+            "payload": completion_payload,
+        },
+        "trade_dispute_statement_creation_completion_negative_cases": [
+            {
+                "case": "request-digest-mismatch",
+                "expected_reason": "does not bind its result",
+                "payload": completion_bad_request,
+                "validation": "binding",
+            },
+            {
+                "case": "invalid-audit-event-id",
+                "expected_reason": "audit_event_id is invalid",
+                "payload": completion_bad_audit_id,
+                "validation": "payload",
+            },
+        ],
+        "trade_dispute_statement_creation_materialization": {
+            "event_type": EVENT_TRADE_DISPUTE_STATEMENT_CREATE_MATERIALIZED,
+            "input": materialization_input,
+            "payload": materialization_payload,
+        },
+        "trade_dispute_statement_creation_materialization_negative_cases": [
+            {
+                "case": "created-at-mismatch",
+                "expected_reason": "does not bind signed bytes",
+                "payload": materialization_bad_created_at,
+                "validation": "binding",
             },
         ],
         "trade_dispute_statement_creation_reservation": {

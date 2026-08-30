@@ -1,0 +1,125 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "type": "boolean"
+    },
+    "detail": {
+      "maxLength": 2048,
+      "type": "string"
+    },
+    "entry_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "entry_json": {
+      "maxLength": 32768,
+      "type": "string"
+    },
+    "entry_sha256": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "found": {
+      "type": "boolean"
+    },
+    "index_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "entry_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "entry_json": {
+            "maxLength": 32768,
+            "minLength": 2,
+            "type": "string"
+          },
+          "entry_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "score": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entry_id",
+          "entry_json",
+          "entry_sha256",
+          "score"
+        ],
+        "type": "object"
+      },
+      "maxItems": 20,
+      "type": "array"
+    },
+    "max_entries_per_principal": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_entry_bytes": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "next_cursor": {
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "get",
+        "probe",
+        "remove",
+        "search",
+        "upsert"
+      ],
+      "type": "string"
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "removed": {
+      "type": "boolean"
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "revision": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "changed",
+    "detail",
+    "entry_id",
+    "entry_json",
+    "entry_sha256",
+    "found",
+    "index_id",
+    "items",
+    "max_entries_per_principal",
+    "max_entry_bytes",
+    "next_cursor",
+    "operation",
+    "ready",
+    "removed",
+    "replayed",
+    "revision"
+  ],
+  "type": "object"
+}
