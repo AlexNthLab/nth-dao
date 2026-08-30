@@ -129,14 +129,18 @@ Every plugin declares a bounded manifest before activation:
 }
 ```
 
-The initial host accepts only statically registered `builtin` plugins. This is
-intentional: an in-process Python import is arbitrary code execution, not a
-sandbox. Signed third-party packages, entry-point discovery, subprocess RPC,
-and WASI components are later protocol phases and must not be simulated by a
-weak loader.
+The host accepts statically registered `builtin` plugins and one explicit
+`subprocess` path for locally reviewed worker artifacts. An in-process Python
+import is arbitrary code execution, not a sandbox. The subprocess path is not
+package discovery: remote manifests, Python entry points, signed third-party
+packages, and downloaded commands remain unsupported. WASI or a platform OS
+sandbox is still required before community code can be treated as confined.
+Existing built-ins retain their Host API `1.0` minimum. The subprocess runtime
+requires Host API `1.1`; an older `1.0` host therefore rejects it explicitly
+instead of interpreting a new runtime under an unchanged compatibility claim.
 
-`publisher_did` and `proof` are reserved wire fields in Host API v1. The
-built-in registration path rejects non-empty values because this release does
+`publisher_did` and `proof` are reserved wire fields in Host API v1. Both
+reviewed registration paths reject non-empty values because this release does
 not yet define or verify an external package signature. A shaped proof is not
 treated as authentication.
 
@@ -233,6 +237,74 @@ the global registry lock, but Python cannot safely terminate a factory or
 `start()` call that never returns. This is another reason third-party runtimes
 require a subprocess or WASI isolation phase.
 
+### Reviewed subprocess RPC v1
+
+`register_reviewed_subprocess()` is a narrow migration boundary, not a public
+plugin installer. Trusted host code supplies an absolute launcher, one local
+entry artifact, a controlled working directory, explicit arguments, and an
+explicit environment. The Host verifies the entry artifact SHA-256 at
+registration. It rejects launcher symlinks, stores the resolved launcher path,
+binds the launcher bytes into the local launch profile, and rechecks them at
+registration and immediately before process creation. At start it reads the
+source once, verifies those bytes while
+copying them into a private, workspace-local per-generation snapshot, and executes only that
+snapshot. A source-path replacement after the verified read therefore cannot
+change the launched entry bytes. It never invokes a shell and
+does not inherit `PATH`, `PYTHONPATH`, user secrets, or arbitrary environment
+state. Transitive interpreter dependencies and operating-system trust remain
+outside that digest, and
+the entry-artifact digest does not prove the contents of dynamically imported
+modules. A future signed package format must bind the complete artifact graph.
+The local launch profile separately hashes the launcher path and bytes, artifact path,
+working directory, arguments, explicit environment key names, timeouts, and byte
+limits. Environment values never enter a public hash commitment. A profile with
+explicit environment values instead receives a random process-local binding, so
+it requires fresh authorization after fresh launch-spec reconstruction. Only the resulting
+digest enters the audit. A profile change clears all grants
+and desired state before registration completes, so reviewed authority cannot
+silently migrate to different launch behavior after restart.
+Each live generation holds a cross-process lease outside its snapshot directory.
+Normal cleanup failures fail the lifecycle operation instead of being swallowed;
+the next subprocess registration removes only inactive, strictly named Host
+generations and audits both janitor success and failure.
+
+The worker uses newline-delimited canonical JSON with the fixed protocol name
+`nth-dao-plugin-rpc` and version `1`. Startup requires an exact nonce-bound echo
+of plugin ID, manifest digest, and sorted capability IDs. Calls carry a
+Host-generated invocation ID and a Host-derived authority projection. RPC
+objects use RFC 8785-compatible UTF-16 key ordering, reject floats, and restrict
+integers to `-(2^53-1)..(2^53-1)` for JavaScript-safe interoperability. Exactly
+one request may be in flight per worker. Results must bind the invocation ID,
+use exact fields, and remain within a 2 MiB frame. A bounded business error does
+not revoke the worker only when its retry hint agrees with the capability's
+declared failure semantics. An input that the RPC subset cannot represent, or
+that exceeds a worker's configured frame, is rejected before pipe I/O and does
+not revoke the worker. A timeout, crash, idle process exit, malformed or non-canonical JSON,
+unsolicited output, oversized output, or binding mismatch terminates the
+supervised process, attempts descendant cleanup, atomically removes its
+complete provider generation, records `plugin.runtime.failed`, and fails
+closed. `disable()` can interrupt a blocked call rather than waiting for its
+normal RPC timeout. A platform job/container boundary is still needed to make
+descendant containment authoritative.
+
+Stderr content is never copied into Host errors or audit records. The Host
+retains only a bounded byte count and a process-local keyed fingerprint for
+diagnosis, so low-entropy text cannot be tested against a public raw digest;
+excessive stderr is a protocol failure. The checked-in
+`plugins/vectors/subprocess-rpc-v1.json` file fixes canonical examples for
+handshake, invocation, success, error, shutdown, and non-BMP object-key order.
+The test suite executes those vectors through Node.js as an independent
+consumer rather than relying only on Python round trips.
+
+This boundary contains observed process crashes, invocation hangs, idle exits,
+and protocol pollution. It does **not**
+prevent a malicious child running as the same operating-system user from
+opening files, using the network, spawning another process, or inspecting
+other user-readable resources. It also does not impose CPU or memory quotas;
+an idle but resource-hungry child requires a Windows Job Object, cgroup,
+container, or WASI boundary. Therefore it does not yet authorize arbitrary
+third-party plugins or any irreversible capability.
+
 ## Irreversible Effects
 
 Runtime registration can be reversible; real-world side effects cannot. A
@@ -248,11 +320,14 @@ deadline/timeout policy, executor identity, and a durable receipt. A plugin
 cannot describe a committed external effect as "rolled back" merely because it
 was disabled.
 
-Host API v1 rejects every capability classified as `irreversible`. Merely
+Host API v1 rejects every T4 capability and every capability classified as
+`irreversible`; a weaker self-declared security label cannot make
+`credential-use`, `payment-prepare`, or `payment-commit` executable. Merely
 requiring mandate and idempotency strings would not prevent a crash between an
-external commit and local persistence. T4 commit execution remains disabled
-until an isolated executor, durable idempotency ledger, prepare/commit recovery,
-and receipt reconciliation are implemented and tested together.
+external commit and local persistence. T4 execution remains disabled until an
+OS-confined executor, complete artifact verification, durable idempotency
+ledger, prepare/commit recovery, and receipt reconciliation are implemented
+and tested together.
 
 ## Failure And Recovery
 
@@ -531,5 +606,8 @@ Migration order:
    (ephemeral reference implemented), then transport providers (local
    loopback contract and disabled reference implemented; network adapters
    remain);
-5. settlement and payment providers only after subprocess isolation and
-   mandate-bound commit tests exist.
+5. reviewed subprocess RPC foundation (implemented for static local workers;
+   OS sandbox and signed package loading remain);
+6. settlement and payment providers only after OS confinement, complete
+   package verification, durable idempotency and mandate-bound commit tests
+   exist.

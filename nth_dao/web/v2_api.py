@@ -5991,12 +5991,7 @@ def _load_order_bound_recognition_import_contexts(
         item["digest"]: item["rule_id"]
         for item in order_document["rule_bindings"]
     }
-    resolver = _OrderAuditedRulePackageResolver(
-        package_store,
-        spine,
-        order_digest,
-        workspace,
-    )
+    resolver = _trade_order_rule_package_resolver(request, order_digest)
     packages = []
     for package_digest in package_digests:
         if package_digest not in bindings:
@@ -6411,6 +6406,55 @@ def _trade_rule_package_import_audit_state_from_records(
     return "not-imported"
 
 
+class _TradeRulePackageImportAuditCache:
+    """Share one verified import-audit projection across web requests."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._token: tuple[int, int, int, int, int, str] | None = None
+        self._revision: tuple[int, int, int, int, int] | None = None
+        self._records: Any = None
+
+    def records_for(self, spine: Any) -> Any:
+        """Return records derived from the current, fully verified Spine."""
+
+        with self._lock:
+            current_revision = spine.storage_revision()
+            if self._records is not None and current_revision == self._revision:
+                return self._records
+            token, events = spine.verified_snapshot_with_token()
+            records = _trade_rule_package_import_audit_records(events)
+            self._records = records
+            self._token = token
+            self._revision = token[:5]
+            return records
+
+
+_TRADE_RULE_PACKAGE_IMPORT_AUDIT_CACHE_BUILD_LOCK = threading.Lock()
+_TRADE_RULE_PACKAGE_READ_LOCK_TIMEOUT_SECONDS = 1.0
+_TRADE_RULE_PACKAGE_IMPORT_LOCK_TIMEOUT_SECONDS = 35.0
+
+
+def _state_trade_rule_package_import_audit_cache(
+    request: Request,
+) -> _TradeRulePackageImportAuditCache:
+    """Lazily attach the request-shared verified projection to WebState."""
+
+    try:
+        state = request.app.state.nth
+    except AttributeError as exc:
+        raise RuntimeError("Trade Rule Package import audit is unavailable") from exc
+    cache = getattr(state, "trade_rule_package_import_audit_cache", None)
+    if cache is not None:
+        return cache
+    with _TRADE_RULE_PACKAGE_IMPORT_AUDIT_CACHE_BUILD_LOCK:
+        cache = getattr(state, "trade_rule_package_import_audit_cache", None)
+        if cache is None:
+            cache = _TradeRulePackageImportAuditCache()
+            state.trade_rule_package_import_audit_cache = cache
+        return cache
+
+
 class _OrderAuditedRulePackageResolver:
     """Block a Package whose signed import intent lacks its final anchor."""
 
@@ -6420,13 +6464,13 @@ class _OrderAuditedRulePackageResolver:
         spine: Any,
         order_digest: str,
         workspace: Path,
+        audit_cache: _TradeRulePackageImportAuditCache | None = None,
     ) -> None:
         self._store = store
         self._spine = spine
         self._order_digest = order_digest
         self._workspace = workspace
-        self._audit_token: tuple[int, int, int, int, int, str] | None = None
-        self._audit_records: Any = None
+        self._audit_cache = audit_cache or _TradeRulePackageImportAuditCache()
 
     def load(self, package_digest: str) -> Any:
         lock = InterProcessLock(
@@ -6434,7 +6478,7 @@ class _OrderAuditedRulePackageResolver:
                 self._workspace,
                 package_digest,
             ),
-            timeout=5.0,
+            timeout=_TRADE_RULE_PACKAGE_READ_LOCK_TIMEOUT_SECONDS,
         )
         try:
             lock.acquire()
@@ -6445,30 +6489,26 @@ class _OrderAuditedRulePackageResolver:
             if package is None:
                 return None
             sources = self._store.provenance_sources(package_digest)
-            current_token = self._spine.storage_token()
-            if self._audit_records is None or current_token != self._audit_token:
-                token, events = self._spine.verified_snapshot_with_token()
-                self._audit_records = _trade_rule_package_import_audit_records(events)
-                self._audit_token = token
-            state = _trade_rule_package_import_audit_state_from_records(
-                self._audit_records,
-                order_digest=self._order_digest,
-                package_digest=package_digest,
-            )
-            if state in {"incomplete", "package-incomplete"}:
-                raise RuntimeError("Trade Rule Package import audit is incomplete")
-            if not sources:
-                raise RuntimeError("Trade Rule Package provenance is unclassified")
-            if "local" not in sources and state not in {
-                "anchored",
-                "package-anchored",
-            }:
-                raise RuntimeError(
-                    "federated Trade Rule Package lacks a signed import anchor"
-                )
-            return package
         finally:
             lock.release()
+        audit_records = self._audit_cache.records_for(self._spine)
+        state = _trade_rule_package_import_audit_state_from_records(
+            audit_records,
+            order_digest=self._order_digest,
+            package_digest=package_digest,
+        )
+        if state in {"incomplete", "package-incomplete"}:
+            raise RuntimeError("Trade Rule Package import audit is incomplete")
+        if not sources:
+            raise RuntimeError("Trade Rule Package provenance is unclassified")
+        if "local" not in sources and state not in {
+            "anchored",
+            "package-anchored",
+        }:
+            raise RuntimeError(
+                "federated Trade Rule Package lacks a signed import anchor"
+            )
+        return package
 
 
 def _trade_order_rule_package_resolver(
@@ -6489,6 +6529,7 @@ def _trade_order_rule_package_resolver(
         spine,
         order_digest,
         workspace,
+        audit_cache=_state_trade_rule_package_import_audit_cache(request),
     )
 
 
@@ -6527,7 +6568,10 @@ def _import_trade_rule_package_singleflight(
     """
 
     lock_target = _trade_rule_package_import_lock_target(workspace, package_digest)
-    lock = InterProcessLock(lock_target, timeout=35.0)
+    lock = InterProcessLock(
+        lock_target,
+        timeout=_TRADE_RULE_PACKAGE_IMPORT_LOCK_TIMEOUT_SECONDS,
+    )
     try:
         lock.acquire()
     except TimeoutError as exc:

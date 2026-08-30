@@ -1,8 +1,8 @@
 """Versioned, fail-closed contracts for NTH DAO host plugins.
 
-The first host supports reviewed built-ins only. These contracts are still
-wire-shaped so a future subprocess or WASI host can consume the same manifest
-without depending on Python class identity.
+The host supports reviewed built-ins and statically configured local
+subprocess workers. These contracts remain wire-shaped so a future WASI or
+non-Python host can consume the same manifest without Python class identity.
 """
 
 from __future__ import annotations
@@ -17,7 +17,10 @@ from nth_dao.did_key import is_did_key
 
 
 PLUGIN_MANIFEST_VERSION = 1
-PLUGIN_HOST_API_VERSION = "1.0"
+PLUGIN_BASE_HOST_API_VERSION = "1.0"
+PLUGIN_HOST_API_VERSION = "1.1"
+PLUGIN_SUBPROCESS_HOST_API_VERSION = "1.1"
+PLUGIN_RUNTIMES = frozenset({"builtin", "subprocess"})
 
 PLUGIN_KINDS = frozenset(
     {
@@ -417,8 +420,21 @@ class PluginManifest:
             raise PluginContractError("host_api must be a major.minor version")
         if self.kind not in PLUGIN_KINDS:
             raise PluginContractError(f"unsupported plugin kind: {self.kind!r}")
-        if self.runtime != "builtin":
-            raise PluginContractError("the current host accepts builtin plugins only")
+        if self.runtime not in PLUGIN_RUNTIMES:
+            raise PluginContractError(
+                f"unsupported plugin runtime: {self.runtime!r}"
+            )
+        if self.runtime == "subprocess":
+            required_major, required_minor = (
+                int(part) for part in PLUGIN_SUBPROCESS_HOST_API_VERSION.split(".")
+            )
+            actual_major, actual_minor = (
+                int(part) for part in self.host_api.split(".")
+            )
+            if actual_major != required_major or actual_minor < required_minor:
+                raise PluginContractError(
+                    "subprocess runtime requires host_api 1.1 or newer"
+                )
         if not isinstance(self.provides, tuple) or not self.provides:
             raise PluginContractError("plugin must provide at least one capability")
         if len(self.provides) > 64 or any(
@@ -559,9 +575,12 @@ __all__ = [
     "CONSISTENCY_CLASSES",
     "FAILURE_SEMANTICS",
     "PLUGIN_HOST_API_VERSION",
+    "PLUGIN_BASE_HOST_API_VERSION",
     "PLUGIN_KINDS",
     "PLUGIN_MANIFEST_VERSION",
     "PLUGIN_PERMISSIONS",
+    "PLUGIN_RUNTIMES",
+    "PLUGIN_SUBPROCESS_HOST_API_VERSION",
     "PERMISSION_RISK_TIER",
     "PRIVACY_CLASSES",
     "RETENTION_CLASSES",

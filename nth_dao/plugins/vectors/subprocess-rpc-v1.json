@@ -1,0 +1,129 @@
+{
+  "canonical_examples": [
+    {
+      "canonical_utf8": "{\"𐀀\":9007199254740991,\"\":1}",
+      "document": {
+        "": 1,
+        "𐀀": 9007199254740991
+      },
+      "name": "non-bmp-key-order-and-safe-integer",
+      "sha256": "sha256:1bcd67694218cc060872ae74f0dfeb5a0a6a9f829ff5abef95f0ac031553b583"
+    }
+  ],
+  "examples": [
+    {
+      "canonical_utf8": "{\"capability_ids\":[\"org.nth-dao.example.echo\"],\"manifest_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"nonce\":\"dddddddddddddddddddddddddddddddd\",\"plugin_id\":\"org.nth-dao.example.worker\",\"protocol\":\"nth-dao-plugin-rpc\",\"type\":\"hello\",\"version\":1}",
+      "document": {
+        "capability_ids": [
+          "org.nth-dao.example.echo"
+        ],
+        "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nonce": "dddddddddddddddddddddddddddddddd",
+        "plugin_id": "org.nth-dao.example.worker",
+        "protocol": "nth-dao-plugin-rpc",
+        "type": "hello",
+        "version": 1
+      },
+      "name": "hello",
+      "sha256": "sha256:0c12bd35089fa23a527c6cc0a6bbaa588741da95e7819023d5e93d876a94589c"
+    },
+    {
+      "canonical_utf8": "{\"capability_ids\":[\"org.nth-dao.example.echo\"],\"manifest_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"nonce\":\"dddddddddddddddddddddddddddddddd\",\"plugin_id\":\"org.nth-dao.example.worker\",\"protocol\":\"nth-dao-plugin-rpc\",\"type\":\"ready\",\"version\":1}",
+      "document": {
+        "capability_ids": [
+          "org.nth-dao.example.echo"
+        ],
+        "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nonce": "dddddddddddddddddddddddddddddddd",
+        "plugin_id": "org.nth-dao.example.worker",
+        "protocol": "nth-dao-plugin-rpc",
+        "type": "ready",
+        "version": 1
+      },
+      "name": "ready",
+      "sha256": "sha256:168414f32a33cbb6964896f5dab75bd81e9bb91d7fabc4d661a32b21a4586dc7"
+    },
+    {
+      "canonical_utf8": "{\"capability_id\":\"org.nth-dao.example.echo\",\"context\":{\"capability_ids\":[\"org.nth-dao.example.echo\"],\"granted_permissions\":[],\"idempotency_key\":\"request-1\",\"mandate_digest\":\"\",\"principal\":\"did:key:example\",\"resource_ids\":[]},\"invocation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload\":{\"value\":\"hello\"},\"protocol\":\"nth-dao-plugin-rpc\",\"type\":\"invoke\",\"version\":1}",
+      "document": {
+        "capability_id": "org.nth-dao.example.echo",
+        "context": {
+          "capability_ids": [
+            "org.nth-dao.example.echo"
+          ],
+          "granted_permissions": [],
+          "idempotency_key": "request-1",
+          "mandate_digest": "",
+          "principal": "did:key:example",
+          "resource_ids": []
+        },
+        "invocation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "payload": {
+          "value": "hello"
+        },
+        "protocol": "nth-dao-plugin-rpc",
+        "type": "invoke",
+        "version": 1
+      },
+      "name": "invoke",
+      "sha256": "sha256:4087a7a06b5504039639d3c71a4b1c3b87a6fcf58089b761cfdd3a740f3b1e72"
+    },
+    {
+      "canonical_utf8": "{\"invocation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"ok\":true,\"output\":{\"value\":\"hello\"},\"protocol\":\"nth-dao-plugin-rpc\",\"type\":\"result\",\"version\":1}",
+      "document": {
+        "invocation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ok": true,
+        "output": {
+          "value": "hello"
+        },
+        "protocol": "nth-dao-plugin-rpc",
+        "type": "result",
+        "version": 1
+      },
+      "name": "result-success",
+      "sha256": "sha256:4f4707a1f784f80c796beb14e6b971fe8af3bc8d7735c309fd382a2908386284"
+    },
+    {
+      "canonical_utf8": "{\"error\":{\"code\":\"not-ready\",\"message\":\"worker is warming up\",\"retryable\":true},\"invocation_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"ok\":false,\"protocol\":\"nth-dao-plugin-rpc\",\"type\":\"result\",\"version\":1}",
+      "document": {
+        "error": {
+          "code": "not-ready",
+          "message": "worker is warming up",
+          "retryable": true
+        },
+        "invocation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ok": false,
+        "protocol": "nth-dao-plugin-rpc",
+        "type": "result",
+        "version": 1
+      },
+      "name": "result-error",
+      "sha256": "sha256:c6d409415084b14de5b087c4d7cb544e41a7e1dcfe9de61a52bbf02ae7d19756"
+    },
+    {
+      "canonical_utf8": "{\"protocol\":\"nth-dao-plugin-rpc\",\"request_id\":\"cccccccccccccccccccccccccccccccc\",\"type\":\"shutdown\",\"version\":1}",
+      "document": {
+        "protocol": "nth-dao-plugin-rpc",
+        "request_id": "cccccccccccccccccccccccccccccccc",
+        "type": "shutdown",
+        "version": 1
+      },
+      "name": "shutdown",
+      "sha256": "sha256:ca1ae7c9b436ed6ecd8734ac5c747181b5d239dfc39bd356ccb481692051cd55"
+    },
+    {
+      "canonical_utf8": "{\"protocol\":\"nth-dao-plugin-rpc\",\"request_id\":\"cccccccccccccccccccccccccccccccc\",\"type\":\"stopped\",\"version\":1}",
+      "document": {
+        "protocol": "nth-dao-plugin-rpc",
+        "request_id": "cccccccccccccccccccccccccccccccc",
+        "type": "stopped",
+        "version": 1
+      },
+      "name": "stopped",
+      "sha256": "sha256:45192637e84efcdd9f8aac80ca491ff652c469462a3b49d4d3a72edbe3a3ae6c"
+    }
+  ],
+  "format": "nth-dao-plugin-subprocess-rpc-v1",
+  "protocol_digest": "sha256:baf367fc5bb0de10c263005824a223d4c8784ded516820fc7e5fbd1a5f928143",
+  "schema_version": 1
+}

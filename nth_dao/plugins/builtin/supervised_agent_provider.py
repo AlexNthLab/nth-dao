@@ -32,7 +32,7 @@ from nth_dao.plugins.agent_provider import (
     validate_agent_session_output,
 )
 from nth_dao.plugins.contracts import (
-    PLUGIN_HOST_API_VERSION,
+    PLUGIN_BASE_HOST_API_VERSION,
     PluginManifest,
 )
 from nth_dao.plugins.host import (
@@ -266,7 +266,7 @@ def supervised_agent_manifest(
         manifest_version=1,
         plugin_id=supervised_agent_plugin_id(target.agent_did),
         version="1.0.0",
-        host_api=PLUGIN_HOST_API_VERSION,
+        host_api=PLUGIN_BASE_HOST_API_VERSION,
         kind="agent.provider",
         runtime="builtin",
         provides=(SUPERVISED_AGENT_SESSION_CONTRACT,),

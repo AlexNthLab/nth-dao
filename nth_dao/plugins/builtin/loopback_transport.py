@@ -20,7 +20,7 @@ import time
 from typing import Any, Dict, Optional
 
 from nth_dao.canonical_json import canonical_json
-from nth_dao.plugins.contracts import PLUGIN_HOST_API_VERSION, PluginManifest
+from nth_dao.plugins.contracts import PLUGIN_BASE_HOST_API_VERSION, PluginManifest
 from nth_dao.plugins.host import (
     CapabilitySchemas,
     PluginContext,
@@ -89,7 +89,7 @@ def loopback_transport_manifest() -> PluginManifest:
         manifest_version=1,
         plugin_id=LOOPBACK_TRANSPORT_PLUGIN_ID,
         version="1.0.0",
-        host_api=PLUGIN_HOST_API_VERSION,
+        host_api=PLUGIN_BASE_HOST_API_VERSION,
         kind="transport.provider",
         runtime="builtin",
         provides=(TRANSPORT_LOCAL_CONTRACT,),

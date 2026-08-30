@@ -158,6 +158,21 @@ def authority(capability_id: str) -> InvocationAuthority:
     )
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"principal": "bad\nprincipal", "capability_ids": {"cap"}},
+        {"principal": "ok", "capability_ids": {f"cap-{index}" for index in range(257)}},
+        {"principal": "ok", "capability_ids": {"x" * 513}},
+        {"principal": "ok", "capability_ids": {"cap"}, "mandate_digest": "bad\rvalue"},
+        {"principal": "ok", "capability_ids": {"cap"}, "resource_ids": {"bad\tvalue"}},
+    ],
+)
+def test_invocation_authority_rejects_unbounded_or_control_text(kwargs) -> None:
+    with pytest.raises(ValueError, match="bounded|too long"):
+        InvocationAuthority(**kwargs)
+
+
 def test_manifest_round_trip_and_content_digest_are_stable() -> None:
     original = manifest()
     restored = PluginManifest.from_dict(original.to_dict())
@@ -190,7 +205,7 @@ def test_checked_in_manifest_conformance_vector() -> None:
     ("mutate", "match"),
     [
         (lambda body: body.update(extra=True), "fields are invalid"),
-        (lambda body: body.update(runtime="python"), "builtin plugins only"),
+        (lambda body: body.update(runtime="python"), "unsupported plugin runtime"),
         (lambda body: body.update(plugin_id="../escape"), "namespaced identifier"),
         (lambda body: body.update(plugin_id="org.nth-dao.bad-"), "namespaced identifier"),
         (lambda body: body.update(version="1.0.0-01"), "semantic version"),
@@ -235,6 +250,15 @@ def test_host_api_rejects_newer_minor_or_different_major() -> None:
         ensure_host_api_compatible("1.2", "1.1")
     with pytest.raises(PluginContractError):
         ensure_host_api_compatible("2.0", "1.9")
+
+
+def test_subprocess_runtime_requires_host_api_1_1() -> None:
+    body = manifest().to_dict()
+    body["runtime"] = "subprocess"
+    with pytest.raises(PluginContractError, match="requires host_api 1.1"):
+        PluginManifest.from_dict(body)
+    body["host_api"] = "1.1"
+    assert PluginManifest.from_dict(body).runtime == "subprocess"
 
 
 def test_default_host_policy_denies_effectful_plugin() -> None:
@@ -541,6 +565,51 @@ def test_invocation_rejects_oversized_and_non_finite_json() -> None:
         )
 
 
+def test_host_api_v1_preserves_arbitrary_precision_integers() -> None:
+    integer_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"value": {"type": "integer"}},
+        "required": ["value"],
+    }
+    capability_id = "org.nth-dao.test.integer-echo"
+    cap = CapabilityContract(
+        capability_id=capability_id,
+        version="1.0.0",
+        input_schema_digest=schema_digest(integer_schema),
+        output_schema_digest=schema_digest(integer_schema),
+        effects=("none",),
+        consistency="C1",
+        privacy="workspace",
+        security="verified-input",
+        cardinality="one",
+        deterministic=True,
+        retention="none",
+        failure_semantics="retry-safe",
+    )
+    item = manifest(provides=(cap,))
+
+    class IntegerEchoProvider:
+        def invoke(self, payload, context):
+            return dict(payload)
+
+    host = PluginHost()
+    host.register_builtin(
+        item,
+        lambda: Runtime({capability_id: IntegerEchoProvider()}),
+        schemas={
+            capability_id: CapabilitySchemas(integer_schema, integer_schema),
+        },
+    )
+    binding = host.enable(item.plugin_id)[0]
+    value = 9_007_199_254_740_992
+
+    assert binding.invoke(
+        {"value": value},
+        authority=authority(capability_id),
+    ) == {"value": value}
+
+
 def test_host_v1_refuses_irreversible_capability_execution() -> None:
     cap = capability(effects=("network-write",), security="irreversible")
     item = manifest(provides=(cap,), permissions=("network.client",))
@@ -550,7 +619,20 @@ def test_host_v1_refuses_irreversible_capability_execution() -> None:
             max_risk_tier=4,
         )
     )
-    with pytest.raises(PluginAuthorizationError, match="does not execute irreversible"):
+    with pytest.raises(PluginAuthorizationError, match="T4 or irreversible"):
+        register(host, item, lambda: Runtime({cap.capability_id: Provider()}))
+
+
+def test_host_v1_refuses_t4_effect_even_when_security_label_is_weaker() -> None:
+    cap = capability(effects=("payment-prepare",), security="verified-input")
+    item = manifest(provides=(cap,), permissions=("payment.prepare",))
+    host = PluginHost(
+        policy=PluginHostPolicy(
+            allowed_permissions=frozenset({"payment.prepare"}),
+            max_risk_tier=4,
+        )
+    )
+    with pytest.raises(PluginAuthorizationError, match="T4"):
         register(host, item, lambda: Runtime({cap.capability_id: Provider()}))
 
 

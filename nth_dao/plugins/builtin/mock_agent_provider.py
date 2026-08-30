@@ -31,7 +31,7 @@ from nth_dao.plugins.agent_provider import (
     validate_agent_session_identifier,
     validate_agent_session_output,
 )
-from nth_dao.plugins.contracts import PLUGIN_HOST_API_VERSION, PluginManifest
+from nth_dao.plugins.contracts import PLUGIN_BASE_HOST_API_VERSION, PluginManifest
 from nth_dao.plugins.host import (
     CapabilitySchemas,
     PluginContext,
@@ -74,7 +74,7 @@ def mock_agent_provider_manifest() -> PluginManifest:
         manifest_version=1,
         plugin_id=MOCK_AGENT_PROVIDER_PLUGIN_ID,
         version="1.0.0",
-        host_api=PLUGIN_HOST_API_VERSION,
+        host_api=PLUGIN_BASE_HOST_API_VERSION,
         kind="agent.provider",
         runtime="builtin",
         provides=(AGENT_SESSION_CONTRACT,),

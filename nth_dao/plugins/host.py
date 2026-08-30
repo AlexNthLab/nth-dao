@@ -1,4 +1,4 @@
-"""Default-deny lifecycle host for reviewed NTH DAO built-in plugins."""
+"""Default-deny lifecycle host for reviewed NTH DAO plugin runtimes."""
 
 from __future__ import annotations
 
@@ -53,6 +53,10 @@ class PluginConflictError(PluginHostError):
 
 class PluginInvocationError(PluginHostError):
     """A capability invocation failed a host boundary check."""
+
+
+class PluginProviderUnavailable(PluginInvocationError):
+    """A provider process is irrecoverably unavailable for this generation."""
 
 
 _MAX_INVOCATION_DOCUMENT_BYTES = 1024 * 1024
@@ -114,19 +118,29 @@ class InvocationAuthority:
     def __post_init__(self) -> None:
         if not isinstance(self.principal, str) or not self.principal.strip():
             raise ValueError("invocation principal must be non-empty text")
-        if len(self.principal.encode("utf-8")) > 512:
+        if len(self.principal.encode("utf-8")) > 512 or any(
+            ord(char) < 0x20 or ord(char) == 0x7F for char in self.principal
+        ):
             raise ValueError("invocation principal is too long")
         if not isinstance(self.capability_ids, frozenset):
             object.__setattr__(self, "capability_ids", frozenset(self.capability_ids))
-        if not self.capability_ids or any(
-            not isinstance(item, str) or not item for item in self.capability_ids
+        if not self.capability_ids or len(self.capability_ids) > 256 or any(
+            not isinstance(item, str)
+            or not item
+            or len(item.encode("utf-8")) > 512
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in item)
+            for item in self.capability_ids
         ):
-            raise ValueError("invocation capability_ids must contain non-empty text")
+            raise ValueError("invocation capability_ids must contain bounded text")
         for label, value in (
             ("mandate_digest", self.mandate_digest),
             ("idempotency_key", self.idempotency_key),
         ):
-            if not isinstance(value, str) or len(value.encode("utf-8")) > 512:
+            if (
+                not isinstance(value, str)
+                or len(value.encode("utf-8")) > 512
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+            ):
                 raise ValueError(f"invocation {label} must be bounded text")
         if not isinstance(self.resource_ids, frozenset):
             object.__setattr__(self, "resource_ids", frozenset(self.resource_ids))
@@ -134,6 +148,7 @@ class InvocationAuthority:
             not isinstance(item, str)
             or not item
             or len(item.encode("utf-8")) > 512
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in item)
             for item in self.resource_ids
         ):
             raise ValueError("invocation resource_ids must contain bounded text")
@@ -203,7 +218,7 @@ class CapabilitySchemas:
 
 
 class PluginRuntime(Protocol):
-    """A reviewed built-in runtime with explicit start/stop effects."""
+    """A reviewed runtime with explicit start/stop effects."""
 
     def start(self, context: PluginContext) -> Mapping[str, object]: ...
 
@@ -259,6 +274,7 @@ class _StopOperation:
 class _PluginRecord:
     manifest: PluginManifest
     factory: PluginFactory
+    registration_key: object
     state: str = "installed"
     grants: frozenset[str] = frozenset()
     runtime: PluginRuntime | None = None
@@ -269,16 +285,17 @@ class _PluginRecord:
     generation: str = ""
     active_calls: int = 0
     stop_operation: _StopOperation | None = None
+    quarantining: bool = False
     desired_enabled: bool = False
     last_error: str = ""
 
 
 class PluginHost:
-    """Atomic registry and lifecycle manager for trusted built-ins.
+    """Atomic registry and lifecycle manager for trusted local runtimes.
 
-    This class enforces host policy and dependency semantics, but it is not a
-    Python sandbox. The deliberately named ``register_builtin`` method is the
-    only installation path in host API v1.
+    This class enforces host policy and dependency semantics, but it is not an
+    OS sandbox. Registration is limited to reviewed built-ins and explicitly
+    configured local subprocess entry artifacts.
     """
 
     def __init__(
@@ -330,6 +347,99 @@ class PluginHost:
         allow_manifest_upgrade: bool = False,
         audited_capabilities: frozenset[str] | set[str] = frozenset(),
     ) -> None:
+        self._register_reviewed(
+            manifest,
+            factory,
+            schemas=schemas,
+            expected_runtime="builtin",
+            registration_key=factory,
+            launch_profile_digest="",
+            allow_manifest_upgrade=allow_manifest_upgrade,
+            audited_capabilities=audited_capabilities,
+        )
+
+    def register_reviewed_subprocess(
+        self,
+        manifest: PluginManifest,
+        spec: object,
+        *,
+        schemas: Mapping[str, CapabilitySchemas],
+        allow_manifest_upgrade: bool = False,
+        audited_capabilities: frozenset[str] | set[str] = frozenset(),
+    ) -> None:
+        """Register one local, content-bound worker through the RPC boundary.
+
+        The spec is trusted host configuration, not data accepted from a
+        downloaded manifest. This API does not verify publisher signatures and
+        does not make the child an OS-sandboxed process.
+        """
+
+        from .subprocess_runtime import (
+            ReviewedSubprocessRuntime,
+            ReviewedSubprocessSpec,
+            SubprocessPluginError,
+            cleanup_orphaned_subprocess_snapshots,
+        )
+
+        if not isinstance(spec, ReviewedSubprocessSpec):
+            raise TypeError("spec must be a ReviewedSubprocessSpec")
+        if not isinstance(manifest, PluginManifest):
+            raise TypeError("manifest must be a PluginManifest")
+        if manifest.runtime != "subprocess":
+            raise PluginContractError(
+                "reviewed subprocess registration requires runtime=subprocess"
+            )
+        if self.workspace_root is None or self._audit_log is None:
+            raise PluginAuthorizationError(
+                "reviewed subprocess registration requires a workspace audit"
+            )
+        snapshot_root = self.workspace_root / ".nth" / "plugin-host" / "snapshots"
+        try:
+            removed_snapshots = cleanup_orphaned_subprocess_snapshots(snapshot_root)
+        except SubprocessPluginError as exc:
+            self._audit(
+                "plugin.snapshot.cleanup.failed",
+                manifest.plugin_id,
+                {"error_type": type(exc).__name__},
+            )
+            raise PluginLifecycleError(
+                "reviewed subprocess snapshot cleanup failed"
+            ) from exc
+        if removed_snapshots:
+            self._audit(
+                "plugin.snapshot.orphans-cleaned",
+                manifest.plugin_id,
+                {"count": removed_snapshots},
+            )
+        spec.verify_launcher()
+        spec.verify_artifact(manifest.artifact_digest)
+
+        def factory() -> PluginRuntime:
+            return ReviewedSubprocessRuntime(manifest, spec)
+
+        self._register_reviewed(
+            manifest,
+            factory,
+            schemas=schemas,
+            expected_runtime="subprocess",
+            registration_key=(manifest.digest, spec),
+            launch_profile_digest=spec.launch_profile_digest,
+            allow_manifest_upgrade=allow_manifest_upgrade,
+            audited_capabilities=audited_capabilities,
+        )
+
+    def _register_reviewed(
+        self,
+        manifest: PluginManifest,
+        factory: PluginFactory,
+        *,
+        schemas: Mapping[str, CapabilitySchemas],
+        expected_runtime: str,
+        registration_key: object,
+        launch_profile_digest: str,
+        allow_manifest_upgrade: bool,
+        audited_capabilities: frozenset[str] | set[str],
+    ) -> None:
         if not isinstance(manifest, PluginManifest):
             raise TypeError("manifest must be a PluginManifest")
         if not callable(factory):
@@ -348,22 +458,35 @@ class PluginHost:
             raise PluginAuthorizationError(
                 "audited capabilities require a host-bound workspace audit"
             )
-        if manifest.runtime != "builtin":
-            raise PluginContractError("only builtin manifests may be registered")
+        if manifest.runtime != expected_runtime:
+            raise PluginContractError(
+                f"only {expected_runtime} manifests may use this registration path"
+            )
+        if bool(launch_profile_digest) != (expected_runtime == "subprocess"):
+            raise PluginContractError(
+                "subprocess registration requires one local launch profile digest"
+            )
         if manifest.publisher_did or manifest.proof:
             raise PluginContractError(
                 "host API v1 does not verify signed external plugin manifests"
             )
-        if any(item.security == "irreversible" for item in manifest.provides):
+        if manifest.risk_tier >= 4 or any(
+            item.security == "irreversible" for item in manifest.provides
+        ):
             raise PluginAuthorizationError(
-                "host API v1 does not execute irreversible capabilities"
+                "host API v1 does not execute T4 or irreversible capabilities"
             )
         ensure_host_api_compatible(manifest.host_api, self.host_api)
         checked_schemas = self._validate_schemas(manifest, schemas)
         with self._lock:
             existing = self._records.get(manifest.plugin_id)
             if existing is not None:
-                if existing.manifest.digest == manifest.digest and existing.factory is factory:
+                same_registration = (
+                    existing.registration_key is registration_key
+                    if expected_runtime == "builtin"
+                    else existing.registration_key == registration_key
+                )
+                if existing.manifest.digest == manifest.digest and same_registration:
                     return
                 raise PluginConflictError(
                     f"plugin {manifest.plugin_id!r} is already installed"
@@ -385,10 +508,26 @@ class PluginHost:
                 )
                 persisted = {
                     "manifest_digest": manifest.digest,
+                    "launch_profile_digest": "",
                     "grants": [],
                     "desired_enabled": False,
                 }
                 self._persisted[manifest.plugin_id] = persisted
+            if persisted is not None and launch_profile_digest:
+                previous_profile = str(persisted.get("launch_profile_digest", ""))
+                if previous_profile != launch_profile_digest:
+                    event_type = (
+                        "plugin.launch-profile.changed"
+                        if previous_profile
+                        else "plugin.launch-profile.bound"
+                    )
+                    details = {"launch_profile_digest": launch_profile_digest}
+                    if previous_profile:
+                        details["previous_launch_profile_digest"] = previous_profile
+                    self._audit(event_type, manifest.plugin_id, details)
+                    persisted["launch_profile_digest"] = launch_profile_digest
+                    persisted["grants"] = []
+                    persisted["desired_enabled"] = False
             restored_grants = frozenset(persisted.get("grants", ())) if persisted else frozenset()
             if not (
                 restored_grants <= frozenset(manifest.permissions)
@@ -403,12 +542,22 @@ class PluginHost:
                 )
                 self._persisted[manifest.plugin_id] = {
                     "manifest_digest": manifest.digest,
+                    "launch_profile_digest": "",
                     "grants": [],
                     "desired_enabled": False,
                 }
+                persisted = self._persisted[manifest.plugin_id]
+                if launch_profile_digest:
+                    self._audit(
+                        "plugin.launch-profile.bound",
+                        manifest.plugin_id,
+                        {"launch_profile_digest": launch_profile_digest},
+                    )
+                    persisted["launch_profile_digest"] = launch_profile_digest
             self._records[manifest.plugin_id] = _PluginRecord(
                 manifest=manifest,
                 factory=factory,
+                registration_key=registration_key,
                 state="authorized" if restored_grants else "installed",
                 grants=restored_grants,
                 schemas=checked_schemas,
@@ -545,7 +694,26 @@ class PluginHost:
                 self._persisted[plugin_id]["desired_enabled"] = True
                 record.last_error = ""
                 self._condition.notify_all()
-                return tuple(bindings[key] for key in sorted(bindings))
+                enabled_bindings = tuple(
+                    bindings[key] for key in sorted(bindings)
+                )
+            failure_handler = getattr(runtime, "set_failure_handler", None)
+            if callable(failure_handler):
+                primary_binding = enabled_bindings[0]
+
+                def quarantine(error: PluginProviderUnavailable) -> None:
+                    self._quarantine_provider(primary_binding, record, error)
+
+                failure_handler(quarantine)
+                with self._condition:
+                    if (
+                        record.state != "enabled"
+                        or record.generation != generation
+                    ):
+                        raise PluginLifecycleError(
+                            "plugin runtime failed immediately after enable"
+                        )
+            return enabled_bindings
         except Exception as exc:
             cleanup_error = ""
             cleanup_operation: _StopOperation | None = None
@@ -820,29 +988,116 @@ class PluginHost:
                 schemas._input_validator(request_body)
             if schemas._authority_validator is not None:
                 schemas._authority_validator(request_body, authority)
-            response = provider.invoke(request_body, context)
-            if not isinstance(response, Mapping):
-                raise PluginSchemaError("capability output must be an object")
-            response_body = _json_boundary_copy(response, label="capability output")
-            validate_instance(response_body, schemas._output_schema, path="$output")
-            if (
-                binding.contract.consistency in {"C2", "C3", "C4"}
-                and "operation" in request_body
-                and "operation" in response_body
-                and response_body["operation"] != request_body["operation"]
-            ):
-                raise PluginSchemaError(
-                    "$output.operation does not match $input.operation"
-                )
-            if schemas._output_validator is not None:
-                schemas._output_validator(response_body)
-            if schemas._exchange_validator is not None:
-                schemas._exchange_validator(request_body, response_body)
+            try:
+                response = provider.invoke(request_body, context)
+            except PluginProviderUnavailable as exc:
+                self._quarantine_provider(binding, record, exc)
+                raise
+            try:
+                if not isinstance(response, Mapping):
+                    raise PluginSchemaError("capability output must be an object")
+                response_body = _json_boundary_copy(response, label="capability output")
+                validate_instance(response_body, schemas._output_schema, path="$output")
+                if (
+                    binding.contract.consistency in {"C2", "C3", "C4"}
+                    and "operation" in request_body
+                    and "operation" in response_body
+                    and response_body["operation"] != request_body["operation"]
+                ):
+                    raise PluginSchemaError(
+                        "$output.operation does not match $input.operation"
+                    )
+                if schemas._output_validator is not None:
+                    schemas._output_validator(response_body)
+                if schemas._exchange_validator is not None:
+                    schemas._exchange_validator(request_body, response_body)
+            except (PluginSchemaError, RecursionError, TypeError, ValueError) as exc:
+                if record.manifest.runtime == "subprocess":
+                    unavailable = PluginProviderUnavailable(
+                        "subprocess provider violated its output contract"
+                    )
+                    self._quarantine_provider(binding, record, unavailable)
+                    raise unavailable from exc
+                raise
             return response_body
         finally:
             with self._condition:
                 record.active_calls = max(0, record.active_calls - 1)
                 self._condition.notify_all()
+
+    def _quarantine_provider(
+        self,
+        binding: ProviderBinding,
+        record: _PluginRecord,
+        error: PluginProviderUnavailable,
+    ) -> None:
+        """Atomically revoke a failed provider generation from future calls."""
+
+        runtime: PluginRuntime | None = None
+        with self._condition:
+            if record.state == "disabling":
+                if not record.quarantining:
+                    return
+                deadline = time.monotonic() + self.lifecycle_timeout_s
+                while record.quarantining:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    self._condition.wait(remaining)
+                return
+            current = record.bindings.get(binding.contract.capability_id)
+            if current is not binding or record.generation != binding.generation:
+                return
+            runtime = record.runtime
+            for capability_id in tuple(record.bindings):
+                providers = self._providers.get(capability_id)
+                if providers is not None:
+                    providers.pop(binding.plugin_id, None)
+                    if not providers:
+                        self._providers.pop(capability_id, None)
+            record.bindings.clear()
+            record.providers.clear()
+            record.generation = ""
+            record.state = "disabling"
+            record.quarantining = True
+            record.desired_enabled = False
+            self._persisted[binding.plugin_id]["desired_enabled"] = False
+            self._condition.notify_all()
+
+        cleanup_error: BaseException | None = None
+        cleanup_operation: _StopOperation | None = None
+        if runtime is not None:
+            try:
+                cleanup_operation = self._begin_stop(runtime)
+                self._await_stop(cleanup_operation)
+            except BaseException as exc:  # noqa: BLE001
+                cleanup_error = exc
+
+        with self._condition:
+            record.runtime = runtime if cleanup_error is not None else None
+            record.stop_operation = (
+                cleanup_operation if cleanup_error is not None else None
+            )
+            record.state = "cleanup-failed" if cleanup_error is not None else "failed"
+            record.quarantining = False
+            record.last_error = f"{type(error).__name__}: {error}"[:1000]
+            if cleanup_error is not None:
+                record.last_error = (
+                    f"{record.last_error}; cleanup failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )[:1000]
+            try:
+                self._audit(
+                    "plugin.runtime.failed",
+                    binding.plugin_id,
+                    {
+                        "error_type": type(error).__name__,
+                        "cleanup_failed": cleanup_error is not None,
+                    },
+                )
+            except PluginAuditError as audit_exc:
+                record.last_error = f"{record.last_error}; audit failed: {audit_exc}"[:1000]
+            self._condition.notify_all()
 
     def invoke_audited_refresh(
         self,
@@ -1267,6 +1522,7 @@ __all__ = [
     "PluginHostPolicy",
     "PluginInvocationContext",
     "PluginInvocationError",
+    "PluginProviderUnavailable",
     "PluginLifecycleError",
     "PluginRuntime",
     "PluginStatus",

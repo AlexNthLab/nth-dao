@@ -46,6 +46,13 @@ _EVENT_DETAIL_FIELDS = {
     "plugin.authorized": frozenset({"grants"}),
     "plugin.enable.succeeded": frozenset({"manifest_digest"}),
     "plugin.enable.failed": frozenset({"error_type", "cleanup_failed"}),
+    "plugin.runtime.failed": frozenset({"error_type", "cleanup_failed"}),
+    "plugin.launch-profile.bound": frozenset({"launch_profile_digest"}),
+    "plugin.launch-profile.changed": frozenset(
+        {"previous_launch_profile_digest", "launch_profile_digest"}
+    ),
+    "plugin.snapshot.orphans-cleaned": frozenset({"count"}),
+    "plugin.snapshot.cleanup.failed": frozenset({"error_type"}),
     "plugin.disable.succeeded": frozenset(),
     "plugin.disable.failed": frozenset({"error_type"}),
     "plugin.refresh.started": frozenset({"invocation_id"}),
@@ -130,7 +137,12 @@ def _validate_details(event_type: str, details: Any, *, line_number: int) -> Non
                 raise PluginAuditError(
                     f"plugin audit operator is invalid at line {line_number}"
                 )
-    for digest_field in ("manifest_digest", "previous_manifest_digest"):
+    for digest_field in (
+        "manifest_digest",
+        "previous_manifest_digest",
+        "launch_profile_digest",
+        "previous_launch_profile_digest",
+    ):
         if digest_field not in details:
             continue
         digest = details[digest_field]
@@ -164,6 +176,12 @@ def _validate_details(event_type: str, details: Any, *, line_number: int) -> Non
     ):
         raise PluginAuditError(
             f"plugin audit result_count is invalid at line {line_number}"
+        )
+    if "count" in details and (
+        type(details["count"]) is not int or not 1 <= details["count"] <= 10_000
+    ):
+        raise PluginAuditError(
+            f"plugin audit cleanup count is invalid at line {line_number}"
         )
     if "grants" in details:
         grants = details["grants"]
@@ -398,6 +416,11 @@ class PluginAuditLog:
             plugin_id = item["plugin_id"]
             details = item["details"]
             event_type = item["event_type"]
+            if event_type in {
+                "plugin.snapshot.orphans-cleaned",
+                "plugin.snapshot.cleanup.failed",
+            }:
+                continue
             if event_type == "plugin.registered":
                 if plugin_id in state:
                     raise PluginAuditError(
@@ -405,6 +428,7 @@ class PluginAuditLog:
                     )
                 state[plugin_id] = {
                     "manifest_digest": details["manifest_digest"],
+                    "launch_profile_digest": "",
                     "grants": [],
                     "desired_enabled": False,
                 }
@@ -425,9 +449,33 @@ class PluginAuditLog:
                     )
                 state[plugin_id] = {
                     "manifest_digest": details["manifest_digest"],
+                    "launch_profile_digest": "",
                     "grants": [],
                     "desired_enabled": False,
                 }
+            elif event_type == "plugin.launch-profile.bound":
+                if state[plugin_id].get("launch_profile_digest"):
+                    raise PluginAuditError(
+                        f"plugin audit rebinds an existing launch profile for {plugin_id!r}"
+                    )
+                state[plugin_id]["launch_profile_digest"] = details[
+                    "launch_profile_digest"
+                ]
+                state[plugin_id]["grants"] = []
+                state[plugin_id]["desired_enabled"] = False
+            elif event_type == "plugin.launch-profile.changed":
+                if (
+                    details["previous_launch_profile_digest"]
+                    != state[plugin_id].get("launch_profile_digest", "")
+                ):
+                    raise PluginAuditError(
+                        f"plugin audit launch profile change is unbound for {plugin_id!r}"
+                    )
+                state[plugin_id]["launch_profile_digest"] = details[
+                    "launch_profile_digest"
+                ]
+                state[plugin_id]["grants"] = []
+                state[plugin_id]["desired_enabled"] = False
             elif event_type == "plugin.authorized":
                 state[plugin_id]["grants"] = list(details["grants"])
             elif event_type == "plugin.enable.succeeded":
@@ -436,6 +484,8 @@ class PluginAuditLog:
                         f"plugin audit manifest changes during enable for {plugin_id!r}"
                     )
                 state[plugin_id]["desired_enabled"] = True
+            elif event_type == "plugin.runtime.failed":
+                state[plugin_id]["desired_enabled"] = False
             elif event_type in {
                 "plugin.disable.succeeded",
                 "plugin.disable.failed",

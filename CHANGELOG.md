@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A language-neutral `nth-dao-plugin-rpc` v1 subprocess boundary for statically
+  reviewed local workers. It copies each entry artifact from one verified read
+  stream into a private workspace-local per-generation snapshot and executes
+  that snapshot, binds the resolved launcher path and bytes into lifecycle
+  audit, and clears prior grants whenever that profile changes. Explicit
+  environment values never enter a deterministic audit commitment and require
+  fresh authorization after launch-spec reconstruction. Cross-process snapshot
+  leases protect active workers; registration removes and audits only inactive
+  Host-owned generations, while cleanup failures remain visible and retryable.
+  It uses an exact nonce-bound handshake and Host-generated invocation IDs,
+  uses RFC 8785-compatible key ordering and cross-language safe integers,
+  limits canonical JSON frames and stderr, starts with a minimal explicit
+  environment, interrupts blocked calls during disable, and revokes the whole
+  provider generation on timeout, crash, idle exit, or protocol corruption.
+  Requests that cannot be represented by the RPC JSON subset or fit the
+  configured worker frame are rejected before pipe I/O without quarantining a
+  healthy worker.
+  Worker retry hints cannot override an `at-most-once` or `fail-closed`
+  capability contract. Process-group
+  cleanup is best effort until a platform job/container boundary exists. Checked-in
+  canonical vectors cover handshake, invocation, result, error, shutdown, and
+  non-BMP cross-language key ordering, with a real Node.js conformance test.
+  This is process supervision, not an OS sandbox or third-party package loader;
+  CPU/memory quotas and authoritative descendant containment still require a
+  platform Job Object, cgroup/container, or WASI runtime, and irreversible
+  capabilities remain disabled.
 - Authenticated network retrieval of one exact missing Trade Dispute Statement:
   a short-lived bilateral DID-signed Fetch Request reaches a rate-limited public
   responder backed by an atomic replay journal and signed Spine disclosure

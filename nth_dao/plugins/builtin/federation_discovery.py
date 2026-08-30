@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 from nth_dao.canonical_json import canonical_json
 from nth_dao.discovery.federation_registry import LearnedPeerStore
 from nth_dao.plugins.contracts import (
-    PLUGIN_HOST_API_VERSION,
+    PLUGIN_BASE_HOST_API_VERSION,
     CapabilityContract,
     PluginManifest,
     schema_digest,
@@ -129,7 +129,7 @@ def federation_discovery_manifest() -> PluginManifest:
         manifest_version=1,
         plugin_id=FEDERATION_DISCOVERY_PLUGIN_ID,
         version="2.0.0",
-        host_api=PLUGIN_HOST_API_VERSION,
+        host_api=PLUGIN_BASE_HOST_API_VERSION,
         kind="discovery.provider",
         runtime="builtin",
         provides=(FEDERATION_DISCOVERY_CONTRACT,),

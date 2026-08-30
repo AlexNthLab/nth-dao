@@ -60,7 +60,13 @@
       "id": "plugin-manifest-runtime-not-supported",
       "path": "runtime",
       "value": "python-entry-point",
-      "expected_error": "builtin plugins only"
+      "expected_error": "unsupported plugin runtime"
+    },
+    {
+      "id": "plugin-manifest-subprocess-needs-host-api-1.1",
+      "path": "runtime",
+      "value": "subprocess",
+      "expected_error": "requires host_api 1.1"
     },
     {
       "id": "plugin-manifest-permission-order",

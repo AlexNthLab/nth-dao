@@ -32,6 +32,7 @@ SPINE_APPEND_INTENT_VERSION = 1
 MAX_SPINE_APPEND_INTENT_BYTES = MAX_SPINE_LINE_BYTES + 1_024
 
 StorageToken = tuple[int, int, int, int, int, str]
+StorageRevision = tuple[int, int, int, int, int]
 
 logger = logging.getLogger(__name__)
 
@@ -494,6 +495,21 @@ class SignedEventLog:
             int(metadata.st_mtime_ns),
             int(metadata.st_ctime_ns),
             digest.hexdigest(),
+        )
+
+    def storage_revision(self) -> StorageRevision:
+        """Return a cheap cache hint; changed revisions require full verification."""
+
+        try:
+            metadata = self._path.stat()
+        except FileNotFoundError:
+            return (0, 0, 0, 0, 0)
+        return (
+            int(getattr(metadata, "st_dev", 0)),
+            int(getattr(metadata, "st_ino", 0)),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
         )
 
     def _token_after_expected_append(

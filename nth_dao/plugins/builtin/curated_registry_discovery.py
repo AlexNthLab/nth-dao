@@ -26,7 +26,7 @@ from nth_dao.federation_transport import (
     resolve_safe_public_https_ip,
 )
 from nth_dao.plugins.contracts import (
-    PLUGIN_HOST_API_VERSION,
+    PLUGIN_BASE_HOST_API_VERSION,
     CapabilityContract,
     PluginManifest,
     schema_digest,
@@ -168,7 +168,7 @@ def curated_registry_manifest() -> PluginManifest:
         manifest_version=1,
         plugin_id=CURATED_REGISTRY_PLUGIN_ID,
         version="1.0.0",
-        host_api=PLUGIN_HOST_API_VERSION,
+        host_api=PLUGIN_BASE_HOST_API_VERSION,
         kind="discovery.provider",
         runtime="builtin",
         provides=(CURATED_REGISTRY_CONTRACT,),

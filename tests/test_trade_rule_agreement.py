@@ -7269,7 +7269,7 @@ def test_import_audit_recomputes_semantic_key_and_blocks_cross_order_cache(
         web_v2_api._trade_rule_package_import_audit_index(duplicate)
 
 
-def test_order_audited_resolver_reuses_snapshot_and_shares_import_lock(tmp_path):
+def test_order_audited_resolver_reuses_snapshot_and_bounds_import_lock(tmp_path):
     identity = AgentIdentity.generate(label="import-audit-cache")
     signed_spine = SignedEventLog(tmp_path / "spine.jsonl", identity)
 
@@ -7277,8 +7277,8 @@ def test_order_audited_resolver_reuses_snapshot_and_shares_import_lock(tmp_path)
         def __init__(self):
             self.verified_calls = 0
 
-        def storage_token(self):
-            return signed_spine.storage_token()
+        def storage_revision(self):
+            return signed_spine.storage_revision()
 
         def verified_snapshot_with_token(self):
             self.verified_calls += 1
@@ -7300,11 +7300,20 @@ def test_order_audited_resolver_reuses_snapshot_and_shares_import_lock(tmp_path)
             return packages.get(digest)
 
     spine = CountingSpine()
+    audit_cache = web_v2_api._TradeRulePackageImportAuditCache()
     resolver = web_v2_api._OrderAuditedRulePackageResolver(
         Cache(),
         spine,
         f"sha256:{'8' * 64}",
         tmp_path,
+        audit_cache=audit_cache,
+    )
+    second_resolver = web_v2_api._OrderAuditedRulePackageResolver(
+        Cache(),
+        spine,
+        f"sha256:{'8' * 64}",
+        tmp_path,
+        audit_cache=audit_cache,
     )
     first_digest, second_digest = packages
     held = InterProcessLock(
@@ -7328,9 +7337,57 @@ def test_order_audited_resolver_reuses_snapshot_and_shares_import_lock(tmp_path)
         if not released:
             held.release()
 
-    assert resolver.load(second_digest) is packages[second_digest]
+    assert second_resolver.load(second_digest) is packages[second_digest]
     assert resolver.load(first_digest) is packages[first_digest]
     assert spine.verified_calls == 1
+
+
+def test_order_audited_resolver_fails_fast_when_import_lock_is_busy(
+    tmp_path,
+    monkeypatch,
+):
+    identity = AgentIdentity.generate(label="import-audit-busy")
+    spine = SignedEventLog(tmp_path / "spine.jsonl", identity)
+    package_digest = f"sha256:{'6' * 64}"
+    package = object()
+
+    class Cache:
+        @staticmethod
+        def provenance_sources(digest):
+            assert digest == package_digest
+            return ("local",)
+
+        @staticmethod
+        def load(digest):
+            assert digest == package_digest
+            return package
+
+    monkeypatch.setattr(
+        web_v2_api,
+        "_TRADE_RULE_PACKAGE_READ_LOCK_TIMEOUT_SECONDS",
+        0.05,
+    )
+    resolver = web_v2_api._OrderAuditedRulePackageResolver(
+        Cache(),
+        spine,
+        f"sha256:{'8' * 64}",
+        tmp_path,
+    )
+    held = InterProcessLock(
+        web_v2_api._trade_rule_package_import_lock_target(
+            tmp_path,
+            package_digest,
+        ),
+        timeout=1.0,
+    )
+    held.acquire()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(resolver.load, package_digest)
+            with pytest.raises(RuntimeError, match="import is busy"):
+                pending.result(timeout=3.0)
+    finally:
+        held.release()
 
 
 def test_order_audited_resolver_rejects_unclassified_and_unaudited_federation(
