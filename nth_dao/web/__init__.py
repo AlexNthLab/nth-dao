@@ -1939,6 +1939,7 @@ def _register_builtin_plugins(state: WebState) -> None:
     from nth_dao.plugins.builtin import (
         register_curated_registry_discovery,
         register_federation_discovery,
+        register_literal_intent_resolver,
         register_loopback_transport,
         register_memory_market_index,
         register_memory_message_store,
@@ -1985,6 +1986,7 @@ def _register_builtin_plugins(state: WebState) -> None:
         ),
     )
     register_mock_agent_provider(state.plugin_host)
+    register_literal_intent_resolver(state.plugin_host)
     register_memory_market_index(state.plugin_host)
     register_memory_message_store(state.plugin_host)
     register_loopback_transport(state.plugin_host)

@@ -1,0 +1,209 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "assumptions": {
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "attachments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "maxLength": 71,
+            "minLength": 71,
+            "type": "string"
+          },
+          "media_type": {
+            "maxLength": 255,
+            "minLength": 3,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "size_bytes": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verification_status": {
+            "enum": [
+              "unverified"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "media_type",
+          "name",
+          "size_bytes",
+          "verification_status"
+        ],
+        "type": "object"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "authority": {
+      "enum": [
+        "none"
+      ],
+      "type": "string"
+    },
+    "automation_ceiling": {
+      "enum": [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4"
+      ],
+      "type": "string"
+    },
+    "clarifications": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "question"
+        ],
+        "type": "object"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "commit_authority": {
+      "type": "boolean"
+    },
+    "constraints": {
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "executable": {
+      "type": "boolean"
+    },
+    "format": {
+      "enum": [
+        "org.nth-dao.intent-draft"
+      ],
+      "type": "string"
+    },
+    "intent_version": {
+      "enum": [
+        "1"
+      ],
+      "type": "string"
+    },
+    "locale": {
+      "maxLength": 35,
+      "minLength": 2,
+      "type": "string"
+    },
+    "outcomes": {
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "request_digest": {
+      "maxLength": 71,
+      "minLength": 71,
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "requested_capabilities": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "review_required": {
+      "type": "boolean"
+    },
+    "risks": {
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "source_kind": {
+      "enum": [
+        "agent",
+        "human",
+        "system"
+      ],
+      "type": "string"
+    },
+    "source_text": {
+      "maxLength": 32768,
+      "minLength": 1,
+      "type": "string"
+    },
+    "summary": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "assumptions",
+    "attachments",
+    "authority",
+    "automation_ceiling",
+    "clarifications",
+    "commit_authority",
+    "constraints",
+    "executable",
+    "format",
+    "intent_version",
+    "locale",
+    "outcomes",
+    "request_digest",
+    "request_id",
+    "requested_capabilities",
+    "review_required",
+    "risks",
+    "source_kind",
+    "source_text",
+    "summary"
+  ],
+  "type": "object"
+}

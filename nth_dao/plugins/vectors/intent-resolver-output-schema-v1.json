@@ -1,0 +1,109 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "authority": {
+      "enum": [
+        "none"
+      ],
+      "type": "string"
+    },
+    "commit_authority": {
+      "type": "boolean"
+    },
+    "detail": {
+      "maxLength": 2048,
+      "type": "string"
+    },
+    "draft_json": {
+      "maxLength": 131072,
+      "type": "string"
+    },
+    "draft_sha256": {
+      "maxLength": 71,
+      "type": "string"
+    },
+    "executable": {
+      "type": "boolean"
+    },
+    "invocation_context_digest": {
+      "maxLength": 71,
+      "minLength": 71,
+      "type": "string"
+    },
+    "max_attachments": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_source_bytes": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "operation": {
+      "enum": [
+        "probe",
+        "resolve"
+      ],
+      "type": "string"
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "request_digest": {
+      "maxLength": 71,
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "resolver_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "",
+        "draft",
+        "needs-clarification"
+      ],
+      "type": "string"
+    },
+    "supported_automation_levels": {
+      "items": {
+        "enum": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ],
+        "type": "string"
+      },
+      "maxItems": 5,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "authority",
+    "commit_authority",
+    "detail",
+    "draft_json",
+    "draft_sha256",
+    "executable",
+    "invocation_context_digest",
+    "max_attachments",
+    "max_source_bytes",
+    "operation",
+    "ready",
+    "request_digest",
+    "request_id",
+    "resolver_id",
+    "status",
+    "supported_automation_levels"
+  ],
+  "type": "object"
+}

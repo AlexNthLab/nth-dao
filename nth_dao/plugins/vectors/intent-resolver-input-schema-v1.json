@@ -1,0 +1,91 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "attachments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "maxLength": 71,
+            "minLength": 71,
+            "type": "string"
+          },
+          "media_type": {
+            "maxLength": 255,
+            "minLength": 3,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "size_bytes": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verification_status": {
+            "enum": [
+              "unverified"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "media_type",
+          "name",
+          "size_bytes",
+          "verification_status"
+        ],
+        "type": "object"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "automation_ceiling": {
+      "enum": [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4"
+      ],
+      "type": "string"
+    },
+    "locale": {
+      "maxLength": 35,
+      "minLength": 2,
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "probe",
+        "resolve"
+      ],
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_kind": {
+      "enum": [
+        "agent",
+        "human",
+        "system"
+      ],
+      "type": "string"
+    },
+    "source_text": {
+      "maxLength": 32768,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "operation"
+  ],
+  "type": "object"
+}

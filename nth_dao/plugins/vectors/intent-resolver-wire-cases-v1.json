@@ -1,0 +1,2105 @@
+{
+  "negative_context_bindings": [
+    {
+      "context": {
+        "capability_id": "org.nth-dao.intent.resolve",
+        "format": "org.nth-dao.intent-resolver-invocation-context.v1",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": "different-principal"
+      },
+      "expected_error_contains": "does not bind Host invocation context",
+      "name": "response-cannot-cross-principal-context",
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "context": {
+        "capability_id": "org.nth-dao.intent.resolve",
+        "format": "wrong-format",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": "vector-principal"
+      },
+      "expected_error_contains": "context.format is invalid",
+      "name": "invalid-context-format-1",
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:d972de67ecf3b9a4a6fe41f2dcd259836f027151d96400eb50c8156edd73b7ba",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "context": {
+        "capability_id": "org.example.other",
+        "format": "org.nth-dao.intent-resolver-invocation-context.v1",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": "vector-principal"
+      },
+      "expected_error_contains": "context.capability_id is invalid",
+      "name": "invalid-context-capability_id-2",
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:313775931a7d87eb44cf239ed4f6dbce978451bb6c72b603b5317f4b732c7991",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "context": {
+        "capability_id": "org.nth-dao.intent.resolve",
+        "format": "org.nth-dao.intent-resolver-invocation-context.v1",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": " "
+      },
+      "expected_error_contains": "must be non-empty text",
+      "name": "invalid-context-principal-3",
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:1e1e0215b656014c312b1b227c34a9114bef61d5f6f53a37ed6e6503935d3329",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "context": {
+        "capability_id": "org.nth-dao.intent.resolve",
+        "format": "org.nth-dao.intent-resolver-invocation-context.v1",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "expected_error_contains": "UTF-8 byte limit",
+      "name": "invalid-context-principal-4",
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9923cec2af030097cbb92e4f4251218cb2fae7d74c8f6097328385915f0dddb7",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    }
+  ],
+  "negative_exchanges": [
+    {
+      "expected_error_contains": "source_text",
+      "name": "draft-cannot-rewrite-source",
+      "request": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Different source text\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:df91e45516a7aee810b20dd95ce86ea909357dd474b9f4c59f9897a54ffca579",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "request_digest",
+      "name": "draft-cannot-rebind-request-digest",
+      "request": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:f886f1a7deaa5ccf2ca9bbf46dcccb32d180ca40665d6b9fa2c5d830813e38e3",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    }
+  ],
+  "negative_inputs": [
+    {
+      "expected_error_contains": "UTF-8 byte limit",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+      },
+      "name": "source-byte-limit-is-not-character-limit"
+    },
+    {
+      "expected_error_contains": "must be integer",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": true,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "attachment-size-cannot-be-boolean"
+    },
+    {
+      "expected_error_contains": "unknown fields",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "mandate_id": "forbidden",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "resolve-cannot-smuggle-mandate-field"
+    },
+    {
+      "expected_error_contains": "probe accepts only operation",
+      "input": {
+        "operation": "probe",
+        "source_text": "unexpected"
+      },
+      "name": "probe-cannot-carry-source"
+    },
+    {
+      "expected_error_contains": "resolve has missing or unknown fields",
+      "input": {
+        "operation": "resolve"
+      },
+      "name": "resolve-requires-source-fields"
+    },
+    {
+      "expected_error_contains": "must be non-empty text",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "   "
+      },
+      "name": "blank-source"
+    },
+    {
+      "expected_error_contains": "must be non-empty text",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": ""
+      },
+      "name": "unicode-blank-source"
+    },
+    {
+      "expected_error_contains": "unsupported control characters",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "a\u0000b"
+      },
+      "name": "control-source"
+    },
+    {
+      "expected_error_contains": "locale is invalid",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en_US",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-locale"
+    },
+    {
+      "expected_error_contains": "request_id is invalid",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "has spaces",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-request-id"
+    },
+    {
+      "expected_error_contains": "digest is invalid",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-attachment-digest-10"
+    },
+    {
+      "expected_error_contains": "media_type is invalid",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain; charset=utf-8",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-attachment-media_type-11"
+    },
+    {
+      "expected_error_contains": "unsupported control characters",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "bad\u0000name",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-attachment-name-12"
+    },
+    {
+      "expected_error_contains": "below the minimum",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": -1,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-attachment-size_bytes-13"
+    },
+    {
+      "expected_error_contains": "exceeds the maximum",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 9007199254740992,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "invalid-attachment-size_bytes-14"
+    },
+    {
+      "expected_error_contains": "too many items",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000005",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000006",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000007",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000008",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000009",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000b",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000c",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000d",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000e",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000f",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "attachment-limit-seventeen"
+    },
+    {
+      "expected_error_contains": "digests must be unique",
+      "input": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          },
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "name": "duplicate-input-attachment"
+    }
+  ],
+  "negative_outputs": [
+    {
+      "expected_error_contains": "cannot grant authority or execution",
+      "name": "resolver-cannot-make-draft-executable",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": true,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "review-only",
+      "name": "draft-cannot-be-executable",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":true,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:48bd99cbbfd03a14fcc0fb1fbe85c35824d7ede14b93d92dc3a8a22920b9553d",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "review-only",
+      "name": "draft-cannot-grant-commit-authority",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":true,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:b35ed37ea3cc1ecf2f4dce764e92208cad711e6301506a77dc85789eb4b2f149",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "review-only",
+      "name": "draft-cannot-skip-review",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":false,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:bdacd03e7d2349b66bbdeafe68d84a6249a5c146c4bb07a2e093cb6962765b3e",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "format",
+      "name": "draft-format-is-closed",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:bbfd9b37faa626902e534689be267b0ea9755dc02fa79e7f2ade923d1e0b04ae",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "sorted and unique",
+      "name": "draft-capabilities-cannot-be-duplicated",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[\"code.review\",\"code.review\"],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:ca0c551e4bb41b0dfb67665356583a4396515b7e7b737228ce1fab88a4a5efbf",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "digests must be unique",
+      "name": "draft-attachments-cannot-be-duplicated",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"},{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:ad5129364faf6421f3de2fc59c0ff0e7c0f42cc9bf1c90998436e3631847a215",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "verification_status",
+      "name": "draft-attachment-verification-cannot-be-invented",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"verified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:e50c5329d3762867290a852ac59cc672feb4810146f9ee164a46b2b0147e4fc6",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "does not bind",
+      "name": "draft-content-digest-must-match",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "does not bind draft_json",
+      "name": "response-request-digest-must-match-draft",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "request_id does not bind draft_json",
+      "name": "invalid-response-request_id",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "different-id",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "status does not match draft clarifications",
+      "name": "invalid-response-status",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "draft",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "probe cannot carry draft state",
+      "name": "invalid-response-operation",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "probe",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "must be ready without detail",
+      "name": "invalid-response-ready",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": false,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "must be ready without detail",
+      "name": "invalid-response-detail",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "hidden error",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "exceeds the wire limit",
+      "name": "invalid-response-max_source_bytes",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32769,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "exceeds the wire limit",
+      "name": "invalid-response-max_attachments",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 17,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "incomplete or unordered",
+      "name": "invalid-response-supported_automation_levels",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A4",
+          "A3",
+          "A2",
+          "A1",
+          "A0"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "invocation_context_digest is invalid",
+      "name": "invalid-response-invocation_context_digest",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "resolver_id is invalid",
+      "name": "invalid-response-resolver_id",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "invalid resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "must be non-empty text",
+      "name": "invalid-draft-summary",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"  \"}",
+        "draft_sha256": "sha256:7696d8b1ca8556473c62465d70c3d54b5a90f4ed8186e9ffbdae7019fefd4ea4",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "unsupported control characters",
+      "name": "invalid-draft-risks",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"\\u0000\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:05069a38bc9ba940a6f543780f8cf631eb3fdebbde97ec15ebbf750aea1a2b3d",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "requested_capabilities",
+      "name": "invalid-draft-requested_capabilities",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[\"invalid capability\"],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:d98b624b30351989fe07972bc8604479e6f40ebd3b2a28b6b68e25de8d93757d",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "expected_error_contains": "clarification codes must be unique",
+      "name": "invalid-draft-clarifications",
+      "output": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"},{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:42c06a8da01f6657011103f937be1dcfc9b0c5e86f2f37ce335304132f38c48d",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    }
+  ],
+  "negative_schemas": [
+    {
+      "expected_error_contains": "unsupported keyword",
+      "name": "optional-field-unknown-keyword",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "digest": {
+                  "maxLength": 71,
+                  "minLength": 71,
+                  "type": "string"
+                },
+                "media_type": {
+                  "maxLength": 255,
+                  "minLength": 3,
+                  "type": "string"
+                },
+                "name": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "verification_status": {
+                  "enum": [
+                    "unverified"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "digest",
+                "media_type",
+                "name",
+                "size_bytes",
+                "verification_status"
+              ],
+              "type": "object"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "automation_ceiling": {
+            "enum": [
+              "A0",
+              "A1",
+              "A2",
+              "A3",
+              "A4"
+            ],
+            "type": "string"
+          },
+          "locale": {
+            "maxLength": 35,
+            "minLength": 2,
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "probe",
+              "resolve"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_kind": {
+            "enum": [
+              "agent",
+              "human",
+              "system"
+            ],
+            "type": "string"
+          },
+          "source_text": {
+            "maxLength": 32768,
+            "minLength": 1,
+            "pattern": "unsupported",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "expected_error_contains": "unsupported keyword",
+      "name": "empty-array-child-unknown-keyword",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "assumptions": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "pattern": "unsupported",
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "attachments": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "digest": {
+                  "maxLength": 71,
+                  "minLength": 71,
+                  "type": "string"
+                },
+                "media_type": {
+                  "maxLength": 255,
+                  "minLength": 3,
+                  "type": "string"
+                },
+                "name": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "verification_status": {
+                  "enum": [
+                    "unverified"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "digest",
+                "media_type",
+                "name",
+                "size_bytes",
+                "verification_status"
+              ],
+              "type": "object"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "authority": {
+            "enum": [
+              "none"
+            ],
+            "type": "string"
+          },
+          "automation_ceiling": {
+            "enum": [
+              "A0",
+              "A1",
+              "A2",
+              "A3",
+              "A4"
+            ],
+            "type": "string"
+          },
+          "clarifications": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "question": {
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "question"
+              ],
+              "type": "object"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "commit_authority": {
+            "type": "boolean"
+          },
+          "constraints": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "executable": {
+            "type": "boolean"
+          },
+          "format": {
+            "enum": [
+              "org.nth-dao.intent-draft"
+            ],
+            "type": "string"
+          },
+          "intent_version": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          },
+          "locale": {
+            "maxLength": 35,
+            "minLength": 2,
+            "type": "string"
+          },
+          "outcomes": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "request_digest": {
+            "maxLength": 71,
+            "minLength": 71,
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requested_capabilities": {
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "review_required": {
+            "type": "boolean"
+          },
+          "risks": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "source_kind": {
+            "enum": [
+              "agent",
+              "human",
+              "system"
+            ],
+            "type": "string"
+          },
+          "source_text": {
+            "maxLength": 32768,
+            "minLength": 1,
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "assumptions",
+          "attachments",
+          "authority",
+          "automation_ceiling",
+          "clarifications",
+          "commit_authority",
+          "constraints",
+          "executable",
+          "format",
+          "intent_version",
+          "locale",
+          "outcomes",
+          "request_digest",
+          "request_id",
+          "requested_capabilities",
+          "review_required",
+          "risks",
+          "source_kind",
+          "source_text",
+          "summary"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "expected_error_contains": "reference declared properties",
+      "name": "required-must-be-declared",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "digest": {
+                  "maxLength": 71,
+                  "minLength": 71,
+                  "type": "string"
+                },
+                "media_type": {
+                  "maxLength": 255,
+                  "minLength": 3,
+                  "type": "string"
+                },
+                "name": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "verification_status": {
+                  "enum": [
+                    "unverified"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "digest",
+                "media_type",
+                "name",
+                "size_bytes",
+                "verification_status"
+              ],
+              "type": "object"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "automation_ceiling": {
+            "enum": [
+              "A0",
+              "A1",
+              "A2",
+              "A3",
+              "A4"
+            ],
+            "type": "string"
+          },
+          "locale": {
+            "maxLength": 35,
+            "minLength": 2,
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "probe",
+              "resolve"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_kind": {
+            "enum": [
+              "agent",
+              "human",
+              "system"
+            ],
+            "type": "string"
+          },
+          "source_text": {
+            "maxLength": 32768,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "undeclared"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "positive_exchanges": [
+    {
+      "context": {
+        "capability_id": "org.nth-dao.intent.resolve",
+        "format": "org.nth-dao.intent-resolver-invocation-context.v1",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": "vector-principal"
+      },
+      "request": {
+        "operation": "probe"
+      },
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "",
+        "draft_sha256": "",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "probe",
+        "ready": true,
+        "request_digest": "",
+        "request_id": "",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    },
+    {
+      "context": {
+        "capability_id": "org.nth-dao.intent.resolve",
+        "format": "org.nth-dao.intent-resolver-invocation-context.v1",
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+        "plugin_id": "org.nth-dao.intent.vector-resolver",
+        "principal": "vector-principal"
+      },
+      "request": {
+        "attachments": [
+          {
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "media_type": "text/plain",
+            "name": "café-requirements.txt",
+            "size_bytes": 128,
+            "verification_status": "unverified"
+          }
+        ],
+        "automation_ceiling": "A1",
+        "locale": "en",
+        "operation": "resolve",
+        "request_id": "intent-request:vector-alpha",
+        "source_kind": "human",
+        "source_text": "Review the attached café requirements and propose next steps."
+      },
+      "response": {
+        "authority": "none",
+        "commit_authority": false,
+        "detail": "",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+        "executable": false,
+        "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+        "max_attachments": 16,
+        "max_source_bytes": 32768,
+        "operation": "resolve",
+        "ready": true,
+        "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+        "request_id": "intent-request:vector-alpha",
+        "resolver_id": "org.nth-dao.intent.vector-resolver",
+        "status": "needs-clarification",
+        "supported_automation_levels": [
+          "A0",
+          "A1",
+          "A2",
+          "A3",
+          "A4"
+        ]
+      }
+    }
+  ],
+  "positive_inputs": [
+    {
+      "operation": "probe"
+    },
+    {
+      "attachments": [
+        {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        }
+      ],
+      "automation_ceiling": "A1",
+      "locale": "en",
+      "operation": "resolve",
+      "request_id": "intent-request:vector-alpha",
+      "source_kind": "human",
+      "source_text": "Review the attached café requirements and propose next steps."
+    },
+    {
+      "attachments": [
+        {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        }
+      ],
+      "automation_ceiling": "A1",
+      "locale": "en",
+      "operation": "resolve",
+      "request_id": "intent-request:vector-alpha",
+      "source_kind": "human",
+      "source_text": "﻿"
+    },
+    {
+      "attachments": [
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000005",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000006",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000007",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000008",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000009",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000b",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000c",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000d",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000e",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        },
+        {
+          "digest": "sha256:000000000000000000000000000000000000000000000000000000000000000f",
+          "media_type": "text/plain",
+          "name": "café-requirements.txt",
+          "size_bytes": 128,
+          "verification_status": "unverified"
+        }
+      ],
+      "automation_ceiling": "A1",
+      "locale": "en",
+      "operation": "resolve",
+      "request_id": "intent-request:vector-alpha",
+      "source_kind": "human",
+      "source_text": "Review the attached café requirements and propose next steps."
+    }
+  ],
+  "positive_outputs": [
+    {
+      "authority": "none",
+      "commit_authority": false,
+      "detail": "",
+      "draft_json": "",
+      "draft_sha256": "",
+      "executable": false,
+      "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+      "max_attachments": 16,
+      "max_source_bytes": 32768,
+      "operation": "probe",
+      "ready": true,
+      "request_digest": "",
+      "request_id": "",
+      "resolver_id": "org.nth-dao.intent.vector-resolver",
+      "status": "",
+      "supported_automation_levels": [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4"
+      ]
+    },
+    {
+      "authority": "none",
+      "commit_authority": false,
+      "detail": "",
+      "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"intent.scope.needs-review\",\"question\":\"Which outcomes and constraints should be accepted?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Produce a reviewed plan\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+      "draft_sha256": "sha256:1493814e8d6d84cd9ec8e01b134a483e37bc4fe715c13f9ce1b6be21f73d60f2",
+      "executable": false,
+      "invocation_context_digest": "sha256:9992de1edb0768a4c2d4b5f0ca10c1dfd30ccb752473a4717f85500b45b8f114",
+      "max_attachments": 16,
+      "max_source_bytes": 32768,
+      "operation": "resolve",
+      "ready": true,
+      "request_digest": "sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243",
+      "request_id": "intent-request:vector-alpha",
+      "resolver_id": "org.nth-dao.intent.vector-resolver",
+      "status": "needs-clarification",
+      "supported_automation_levels": [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4"
+      ]
+    }
+  ],
+  "protocol_digest": "sha256:57f7a4d53bbe24233fc6f83f0b882c9bcbc4a65df823b4f5e05b5fa833094841"
+}

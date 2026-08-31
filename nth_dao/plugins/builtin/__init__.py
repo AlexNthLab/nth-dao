@@ -57,6 +57,14 @@ from .memory_market_index import (
     memory_market_index_manifest,
     register_memory_market_index,
 )
+from .literal_intent_resolver import (
+    LITERAL_INTENT_RESOLVER_ID,
+    LITERAL_INTENT_RESOLVER_PLUGIN_ID,
+    LiteralIntentResolverPlugin,
+    LiteralIntentResolverProvider,
+    literal_intent_resolver_manifest,
+    register_literal_intent_resolver,
+)
 from .loopback_transport import (
     LOOPBACK_TRANSPORT_MAX_BYTES,
     LOOPBACK_TRANSPORT_MAX_BYTES_PER_PRINCIPAL,
@@ -127,6 +135,10 @@ __all__ = [
     "MEMORY_MARKET_INDEX_MAX_MUTATION_RECEIPTS",
     "MEMORY_MARKET_INDEX_MAX_MUTATION_RECEIPTS_PER_PRINCIPAL",
     "MEMORY_MARKET_INDEX_PLUGIN_ID",
+    "LITERAL_INTENT_RESOLVER_ID",
+    "LITERAL_INTENT_RESOLVER_PLUGIN_ID",
+    "LiteralIntentResolverPlugin",
+    "LiteralIntentResolverProvider",
     "MemoryMarketIndexPlugin",
     "MemoryMarketIndexProvider",
     "MemoryMessageStorePlugin",
@@ -161,6 +173,7 @@ __all__ = [
     "mock_agent_provider_manifest",
     "memory_message_store_manifest",
     "memory_market_index_manifest",
+    "literal_intent_resolver_manifest",
     "loopback_route_id",
     "loopback_transport_manifest",
     "register_curated_registry_discovery",
@@ -168,6 +181,7 @@ __all__ = [
     "register_mock_agent_provider",
     "register_memory_message_store",
     "register_memory_market_index",
+    "register_literal_intent_resolver",
     "register_loopback_transport",
     "register_supervised_agent_provider",
     "supervised_agent_manifest",

@@ -1,0 +1,25 @@
+{
+  "capability": {
+    "capability_id": "org.nth-dao.intent.resolve",
+    "cardinality": "many",
+    "consistency": "C0",
+    "deterministic": false,
+    "effects": [
+      "none"
+    ],
+    "failure_semantics": "retry-safe",
+    "input_schema_digest": "sha256:4b0e6513f67d2e8cb1ca2bbd9d6ca3057c6d6cf5ebc83e934100f21caad81942",
+    "output_schema_digest": "sha256:be53f9f77113fa38cbc4a7b3ee71f7f5224db8cf03278155746879ce45d21f31",
+    "privacy": "confidential",
+    "retention": "none",
+    "security": "untrusted-hint",
+    "version": "1.0.0"
+  },
+  "draft_schema": "intent-draft-schema-v1.json",
+  "expected_protocol_digest": "sha256:57f7a4d53bbe24233fc6f83f0b882c9bcbc4a65df823b4f5e05b5fa833094841",
+  "format": "nth-dao-plugin-capability-conformance-v1",
+  "input_schema": "intent-resolver-input-schema-v1.json",
+  "operation_vectors": "intent-resolver-wire-cases-v1.json",
+  "output_schema": "intent-resolver-output-schema-v1.json",
+  "schema_version": 1
+}

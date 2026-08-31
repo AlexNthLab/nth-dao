@@ -187,6 +187,25 @@ detected mechanically: validators remain reviewed in-process code, not proof
 of provider correctness, and their source artifact remains part of the plugin
 trust decision.
 
+The Host retains its own canonical request snapshot and passes a separate deep
+copy to the provider. Exchange validation always uses the original snapshot,
+not the provider's possibly modified input. Every semantic, authority, exchange,
+and response-context callback receives isolated JSON copies. Synchronous
+mutation fails validation; retained references cannot change the Host's request
+or returned response after a callback finishes. These are data-integrity
+guarantees, not an in-process code sandbox.
+
+A capability may also register a `response_context_validator`, which the Host
+runs after output and exchange checks against its own invocation context. It
+can bind a response to the selected plugin, invocation ID, and principal scope;
+a provider-supplied context is never substituted for the Host's context.
+The callback receives a detached response copy, and mutation fails validation
+instead of changing an already checked result.
+Top-level `invocation_context_digest` is reserved for this boundary. A schema
+containing it must require the field and register input, output, exchange, and
+response-context validators, even for C0 capabilities. Missing callbacks fail
+registration; dishonest no-op callbacks remain part of reviewed Host code.
+
 ## Lifecycle And Authorization
 
 The lifecycle is deliberately split:
@@ -632,6 +651,41 @@ allow every declared external effect before selection. Checked-in JSON vectors f
 entry schema, operation schemas, protocol digest, positive inputs, and one
 cross-language canonical content address.
 
+### Intent resolver boundary
+
+`org.nth-dao.intent.resolve` v1 converts a bounded human, agent, or system
+request into an unsigned, review-required `IntentDraft`. Input and output bind
+the exact request ID, source text, source kind, locale, automation ceiling, and
+digest-addressed attachment metadata. Attachment digests, media types, and
+sizes are fixed as `unverified` caller claims; validation of referenced bytes
+belongs to a separate Host-owned artifact boundary. A resolver response declares
+`authority=none`, `commit_authority=false`, and `executable=false`. It cannot
+create a Task, Mission, Agreement, Offer, Mandate, capability grant, payment,
+or execution request. Any such promotion is a distinct future signed protocol
+operation outside this capability.
+
+The reviewed `org.nth-dao.intent.literal-resolver` is an offline conformance
+sample. It performs no model inference, stores no request, requests no Host
+permissions, and always asks for explicit outcomes and constraints. It is
+installed disabled and is not wired to application workflows or UI. Its
+checked-in schemas and canonical JSON, digest, authority, and source-binding
+vectors are exercised by Python and an independent Node test consumer. The
+Node consumer validates the entire schema tree, including unused optional
+fields and array items, and checks operation-specific and cross-field semantics.
+It rejects unsupported schema keywords and is not a general JSON Schema
+implementation. Negative vectors require explicit validation failures in both
+languages, not identical diagnostic wording or accidental runtime exceptions.
+A detached resolver response is unsigned: its `resolver_id` is a claimed label,
+not cryptographic provenance, and `source_kind` does not authenticate a source.
+The response's invocation-context digest is verified by a Host-side callback;
+it rejects blind replay across calls or principals but is not a detached proof
+of origin. Draft content stays stable across identical requests, while the
+response wrapper changes for each invocation. Resolver v1 defines no business
+error codes: malformed input and revoked bindings fail at the Host boundary.
+A future model-backed resolver must declare its real network, subprocess,
+privacy, and retention profile and remain an untrusted hint producer; sharing
+the wire shape does not grant it authority.
+
 Migration order:
 
 1. plugin manifest, capability contract, registry, and lifecycle tests;
@@ -647,6 +701,8 @@ Migration order:
    (implemented; existing Market reads are not migrated or dual-written);
 6. reviewed subprocess RPC foundation (implemented for static local workers;
    OS sandbox and signed package loading remain);
-7. settlement and payment providers only after OS confinement, complete
+7. non-authoritative Intent resolver v1 and disabled literal reference
+   (implemented; signed envelopes, solvers, policy gates, and UI remain);
+8. settlement and payment providers only after OS confinement, complete
    package verification, durable idempotency and mandate-bound commit tests
    exist.
