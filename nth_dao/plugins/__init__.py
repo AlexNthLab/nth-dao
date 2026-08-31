@@ -75,6 +75,17 @@ from .intent_acceptance import (
     IntentAcceptanceStore,
     IntentAcceptanceStoreError,
 )
+from .intent_acceptance_audit import (
+    EVENT_INTENT_ACCEPTED,
+    INTENT_ACCEPTANCE_ANCHOR_FORMAT,
+    INTENT_ACCEPTANCE_ANCHOR_SCHEMA,
+    IntentAcceptanceAnchor,
+    IntentAcceptanceAuditError,
+    IntentAcceptanceReconciliation,
+    IntentAcceptanceSpineBridge,
+    validate_intent_acceptance_anchor,
+    verify_intent_acceptance_anchor,
+)
 from .intent_envelope import (
     INTENT_ENVELOPE_BODY_SCHEMA,
     INTENT_ENVELOPE_FORMAT,
@@ -258,6 +269,15 @@ __all__ = [
     "CapabilityRequirement",
     "CapabilitySchemas",
     "InvocationAuthority",
+    "EVENT_INTENT_ACCEPTED",
+    "INTENT_ACCEPTANCE_ANCHOR_FORMAT",
+    "INTENT_ACCEPTANCE_ANCHOR_SCHEMA",
+    "IntentAcceptanceAnchor",
+    "IntentAcceptanceAuditError",
+    "IntentAcceptanceReconciliation",
+    "IntentAcceptanceSpineBridge",
+    "validate_intent_acceptance_anchor",
+    "verify_intent_acceptance_anchor",
     "IntentAcceptanceBusy",
     "IntentAcceptanceCapacity",
     "IntentAcceptanceConflict",

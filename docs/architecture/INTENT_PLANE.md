@@ -80,7 +80,9 @@ It verifies a direct Ed25519 DID acceptance against explicit local expectations.
 Its pure functions do not persist acceptance or consume nonces. A separate
 [local acceptance journal](INTENT_ACCEPTANCE.md) now provides atomic revision
 and nonce checks, restart-safe idempotency and local audit observations. A signed
-predecessor hash alone still does not establish a current head. Governance policy
+predecessor hash alone still does not establish a current head. An explicit
+[Spine bridge](INTENT_ACCEPTANCE_SPINE.md) can project hash-only historical
+observations with node signatures and crash-safe retries. Governance policy
 integration, cross-node acceptance and business promotion remain deferred.
 
 ### SolverProposal
@@ -158,6 +160,8 @@ Implemented now:
 - explicit Host SDK acceptance journal with one atomic artifact/nonce/audit
   write, current-context callback under the writer lock, bounded verified history,
   competing-revision rejection and restart-safe exact retries.
+- opt-in, node-signed Spine observation anchors, with no raw source/context
+  publication, bounded replay pages and idempotent crash recovery.
 
 Not implemented now:
 
@@ -166,7 +170,7 @@ Not implemented now:
 - capability grants, signing, payment, execution, or approval through a draft;
 - UI promotion, visible acceptance diff, or persistent unsigned draft storage;
 - automatic membership/role/revocation/delegation resolution, cross-store policy
-  coordination, signed Spine acceptance audit or cross-node acceptance. Live
+  coordination, automatic audit publication or cross-node acceptance. Live
   business promotion remains disabled until these boundaries are integrated.
 
 Those omissions are security boundaries. They must not be filled by routing a

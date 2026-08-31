@@ -672,7 +672,10 @@ automatic key loading, REST/UI promotion, durable replay store, or execution
 path is introduced by the wire primitive. The separate
 [local acceptance journal](INTENT_ACCEPTANCE.md) now adds explicit Host SDK
 nonce/revision CAS and atomic local audit persistence; it does not enable
-governance integration, a Spine bridge or business promotion.
+governance integration or business promotion. An explicit
+[Spine bridge](INTENT_ACCEPTANCE_SPINE.md) adds node-signed, hash-only observation
+anchors and recoverable replay; no automatic publication or signing provider
+capability is enabled.
 See [Intent Envelope v1](INTENT_ENVELOPE.md).
 
 The reviewed `org.nth-dao.intent.literal-resolver` is an offline conformance
@@ -714,8 +717,8 @@ Migration order:
    OS sandbox and signed package loading remain);
 7. non-authoritative Intent resolver v1 and disabled literal reference
    (implemented; signed envelope v1 wire/signature/context checks implemented;
-   local acceptance journal with nonce/revision CAS implemented; governance
-   integration, signed Spine bridge, solvers, policy gates, and UI remain);
+   local acceptance journal with nonce/revision CAS and opt-in signed Spine
+   anchors implemented; governance integration, solvers, policy gates, and UI remain);
 8. settlement and payment providers only after OS confinement, complete
    package verification, durable idempotency and mandate-bound commit tests
    exist.

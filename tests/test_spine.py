@@ -1,6 +1,7 @@
 """Spine chaining, persistence, tamper detection, signature, and projection tests."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import multiprocessing
 import os
@@ -17,6 +18,7 @@ from nth_dao.spine import (
     Projection,
     SignedEventLog,
     SpineAppendOutcomeUnknown,
+    SpineSemanticConflict,
     replay,
     sign_event,
     verify_event,
@@ -228,6 +230,191 @@ def test_spine_plain_intent_failure_is_safe_to_retry(
     appended = log.append("test.safe-retry", {"id": "one"}, ts_ms=1)
 
     assert log.verified_snapshot() == (appended,)
+
+
+@pytest.mark.parametrize("phase", ["readback", "cache", "lock-exit"])
+@pytest.mark.parametrize("batch", [False, True])
+def test_post_commit_io_failure_retains_reconciliation_ids(
+    tmp_path: Path, monkeypatch, phase: str, batch: bool,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    identity = _id()
+    log = SignedEventLog(path, identity)
+    log.append("test.prefix", {"id": "prefix"}, ts_ms=1)
+    payloads = ({"id": "one"}, {"id": "two"}) if batch else ({"id": "one"},)
+    real_readback = log._token_after_expected_append
+    real_lock = spine_log_module.InterProcessLock
+
+    def unavailable(*_args, **_kwargs):
+        raise PermissionError("PRIVATE-READBACK-DETAIL")
+
+    class FailingReleaseLock(real_lock):
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            unavailable()
+
+    def fail_cache_after_readback(*args):
+        token = real_readback(*args)
+        patch.setattr(log, "_remember_verified_unlocked", unavailable)
+        return token
+
+    with monkeypatch.context() as patch:
+        if phase == "lock-exit":
+            patch.setattr(spine_log_module, "InterProcessLock", FailingReleaseLock)
+        else:
+            patch.setattr(log, "_token_after_expected_append",
+                          fail_cache_after_readback if phase == "cache" else unavailable)
+        with pytest.raises(SpineAppendOutcomeUnknown) as caught:
+            if batch:
+                log.append_unique_many("test.outcome", payloads,
+                                       unique_payload_fields=("id",), ts_ms=2)
+            else:
+                log.append("test.outcome", payloads[0], ts_ms=2)
+    retained = tuple(log.read_all())[1:]
+    assert caught.value.event_ids == tuple(event.event_id for event in retained)
+    assert caught.value.event_id == retained[-1].event_id
+    assert not log._pending_path.exists()
+    assert log._verified_cache_token is None
+    assert log._verified_cache_events == ()
+    recovered = SignedEventLog(path, identity)
+    for event in retained:
+        assert recovered.reconcile_append(event.event_id) == event
+    if batch:
+        retried = recovered.append_unique_many("test.outcome", payloads,
+                                              unique_payload_fields=("id",), ts_ms=3)
+        assert tuple(event for event, _ in retried) == retained
+        assert all(not created for _, created in retried)
+    assert len(recovered.verified_snapshot()) == 1 + len(payloads)
+
+
+def test_actual_readback_open_failure_after_pending_cleanup(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, _id())
+    clear = log._clear_append_intent_unlocked
+    original_open = Path.open
+
+    def deny_read(target, mode="r", *args, **kwargs):
+        if target == path and mode == "rb":
+            raise PermissionError("readback temporarily unavailable")
+        return original_open(target, mode, *args, **kwargs)
+
+    def clear_then_deny():
+        clear()
+        patch.setattr(Path, "open", deny_read)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(log, "_clear_append_intent_unlocked", clear_then_deny)
+        with pytest.raises(SpineAppendOutcomeUnknown) as caught:
+            log.append("test.outcome", {"id": "one"}, ts_ms=1)
+    assert not log._pending_path.exists()
+    assert log.reconcile_append(caught.value.event_id) == caught.value.event
+    assert len(log.verified_snapshot()) == 1
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("phase", ["intent", "record"])
+def test_write_failure_plus_lock_release_failure_retains_all_ids(
+    tmp_path: Path, monkeypatch, batch: bool, phase: str,
+) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    method = "_write_append_intent_unlocked" if phase == "intent" else "_write_record_unlocked"
+    real_write, real_lock = getattr(log, method), spine_log_module.InterProcessLock
+    calls = 0
+
+    def ambiguous_write(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        real_write(*args, **kwargs)
+        if calls == (2 if batch else 1):
+            raise OSError("write outcome unknown")
+
+    class FailingReleaseLock(real_lock):
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            raise OSError("lock release also failed")
+
+    payloads = ({"id": "one"}, {"id": "two"}) if batch else ({"id": "one"},)
+    with monkeypatch.context() as patch:
+        patch.setattr(spine_log_module, "InterProcessLock", FailingReleaseLock)
+        patch.setattr(log, method, ambiguous_write)
+        with pytest.raises(SpineAppendOutcomeUnknown) as caught:
+            if batch:
+                log.append_unique_many("test.outcome", payloads, unique_payload_fields=("id",), ts_ms=1)
+            else:
+                log.append("test.outcome", payloads[0], ts_ms=1)
+    resolved = log.reconcile_append(caught.value.event_id)
+    events = log.verified_snapshot()
+    assert len(events) == len(payloads)
+    assert caught.value.event_ids == tuple(event.event_id for event in events)
+    assert resolved == events[-1]
+
+
+def test_read_only_batch_retry_does_not_report_new_uncertain_append(tmp_path: Path, monkeypatch) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    event, _ = log.append_unique("test.outcome", {"id": "one"}, unique_payload_fields=("id",), ts_ms=1)
+
+    def unavailable(*_args):
+        raise PermissionError("readback unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(log, "_token_after_expected_append", unavailable)
+        with pytest.raises(PermissionError):
+            log.append_unique("test.outcome", event.payload, unique_payload_fields=("id",), ts_ms=2)
+    assert log.verified_snapshot() == (event,)
+
+
+@pytest.mark.parametrize("phase", ["before-intent", "after-record"])
+def test_batch_io_failure_identifies_already_written_prefix(
+    tmp_path: Path, monkeypatch, phase: str,
+) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    method = "_write_append_intent_unlocked" if phase == "before-intent" else "_write_record_unlocked"
+    real_write = getattr(log, method)
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2 and phase == "before-intent":
+            raise PermissionError("second intent not written")
+        real_write(*args, **kwargs)
+        if calls == 2:
+            raise PermissionError("second record may be written")
+
+    payloads = ({"id": "one"}, {"id": "two"})
+    with monkeypatch.context() as patch:
+        patch.setattr(log, method, fail_second)
+        with pytest.raises(SpineAppendOutcomeUnknown) as caught:
+            log.append_unique_many("test.outcome", payloads,
+                                   unique_payload_fields=("id",), ts_ms=2)
+    retained = log.verified_snapshot()
+    assert len(retained) == (1 if phase == "before-intent" else 2)
+    assert caught.value.event_ids == tuple(event.event_id for event in retained)
+    assert caught.value.event_id == retained[-1].event_id
+    retried = log.append_unique_many("test.outcome", payloads,
+                                    unique_payload_fields=("id",), ts_ms=3)
+    assert [created for _, created in retried] == [False, phase == "before-intent"]
+    assert len(log.verified_snapshot()) == 2
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_post_commit_integrity_failure_is_not_retryable_io(
+    tmp_path: Path, monkeypatch, batch: bool,
+) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+
+    def changed(*_args):
+        raise ValueError("spine appended bytes do not match signed events")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(log, "_token_after_expected_append", changed)
+        with pytest.raises(ValueError, match="do not match"):
+            if batch:
+                log.append_unique_many("test.outcome", ({"id": "one"},),
+                                       unique_payload_fields=("id",), ts_ms=1)
+            else:
+                log.append("test.outcome", {"id": "one"}, ts_ms=1)
+    assert log._verified_cache_token is None
 
 
 def test_append_unique_retry_after_unknown_outcome_is_duplicate_safe(
@@ -601,6 +788,93 @@ def test_append_unique_many_scans_once_and_prevalidates_conflicts(
     )
     assert appended[0][1] is True
     assert scans == 1
+
+
+@pytest.mark.parametrize("rejected_id", ["existing", "first", "second"])
+def test_batch_validation_rejects_before_any_new_write(tmp_path, rejected_id):
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    log.append("test.observation", {"id": "existing"}, ts_ms=1)
+    before = log.storage_token()
+
+    def validate(event):
+        if event.payload["id"] == rejected_id:
+            raise PermissionError("rejected candidate")
+
+    with pytest.raises(PermissionError, match="rejected candidate"):
+        log.append_unique_many(
+            "test.observation", ({"id": "first"}, {"id": "existing"}, {"id": "second"}),
+            unique_payload_fields=("id",), ts_ms=2, validate_event=validate,
+        )
+    assert log.storage_token() == before
+    assert not log._pending_path.exists()
+
+
+def test_batch_validator_cannot_mutate_cached_prepared_or_returned_events(tmp_path):
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    existing = log.append("test.observation", {"id": "existing", "nested": [1]}, ts_ms=1)
+    views = []
+
+    def validate(event):
+        views.append(event)
+        event.payload["nested"].append(2)
+        event.author_did = "changed"
+
+    results = log.append_unique_many(
+        "test.observation", (existing.payload, {"id": "new", "nested": [1]}),
+        unique_payload_fields=("id",), ts_ms=2, validate_event=validate,
+    )
+    assert len(views) == 2
+    for view in views:
+        view.payload.clear()
+    for event, _created in results:
+        assert event.payload["nested"] == [1]
+        assert verify_event(event) == (True, "ok")
+    assert log.get_verified_event(existing.event_id) == existing
+    assert log.verify_chain() == (True, "ok")
+
+
+def test_batch_validator_and_write_share_process_lock(tmp_path):
+    identity = _id()
+    path = tmp_path / "events.jsonl"
+    log = SignedEventLog(path, identity)
+    other = SignedEventLog(path, identity, lock_timeout=0.05)
+    outcomes = []
+
+    def try_write():
+        try:
+            other.append("test.observation", {"id": "other"}, ts_ms=2)
+        except TimeoutError:
+            return "locked"
+        return "unlocked"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def validate(event):
+            outcomes.append(pool.submit(try_write).result(timeout=5))
+
+        log.append_unique_many("test.observation", ({"id": "new"},),
+                               unique_payload_fields=("id",), ts_ms=1, validate_event=validate)
+    assert outcomes == ["locked"]
+    assert len(log.verified_snapshot()) == 1
+
+
+@pytest.mark.parametrize("validator", [False, lambda _event: False, lambda _event: True])
+def test_batch_validator_invalid_contract_is_fail_closed(tmp_path, validator):
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    before = log.storage_token()
+    with pytest.raises(TypeError, match="validator"):
+        log.append_unique_many("test.observation", ({"id": "new"},),
+                               unique_payload_fields=("id",), ts_ms=1, validate_event=validator)
+    assert log.storage_token() == before
+
+
+def test_semantic_retry_requires_exact_wire_types(tmp_path):
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    log.append("test.observation", {"id": "flag", "executable": False}, ts_ms=1)
+    before = log.storage_token()
+    with pytest.raises(SpineSemanticConflict, match="conflicting payload"):
+        log.append_unique_many("test.observation", ({"id": "new"}, {"id": "flag", "executable": 0}),
+                               unique_payload_fields=("id",), ts_ms=2)
+    assert log.storage_token() == before
 
 
 def test_verified_indexes_rebuild_after_another_writer_advances_log(

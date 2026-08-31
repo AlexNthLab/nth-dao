@@ -119,8 +119,10 @@ snapshot tampering, bounded churn and concurrent retries at the default capacity
 `record.audit` is a hash-linked local `intent.accepted` observation with the
 signed envelope digest, context digest, sequence and acceptance time. It carries
 `authority=none`, `commit_authority=false` and `executable=false`. It is **not a
-signed Spine event**. No Spine event type is registered and no dual-write bridge
-is enabled. A durable, idempotent Spine bridge remains a separate step.
+signed Spine event**. The separate, opt-in
+[Spine bridge](INTENT_ACCEPTANCE_SPINE.md) can anchor its digests as a node-signed
+`intent.accepted` event. No bridge is automatically enabled; the local journal
+and Spine are not written as one cross-store transaction.
 
 A local hash chain is not tamper-proof against a workspace owner who rewrites
 the database and its hashes. Retaining an audit tail outside the database lets

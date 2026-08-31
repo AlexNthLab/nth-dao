@@ -14,16 +14,21 @@ import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional, Tuple, Union
+from typing import Callable, Iterator, Optional, Tuple, Union
 
+from nth_dao.canonical_json import canonical_json
 from nth_dao.execution_receipt import now_ms
 from nth_dao.identity import AgentIdentity
-from nth_dao.spine.event import GENESIS_PREV, SpineEvent, sign_event, verify_event
+from nth_dao.spine.event import (
+    GENESIS_PREV, MAX_SPINE_PAYLOAD_BYTES, SpineEvent, sign_event, verify_event,
+)
 from nth_dao.util.io import InterProcessLock, atomic_write_bytes
 
 MAX_SPINE_LINE_BYTES = 2 * 1024 * 1024
 MAX_SPINE_APPEND_BATCH = 1_000
+MAX_SPINE_APPEND_BATCH_BYTES = 8 * 1024 * 1024
 MAX_SPINE_VERIFIED_CACHE_BYTES = 16 * 1024 * 1024
 MAX_SPINE_VERIFIED_CACHE_EVENTS = 10_000
 MAX_SPINE_SEMANTIC_INDEX_SHAPES = 64
@@ -37,12 +42,25 @@ StorageRevision = tuple[int, int, int, int, int]
 logger = logging.getLogger(__name__)
 
 
-class SpineAppendOutcomeUnknown(OSError):
-    """An append may be durable and must be reconciled before retrying."""
+class SpineSemanticConflict(ValueError):
+    """Existing semantic keys are duplicated or bind different wire payloads."""
 
-    def __init__(self, event: SpineEvent, cause: OSError) -> None:
+
+class SpineAppendOutcomeUnknown(OSError):
+    """An append may be durable and must be reconciled before retrying.
+
+    ``event_id`` identifies the last possibly committed event. ``event_ids``
+    also includes the completed prefix of this call's batch, in write order.
+    It excludes existing semantic matches and records not attempted yet.
+    """
+
+    def __init__(
+        self, event: SpineEvent, cause: OSError, *,
+        event_ids: tuple[str, ...] | None = None,
+    ) -> None:
         self.event = event
         self.event_id = event.event_id
+        self.event_ids = event_ids if event_ids is not None else (event.event_id,)
         super().__init__(
             "spine append outcome is unknown for event "
             f"{self.event_id}; call reconcile_append(event_id) before retrying: "
@@ -121,12 +139,74 @@ class SignedEventLog:
             ensure_ascii=True,
         ).encode("ascii")
 
-    def _write_append_intent_unlocked(
-        self,
+    @staticmethod
+    def _encode_payload(payload: dict) -> bytes:
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        try:
+            encoded = canonical_json(payload)
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise ValueError("spine event payload is not canonical JSON") from exc
+        if len(encoded) > MAX_SPINE_PAYLOAD_BYTES:
+            raise ValueError("spine event payload exceeds byte limit")
+        return encoded
+
+    @staticmethod
+    def _snapshot_payload(payload: dict) -> dict:
+        return json.loads(SignedEventLog._encode_payload(payload))
+
+    @staticmethod
+    def _charge_batch_bytes(used: int, additional: int) -> int:
+        used += additional
+        if used > MAX_SPINE_APPEND_BATCH_BYTES:
+            raise ValueError("spine append batch exceeds byte budget")
+        return used
+
+    @staticmethod
+    def _snapshot_event(event: SpineEvent) -> SpineEvent:
+        # Use the wire tree, not deepcopy's shallower Python recursion limit.
+        return SpineEvent(**json.loads(SignedEventLog._encode_event(event)))
+
+    def _validate_append_event(
+        self, event: SpineEvent, validator: Callable[[SpineEvent], None] | None,
+    ) -> None:
+        if validator is not None and validator(self._snapshot_event(event)) is not None:
+            raise TypeError("event validator must return None or raise")
+
+    @contextmanager
+    def _append_outcome_guard(self) -> Iterator[list[SpineEvent]]:
+        """Retain write identities until I/O, including lock release, completes.
+
+        Enter under the thread lock and outside the process lock. Track identities
+        once their append intents may be durable, before any later exception can
+        be replaced by a failing process-lock release.
+        """
+        appended: list[SpineEvent] = []
+        try:
+            yield appended
+        except OSError as exc:
+            self._verified_cache_token = None
+            self._verified_cache_events = ()
+            self._verified_cache_by_id = {}
+            self._semantic_cache.clear()
+            if isinstance(exc, SpineAppendOutcomeUnknown):
+                exc.event_ids = tuple(
+                    event.event_id for event in appended if event.event_id != exc.event_id
+                ) + (exc.event_id,)
+                raise
+            if appended:
+                raise SpineAppendOutcomeUnknown(
+                    appended[-1], exc,
+                    event_ids=tuple(event.event_id for event in appended),
+                ) from exc
+            raise
+
+    @staticmethod
+    def _encode_append_intent(
         *,
         base_size: int,
         line: bytes,
-    ) -> None:
+    ) -> bytes:
         document = {
             "version": SPINE_APPEND_INTENT_VERSION,
             "base_size": base_size,
@@ -141,6 +221,10 @@ class SignedEventLog:
         ).encode("ascii")
         if len(encoded) > MAX_SPINE_APPEND_INTENT_BYTES:
             raise ValueError("spine append intent exceeds byte limit")
+        return encoded
+
+    def _write_append_intent_unlocked(self, *, base_size: int, line: bytes) -> None:
+        encoded = self._encode_append_intent(base_size=base_size, line=line)
         atomic_write_bytes(self._pending_path, encoded)
 
     def _read_append_intent_unlocked(self) -> tuple[int, bytes] | None:
@@ -526,12 +610,13 @@ class SignedEventLog:
     def _token_after_expected_append(
         self,
         prefix_token: StorageToken,
-        suffix: bytes,
+        suffix: bytes | tuple[bytes, ...],
     ) -> StorageToken:
         """Bind a verified prefix to exact newly appended bytes without rescanning events."""
 
         prefix_size = prefix_token[2]
-        expected_size = prefix_size + len(suffix)
+        parts = (suffix,) if isinstance(suffix, bytes) else suffix
+        expected_size = prefix_size + sum(len(part) for part in parts)
         digest = hashlib.sha256()
         try:
             with self._path.open("rb") as stream:
@@ -547,10 +632,15 @@ class SignedEventLog:
                 ).hexdigest()
                 if digest.hexdigest() != expected_prefix_digest:
                     raise ValueError("spine verified prefix changed before append")
-                retained_suffix = stream.read(len(suffix))
-                if retained_suffix != suffix or stream.read(1):
+                for part in parts:
+                    for offset in range(0, len(part), 1024 * 1024):
+                        expected = memoryview(part)[offset:offset + 1024 * 1024]
+                        retained = stream.read(len(expected))
+                        if retained != expected:
+                            raise ValueError("spine appended bytes do not match signed events")
+                        digest.update(retained)
+                if stream.read(1):
                     raise ValueError("spine appended bytes do not match signed events")
-                digest.update(retained_suffix)
                 metadata = os.fstat(stream.fileno())
         except FileNotFoundError as exc:
             raise ValueError("spine disappeared after append") from exc
@@ -568,7 +658,7 @@ class SignedEventLog:
     def verified_snapshot_with_token(
         self,
     ) -> tuple[StorageToken, tuple[SpineEvent, ...]]:
-        """Return a storage token and events from one verified lock snapshot."""
+        """Return a storage token and detached events from a verified snapshot."""
 
         with self._lock:
             with InterProcessLock(
@@ -583,7 +673,7 @@ class SignedEventLog:
                     )
                 if token is None:
                     raise RuntimeError("verified spine snapshot has no storage token")
-                return token, events
+                return token, tuple(self._snapshot_event(event) for event in events)
 
     def append(
         self, event_type: str, payload: dict, *, ts_ms: Optional[int] = None,
@@ -595,7 +685,9 @@ class SignedEventLog:
         consider issuing a new append. Business writes with semantic keys
         should use :meth:`append_unique` instead.
         """
-        with self._lock:
+        # Neither caller input nor returned views may own the verified cache.
+        payload = self._snapshot_payload(payload)
+        with self._lock, self._append_outcome_guard() as appended:
             with InterProcessLock(
                 self._path,
                 timeout=self._lock_timeout,
@@ -611,36 +703,35 @@ class SignedEventLog:
                     )
                 if token is None:
                     raise RuntimeError("verified spine prefix has no storage token")
-                event = self._append_after_verified(
+                event, line = self._prepare_append(
                     event_type,
                     payload,
                     ts_ms=ts_ms,
                     last=events[-1] if events else None,
+                    base_size=token[2],
                 )
+                result = self._snapshot_event(event)
+                self._append_prepared(event, line, outcomes=appended)
                 appended_events = events + (event,)
                 appended_token = self._token_after_expected_append(
                     token,
-                    self._encode_event(event) + b"\n",
+                    line + b"\n",
                 )
                 self._remember_verified_unlocked(appended_events, appended_token)
-                return event
+                return result
 
-    def _append_after_verified(
+    def _prepare_append(
         self,
         event_type: str,
         payload: dict,
         *,
         ts_ms: Optional[int],
         last: Optional[SpineEvent],
-    ) -> SpineEvent:
-        self._verified_cache_token = None
-        self._head_hash = (
-            last.content_hash if last is not None else GENESIS_PREV
-        )
-        self._head_seq = last.seq if last is not None else -1
+        base_size: int,
+    ) -> tuple[SpineEvent, bytes]:
         event = sign_event(
-            seq=self._head_seq + 1,
-            prev_hash=self._head_hash,
+            seq=last.seq + 1 if last is not None else 0,
+            prev_hash=last.content_hash if last is not None else GENESIS_PREV,
             event_type=event_type,
             payload=payload,
             identity=self._identity,
@@ -649,6 +740,13 @@ class SignedEventLog:
         line = self._encode_event(event)
         if len(line) > MAX_SPINE_LINE_BYTES:
             raise ValueError("spine event exceeds line byte limit")
+        self._encode_append_intent(base_size=base_size, line=line)
+        return event, line
+
+    def _append_prepared(
+        self, event: SpineEvent, line: bytes, *, outcomes: list[SpineEvent],
+    ) -> None:
+        self._verified_cache_token = None
         base_size = self._path.stat().st_size if self._path.exists() else 0
         try:
             self._write_append_intent_unlocked(base_size=base_size, line=line)
@@ -656,10 +754,13 @@ class SignedEventLog:
             try:
                 persisted_intent = self._read_append_intent_unlocked()
             except (OSError, ValueError):
+                outcomes.append(event)
                 raise SpineAppendOutcomeUnknown(event, exc) from exc
             if persisted_intent is not None:
+                outcomes.append(event)
                 raise SpineAppendOutcomeUnknown(event, exc) from exc
             raise
+        outcomes.append(event)
         try:
             self._write_record_unlocked(line + b"\n")
         except OSError as exc:
@@ -674,7 +775,6 @@ class SignedEventLog:
             )
         self._head_hash = event.content_hash
         self._head_seq = event.seq
-        return event
 
     def reconcile_append(self, event_id: str) -> Optional[SpineEvent]:
         """Recover pending I/O and return the exact committed event, if any.
@@ -708,16 +808,17 @@ class SignedEventLog:
                 self._head_seq = last.seq if last is not None else -1
                 cached = self._verified_cache_by_id.get(event_id)
                 if cached is not None:
-                    return cached
+                    return self._snapshot_event(cached)
                 if self._verified_cache_token is not None:
                     return None
-                return next(
+                event = next(
                     (event for event in events if event.event_id == event_id),
                     None,
                 )
+                return self._snapshot_event(event) if event is not None else None
 
     def verified_snapshot(self) -> tuple[SpineEvent, ...]:
-        """Return one lock-consistent, signature-verified event snapshot."""
+        """Return detached events from one lock-consistent verified snapshot."""
 
         with self._lock:
             with InterProcessLock(
@@ -731,7 +832,7 @@ class SignedEventLog:
                         f"spine log at {self._path} is corrupt and cannot be "
                         f"read as a verified snapshot: {reason}"
                     )
-                return events
+                return tuple(self._snapshot_event(event) for event in events)
 
     def append_unique(
         self,
@@ -790,7 +891,7 @@ class SignedEventLog:
                 owner_kind, sequence = next(iter(owners))
                 if owner_kind != "existing" or not 0 <= sequence < len(events):
                     raise RuntimeError("spine semantic index is inconsistent")
-                return events[sequence]
+                return self._snapshot_event(events[sequence])
 
     def get_verified_event(self, event_id: str) -> Optional[SpineEvent]:
         """Return one verified event by content-addressed event id."""
@@ -815,11 +916,12 @@ class SignedEventLog:
                     )
                 cached = self._verified_cache_by_id.get(event_id)
                 if cached is not None:
-                    return cached
-                return next(
+                    return self._snapshot_event(cached)
+                event = next(
                     (event for event in events if event.event_id == event_id),
                     None,
                 )
+                return self._snapshot_event(event) if event is not None else None
 
     def append_unique_many(
         self,
@@ -828,14 +930,28 @@ class SignedEventLog:
         *,
         unique_payload_fields: tuple[str, ...],
         ts_ms: Optional[int] = None,
+        validate_event: Callable[[SpineEvent], None] | None = None,
     ) -> tuple[tuple[SpineEvent, bool], ...]:
         """Append one idempotent batch after a single verified scan.
 
         All semantic conflicts are checked before the first write. An I/O
         failure may still leave a valid prefix, which remains retryable by the
         same semantic keys.
+
+        An 8 MiB aggregate budget counts canonical input bytes, new encoded
+        records (including newlines), and encoded return views, even duplicates.
+        Charges precede retaining each copy; overflow rejects before any new
+        write. This bounds batch amplification, not total process memory or
+        full-history verification. The log never silently splits the batch.
+
+        An optional trusted Host validator checks detached existing and proposed
+        events under the same write lock, before any append. It must return None
+        or raise; it must not do I/O, reenter this log or acquire other stores.
+        Mutating a validator's view cannot alter cached or proposed events.
         """
 
+        if validate_event is not None and not callable(validate_event):
+            raise TypeError("event validator must be callable")
         if (
             not isinstance(unique_payload_fields, tuple)
             or not unique_payload_fields
@@ -856,6 +972,14 @@ class SignedEventLog:
             raise ValueError(
                 f"payload batch exceeds {MAX_SPINE_APPEND_BATCH} events"
             )
+        batch_bytes = 0
+        snapshots: list[dict] = []
+        for payload in payloads:
+            encoded = self._encode_payload(payload)
+            batch_bytes = self._charge_batch_bytes(batch_bytes, len(encoded))
+            snapshots.append(json.loads(encoded))
+        payloads = tuple(snapshots)
+        del snapshots, encoded
         for payload in payloads:
             if not isinstance(payload, dict):
                 raise ValueError("payload must be an object")
@@ -868,7 +992,7 @@ class SignedEventLog:
                     raise ValueError(
                         f"unique payload field {field!r} must be a non-empty string"
                     )
-        with self._lock:
+        with self._lock, self._append_outcome_guard() as appended:
             with InterProcessLock(
                 self._path,
                 timeout=self._lock_timeout,
@@ -896,18 +1020,20 @@ class SignedEventLog:
                             owners.get((field, payload[field]), set())
                         )
                     if len(matched) > 1:
-                        raise ValueError(
+                        raise SpineSemanticConflict(
                             "spine contains duplicate semantic event keys"
                         )
                     if matched:
                         owner = next(iter(matched))
+                        if owner[0] == "existing":
+                            self._validate_append_event(events[owner[1]], validate_event)
                         owner_payload = (
                             events[owner[1]].payload
                             if owner[0] == "existing"
                             else planned[owner[1]]
                         )
-                        if owner_payload != payload:
-                            raise ValueError(
+                        if canonical_json(owner_payload) != canonical_json(payload):
+                            raise SpineSemanticConflict(
                                 "spine semantic event key has conflicting payload"
                             )
                         resolutions.append((owner, False))
@@ -920,32 +1046,43 @@ class SignedEventLog:
                             owner
                         )
 
-                appended: list[SpineEvent] = []
+                prepared: list[tuple[SpineEvent, bytes]] = []
                 last = events[-1] if events else None
+                base_size = token[2]
                 for payload in planned:
-                    event = self._append_after_verified(
+                    event, line = self._prepare_append(
                         event_type,
                         payload,
                         ts_ms=ts_ms,
                         last=last,
+                        base_size=base_size,
                     )
-                    appended.append(event)
+                    batch_bytes = self._charge_batch_bytes(batch_bytes, len(line) + 1)
+                    self._validate_append_event(event, validate_event)
+                    prepared.append((event, line))
                     last = event
-                appended_events = events + tuple(appended)
-                appended_token = self._token_after_expected_append(
-                    token,
-                    b"".join(self._encode_event(event) + b"\n" for event in appended),
-                )
-                self._remember_verified_unlocked(appended_events, appended_token)
-                return tuple(
-                    (
+                    base_size += len(line) + 1
+                # Build every detached result before the first durable write.
+                result_views: list[tuple[SpineEvent, bool]] = []
+                for owner, created in resolutions:
+                    event = (
                         events[owner[1]]
                         if owner[0] == "existing"
-                        else appended[owner[1]],
-                        created,
+                        else prepared[owner[1]][0]
                     )
-                    for owner, created in resolutions
+                    batch_bytes = self._charge_batch_bytes(
+                        batch_bytes, len(self._encode_event(event)),
+                    )
+                    result_views.append((self._snapshot_event(event), created))
+                results = tuple(result_views)
+                for event, line in prepared:
+                    self._append_prepared(event, line, outcomes=appended)
+                appended_events = events + tuple(event for event, _line in prepared)
+                appended_token = self._token_after_expected_append(
+                    token, tuple(part for _event, line in prepared for part in (line, b"\n")),
                 )
+                self._remember_verified_unlocked(appended_events, appended_token)
+                return results
 
     def verify_chain(self) -> Tuple[bool, str]:
         """Verify sequence, links, structure, and signatures fail-closed.

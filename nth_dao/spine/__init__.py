@@ -6,7 +6,7 @@ from nth_dao.spine.event import (
     sign_event,
     verify_event,
 )
-from nth_dao.spine.log import SignedEventLog, SpineAppendOutcomeUnknown
+from nth_dao.spine.log import SignedEventLog, SpineAppendOutcomeUnknown, SpineSemanticConflict
 from nth_dao.spine.projection import Projection, replay
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     "verify_event",
     "SignedEventLog",
     "SpineAppendOutcomeUnknown",
+    "SpineSemanticConflict",
     "Projection",
     "replay",
 ]
