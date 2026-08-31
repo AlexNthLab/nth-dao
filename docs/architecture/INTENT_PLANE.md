@@ -62,7 +62,7 @@ checks it after output and exchange validation, so a cached response from
 another invocation or principal is rejected. Raw principal text is not emitted.
 Once detached, `resolver_id` is only a self-declared label and the digest is
 only a content address; neither proves provenance, truth, or authorization.
-Promotion requires a separate future signed `IntentEnvelope`; changing any
+Promotion requires a separate signed `IntentEnvelope`; changing any
 source field requires a new resolve request and draft. `source_kind` is also a
 request classification, not verified human, agent, or system identity.
 
@@ -72,6 +72,14 @@ request classification, not verified human, agent, or system identity.
 - binds the accepted draft digest, scope, constraints, expiry, and nonce;
 - names allowed solver classes but grants no commit authority;
 - is append-only; revisions create a new envelope linked to the prior digest.
+
+The v1 wire primitive is now implemented in
+`nth_dao/plugins/intent_envelope.py`; see [Intent Envelope v1](INTENT_ENVELOPE.md).
+It is Host-owned protocol code, not a signing capability offered to plugins.
+It verifies a direct Ed25519 DID acceptance against explicit local expectations.
+It does not yet persist acceptance or consume nonces. The append-only property
+requires a future atomic revision-head store; a signed predecessor hash alone
+does not establish a current head or prevent concurrent forks.
 
 ### SolverProposal
 
@@ -137,13 +145,23 @@ Implemented now:
   JSON Schema support;
 - a bounded, offline, zero-permission literal reference provider;
 - Host lifecycle registration with no automatic authorization or enablement.
+- domain-separated, non-executable `IntentEnvelope` v1 signing and verification;
+- exact draft/source-request binding, rejection of open clarifications and empty
+  outcomes, and bounded solver selectors with no execution or capability grants;
+- mandatory Host expectations for signer, audience, scope, draft, revision head,
+  automation ceiling, and solver classes; strict time bounds;
+- checked-in signed vectors, independent Node verification of Python signatures,
+  Python verification of a Node-generated signature, and re-signed negative
+  cases that must fail semantic checks despite valid cryptography.
 
 Not implemented now:
 
-- model-backed interpretation, `IntentEnvelope`, solver, or policy providers;
+- model-backed interpretation, solver, or deterministic policy providers;
 - automatic creation of Tasks, Missions, Agreements, Offers, or Mandates;
 - capability grants, signing, payment, execution, or approval through a draft;
-- UI promotion or persistent draft storage.
+- UI promotion, visible acceptance diff, or persistent draft/envelope storage;
+- nonce consumption, atomic revision CAS, revocation/delegation resolution, or
+  acceptance audit. Live business promotion remains disabled until these exist.
 
 Those omissions are security boundaries. They must not be filled by routing a
 draft directly into an existing executor.

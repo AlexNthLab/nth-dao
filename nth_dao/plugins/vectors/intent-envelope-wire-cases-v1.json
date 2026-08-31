@@ -1,0 +1,1147 @@
+{
+  "format": "org.nth-dao.intent-envelope-conformance.v1",
+  "negative_cases": [
+    {
+      "body_updates": {
+        "commit_authority": true
+      },
+      "expected_updates": {},
+      "id": "commit-authority",
+      "now_ms": 1000,
+      "signature": "3958937e15620796ec620a82f9392acbff1279fd96cee7199d34dd693cfb44a1916493692ed36621668de040d28a4dbabb4749367cafbfaaac6aa05ced81f006",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "executable": true
+      },
+      "expected_updates": {},
+      "id": "executable",
+      "now_ms": 1000,
+      "signature": "e77c0905a7c364fbe591bd746fffe6953feca9945891183bc4c3a448f8a5336911165e3833b401fe12a8a6a23b03f3b8601144fceb9e70b5070010dd85ac5a00",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "executable": 0
+      },
+      "expected_updates": {},
+      "id": "numeric-false",
+      "now_ms": 1000,
+      "signature": "f209080dd5d9852d5511875dabc6b799f00e9b4ad35412cb32221f6a52c75863ba8b7067777389435e7df3a31baf52be21b2a9200acc3e79d000bbf9e729b006",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "mandate": "not-a-grant"
+      },
+      "expected_updates": {},
+      "id": "unknown-field",
+      "now_ms": 1000,
+      "signature": "9a3ff3326763521179612a1f3b1b769e6be936b257dbcffe62ec38c6ba60d7064cf2cc6b6cb71e96a8dfb7afa660e54737caa50c6c58f7a5c494a6623f88100f",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "purpose": "payment"
+      },
+      "expected_updates": {},
+      "id": "wrong-purpose",
+      "now_ms": 1000,
+      "signature": "edab6ebb582e6fc2065fbb60198b6452bf5dddd679652a512f323db1b4b88fafd46359ae022d3c26ac840bd5aef2e2e60f62c72010ac35634c428b0934851d09",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "version": "2"
+      },
+      "expected_updates": {},
+      "id": "wrong-version",
+      "now_ms": 1000,
+      "signature": "7dad5b16ee20fca3e08f52102a9ada13e453328d3ac4e0f3b8dd2be0e9b48f2b1f57d66b9ea35c0f8b6cdc8e81c343e26c765943a0ef71ec687168bfc5ce6100",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "authority": "owner"
+      },
+      "expected_updates": {},
+      "id": "wrong-authority",
+      "now_ms": 1000,
+      "signature": "2c49c81f0c4078d5086af2c3bb94b8be551ddc0aeed14203fc8ff84a2fcf4ab2ef9208cde40c00af021a75c43e04848775a471289fd125be654758adddc49100",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "issued_at_ms": true
+      },
+      "expected_updates": {},
+      "id": "boolean-time",
+      "now_ms": 1000,
+      "signature": "0e6d4b85a75e61ecc5c1988d19d011f743fc46b39f41594c5224429410b07ce29839d15b4f407b3a0c5b3ee11254a733bc2d79db30c0776f62e490dabda51a08",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "expires_at_ms": 9007199254740992
+      },
+      "expected_updates": {},
+      "id": "unsafe-time",
+      "now_ms": 1000,
+      "signature": "8e7d74309ad67928124c53d831fc4016f7ea1e0c9ebd9a9da4e89a4565b6341fbc767cddad337a73a4d631896c715434ba3d584357791da6925acac88ca73c06",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "expires_at_ms": 1000
+      },
+      "expected_updates": {},
+      "id": "expired-ttl",
+      "now_ms": 1000,
+      "signature": "f8f844c68d2ef6b10d12563fffc389f6694460efca0aeba7033001795c8dd150250ba3f732504e25f73cb30ca8eaa52ac5163ced9a0c4b7da338615095ac4902",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "expires_at_ms": 86401001
+      },
+      "expected_updates": {},
+      "id": "excessive-ttl",
+      "now_ms": 1000,
+      "signature": "37c7610dec80b5dd5320921e0d84521a2377ac11f0b840edc7e5980d0aaa83a2a82c58d5a425604be16a7f39db0dada007f0985736347ce612ba3de1fee10205",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "expected_updates": {},
+      "id": "uppercase-nonce",
+      "now_ms": 1000,
+      "signature": "f492d4cc676edb342984a45fbd368a7b454cb25380e0a7cd02c4f0a00b6935b40c239f8a9e6b92cb57dc6fff55fd8410606f98cc8bb44dddc5164aa98edfe50f",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "nonce": ""
+      },
+      "expected_updates": {},
+      "id": "missing-nonce",
+      "now_ms": 1000,
+      "signature": "ceecf72ae902a7b81569041986b8521c41b305bc62c78a73cb5f42d7f0199ca392eb87f0d081908cfda1af3e269300b0f7beae9755ce5250ebd62b5fc1a2fb09",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "scope_id": "*"
+      },
+      "expected_updates": {},
+      "id": "wildcard-scope",
+      "now_ms": 1000,
+      "signature": "f66484f3cf8bcbdfe75b7ca42ed0d9466c2de17e1a2cdde5318e55599e990322da10965fb4772dfb5a48bb3128a538d5ff6f303c2e02797eefef5ef2e440100e",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "solver_classes": [
+          "*"
+        ]
+      },
+      "expected_updates": {},
+      "id": "wildcard-solver",
+      "now_ms": 1000,
+      "signature": "54fa162b0ed994f73bec826c6ae00d4219c2514718febf46f8ac64ceef0a40cad2461eb41ce7d1b8c59742fb8e98fda0eed9a6fe408640203d9ce6bd4ef4db02",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "solver_classes": [
+          "a",
+          "a"
+        ]
+      },
+      "expected_updates": {},
+      "id": "duplicate-solver",
+      "now_ms": 1000,
+      "signature": "c2a706792f72a65ddb77633b30f57de0e5afde01ca9af16d105a61162294f1084e2757054d206bf8cd8e0b145828ec28121887ca9c251c4c383344ae2042cc03",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "solver_classes": [
+          "z",
+          "a"
+        ]
+      },
+      "expected_updates": {},
+      "id": "unordered-solver",
+      "now_ms": 1000,
+      "signature": "e773892dc27954d32618287c6ec3c01f9e9feb8351ccfd0c19e00667fe001d93aa1a2fba0051c317a8b6ae2ec627202c0a22e5ad14c179501e071bc28dbac50c",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "solver_classes": []
+      },
+      "expected_updates": {},
+      "id": "empty-solver",
+      "now_ms": 1000,
+      "signature": "f815061b1434b346ab00d7d2e449b6a0d67c7f5283b828122a8639a4d721a65659e68123999fb4c65896fd30daccc0e021b6d6b37e302159128186a6448d880c",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "solver_classes": [
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a"
+        ]
+      },
+      "expected_updates": {},
+      "id": "too-many-solvers",
+      "now_ms": 1000,
+      "signature": "cab9f02c1adf5da587a1491be5eaab4ab81f55f7a76ee3223bce5a72704b7cfe30f658e1921810c92692cddd111ac6cc2aa1a7f9fabaacf88a7242015d92dc00",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "automation_ceiling": "A2"
+      },
+      "expected_updates": {},
+      "id": "automation-escalation",
+      "now_ms": 1000,
+      "signature": "3abb5a302959858f696435772d04feaf3c7f041f3460f17287ae6e1cd71ca97f9cd4d19ec58b6ee370641fc31bb4f76d489dd5737a9f893210ed0deaf793800f",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "revision": 2
+      },
+      "expected_updates": {},
+      "id": "missing-predecessor",
+      "now_ms": 1000,
+      "signature": "43445cd67b99430eb29877befa469e076e26e1156d4d0e17a6ed8b771aa4ea0c85c3b18867656e9fb4c850ac7f7dfd83354ca6edd2e0bbb1c370f8f8ff58a80b",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "previous_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected_updates": {},
+      "id": "invalid-genesis",
+      "now_ms": 1000,
+      "signature": "4e611e2fca5b91d10a72928594747da4f551cd478fdc7d2b29a7c9ea4945fe0636cbf60567b44359ef5c724415c1afc1a4ef4d741bf15efd111ec928ccfcaf09",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "audience_did": "did:web:example.test"
+      },
+      "expected_updates": {},
+      "id": "invalid-did",
+      "now_ms": 1000,
+      "signature": "03f935571f4f219fc395ed2bed46be4db7ca6429513780ec494b579a647f499cce97144c647c1b85fcff1daf94834901f1e5a08c6c7f726bf5d4a3446aa19008",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "draft_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "expected_updates": {},
+      "id": "draft-hash-mismatch",
+      "now_ms": 1000,
+      "signature": "539352061fb6da9b9fad418bce56509634e3ed6bd24b227ca18136ce96ac376c0e3681db4924877089a28910466810ddf11ba073d9cea5336f1fed2db3a3ec07",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "draft_digest": "sha256:e70c08fdde3ca2ae4a833d62d5e1c253d8e9b94304f0b14fd27d816d0189939b",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[{\"code\":\"unknown\",\"question\":\"Which scope?\"}],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}"
+      },
+      "expected_updates": {},
+      "id": "unresolved-draft",
+      "now_ms": 1000,
+      "signature": "bf933c316fc7469e98c786a4ef7dd1e5013da745039a1acdd0e9cae997681f821d5a3407e13c837813b724c8bc6f2ecd5e3a5865a70e1130068d8104fabb010e",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "draft_digest": "sha256:eccf29afc7fa3c82efe97d9acc33dd28ca037bc109ed48c963f7e56678954b01",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}"
+      },
+      "expected_updates": {},
+      "id": "empty-outcomes",
+      "now_ms": 1000,
+      "signature": "eda9539eab3ef0d23d68b1f8c2d1a6af600cd1d810b888a964868a775461d247d2442e87d6105b94b16070627ca6b881608aa2c2ab66f2c8331308009b14aa0e",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "draft_digest": "sha256:c3a165e334d0dff0b46b44720ab2f9c93471620f79120bc880a53594d3c23acf",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Altered source with its old digest\",\"summary\":\"Review requirements and propose next steps.\"}"
+      },
+      "expected_updates": {},
+      "id": "source-rebinding",
+      "now_ms": 1000,
+      "signature": "bd13624c00a308cd6e5607b7beb14539c67a9be7713085081d6046631810f0bac406d57df7b8c9c78d37f3b3f1aa1a18c8c3e26c1e9d903bfd08fc632d4ec20a",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "draft_digest": "sha256:93f405b80dc4c46d8e247d694cf1e833f9b5b437a4477f0082d05d11a89c2c9f",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}"
+      },
+      "expected_updates": {},
+      "id": "request-rebinding",
+      "now_ms": 1000,
+      "signature": "850b9b6bd7509f3b1814a87f888b285d86db020b0d4469d00f07a0cc84993af025f12c18f53e6957c8dce25ee604b15c024316f9c7d5085e463738b8c2bfa405",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}\n"
+      },
+      "expected_updates": {},
+      "id": "noncanonical-draft",
+      "now_ms": 1000,
+      "signature": "b63e88bdb8f1aa04cddd19684a84cd7da3d0ced4774bc17cc9612516d61027f50b0dfe22b3aa58289525b368f21e4a63b7ba87e90f1ebb9a5f670e1c69702108",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "scope_id": "workspace:another"
+      },
+      "expected_updates": {},
+      "id": "signature-tamper",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "signer_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj"
+      },
+      "id": "expected-signer_did",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "audience_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ"
+      },
+      "id": "expected-audience_did",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "scope_id": "workspace:another"
+      },
+      "id": "expected-scope_id",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "draft_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "id": "expected-draft_digest",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": [
+          "org.nth-dao.solver.other"
+        ]
+      },
+      "id": "expected-allowed_solver_classes",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "automation_ceiling": "A0"
+      },
+      "id": "expected-automation_ceiling",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "previous_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": 2
+      },
+      "id": "stale-revision-head",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "future",
+      "now_ms": 999,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "expired",
+      "now_ms": 61000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "boolean-clock",
+      "now_ms": true,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "scope_id": "workspace:conformance-intent\n"
+      },
+      "expected_updates": {
+        "scope_id": "workspace:conformance-intent\n"
+      },
+      "id": "scope-trailing-newline",
+      "now_ms": 1000,
+      "signature": "5ff8b49c9130bde10d5a4062a56bbdb3c50551697e1a1806e1fb56927424fe21539733347a682f74f52957648cc3c0142af219a1cc7daeca506859aa95165c02",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "solver_classes": [
+          "solver\n"
+        ]
+      },
+      "expected_updates": {
+        "allowed_solver_classes": [
+          "solver\n"
+        ]
+      },
+      "id": "solver-trailing-newline",
+      "now_ms": 1000,
+      "signature": "b4b88c9e65927905bbe4e83b78f29fb6b7ff75157064ff5ecb761abf907fb9567b871c3f5a3d624dd6e56a9a011b949fb69604b4750273f21fd0e1e4cc3cf10b",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": "prefix:org.nth-dao.solver.review:suffix"
+      },
+      "id": "context-string-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": null
+      },
+      "id": "context-null-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": true
+      },
+      "id": "context-boolean-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": {
+          "class": "org.nth-dao.solver.review"
+        }
+      },
+      "id": "context-object-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": []
+      },
+      "id": "context-empty-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": [
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review"
+        ]
+      },
+      "id": "context-duplicate-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": [
+          "zzz",
+          "org.nth-dao.solver.review"
+        ]
+      },
+      "id": "context-unordered-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": [
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review",
+          "org.nth-dao.solver.review"
+        ]
+      },
+      "id": "context-oversized-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": [
+          "*"
+        ]
+      },
+      "id": "context-wildcard-policy",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "allowed_solver_classes": [
+          null
+        ]
+      },
+      "id": "context-bad-policy-member",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "grants": "all"
+      },
+      "id": "context-unknown-field",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "signer_did": "admin"
+      },
+      "id": "context-invalid-signer",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "audience_did": "did:web:example.test"
+      },
+      "id": "context-invalid-audience",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "scope_id": "*"
+      },
+      "id": "context-invalid-scope",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "draft_digest": "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+      },
+      "id": "context-invalid-draft-digest",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "revision": true
+      },
+      "id": "context-boolean-revision",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "previous_digest": "unknown"
+      },
+      "id": "context-invalid-lineage",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {
+        "automation_ceiling": "A4"
+      },
+      "id": "context-invalid-ceiling",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {},
+      "expected_omissions": [
+        "revision"
+      ],
+      "expected_updates": {},
+      "id": "context-missing-field",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": true
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj"
+      },
+      "id": "small-order-public-key-forgery",
+      "now_ms": 1000,
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-zero-nonce-equation",
+      "now_ms": 1000,
+      "signature": "0100000000000000000000000000000000000000000000000000000000000000abc6b24671410826c42aca10247666c8bbb0f0db6522c95cdf508a15e464d70c",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "nonce": "00000000000000000000000000000000",
+        "signer_did": "did:key:z6MkwfujuXTsnSYdrpAv249JV4ESuD9wfb4EoVbL3otfU4Bc"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkwfujuXTsnSYdrpAv249JV4ESuD9wfb4EoVbL3otfU4Bc"
+      },
+      "id": "crypto-public-key-mixed-equation",
+      "now_ms": 1000,
+      "signature": "5866666666666666666666666666666666666666666666666666666666666666c9a543f9bae8f78d7f7cddeef8d53d7294631130587c0f8447594e41811d2307",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj"
+      },
+      "id": "crypto-public-key-identity",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-identity",
+      "now_ms": 1000,
+      "signature": "0100000000000000000000000000000000000000000000000000000000000000db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkvQQfodDS9hpfvSLcFA5f2iCB9tBXk3PE5b1P8VVsjtRt"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkvQQfodDS9hpfvSLcFA5f2iCB9tBXk3PE5b1P8VVsjtRt"
+      },
+      "id": "crypto-public-key-order-two",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-order-two",
+      "now_ms": 1000,
+      "signature": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7fdb6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP"
+      },
+      "id": "crypto-public-key-order-four",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-order-four",
+      "now_ms": 1000,
+      "signature": "0000000000000000000000000000000000000000000000000000000000000000db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkvYDV6cfbwNp6jpaZGAcYpZgdfuK59wb3FKdA8t7sBVka"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkvYDV6cfbwNp6jpaZGAcYpZgdfuK59wb3FKdA8t7sBVka"
+      },
+      "id": "crypto-public-key-noncanonical-identity",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-noncanonical-identity",
+      "now_ms": 1000,
+      "signature": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7fdb6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Uw"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Uw"
+      },
+      "id": "crypto-public-key-negative-zero",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-negative-zero",
+      "now_ms": 1000,
+      "signature": "0100000000000000000000000000000000000000000000000000000000000080db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6Mkeb4rtEhc8DUtvt5ehaVjdx3TLbQPpnTArkXhqfb1Mq75"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6Mkeb4rtEhc8DUtvt5ehaVjdx3TLbQPpnTArkXhqfb1Mq75"
+      },
+      "id": "crypto-public-key-off-curve",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-off-curve",
+      "now_ms": 1000,
+      "signature": "0200000000000000000000000000000000000000000000000000000000000000db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {
+        "signer_did": "did:key:z6MkwfujuXTsnSYdrpAv249JV4ESuD9wfb4EoVbL3otfU4Bc"
+      },
+      "expected_updates": {
+        "signer_did": "did:key:z6MkwfujuXTsnSYdrpAv249JV4ESuD9wfb4EoVbL3otfU4Bc"
+      },
+      "id": "crypto-public-key-mixed-order",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-R-mixed-order",
+      "now_ms": 1000,
+      "signature": "ffd444f95c9f9f95042087dcdd5fc31f76a38891d3ee925f0474e423b1a596cbdb6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-S-at-order",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-S-malleated",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41c84220955a5e84be4472704cdd806c4d1567a4f657480f7b72751a52c19dda1d",
+      "signature_valid": false
+    },
+    {
+      "body_updates": {},
+      "expected_updates": {},
+      "id": "crypto-S-max",
+      "now_ms": 1000,
+      "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "signature_valid": false
+    }
+  ],
+  "positive_cases": [
+    {
+      "document_digest": "sha256:2c488d061eeecbeb840c07931632cfbb394137fd02cfd02c63fb6e202613c87e",
+      "envelope": {
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "none",
+        "automation_ceiling": "A1",
+        "commit_authority": false,
+        "draft_digest": "sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "executable": false,
+        "expires_at_ms": 61000,
+        "format": "org.nth-dao.intent-envelope",
+        "issued_at_ms": 1000,
+        "nonce": "696c4aa524e10e9c3d0775af0570bfe9",
+        "previous_digest": "",
+        "purpose": "draft-acceptance",
+        "revision": 1,
+        "scope_id": "workspace:conformance-intent",
+        "signature": "50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d",
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+        "solver_classes": [
+          "org.nth-dao.solver.review"
+        ],
+        "version": "1"
+      },
+      "expected": {
+        "allowed_solver_classes": [
+          "org.nth-dao.solver.review"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "automation_ceiling": "A1",
+        "draft_digest": "sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2",
+        "previous_digest": "",
+        "revision": 1,
+        "scope_id": "workspace:conformance-intent",
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ"
+      },
+      "id": "genesis",
+      "now_ms": 1000,
+      "signing_bytes_hex": "4e54482d44414f3a496e74656e74456e76656c6f70653a7631007b2261756469656e63655f646964223a226469643a6b65793a7a364d6b6a6a524c356551766d5974354e723646547137665a6739414c444e415a47363361714d79314359676d334e6a222c22617574686f72697479223a226e6f6e65222c226175746f6d6174696f6e5f6365696c696e67223a224131222c22636f6d6d69745f617574686f72697479223a66616c73652c2264726166745f646967657374223a227368613235363a38333431333931643635363430386665373734306464646439653564643061393132386334356661653235626537613337336137656462386363373534646132222c2264726166745f6a736f6e223a227b5c22617373756d7074696f6e735c223a5b5d2c5c226174746163686d656e74735c223a5b7b5c226469676573745c223a5c227368613235363a616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615c222c5c226d656469615f747970655c223a5c22746578742f706c61696e5c222c5c226e616d655c223a5c22636166c3a92d726571756972656d656e74732e7478745c222c5c2273697a655f62797465735c223a3132382c5c22766572696669636174696f6e5f7374617475735c223a5c22756e76657269666965645c227d5d2c5c22617574686f726974795c223a5c226e6f6e655c222c5c226175746f6d6174696f6e5f6365696c696e675c223a5c2241315c222c5c22636c6172696669636174696f6e735c223a5b5d2c5c22636f6d6d69745f617574686f726974795c223a66616c73652c5c22636f6e73747261696e74735c223a5b5d2c5c2265786563757461626c655c223a66616c73652c5c22666f726d61745c223a5c226f72672e6e74682d64616f2e696e74656e742d64726166745c222c5c22696e74656e745f76657273696f6e5c223a5c22315c222c5c226c6f63616c655c223a5c22656e5c222c5c226f7574636f6d65735c223a5b5c2250726f766964652061207265766965772070726f706f73616c20776974686f757420657865637574696e672069742e5c225d2c5c22726571756573745f6469676573745c223a5c227368613235363a333632616539613534336532373062646438613534666263653766336463376632373461616137336365363138333366363832646663316564313438383234335c222c5c22726571756573745f69645c223a5c22696e74656e742d726571756573743a766563746f722d616c7068615c222c5c227265717565737465645f6361706162696c69746965735c223a5b5d2c5c227265766965775f72657175697265645c223a747275652c5c227269736b735c223a5b5c22536f7572636520636f6e74656e74206d617920636f6e7461696e20756e7472757374656420696e737472756374696f6e735c225d2c5c22736f757263655f6b696e645c223a5c2268756d616e5c222c5c22736f757263655f746578745c223a5c225265766965772074686520617474616368656420636166c3a920726571756972656d656e747320616e642070726f706f7365206e6578742073746570732e5c222c5c2273756d6d6172795c223a5c2252657669657720726571756972656d656e747320616e642070726f706f7365206e6578742073746570732e5c227d222c2265786563757461626c65223a66616c73652c22657870697265735f61745f6d73223a36313030302c22666f726d6174223a226f72672e6e74682d64616f2e696e74656e742d656e76656c6f7065222c226973737565645f61745f6d73223a313030302c226e6f6e6365223a223639366334616135323465313065396333643037373561663035373062666539222c2270726576696f75735f646967657374223a22222c22707572706f7365223a2264726166742d616363657074616e6365222c227265766973696f6e223a312c2273636f70655f6964223a22776f726b73706163653a636f6e666f726d616e63652d696e74656e74222c227369676e65725f646964223a226469643a6b65793a7a364d6b765578734c5653465437574b7674585a4850697264355675674d64436a5a41375470504c7574637054676d5a222c22736f6c7665725f636c6173736573223a5b226f72672e6e74682d64616f2e736f6c7665722e726576696577225d2c2276657273696f6e223a2231227d"
+    },
+    {
+      "document_digest": "sha256:48b5adf71d0a2bfc7de3b909950be780586be31053b43669f0a724ee021b0af0",
+      "envelope": {
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "none",
+        "automation_ceiling": "A1",
+        "commit_authority": false,
+        "draft_digest": "sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"Review requirements and propose next steps.\"}",
+        "executable": false,
+        "expires_at_ms": 61000,
+        "format": "org.nth-dao.intent-envelope",
+        "issued_at_ms": 1000,
+        "nonce": "9cbd91c7a9a6e1158ca1133827e71a05",
+        "previous_digest": "sha256:2c488d061eeecbeb840c07931632cfbb394137fd02cfd02c63fb6e202613c87e",
+        "purpose": "draft-acceptance",
+        "revision": 2,
+        "scope_id": "workspace:conformance-intent",
+        "signature": "caf9ff5bb4a9da0d326b41eacb666aaf485ce783cda4a57f2741a5ce63ee2cb0e3ad9b753cc21ad4a6624ad1eec9a796fd51dc8722a9669c7937035909f9d006",
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+        "solver_classes": [
+          "org.nth-dao.solver.review"
+        ],
+        "version": "1"
+      },
+      "expected": {
+        "allowed_solver_classes": [
+          "org.nth-dao.solver.review"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "automation_ceiling": "A1",
+        "draft_digest": "sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2",
+        "previous_digest": "sha256:2c488d061eeecbeb840c07931632cfbb394137fd02cfd02c63fb6e202613c87e",
+        "revision": 2,
+        "scope_id": "workspace:conformance-intent",
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ"
+      },
+      "id": "revision",
+      "now_ms": 60999,
+      "signing_bytes_hex": "4e54482d44414f3a496e74656e74456e76656c6f70653a7631007b2261756469656e63655f646964223a226469643a6b65793a7a364d6b6a6a524c356551766d5974354e723646547137665a6739414c444e415a47363361714d79314359676d334e6a222c22617574686f72697479223a226e6f6e65222c226175746f6d6174696f6e5f6365696c696e67223a224131222c22636f6d6d69745f617574686f72697479223a66616c73652c2264726166745f646967657374223a227368613235363a38333431333931643635363430386665373734306464646439653564643061393132386334356661653235626537613337336137656462386363373534646132222c2264726166745f6a736f6e223a227b5c22617373756d7074696f6e735c223a5b5d2c5c226174746163686d656e74735c223a5b7b5c226469676573745c223a5c227368613235363a616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615c222c5c226d656469615f747970655c223a5c22746578742f706c61696e5c222c5c226e616d655c223a5c22636166c3a92d726571756972656d656e74732e7478745c222c5c2273697a655f62797465735c223a3132382c5c22766572696669636174696f6e5f7374617475735c223a5c22756e76657269666965645c227d5d2c5c22617574686f726974795c223a5c226e6f6e655c222c5c226175746f6d6174696f6e5f6365696c696e675c223a5c2241315c222c5c22636c6172696669636174696f6e735c223a5b5d2c5c22636f6d6d69745f617574686f726974795c223a66616c73652c5c22636f6e73747261696e74735c223a5b5d2c5c2265786563757461626c655c223a66616c73652c5c22666f726d61745c223a5c226f72672e6e74682d64616f2e696e74656e742d64726166745c222c5c22696e74656e745f76657273696f6e5c223a5c22315c222c5c226c6f63616c655c223a5c22656e5c222c5c226f7574636f6d65735c223a5b5c2250726f766964652061207265766965772070726f706f73616c20776974686f757420657865637574696e672069742e5c225d2c5c22726571756573745f6469676573745c223a5c227368613235363a333632616539613534336532373062646438613534666263653766336463376632373461616137336365363138333366363832646663316564313438383234335c222c5c22726571756573745f69645c223a5c22696e74656e742d726571756573743a766563746f722d616c7068615c222c5c227265717565737465645f6361706162696c69746965735c223a5b5d2c5c227265766965775f72657175697265645c223a747275652c5c227269736b735c223a5b5c22536f7572636520636f6e74656e74206d617920636f6e7461696e20756e7472757374656420696e737472756374696f6e735c225d2c5c22736f757263655f6b696e645c223a5c2268756d616e5c222c5c22736f757263655f746578745c223a5c225265766965772074686520617474616368656420636166c3a920726571756972656d656e747320616e642070726f706f7365206e6578742073746570732e5c222c5c2273756d6d6172795c223a5c2252657669657720726571756972656d656e747320616e642070726f706f7365206e6578742073746570732e5c227d222c2265786563757461626c65223a66616c73652c22657870697265735f61745f6d73223a36313030302c22666f726d6174223a226f72672e6e74682d64616f2e696e74656e742d656e76656c6f7065222c226973737565645f61745f6d73223a313030302c226e6f6e6365223a223963626439316337613961366531313538636131313333383237653731613035222c2270726576696f75735f646967657374223a227368613235363a32633438386430363165656563626562383430633037393331363332636662623339343133376664303263666430326336336662366532303236313363383765222c22707572706f7365223a2264726166742d616363657074616e6365222c227265766973696f6e223a322c2273636f70655f6964223a22776f726b73706163653a636f6e666f726d616e63652d696e74656e74222c227369676e65725f646964223a226469643a6b65793a7a364d6b765578734c5653465437574b7674585a4850697264355675674d64436a5a41375470504c7574637054676d5a222c22736f6c7665725f636c6173736573223a5b226f72672e6e74682d64616f2e736f6c7665722e726576696577225d2c2276657273696f6e223a2231227d"
+    },
+    {
+      "document_digest": "sha256:6d6a7accaa703d9c8f3d8239256e826853883e0b6afbe5631e1e9d9c19f885f8",
+      "envelope": {
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "none",
+        "automation_ceiling": "A1",
+        "commit_authority": false,
+        "draft_digest": "sha256:83a4605185a75aa7871abb07bcfbd873156814b61f357f49d2f68f1a308a48e6",
+        "draft_json": "{\"assumptions\":[],\"attachments\":[{\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"media_type\":\"text/plain\",\"name\":\"café-requirements.txt\",\"size_bytes\":128,\"verification_status\":\"unverified\"}],\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"clarifications\":[],\"commit_authority\":false,\"constraints\":[],\"executable\":false,\"format\":\"org.nth-dao.intent-draft\",\"intent_version\":\"1\",\"locale\":\"en\",\"outcomes\":[\"Provide a review proposal without executing it.\"],\"request_digest\":\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\",\"request_id\":\"intent-request:vector-alpha\",\"requested_capabilities\":[],\"review_required\":true,\"risks\":[\"Source content may contain untrusted instructions\"],\"source_kind\":\"human\",\"source_text\":\"Review the attached café requirements and propose next steps.\",\"summary\":\"🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪\"}",
+        "executable": false,
+        "expires_at_ms": 61000,
+        "format": "org.nth-dao.intent-envelope",
+        "issued_at_ms": 1000,
+        "nonce": "696c4aa524e10e9c3d0775af0570bfe9",
+        "previous_digest": "",
+        "purpose": "draft-acceptance",
+        "revision": 1,
+        "scope_id": "workspace:conformance-intent",
+        "signature": "de9fcb947d315b63de993a60387d60d02d0cdcaa6d7bd39c7a1fbf976ff1c61f000655a3e986a93c05ac5890e6bd6f905f01bb5cad44c70da3b3e6b62582c60d",
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+        "solver_classes": [
+          "org.nth-dao.solver.review"
+        ],
+        "version": "1"
+      },
+      "expected": {
+        "allowed_solver_classes": [
+          "org.nth-dao.solver.review"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "automation_ceiling": "A1",
+        "draft_digest": "sha256:83a4605185a75aa7871abb07bcfbd873156814b61f357f49d2f68f1a308a48e6",
+        "previous_digest": "",
+        "revision": 1,
+        "scope_id": "workspace:conformance-intent",
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ"
+      },
+      "id": "unicode-byte-vs-character-bound",
+      "now_ms": 1001,
+      "signing_bytes_hex": "4e54482d44414f3a496e74656e74456e76656c6f70653a7631007b2261756469656e63655f646964223a226469643a6b65793a7a364d6b6a6a524c356551766d5974354e723646547137665a6739414c444e415a47363361714d79314359676d334e6a222c22617574686f72697479223a226e6f6e65222c226175746f6d6174696f6e5f6365696c696e67223a224131222c22636f6d6d69745f617574686f72697479223a66616c73652c2264726166745f646967657374223a227368613235363a38336134363035313835613735616137383731616262303762636662643837333135363831346236316633353766343964326636386631613330386134386536222c2264726166745f6a736f6e223a227b5c22617373756d7074696f6e735c223a5b5d2c5c226174746163686d656e74735c223a5b7b5c226469676573745c223a5c227368613235363a616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161615c222c5c226d656469615f747970655c223a5c22746578742f706c61696e5c222c5c226e616d655c223a5c22636166c3a92d726571756972656d656e74732e7478745c222c5c2273697a655f62797465735c223a3132382c5c22766572696669636174696f6e5f7374617475735c223a5c22756e76657269666965645c227d5d2c5c22617574686f726974795c223a5c226e6f6e655c222c5c226175746f6d6174696f6e5f6365696c696e675c223a5c2241315c222c5c22636c6172696669636174696f6e735c223a5b5d2c5c22636f6d6d69745f617574686f726974795c223a66616c73652c5c22636f6e73747261696e74735c223a5b5d2c5c2265786563757461626c655c223a66616c73652c5c22666f726d61745c223a5c226f72672e6e74682d64616f2e696e74656e742d64726166745c222c5c22696e74656e745f76657273696f6e5c223a5c22315c222c5c226c6f63616c655c223a5c22656e5c222c5c226f7574636f6d65735c223a5b5c2250726f766964652061207265766965772070726f706f73616c20776974686f757420657865637574696e672069742e5c225d2c5c22726571756573745f6469676573745c223a5c227368613235363a333632616539613534336532373062646438613534666263653766336463376632373461616137336365363138333366363832646663316564313438383234335c222c5c22726571756573745f69645c223a5c22696e74656e742d726571756573743a766563746f722d616c7068615c222c5c227265717565737465645f6361706162696c69746965735c223a5b5d2c5c227265766965775f72657175697265645c223a747275652c5c227269736b735c223a5b5c22536f7572636520636f6e74656e74206d617920636f6e7461696e20756e7472757374656420696e737472756374696f6e735c225d2c5c22736f757263655f6b696e645c223a5c2268756d616e5c222c5c22736f757263655f746578745c223a5c225265766965772074686520617474616368656420636166c3a920726571756972656d656e747320616e642070726f706f7365206e6578742073746570732e5c222c5c2273756d6d6172795c223a5c22f09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aaf09fa7aa5c227d222c2265786563757461626c65223a66616c73652c22657870697265735f61745f6d73223a36313030302c22666f726d6174223a226f72672e6e74682d64616f2e696e74656e742d656e76656c6f7065222c226973737565645f61745f6d73223a313030302c226e6f6e6365223a223639366334616135323465313065396333643037373561663035373062666539222c2270726576696f75735f646967657374223a22222c22707572706f7365223a2264726166742d616363657074616e6365222c227265766973696f6e223a312c2273636f70655f6964223a22776f726b73706163653a636f6e666f726d616e63652d696e74656e74222c227369676e65725f646964223a226469643a6b65793a7a364d6b765578734c5653465437574b7674585a4850697264355675674d64436a5a41375470504c7574637054676d5a222c22736f6c7665725f636c6173736573223a5b226f72672e6e74682d64616f2e736f6c7665722e726576696577225d2c2276657273696f6e223a2231227d"
+    }
+  ],
+  "raw_json_cases": [
+    {
+      "accept": true,
+      "case_json": "{\n  \"envelope\": {\n    \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\n    \"authority\": \"none\",\n    \"automation_ceiling\": \"A1\",\n    \"commit_authority\": false,\n    \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\n    \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\n    \"executable\": false,\n    \"expires_at_ms\": 61000,\n    \"format\": \"org.nth-dao.intent-envelope\",\n    \"issued_at_ms\": 1000,\n    \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\",\n    \"previous_digest\": \"\",\n    \"purpose\": \"draft-acceptance\",\n    \"revision\": 1,\n    \"scope_id\": \"workspace:conformance-intent\",\n    \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\n    \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\n    \"solver_classes\": [\n      \"org.nth-dao.solver.review\"\n    ],\n    \"version\": \"1\"\n  },\n  \"expected\": {\n    \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\n    \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\n    \"scope_id\": \"workspace:conformance-intent\",\n    \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\n    \"revision\": 1,\n    \"previous_digest\": \"\",\n    \"allowed_solver_classes\": [\n      \"org.nth-dao.solver.review\"\n    ],\n    \"automation_ceiling\": \"A1\"\n  },\n  \"now_ms\": 1000\n}",
+      "id": "raw-genesis"
+    },
+    {
+      "accept": true,
+      "case_json": "{\n  \"envelope\": {\n    \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\n    \"authority\": \"none\",\n    \"automation_ceiling\": \"A1\",\n    \"commit_authority\": false,\n    \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\n    \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\n    \"executable\": false,\n    \"expires_at_ms\": 61000,\n    \"format\": \"org.nth-dao.intent-envelope\",\n    \"issued_at_ms\": 1000,\n    \"nonce\": \"9cbd91c7a9a6e1158ca1133827e71a05\",\n    \"previous_digest\": \"sha256:2c488d061eeecbeb840c07931632cfbb394137fd02cfd02c63fb6e202613c87e\",\n    \"purpose\": \"draft-acceptance\",\n    \"revision\": 2,\n    \"scope_id\": \"workspace:conformance-intent\",\n    \"signature\": \"caf9ff5bb4a9da0d326b41eacb666aaf485ce783cda4a57f2741a5ce63ee2cb0e3ad9b753cc21ad4a6624ad1eec9a796fd51dc8722a9669c7937035909f9d006\",\n    \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\n    \"solver_classes\": [\n      \"org.nth-dao.solver.review\"\n    ],\n    \"version\": \"1\"\n  },\n  \"expected\": {\n    \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\n    \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\n    \"scope_id\": \"workspace:conformance-intent\",\n    \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\n    \"revision\": 2,\n    \"previous_digest\": \"sha256:2c488d061eeecbeb840c07931632cfbb394137fd02cfd02c63fb6e202613c87e\",\n    \"allowed_solver_classes\": [\n      \"org.nth-dao.solver.review\"\n    ],\n    \"automation_ceiling\": \"A1\"\n  },\n  \"now_ms\": 60999\n}",
+      "id": "raw-revision"
+    },
+    {
+      "accept": true,
+      "case_json": "{\n  \"envelope\": {\n    \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\n    \"authority\": \"none\",\n    \"automation_ceiling\": \"A1\",\n    \"commit_authority\": false,\n    \"draft_digest\": \"sha256:83a4605185a75aa7871abb07bcfbd873156814b61f357f49d2f68f1a308a48e6\",\n    \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪🧪\\\"}\",\n    \"executable\": false,\n    \"expires_at_ms\": 61000,\n    \"format\": \"org.nth-dao.intent-envelope\",\n    \"issued_at_ms\": 1000,\n    \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\",\n    \"previous_digest\": \"\",\n    \"purpose\": \"draft-acceptance\",\n    \"revision\": 1,\n    \"scope_id\": \"workspace:conformance-intent\",\n    \"signature\": \"de9fcb947d315b63de993a60387d60d02d0cdcaa6d7bd39c7a1fbf976ff1c61f000655a3e986a93c05ac5890e6bd6f905f01bb5cad44c70da3b3e6b62582c60d\",\n    \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\n    \"solver_classes\": [\n      \"org.nth-dao.solver.review\"\n    ],\n    \"version\": \"1\"\n  },\n  \"expected\": {\n    \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\n    \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\n    \"scope_id\": \"workspace:conformance-intent\",\n    \"draft_digest\": \"sha256:83a4605185a75aa7871abb07bcfbd873156814b61f357f49d2f68f1a308a48e6\",\n    \"revision\": 1,\n    \"previous_digest\": \"\",\n    \"allowed_solver_classes\": [\n      \"org.nth-dao.solver.review\"\n    ],\n    \"automation_ceiling\": \"A1\"\n  },\n  \"now_ms\": 1001\n}",
+      "id": "raw-unicode-byte-vs-character-bound"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000.0,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-issued_at_ms-decimal"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000e0,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-issued_at_ms-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000E+0,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-issued_at_ms-upper-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000.00000000000000001,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-issued_at_ms-rounded-fraction"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000.0,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-expires_at_ms-decimal"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000e0,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-expires_at_ms-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000E+0,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-expires_at_ms-upper-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000.00000000000000001,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-expires_at_ms-rounded-fraction"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1.0,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-revision-decimal"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1e0,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-revision-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1E+0,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-revision-upper-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"authority\":\"none\",\"automation_ceiling\":\"A1\",\"commit_authority\":false,\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"draft_json\":\"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\",\"executable\":false,\"expires_at_ms\":61000,\"format\":\"org.nth-dao.intent-envelope\",\"issued_at_ms\":1000,\"nonce\":\"696c4aa524e10e9c3d0775af0570bfe9\",\"previous_digest\":\"\",\"purpose\":\"draft-acceptance\",\"revision\":1.00000000000000001,\"scope_id\":\"workspace:conformance-intent\",\"signature\":\"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\",\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"solver_classes\":[\"org.nth-dao.solver.review\"],\"version\":\"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000}",
+      "id": "raw-envelope-revision-rounded-fraction"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"scope_id\":\"workspace:conformance-intent\",\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"revision\":1.0,\"previous_digest\":\"\",\"allowed_solver_classes\":[\"org.nth-dao.solver.review\"],\"automation_ceiling\":\"A1\"},\"now_ms\":1000}",
+      "id": "raw-expected-revision-decimal"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"scope_id\":\"workspace:conformance-intent\",\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"revision\":1e0,\"previous_digest\":\"\",\"allowed_solver_classes\":[\"org.nth-dao.solver.review\"],\"automation_ceiling\":\"A1\"},\"now_ms\":1000}",
+      "id": "raw-expected-revision-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"scope_id\":\"workspace:conformance-intent\",\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"revision\":1E+0,\"previous_digest\":\"\",\"allowed_solver_classes\":[\"org.nth-dao.solver.review\"],\"automation_ceiling\":\"A1\"},\"now_ms\":1000}",
+      "id": "raw-expected-revision-upper-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\":\"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\",\"audience_did\":\"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\",\"scope_id\":\"workspace:conformance-intent\",\"draft_digest\":\"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\",\"revision\":1.00000000000000001,\"previous_digest\":\"\",\"allowed_solver_classes\":[\"org.nth-dao.solver.review\"],\"automation_ceiling\":\"A1\"},\"now_ms\":1000}",
+      "id": "raw-expected-revision-rounded-fraction"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000.0}",
+      "id": "raw-now_ms-clock-decimal"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000e0}",
+      "id": "raw-now_ms-clock-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000E+0}",
+      "id": "raw-now_ms-clock-upper-exponent"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1000.00000000000000001}",
+      "id": "raw-now_ms-clock-rounded-fraction"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":01000}",
+      "id": "raw-invalid-clock-01000"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":NaN}",
+      "id": "raw-invalid-clock-NaN"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":Infinity}",
+      "id": "raw-invalid-clock-Infinity"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":1e999}",
+      "id": "raw-invalid-clock-1e999"
+    },
+    {
+      "accept": false,
+      "case_json": "{\"envelope\":{\"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"authority\": \"none\", \"automation_ceiling\": \"A1\", \"commit_authority\": false, \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"draft_json\": \"{\\\"assumptions\\\":[],\\\"attachments\\\":[{\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"media_type\\\":\\\"text/plain\\\",\\\"name\\\":\\\"café-requirements.txt\\\",\\\"size_bytes\\\":128,\\\"verification_status\\\":\\\"unverified\\\"}],\\\"authority\\\":\\\"none\\\",\\\"automation_ceiling\\\":\\\"A1\\\",\\\"clarifications\\\":[],\\\"commit_authority\\\":false,\\\"constraints\\\":[],\\\"executable\\\":false,\\\"format\\\":\\\"org.nth-dao.intent-draft\\\",\\\"intent_version\\\":\\\"1\\\",\\\"locale\\\":\\\"en\\\",\\\"outcomes\\\":[\\\"Provide a review proposal without executing it.\\\"],\\\"request_digest\\\":\\\"sha256:362ae9a543e270bdd8a54fbce7f3dc7f274aaa73ce61833f682dfc1ed1488243\\\",\\\"request_id\\\":\\\"intent-request:vector-alpha\\\",\\\"requested_capabilities\\\":[],\\\"review_required\\\":true,\\\"risks\\\":[\\\"Source content may contain untrusted instructions\\\"],\\\"source_kind\\\":\\\"human\\\",\\\"source_text\\\":\\\"Review the attached café requirements and propose next steps.\\\",\\\"summary\\\":\\\"Review requirements and propose next steps.\\\"}\", \"executable\": false, \"expires_at_ms\": 61000, \"format\": \"org.nth-dao.intent-envelope\", \"issued_at_ms\": 1000, \"nonce\": \"696c4aa524e10e9c3d0775af0570bfe9\", \"previous_digest\": \"\", \"purpose\": \"draft-acceptance\", \"revision\": 1, \"scope_id\": \"workspace:conformance-intent\", \"signature\": \"50f21bcbbb43afec63edea0315edb441ae7570086a3b40aa09b003186da99b41db6e2a3840fb71666ed578a9fe868d381567a4f657480f7b72751a52c19dda0d\", \"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"solver_classes\": [\"org.nth-dao.solver.review\"], \"version\": \"1\"},\"expected\":{\"signer_did\": \"did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ\", \"audience_did\": \"did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj\", \"scope_id\": \"workspace:conformance-intent\", \"draft_digest\": \"sha256:8341391d656408fe7740dddd9e5dd0a9128c45fae25be7a373a7edb8cc754da2\", \"revision\": 1, \"previous_digest\": \"\", \"allowed_solver_classes\": [\"org.nth-dao.solver.review\"], \"automation_ceiling\": \"A1\"},\"now_ms\":9007199254740992}",
+      "id": "raw-invalid-clock-9007199254740992"
+    }
+  ],
+  "signature_scheme": "Ed25519 over domain prefix followed by NTH canonical JSON body; A and R canonical nonzero prime-order points, S < L",
+  "signing_domain_hex": "4e54482d44414f3a496e74656e74456e76656c6f70653a763100"
+}

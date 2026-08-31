@@ -1,0 +1,11 @@
+{
+  "name": "nth-dao-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "devDependencies": {
+    "@noble/curves": "2.4.0"
+  }
+}

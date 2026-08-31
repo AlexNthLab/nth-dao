@@ -1,0 +1,127 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "audience_did": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "authority": {
+      "enum": [
+        "none"
+      ],
+      "type": "string"
+    },
+    "automation_ceiling": {
+      "enum": [
+        "A0",
+        "A1"
+      ],
+      "type": "string"
+    },
+    "commit_authority": {
+      "enum": [
+        false
+      ],
+      "type": "boolean"
+    },
+    "draft_digest": {
+      "maxLength": 71,
+      "minLength": 71,
+      "type": "string"
+    },
+    "draft_json": {
+      "maxLength": 131072,
+      "type": "string"
+    },
+    "executable": {
+      "enum": [
+        false
+      ],
+      "type": "boolean"
+    },
+    "expires_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "format": {
+      "enum": [
+        "org.nth-dao.intent-envelope"
+      ],
+      "type": "string"
+    },
+    "issued_at_ms": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "nonce": {
+      "maxLength": 32,
+      "minLength": 32,
+      "type": "string"
+    },
+    "previous_digest": {
+      "maxLength": 71,
+      "type": "string"
+    },
+    "purpose": {
+      "enum": [
+        "draft-acceptance"
+      ],
+      "type": "string"
+    },
+    "revision": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "scope_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "signer_did": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "solver_classes": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "type": "array"
+    },
+    "version": {
+      "enum": [
+        "1"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "audience_did",
+    "authority",
+    "automation_ceiling",
+    "commit_authority",
+    "draft_digest",
+    "draft_json",
+    "executable",
+    "expires_at_ms",
+    "format",
+    "issued_at_ms",
+    "nonce",
+    "previous_digest",
+    "purpose",
+    "revision",
+    "scope_id",
+    "signer_did",
+    "solver_classes",
+    "version"
+  ],
+  "type": "object"
+}

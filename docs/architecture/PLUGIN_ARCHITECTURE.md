@@ -664,6 +664,13 @@ create a Task, Mission, Agreement, Offer, Mandate, capability grant, payment,
 or execution request. Any such promotion is a distinct future signed protocol
 operation outside this capability.
 
+The Host-owned `IntentEnvelope` v1 wire primitive now exists separately from
+the resolver. It signs only explicit draft acceptance, with no commit authority
+or executable flag. It requires a current, trusted acceptance context, exact
+draft/source binding, and closed solver/time/scope bounds. No signing provider,
+automatic key loading, REST/UI promotion, durable replay store, or execution
+path is introduced. See [Intent Envelope v1](INTENT_ENVELOPE.md).
+
 The reviewed `org.nth-dao.intent.literal-resolver` is an offline conformance
 sample. It performs no model inference, stores no request, requests no Host
 permissions, and always asks for explicit outcomes and constraints. It is
@@ -702,7 +709,8 @@ Migration order:
 6. reviewed subprocess RPC foundation (implemented for static local workers;
    OS sandbox and signed package loading remain);
 7. non-authoritative Intent resolver v1 and disabled literal reference
-   (implemented; signed envelopes, solvers, policy gates, and UI remain);
+   (implemented; signed envelope v1 wire/signature/context checks implemented;
+   durable acceptance with nonce/revision CAS, solvers, policy gates, and UI remain);
 8. settlement and payment providers only after OS confinement, complete
    package verification, durable idempotency and mandate-bound commit tests
    exist.
