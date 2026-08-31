@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -525,6 +526,150 @@ def test_host_runs_exchange_validator_after_output_validation() -> None:
             {"token": "original"},
             authority=authority(cap.capability_id),
         )
+
+
+@pytest.mark.parametrize("failure_mode", ["reject", "mutate"])
+def test_host_runs_response_context_validator_last_and_fails_closed(
+    failure_mode: str,
+) -> None:
+    token_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"token": {"type": "string", "minLength": 1}},
+        "required": ["token"],
+    }
+    cap = CapabilityContract(
+        capability_id="org.nth-dao.test.context-binding",
+        version="1.0.0",
+        input_schema_digest=schema_digest(token_schema),
+        output_schema_digest=schema_digest(token_schema),
+        effects=("none",),
+        consistency="C1",
+        privacy="workspace",
+        security="verified-input",
+        cardinality="one",
+        deterministic=True,
+        retention="none",
+        failure_semantics="retry-safe",
+    )
+    item = manifest(provides=(cap,))
+    provider = Provider({"token": "bound"})
+    calls: list[str] = []
+
+    def validate_output(response) -> None:
+        assert response["token"] == "bound"
+        calls.append("output")
+
+    def validate_exchange(request, response) -> None:
+        assert request["token"] == response["token"]
+        calls.append("exchange")
+
+    def validate_context(response, context) -> None:
+        assert response["token"] == "bound"
+        assert context.plugin_id == item.plugin_id
+        assert context.capability_id == cap.capability_id
+        assert context.authority.principal == "test-suite"
+        assert len(context.invocation_id) == 32
+        calls.append("context")
+        if failure_mode == "reject":
+            raise PluginSchemaError("response context mismatch")
+        response["token"] = "mutated after validation"
+
+    host = PluginHost()
+    host.register_builtin(
+        item,
+        lambda: Runtime({cap.capability_id: provider}),
+        schemas={
+            cap.capability_id: CapabilitySchemas(
+                token_schema,
+                token_schema,
+                output_validator=validate_output,
+                exchange_validator=validate_exchange,
+                response_context_validator=validate_context,
+            )
+        },
+    )
+    binding = host.enable(item.plugin_id)[0]
+
+    expected_error = "response context mismatch" if failure_mode == "reject" else "must not mutate"
+    with pytest.raises(PluginSchemaError, match=expected_error):
+        binding.invoke(
+            {"token": "bound"},
+            authority=authority(cap.capability_id),
+        )
+    assert calls == ["output", "exchange", "context"]
+
+
+@pytest.mark.parametrize(
+    "stage", ["input", "authority", "output", "exchange-input", "exchange-output", "context"]
+)
+@pytest.mark.parametrize("when", ["during-validation", "after-return"])
+def test_all_validator_json_arguments_are_isolated_and_readonly(stage: str, when: str) -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "tokens": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {"type": "string", "maxLength": 64},
+            },
+        },
+        "required": ["tokens"],
+    }
+    cap = replace(
+        capability(),
+        input_schema_digest=schema_digest(schema),
+        output_schema_digest=schema_digest(schema),
+    )
+    item = manifest(provides=(cap,))
+    baseline = {"tokens": ["original"]}
+    retained: list[dict] = []
+
+    def inspect(name, document):
+        assert document == baseline
+        if stage == name:
+            if when == "during-validation":
+                document["tokens"][0] = "modified"
+            else:
+                retained.append(document)
+
+    provider = Provider(deepcopy(baseline))
+    host = PluginHost()
+    host.register_builtin(
+        item,
+        lambda: Runtime({cap.capability_id: provider}),
+        schemas={
+            cap.capability_id: CapabilitySchemas(
+                schema,
+                schema,
+                input_validator=lambda request: inspect("input", request),
+                authority_validator=lambda request, authority: inspect("authority", request),
+                output_validator=lambda response: inspect("output", response),
+                exchange_validator=lambda request, response: (
+                    inspect("exchange-input", request), inspect("exchange-output", response)
+                ),
+                response_context_validator=lambda response, context: inspect("context", response),
+            ),
+        },
+    )
+    binding = host.enable(item.plugin_id)[0]
+    request = deepcopy(baseline)
+    try:
+        if when == "during-validation":
+            with pytest.raises(PluginSchemaError, match="must not mutate"):
+                binding.invoke(request, authority=authority(cap.capability_id))
+            assert len(provider.calls) == (0 if stage in {"input", "authority"} else 1)
+        else:
+            response = binding.invoke(request, authority=authority(cap.capability_id))
+            assert len(retained) == 1
+            retained[0]["tokens"][0] = "modified after return"
+            assert response == baseline
+            assert provider.calls[0][0] == baseline
+        assert request == baseline
+        assert provider.response == baseline
+    finally:
+        host.disable(item.plugin_id)
 
 
 def test_schema_rejects_unbounded_objects_and_regex_patterns() -> None:

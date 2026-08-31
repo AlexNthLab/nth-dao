@@ -841,6 +841,7 @@ def test_unrepresentable_input_does_not_quarantine_healthy_worker(
 
 def test_validator_cannot_push_unrepresentable_input_into_worker(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = make_manifest()
     host = PluginHost(workspace_root=tmp_path)
@@ -865,11 +866,20 @@ def test_validator_cannot_push_unrepresentable_input_into_worker(
         capability_ids=frozenset({CAPABILITY_ID}),
     )
 
-    with pytest.raises(PluginInvocationError, match="not representable"):
-        binding.invoke({"value": "valid-before-validator"}, authority=authority)
+    def unexpected_dispatch(*args, **kwargs):
+        pytest.fail("mutated validator input reached the subprocess provider")
 
-    assert host.status(manifest.plugin_id).state == "enabled"
-    host.disable(manifest.plugin_id)
+    monkeypatch.setattr(
+        subprocess_runtime_module._SubprocessCapabilityProvider,
+        "invoke",
+        unexpected_dispatch,
+    )
+    try:
+        with pytest.raises(PluginSchemaError, match="input validator must not mutate"):
+            binding.invoke({"value": "valid-before-validator"}, authority=authority)
+        assert host.status(manifest.plugin_id).state == "enabled"
+    finally:
+        host.disable(manifest.plugin_id)
 
 
 def test_oversized_request_does_not_quarantine_healthy_worker(

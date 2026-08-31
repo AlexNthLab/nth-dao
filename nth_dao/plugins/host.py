@@ -77,6 +77,33 @@ def _json_boundary_copy(value: Mapping[str, Any], *, label: str) -> Dict[str, An
     return decoded
 
 
+def _run_readonly_validator(
+    validator: Callable[..., None] | None,
+    *args: Any,
+    label: str,
+) -> None:
+    """Isolate JSON arguments, including references retained after validation."""
+
+    if validator is None:
+        return
+    isolated = tuple(
+        deepcopy(dict(arg)) if isinstance(arg, Mapping) else arg for arg in args
+    )
+    snapshots = {
+        index: canonical_json(dict(arg))
+        for index, arg in enumerate(args)
+        if isinstance(arg, Mapping)
+    }
+    validator(*isolated)
+    for index, expected in snapshots.items():
+        try:
+            actual = canonical_json(isolated[index])
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise PluginSchemaError(f"{label} must not mutate its JSON arguments") from exc
+        if actual != expected:
+            raise PluginSchemaError(f"{label} must not mutate its JSON arguments")
+
+
 @dataclass(frozen=True)
 class PluginHostPolicy:
     """Local security ceiling; plugin manifests can only narrow it."""
@@ -190,6 +217,9 @@ class CapabilitySchemas:
         authority_validator: (
             Callable[[Mapping[str, Any], InvocationAuthority], None] | None
         ) = None,
+        response_context_validator: (
+            Callable[[Mapping[str, Any], PluginInvocationContext], None] | None
+        ) = None,
     ) -> None:
         validate_schema(input_schema, path="$input_schema")
         validate_schema(output_schema, path="$output_schema")
@@ -203,10 +233,15 @@ class CapabilitySchemas:
             raise TypeError("exchange_validator must be callable")
         if authority_validator is not None and not callable(authority_validator):
             raise TypeError("authority_validator must be callable")
+        if response_context_validator is not None and not callable(
+            response_context_validator
+        ):
+            raise TypeError("response_context_validator must be callable")
         self._input_validator = input_validator
         self._output_validator = output_validator
         self._exchange_validator = exchange_validator
         self._authority_validator = authority_validator
+        self._response_context_validator = response_context_validator
 
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -984,12 +1019,18 @@ class PluginHost:
         try:
             request_body = _json_boundary_copy(payload, label="capability input")
             validate_instance(request_body, schemas._input_schema, path="$input")
-            if schemas._input_validator is not None:
-                schemas._input_validator(request_body)
-            if schemas._authority_validator is not None:
-                schemas._authority_validator(request_body, authority)
+            _run_readonly_validator(
+                schemas._input_validator, request_body, label="input validator"
+            )
+            _run_readonly_validator(
+                schemas._authority_validator,
+                request_body,
+                authority,
+                label="authority validator",
+            )
             try:
-                response = provider.invoke(request_body, context)
+                # Keep the exchange baseline out of provider-owned mutable state.
+                response = provider.invoke(deepcopy(request_body), context)
             except PluginProviderUnavailable as exc:
                 self._quarantine_provider(binding, record, exc)
                 raise
@@ -1007,10 +1048,21 @@ class PluginHost:
                     raise PluginSchemaError(
                         "$output.operation does not match $input.operation"
                     )
-                if schemas._output_validator is not None:
-                    schemas._output_validator(response_body)
-                if schemas._exchange_validator is not None:
-                    schemas._exchange_validator(request_body, response_body)
+                _run_readonly_validator(
+                    schemas._output_validator, response_body, label="output validator"
+                )
+                _run_readonly_validator(
+                    schemas._exchange_validator,
+                    request_body,
+                    response_body,
+                    label="exchange validator",
+                )
+                _run_readonly_validator(
+                    schemas._response_context_validator,
+                    response_body,
+                    context,
+                    label="response context validator",
+                )
             except (PluginSchemaError, RecursionError, TypeError, ValueError) as exc:
                 if record.manifest.runtime == "subprocess":
                     unavailable = PluginProviderUnavailable(
@@ -1481,6 +1533,19 @@ class PluginHost:
                     f"{contract.consistency} capability {capability_id!r} requires "
                     "input and output semantic validators"
                 )
+            if "invocation_context_digest" in item._output_schema.get("properties", {}):
+                if (
+                    "invocation_context_digest"
+                    not in item._output_schema.get("required", [])
+                    or item._input_validator is None
+                    or item._output_validator is None
+                    or item._exchange_validator is None
+                    or item._response_context_validator is None
+                ):
+                    raise PluginContractError(
+                        f"context-bound capability {capability_id!r} requires a required "
+                        "context digest and input, output, exchange, and response context validators"
+                    )
             checked[capability_id] = item
         return checked
 
