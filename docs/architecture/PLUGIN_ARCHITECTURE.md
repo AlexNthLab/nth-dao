@@ -669,7 +669,11 @@ the resolver. It signs only explicit draft acceptance, with no commit authority
 or executable flag. It requires a current, trusted acceptance context, exact
 draft/source binding, and closed solver/time/scope bounds. No signing provider,
 automatic key loading, REST/UI promotion, durable replay store, or execution
-path is introduced. See [Intent Envelope v1](INTENT_ENVELOPE.md).
+path is introduced by the wire primitive. The separate
+[local acceptance journal](INTENT_ACCEPTANCE.md) now adds explicit Host SDK
+nonce/revision CAS and atomic local audit persistence; it does not enable
+governance integration, a Spine bridge or business promotion.
+See [Intent Envelope v1](INTENT_ENVELOPE.md).
 
 The reviewed `org.nth-dao.intent.literal-resolver` is an offline conformance
 sample. It performs no model inference, stores no request, requests no Host
@@ -710,7 +714,8 @@ Migration order:
    OS sandbox and signed package loading remain);
 7. non-authoritative Intent resolver v1 and disabled literal reference
    (implemented; signed envelope v1 wire/signature/context checks implemented;
-   durable acceptance with nonce/revision CAS, solvers, policy gates, and UI remain);
+   local acceptance journal with nonce/revision CAS implemented; governance
+   integration, signed Spine bridge, solvers, policy gates, and UI remain);
 8. settlement and payment providers only after OS confinement, complete
    package verification, durable idempotency and mandate-bound commit tests
    exist.

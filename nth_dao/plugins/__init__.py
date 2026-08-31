@@ -64,6 +64,17 @@ from .host import (
     PluginStatus,
     ProviderBinding,
 )
+from .intent_acceptance import (
+    IntentAcceptanceBusy,
+    IntentAcceptanceCapacity,
+    IntentAcceptanceConflict,
+    IntentAcceptanceHead,
+    IntentAcceptancePolicyUnavailable,
+    IntentAcceptanceRecord,
+    IntentAcceptanceResult,
+    IntentAcceptanceStore,
+    IntentAcceptanceStoreError,
+)
 from .intent_envelope import (
     INTENT_ENVELOPE_BODY_SCHEMA,
     INTENT_ENVELOPE_FORMAT,
@@ -247,6 +258,15 @@ __all__ = [
     "CapabilityRequirement",
     "CapabilitySchemas",
     "InvocationAuthority",
+    "IntentAcceptanceBusy",
+    "IntentAcceptanceCapacity",
+    "IntentAcceptanceConflict",
+    "IntentAcceptanceHead",
+    "IntentAcceptancePolicyUnavailable",
+    "IntentAcceptanceRecord",
+    "IntentAcceptanceResult",
+    "IntentAcceptanceStore",
+    "IntentAcceptanceStoreError",
     "INTENT_ENVELOPE_BODY_SCHEMA",
     "INTENT_ENVELOPE_FORMAT",
     "INTENT_ENVELOPE_MAX_DOCUMENT_BYTES",

@@ -1,6 +1,7 @@
 # Intent Envelope v1
 
-Status: implemented protocol primitive, not an enabled acceptance workflow.
+Status: implemented protocol primitive with an explicit local journal,
+not an enabled business workflow.
 
 An envelope states that a direct DID signer accepts an exact reviewed draft for
 proposal work. It is not an IntentMandate, a capability grant, an execution
@@ -114,6 +115,11 @@ expiry are signed bindings, not a consumed request. The current functions do
 not write a revision chain, check historical predecessor continuity, consume a
 nonce, invoke a solver, emit audit events, or create a Task/Mission/Agreement.
 They must not be wired directly into any effectful endpoint.
+
+The separate Host-owned [local acceptance journal](INTENT_ACCEPTANCE.md) now
+provides SQLite-atomic nonce/revision checks and local audit persistence. It
+does not change these pure verification functions or provide governance,
+Spine federation, REST/UI promotion, solver execution, or payment authority.
 
 Before enabling business promotion, the next implementation must:
 

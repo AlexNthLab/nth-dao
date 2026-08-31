@@ -77,9 +77,11 @@ The v1 wire primitive is now implemented in
 `nth_dao/plugins/intent_envelope.py`; see [Intent Envelope v1](INTENT_ENVELOPE.md).
 It is Host-owned protocol code, not a signing capability offered to plugins.
 It verifies a direct Ed25519 DID acceptance against explicit local expectations.
-It does not yet persist acceptance or consume nonces. The append-only property
-requires a future atomic revision-head store; a signed predecessor hash alone
-does not establish a current head or prevent concurrent forks.
+Its pure functions do not persist acceptance or consume nonces. A separate
+[local acceptance journal](INTENT_ACCEPTANCE.md) now provides atomic revision
+and nonce checks, restart-safe idempotency and local audit observations. A signed
+predecessor hash alone still does not establish a current head. Governance policy
+integration, cross-node acceptance and business promotion remain deferred.
 
 ### SolverProposal
 
@@ -153,15 +155,19 @@ Implemented now:
 - checked-in signed vectors, independent Node verification of Python signatures,
   Python verification of a Node-generated signature, and re-signed negative
   cases that must fail semantic checks despite valid cryptography.
+- explicit Host SDK acceptance journal with one atomic artifact/nonce/audit
+  write, current-context callback under the writer lock, bounded verified history,
+  competing-revision rejection and restart-safe exact retries.
 
 Not implemented now:
 
 - model-backed interpretation, solver, or deterministic policy providers;
 - automatic creation of Tasks, Missions, Agreements, Offers, or Mandates;
 - capability grants, signing, payment, execution, or approval through a draft;
-- UI promotion, visible acceptance diff, or persistent draft/envelope storage;
-- nonce consumption, atomic revision CAS, revocation/delegation resolution, or
-  acceptance audit. Live business promotion remains disabled until these exist.
+- UI promotion, visible acceptance diff, or persistent unsigned draft storage;
+- automatic membership/role/revocation/delegation resolution, cross-store policy
+  coordination, signed Spine acceptance audit or cross-node acceptance. Live
+  business promotion remains disabled until these boundaries are integrated.
 
 Those omissions are security boundaries. They must not be filled by routing a
 draft directly into an existing executor.
