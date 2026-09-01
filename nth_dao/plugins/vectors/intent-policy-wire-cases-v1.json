@@ -1,0 +1,426 @@
+{
+  "format": "org.nth-dao.intent-policy-conformance.v1",
+  "test_only": true,
+  "positive_cases": [
+    {
+      "id": "genesis-active-member",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      },
+      "canonical_hex": "7b22616c6c6f7765645f616363657074616e63655f726f6c6573223a5b2261646d696e222c226d656d626572222c226f776e6572225d2c2261756469656e63655f646964223a226469643a6b65793a7a364d6b6a6a524c356551766d5974354e723646547137665a6739414c444e415a47363361714d79314359676d334e6a222c22617574686f72697479223a22696e74656e742d64726166742d616363657074616e6365222c22636f6d6d69745f617574686f72697479223a66616c73652c2265786563757461626c65223a66616c73652c22657870697265735f61745f6d73223a323030302c22666f726d6174223a226f72672e6e74682d64616f2e696e74656e742d616363657074616e63652d706f6c6963792d736e617073686f74222c226973737565645f61745f6d73223a3930302c226d656d62657273223a5b7b22616c6c6f7765645f736f6c7665725f636c6173736573223a5b226f72672e6e74682d64616f2e736f6c7665722e726576696577225d2c226175746f6d6174696f6e5f6365696c696e67223a224131222c22726f6c65223a226d656d626572222c227369676e65725f646964223a226469643a6b65793a7a364d6b765578734c5653465437574b7674585a4850697264355675674d64436a5a41375470504c7574637054676d5a222c22737461747573223a22616374697665227d5d2c226d656d626572736869705f646967657374223a227368613235363a61336464373332623864366634353830623530623937396161346234663037363238626164376665646563623232653431633538323862623663646431663736222c22706f6c6963795f7265766973696f6e223a312c2270726576696f75735f706f6c6963795f646967657374223a22222c2272657669657765645f64726166745f646967657374223a227368613235363a63333735376262373030343237643838653366356637323634663464376465373732633963336262623232643336333063373136663431376238336136653264222c227265766f636174696f6e5f646967657374223a227368613235363a31353031393536653464366265663331653562393839353138656533336636666263313561386563633735343831636361303735333633616236326235663130222c2273636f70655f6964223a22776f726b73706163653a636f6e666f726d616e63652d696e74656e74222c2276657273696f6e223a2231227d",
+      "digest": "sha256:626cd1567a759374aa8033af6b4ba6121e5416afe94bd0ce5fd7137495450962",
+      "resolution": {
+        "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+        "head": {
+          "revision": 0,
+          "digest": ""
+        },
+        "now_ms": 1000,
+        "expected": {
+          "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+          "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+          "scope_id": "workspace:conformance-intent",
+          "draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+          "revision": 1,
+          "previous_digest": "",
+          "allowed_solver_classes": [
+            "org.nth-dao.solver.review"
+          ],
+          "automation_ceiling": "A1",
+          "authorization_digest": "sha256:626cd1567a759374aa8033af6b4ba6121e5416afe94bd0ce5fd7137495450962"
+        }
+      }
+    },
+    {
+      "id": "successor-revoked-member",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 3000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 1000,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "revoked"
+          }
+        ],
+        "membership_digest": "sha256:c48e187d6482ae1a807eee19d9da410cfc79e74e17621d3c0b179ce2171bd4d3",
+        "policy_revision": 2,
+        "previous_policy_digest": "sha256:626cd1567a759374aa8033af6b4ba6121e5416afe94bd0ce5fd7137495450962",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:e6825f98dc5c81d92d3606190792e8b2049b16167dc44553f972fcd8d8d4fdfa",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      },
+      "canonical_hex": "7b22616c6c6f7765645f616363657074616e63655f726f6c6573223a5b2261646d696e222c226d656d626572222c226f776e6572225d2c2261756469656e63655f646964223a226469643a6b65793a7a364d6b6a6a524c356551766d5974354e723646547137665a6739414c444e415a47363361714d79314359676d334e6a222c22617574686f72697479223a22696e74656e742d64726166742d616363657074616e6365222c22636f6d6d69745f617574686f72697479223a66616c73652c2265786563757461626c65223a66616c73652c22657870697265735f61745f6d73223a333030302c22666f726d6174223a226f72672e6e74682d64616f2e696e74656e742d616363657074616e63652d706f6c6963792d736e617073686f74222c226973737565645f61745f6d73223a313030302c226d656d62657273223a5b7b22616c6c6f7765645f736f6c7665725f636c6173736573223a5b226f72672e6e74682d64616f2e736f6c7665722e726576696577225d2c226175746f6d6174696f6e5f6365696c696e67223a224131222c22726f6c65223a226d656d626572222c227369676e65725f646964223a226469643a6b65793a7a364d6b765578734c5653465437574b7674585a4850697264355675674d64436a5a41375470504c7574637054676d5a222c22737461747573223a227265766f6b6564227d5d2c226d656d626572736869705f646967657374223a227368613235363a63343865313837643634383261653161383037656565313964396461343130636663373965373465313736323164336330623137396365323137316264346433222c22706f6c6963795f7265766973696f6e223a322c2270726576696f75735f706f6c6963795f646967657374223a227368613235363a36323663643135363761373539333734616138303333616636623462613631323165353431366166653934626430636535666437313337343935343530393632222c2272657669657765645f64726166745f646967657374223a227368613235363a63333735376262373030343237643838653366356637323634663464376465373732633963336262623232643336333063373136663431376238336136653264222c227265766f636174696f6e5f646967657374223a227368613235363a65363832356639386463356338316439326433363036313930373932653862323034396231363136376463343435353366393732666364386438643466646661222c2273636f70655f6964223a22776f726b73706163653a636f6e666f726d616e63652d696e74656e74222c2276657273696f6e223a2231227d",
+      "digest": "sha256:951e7b70faef507da43a51820921e399b99fd6393712aad20a7e2828e7ad729a"
+    }
+  ],
+  "negative_cases": [
+    {
+      "id": "unknown-field",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1",
+        "payment_grant": true
+      }
+    },
+    {
+      "id": "duplicate-member",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "active"
+          },
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      }
+    },
+    {
+      "id": "identity-ed25519-point",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      }
+    },
+    {
+      "id": "zero-ed25519-point",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      }
+    },
+    {
+      "id": "mixed-order-ed25519-point",
+      "policy": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkwfujuXTsnSYdrpAv249JV4ESuD9wfb4EoVbL3otfU4Bc",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      }
+    }
+  ],
+  "successor_cases": [
+    {
+      "id": "contiguous-revocation",
+      "previous": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      },
+      "successor": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 3000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 1000,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "revoked"
+          }
+        ],
+        "membership_digest": "sha256:c48e187d6482ae1a807eee19d9da410cfc79e74e17621d3c0b179ce2171bd4d3",
+        "policy_revision": 2,
+        "previous_policy_digest": "sha256:626cd1567a759374aa8033af6b4ba6121e5416afe94bd0ce5fd7137495450962",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:e6825f98dc5c81d92d3606190792e8b2049b16167dc44553f972fcd8d8d4fdfa",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      },
+      "valid": true
+    },
+    {
+      "id": "wrong-predecessor",
+      "previous": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 2000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 900,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "active"
+          }
+        ],
+        "membership_digest": "sha256:a3dd732b8d6f4580b50b979aa4b4f07628bad7fedecb22e41c5828bb6cdd1f76",
+        "policy_revision": 1,
+        "previous_policy_digest": "",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:1501956e4d6bef31e5b989518ee33f6fbc15a8ecc75481cca075363ab62b5f10",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      },
+      "successor": {
+        "allowed_acceptance_roles": [
+          "admin",
+          "member",
+          "owner"
+        ],
+        "audience_did": "did:key:z6MkjjRL5eQvmYt5Nr6FTq7fZg9ALDNAZG63aqMy1CYgm3Nj",
+        "authority": "intent-draft-acceptance",
+        "commit_authority": false,
+        "executable": false,
+        "expires_at_ms": 3000,
+        "format": "org.nth-dao.intent-acceptance-policy-snapshot",
+        "issued_at_ms": 1000,
+        "members": [
+          {
+            "allowed_solver_classes": [
+              "org.nth-dao.solver.review"
+            ],
+            "automation_ceiling": "A1",
+            "role": "member",
+            "signer_did": "did:key:z6MkvUxsLVSFT7WKvtXZHPird5VugMdCjZA7TpPLutcpTgmZ",
+            "status": "revoked"
+          }
+        ],
+        "membership_digest": "sha256:c48e187d6482ae1a807eee19d9da410cfc79e74e17621d3c0b179ce2171bd4d3",
+        "policy_revision": 2,
+        "previous_policy_digest": "sha256:8810ad581e59f2bc3928b261707a71308f7e139eb04820366dc4d5c18d980225",
+        "reviewed_draft_digest": "sha256:c3757bb700427d88e3f5f7264f4d7de772c9c3bbb22d3630c716f417b83a6e2d",
+        "revocation_digest": "sha256:e6825f98dc5c81d92d3606190792e8b2049b16167dc44553f972fcd8d8d4fdfa",
+        "scope_id": "workspace:conformance-intent",
+        "version": "1"
+      },
+      "valid": false
+    }
+  ]
+}

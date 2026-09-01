@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A Host-only, immutable Intent acceptance policy snapshot that binds one exact
+  reviewed draft to direct member DIDs, roles, monotonic revocations,
+  membership/revocation source digests, solver classes, automation ceilings,
+  policy lineage, validity, and strict size limits. New acceptance contexts
+  retain its content digest under the existing journal/audit chain; legacy rows
+  remain readable but explicitly unbound. A bounded append-only local policy
+  store retains canonical snapshots, enforces contiguous monotonic-revocation
+  lineage, and serializes current-head changes with governed acceptance under a
+  shared cross-process lock. The journal's clock now drives both policy and
+  envelope validation and rechecks both at insertion; legacy callbacks cannot
+  fabricate governed provenance. Policy records now have a migratable audit hash
+  chain, externally pinnable tail and cumulative payload accounting. Governed
+  history verification rejects foreign workspaces and missing policy evidence;
+  indexed head/digest operations avoid reparsing the full history. Separate
+  Python/Node policy vectors cover canonical bytes, digests, strict prime-order
+  Ed25519 DIDs, resolution, and successor rules. No REST/UI, solver,
+  delegation, business promotion, payment, or execution path is enabled.
 - A language-neutral `market.index` v1 plugin contract and a bounded,
   principal-isolated in-memory reference provider. Entries are canonical,
   content-addressed search projections that retain exact source protocol,

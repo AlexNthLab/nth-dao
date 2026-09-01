@@ -160,7 +160,9 @@ Run `python -m pytest -q tests/test_intent_acceptance_audit.py
 tests/test_intent_acceptance_anchor_conformance.py` on one command line. Node
 uses the existing locked dependencies under `tests/conformance`.
 
-Next: integrate trusted membership/role/revocation policy and a pinned reviewed
-draft before enabling any acceptance endpoint or solver proposal flow. Remote
-anchor publication and retrieval of the private evidence remain separate,
-explicitly reviewed boundaries.
+The Host policy snapshot now binds trusted direct membership, role, revocation
+state and one pinned reviewed draft into the journal's context digest. Next:
+add a persistent current-policy head and one cross-process coordinator around
+policy revision plus acceptance before enabling any endpoint or solver proposal
+flow. Remote anchor publication and retrieval of private evidence remain
+separate, explicitly reviewed boundaries.

@@ -152,6 +152,18 @@ def vector_documents():
         "now_ms": 1001, "signing_bytes_hex": intent_envelope_signing_bytes(unicode_body).hex(),
         "document_digest": intent_envelope_digest(unicode_signed),
     })
+    positives.append({
+        "id": "governed-policy-observation",
+        "envelope": signed,
+        "expected": expected | {
+            "authorization_digest": "sha256:" + hashlib.sha256(
+                b"PUBLIC-NTH-TEST-ONLY:intent-policy-v1"
+            ).hexdigest(),
+        },
+        "now_ms": 1000,
+        "signing_bytes_hex": intent_envelope_signing_bytes(body).hex(),
+        "document_digest": intent_envelope_digest(signed),
+    })
     negatives = []
 
     def negative(label, updates=None, *, expected_updates=None, now_ms=1000, resign=True):
@@ -225,10 +237,14 @@ def vector_documents():
         ("boolean-revision", {"revision": True}),
         ("invalid-lineage", {"previous_digest": "unknown"}),
         ("invalid-ceiling", {"automation_ceiling": "A4"}),
+        ("invalid-authorization-digest", {"authorization_digest": "sha256:" + "g" * 64}),
+        ("nonstring-authorization-digest", {"authorization_digest": None}),
     ]:
         negative("context-" + label, expected_updates=changes)
     negative("context-missing-field")
     negatives[-1]["expected_omissions"] = ["revision"]
+    negative("context-missing-authorization-digest")
+    negatives[-1]["expected_omissions"] = ["authorization_digest"]
     identity_point = bytes([1]) + bytes(31)
     forged_did = encode_ed25519_did_key(identity_point)
     negatives.append({

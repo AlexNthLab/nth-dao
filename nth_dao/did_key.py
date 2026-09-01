@@ -21,7 +21,7 @@ the encoding/decoding is just byte juggling.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Tuple
 
 logger = logging.getLogger("nth_dao.did_key")
 
@@ -39,10 +39,47 @@ DID_KEY_PREFIX = "did:key:"
 # Bitcoin base58 alphabet.
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(_B58_ALPHABET)}
+_ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493
+_ED25519_IDENTITY = b"\x01" + b"\x00" * 31
 
 
 class DIDKeyError(Exception):
     """Raised on malformed or unsupported did:key strings."""
+
+
+def is_prime_order_ed25519_point(encoded: bytes) -> bool:
+    """Return whether bytes encode a non-identity prime-order Ed25519 point.
+
+    The import is lazy so pure did:key encoding and decoding remain stdlib-only.
+    Callers using this cryptographic validation require ``nth-dao[crypto]``.
+    """
+
+    if type(encoded) is not bytes or len(encoded) != 32:
+        return False
+    try:
+        from nacl.bindings import (
+            crypto_core_ed25519_add,
+            crypto_core_ed25519_is_valid_point,
+            crypto_scalarmult_ed25519_noclamp,
+        )
+        from nacl.exceptions import RuntimeError as SodiumRuntimeError, UnavailableError
+    except ImportError as exc:
+        raise ImportError(
+            "strict Ed25519 DID validation requires nth-dao[crypto]"
+        ) from exc
+    try:
+        if not crypto_core_ed25519_is_valid_point(encoded):
+            return False
+        negative = crypto_scalarmult_ed25519_noclamp(
+            (_ED25519_ORDER - 1).to_bytes(32, "little"), encoded,
+        )
+        return crypto_core_ed25519_add(negative, encoded) == _ED25519_IDENTITY
+    except UnavailableError as exc:
+        raise ImportError(
+            "strict Ed25519 DID validation requires a full libsodium build"
+        ) from exc
+    except SodiumRuntimeError:
+        return False
 
 
 # ─────────────────── base58btc ───────────────────

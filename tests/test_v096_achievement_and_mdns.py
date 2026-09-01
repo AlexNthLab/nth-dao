@@ -273,7 +273,11 @@ def test_mdns_module_clean_failure_without_zeroconf():
     from nth_dao import discovery
 
     assert hasattr(discovery, "mdns_available")
-    if not _zeroconf_importable:
+    # Availability is intentionally dynamic. A long full-suite run may change
+    # import state after this module's collection-time skip marker was built;
+    # compare both implementations at the same observation boundary.
+    available_now = _can_import_zeroconf()
+    if not available_now:
         assert discovery.mdns_available() is False
         # MDNSDiscovery is a lazy class — instantiating without start() works,
         # but start()/discover() must raise ImportError pointing at `[lan]`.

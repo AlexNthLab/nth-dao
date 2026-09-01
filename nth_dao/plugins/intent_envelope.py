@@ -19,6 +19,7 @@ from nth_dao.did_key import (
     DIDKeyError,
     decode_ed25519_did_key,
     encode_ed25519_did_key,
+    is_prime_order_ed25519_point,
 )
 from nth_dao.identity import AgentIdentity, crypto_available
 
@@ -36,7 +37,6 @@ INTENT_ENVELOPE_SIGNING_DOMAIN = b"NTH-DAO:IntentEnvelope:v1\x00"
 INTENT_ENVELOPE_MAX_TTL_MS = 86_400_000
 INTENT_ENVELOPE_MAX_DOCUMENT_BYTES = 262_144
 _ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493
-_ED25519_IDENTITY = bytes([1]) + bytes(31)
 _HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _NONCE_RE = re.compile(r"[0-9a-f]{32}")
 _SIGNATURE_RE = re.compile(r"[0-9a-f]{128}")
@@ -109,6 +109,7 @@ class IntentAcceptanceContext:
     previous_digest: str
     allowed_solver_classes: tuple[str, ...]
     automation_ceiling: str
+    authorization_digest: str = ""
 
     def __post_init__(self) -> None:
         _did(self.signer_did, "expected signer_did")
@@ -122,6 +123,13 @@ class IntentAcceptanceContext:
         _solver_classes(list(self.allowed_solver_classes))
         if self.automation_ceiling not in ("A0", "A1"):
             raise IntentEnvelopeError("expected automation ceiling must be A0 or A1")
+        if self.authorization_digest != "" and (
+            not isinstance(self.authorization_digest, str)
+            or _HASH_RE.fullmatch(self.authorization_digest) is None
+        ):
+            raise IntentEnvelopeError(
+                "expected authorization_digest must be empty or a content hash"
+            )
 
 
 def _did(value: Any, field: str) -> None:
@@ -258,26 +266,9 @@ def intent_envelope_signing_bytes(body: dict) -> bytes:
 
 
 def _is_prime_order_point(encoded: bytes) -> bool:
-    from nacl.bindings import (
-        crypto_core_ed25519_add,
-        crypto_core_ed25519_is_valid_point,
-        crypto_scalarmult_ed25519_noclamp,
-    )
-    from nacl.exceptions import RuntimeError as SodiumRuntimeError, UnavailableError
+    """Compatibility wrapper around the shared strict DID point validator."""
 
-    try:
-        if not crypto_core_ed25519_is_valid_point(encoded):
-            return False
-        # Older libsodium versions can miss mixed-order points in is_valid_point.
-        # Use its group operations to enforce [L]P = 0 without a clamped scalar.
-        negative = crypto_scalarmult_ed25519_noclamp(
-            (_ED25519_ORDER - 1).to_bytes(32, "little"), encoded,
-        )
-        return crypto_core_ed25519_add(negative, encoded) == _ED25519_IDENTITY
-    except UnavailableError as exc:
-        raise ImportError("IntentEnvelope requires a full libsodium build via nth-dao[crypto]") from exc
-    except SodiumRuntimeError:
-        return False
+    return is_prime_order_ed25519_point(encoded)
 
 
 def _verified_document(envelope: Any) -> dict:

@@ -32,8 +32,9 @@ const expectedSchema = {
   properties: {
     ...Object.fromEntries(expectedFields.map(key => [key, schema.properties[key]])),
     allowed_solver_classes: schema.properties.solver_classes,
+    authorization_digest: { type: 'string', minLength: 0, maxLength: 71 },
   },
-  required: [...expectedFields, 'allowed_solver_classes'],
+  required: [...expectedFields, 'allowed_solver_classes', 'authorization_digest'],
 };
 function canonical(v) {
   if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
@@ -137,6 +138,7 @@ function validateExpectedContext(expected) {
   check(expected.revision === 1 ? expected.previous_digest === '' : hash.test(expected.previous_digest), 'expected lineage');
   unique(expected.allowed_solver_classes);
   check(expected.allowed_solver_classes.every(x => id.test(x)), 'expected solver classes');
+  check(expected.authorization_digest === '' || hash.test(expected.authorization_digest), 'authorization digest');
 }
 function verifyCase(c) {
   const e = c.envelope, expected = c.expected;

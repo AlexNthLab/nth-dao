@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -298,7 +299,14 @@ class IntentAcceptanceStore:
                 envelope, context = record.envelope, json.loads(record.context_json)
                 if type(context) is not dict or type(context.get("allowed_solver_classes")) is not list:
                     raise ValueError("invalid context")
-                expected = IntentAcceptanceContext(**(context | {"allowed_solver_classes": tuple(context["allowed_solver_classes"])}))
+                expected_fields = context | {
+                    "allowed_solver_classes": tuple(context["allowed_solver_classes"]),
+                }
+                # Records written before the Host policy gate predate this
+                # observation-only provenance field. Preserve their original
+                # canonical bytes while treating them as explicitly unbound.
+                expected_fields.setdefault("authorization_digest", "")
+                expected = IntentAcceptanceContext(**expected_fields)
                 verify_intent_envelope(envelope, expected=expected, now_ms=record.accepted_at_ms)
                 if canonical_json(envelope).decode() != record.envelope_json or canonical_json(context).decode() != record.context_json:
                     raise ValueError("noncanonical row")
@@ -335,6 +343,167 @@ class IntentAcceptanceStore:
         """
         if not callable(resolve_context):
             raise TypeError("a trusted Host context resolver is required")
+        return self._accept(
+            envelope,
+            resolve_context=lambda head, _now: resolve_context(head),
+            governed_policy=None,
+        )
+
+    def _accept_governed_snapshot(
+        self,
+        envelope: dict,
+        *,
+        policy: object,
+        signer_did: str,
+    ) -> IntentAcceptanceResult:
+        """Accept under a store-selected policy snapshot and trusted clock.
+
+        Callers must enter through ``accept_governed`` so current-head selection
+        and this write share the policy store's cross-process lock.
+        """
+
+        from .intent_policy import IntentAcceptancePolicySnapshot
+
+        if type(policy) is not IntentAcceptancePolicySnapshot:
+            raise TypeError("policy must be an IntentAcceptancePolicySnapshot")
+        if not isinstance(signer_did, str):
+            raise TypeError("signer_did must be a string")
+        return self._accept(
+            envelope,
+            resolve_context=lambda head, now: policy.resolve(
+                signer_did=signer_did,
+                head=head,
+                now_ms=now,
+            ),
+            governed_policy=policy,
+        )
+
+    def accept_governed(
+        self,
+        envelope: dict,
+        *,
+        policy_store: object,
+        signer_did: str,
+        expected_policy_tail_digest: str,
+    ) -> IntentAcceptanceResult:
+        """Accept only under the persisted current policy for this wire scope."""
+
+        policy_store = self._require_local_policy_store(policy_store)
+        snapshot = _verified_document(envelope)
+        with policy_store.coordination_lock():
+            try:
+                policy_store._require_tail_unlocked(expected_policy_tail_digest)
+            except ValueError:
+                raise
+            except RuntimeError:
+                raise IntentAcceptancePolicyUnavailable(
+                    "policy history does not match the retained tail"
+                ) from None
+            policy = policy_store._current_unlocked(
+                snapshot["audience_did"],
+                snapshot["scope_id"],
+            )
+            if policy is None:
+                raise IntentAcceptancePolicyUnavailable(
+                    "no current policy exists for the envelope audience and scope"
+                )
+            return self._accept_governed_snapshot(
+                snapshot,
+                policy=policy,
+                signer_did=signer_did,
+            )
+
+    def verify_governed_history(
+        self,
+        *,
+        policy_store: object,
+        expected_policy_tail_digest: str | None = None,
+    ) -> tuple[int, str, int, str]:
+        """Verify journal integrity and every retained governance observation.
+
+        The returned tuple is ``(acceptance_count, acceptance_tail,
+        policy_count, policy_tail)``. Legacy records with an empty
+        ``authorization_digest`` remain explicitly unbound and are not promoted
+        to governed records by this audit.
+        """
+
+        policy_store = self._require_local_policy_store(policy_store)
+        with policy_store.coordination_lock():
+            policies = policy_store.history()
+            policy_tail = policies[-1].audit_digest if policies else ""
+            if expected_policy_tail_digest is not None:
+                if (
+                    type(expected_policy_tail_digest) is not str
+                    or (
+                        expected_policy_tail_digest != ""
+                        and _HASH.fullmatch(expected_policy_tail_digest) is None
+                    )
+                ):
+                    raise ValueError(
+                        "expected_policy_tail_digest must be a content hash or empty genesis marker"
+                    )
+                if policy_tail != expected_policy_tail_digest:
+                    raise IntentAcceptancePolicyUnavailable(
+                        "policy history does not match the retained tail"
+                    )
+            _rows, acceptances = self._read_history()
+            policy_by_digest = {record.digest: record for record in policies}
+            scope_heads: dict[tuple[str, str], IntentAcceptanceHead] = {}
+            for acceptance in acceptances:
+                envelope = acceptance.envelope
+                context_document = json.loads(acceptance.context_json)
+                authorization_digest = context_document.get("authorization_digest", "")
+                scope = (envelope["audience_did"], envelope["scope_id"])
+                prior_head = scope_heads.get(scope, IntentAcceptanceHead(0, ""))
+                if authorization_digest:
+                    policy_record = policy_by_digest.get(authorization_digest)
+                    if policy_record is None:
+                        raise IntentAcceptancePolicyUnavailable(
+                            "governed acceptance references a missing policy"
+                        )
+                    if policy_record.stored_at_ms > acceptance.accepted_at_ms:
+                        raise IntentAcceptancePolicyUnavailable(
+                            "governed acceptance predates its policy publication"
+                        )
+                    expected = policy_record.policy.resolve(
+                        signer_did=envelope["signer_did"],
+                        head=prior_head,
+                        now_ms=acceptance.accepted_at_ms,
+                    )
+                    expected_document = asdict(expected)
+                    expected_document["allowed_solver_classes"] = list(
+                        expected.allowed_solver_classes
+                    )
+                    if context_document != expected_document:
+                        raise IntentAcceptancePolicyUnavailable(
+                            "governed acceptance context does not match its retained policy"
+                        )
+                scope_heads[scope] = IntentAcceptanceHead(
+                    envelope["revision"], acceptance.envelope_digest
+                )
+        acceptance_tail = acceptances[-1].audit_digest if acceptances else ""
+        return len(acceptances), acceptance_tail, len(policies), policy_tail
+
+    def _require_local_policy_store(self, policy_store: object):
+        from .intent_policy_store import IntentPolicyStore
+
+        if type(policy_store) is not IntentPolicyStore:
+            raise TypeError("policy_store must be an IntentPolicyStore")
+        acceptance_workspace = os.path.normcase(str(self.workspace.resolve()))
+        policy_workspace = os.path.normcase(str(policy_store.workspace.resolve()))
+        if policy_workspace != acceptance_workspace:
+            raise IntentAcceptancePolicyUnavailable(
+                "policy store belongs to a different workspace"
+            )
+        return policy_store
+
+    def _accept(
+        self,
+        envelope: dict,
+        *,
+        resolve_context: Callable[[IntentAcceptanceHead, int], IntentAcceptanceContext],
+        governed_policy: object | None,
+    ) -> IntentAcceptanceResult:
         snapshot = _verified_document(envelope)
         for _attempt in range(_MAX_SNAPSHOT_ATTEMPTS):
             rows, records = self._read_history()
@@ -348,23 +517,44 @@ class IntentAcceptanceStore:
                 # Compare all persisted fields, not only the tail or a row count.
                 if self._read_rows(connection) != rows:
                     continue
-                result = self._accept_current(connection, snapshot, records, head, usage, resolve_context)
+                result = self._accept_current(
+                    connection,
+                    snapshot,
+                    records,
+                    head,
+                    usage,
+                    resolve_context,
+                    governed_policy,
+                )
             return result
         raise IntentAcceptanceBusy("acceptance journal kept changing; retry with a fresh snapshot")
 
     def _accept_current(
         self, connection: sqlite3.Connection, snapshot: dict,
         records: list[IntentAcceptanceRecord], head: IntentAcceptanceHead, usage: int,
-        resolve_context: Callable[[IntentAcceptanceHead], IntentAcceptanceContext],
+        resolve_context: Callable[[IntentAcceptanceHead, int], IntentAcceptanceContext],
+        governed_policy: object | None,
     ) -> IntentAcceptanceResult:
+        now = self._read_clock()
         try:
-            expected = resolve_context(head)
+            expected = resolve_context(head, now)
         except sqlite3.Error:
             # Do not let the outer journal transaction misclassify a policy DB.
             raise IntentAcceptancePolicyUnavailable("Host policy storage is unavailable") from None
         if type(expected) is not IntentAcceptanceContext:
             raise IntentEnvelopeError("Host resolver must return an IntentAcceptanceContext")
-        now = self._clock()
+        if governed_policy is None:
+            if expected.authorization_digest != "":
+                raise IntentEnvelopeError(
+                    "governed authorization requires accept_governed()"
+                )
+        else:
+            from .intent_policy import IntentAcceptancePolicySnapshot
+
+            if type(governed_policy) is not IntentAcceptancePolicySnapshot:
+                raise IntentEnvelopeError("governed policy type changed during acceptance")
+            if expected.authorization_digest != governed_policy.digest:
+                raise IntentEnvelopeError("authorization digest does not match the policy snapshot")
         document = verify_intent_envelope(snapshot, expected=expected, now_ms=now)
         digest = _hash(document)
         existing = next((r for r in records if r.envelope_digest == digest), None)
@@ -385,11 +575,11 @@ class IntentAcceptanceStore:
             raise IntentEnvelopeError("Host context exceeds the journal byte limit")
         if len(records) >= self.max_records or usage + len(envelope_json.encode()) + len(context_json.encode()) > self.max_bytes:
             raise IntentAcceptanceCapacity("acceptance journal capacity reached")
-        commit_time = self._clock()
-        if type(commit_time) is not int or not 0 <= commit_time <= _MAX_SAFE_INTEGER:
-            raise IntentEnvelopeError("Host clock must return a nonnegative safe integer")
+        commit_time = self._read_clock()
         if not document["issued_at_ms"] <= commit_time < document["expires_at_ms"]:
             raise IntentEnvelopeError("envelope expired before the insert boundary")
+        if governed_policy is not None and not governed_policy.is_valid_at(commit_time):
+            raise IntentEnvelopeError("authorization policy expired before the insert boundary")
         if commit_time < now:
             raise IntentAcceptanceConflict("Host clock moved backwards before insertion")
         record = IntentAcceptanceRecord(
@@ -399,6 +589,12 @@ class IntentAcceptanceStore:
         record = IntentAcceptanceRecord(**(asdict(record) | {"audit_digest": _hash(record.audit)}))
         self._insert(connection, record)
         return IntentAcceptanceResult(record, created=True)
+
+    def _read_clock(self) -> int:
+        now = self._clock()
+        if type(now) is not int or not 0 <= now <= _MAX_SAFE_INTEGER:
+            raise IntentEnvelopeError("Host clock must return a nonnegative safe integer")
+        return now
 
     @staticmethod
     def _insert(connection: sqlite3.Connection, record: IntentAcceptanceRecord) -> None:

@@ -162,6 +162,10 @@ Implemented now:
   competing-revision rejection and restart-safe exact retries.
 - opt-in, node-signed Spine observation anchors, with no raw source/context
   publication, bounded replay pages and idempotent crash recovery.
+- a closed, immutable Host policy snapshot that binds one exact reviewed draft
+  to direct member DIDs, roles, revocation state, solver/automation limits, and
+  membership/revocation source digests; its content address is retained in new
+  acceptance contexts.
 
 Not implemented now:
 
@@ -169,8 +173,9 @@ Not implemented now:
 - automatic creation of Tasks, Missions, Agreements, Offers, or Mandates;
 - capability grants, signing, payment, execution, or approval through a draft;
 - UI promotion, visible acceptance diff, or persistent unsigned draft storage;
-- automatic membership/role/revocation/delegation resolution, cross-store policy
-  coordination, automatic audit publication or cross-node acceptance. Live
+- automatic governance-source ingestion, delegation, persistent current-policy
+  head coordination, cross-store locking, automatic audit publication or
+  cross-node acceptance. Live
   business promotion remains disabled until these boundaries are integrated.
 
 Those omissions are security boundaries. They must not be filled by routing a

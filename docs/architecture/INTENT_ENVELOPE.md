@@ -106,7 +106,12 @@ This narrows only the new IntentEnvelope profile, not other NTH signed protocols
 state, never by copying received fields. The Host chooses the currently
 authorized direct signer, its audience DID, scope ID, reviewed draft digest,
 next revision and current predecessor digest, allowed solver classes, and
-automation ceiling. The verifier compares these exact expectations and checks
+automation ceiling. It may also carry a Host-observed `authorization_digest`;
+new governed acceptance uses the exact content address produced by the
+[Intent policy snapshot](INTENT_POLICY.md), while empty identifies legacy
+unbound state. This observation field is persisted and audited by the journal
+but is not a field signed inside IntentEnvelope v1. The verifier compares the
+envelope-bound expectations and checks
 `issued_at_ms <= now_ms < expires_at_ms` against a trusted clock. It applies no
 implicit clock-skew grace period. Both verification and hashing are repeatable.
 
