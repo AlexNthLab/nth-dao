@@ -122,6 +122,180 @@
         }
       }
     ],
+    "delivery_envelope_v1": [
+      {
+        "description": "Signed envelope validates; canonical bytes, message id, and wire digest are stable",
+        "expected_canonical_hex": "7b22637265617465645f61745f6d73223a313735303030303030303030302c22657870697265735f61745f6d73223a313735303030303036303030302c226b696e64223a226d697373696f6e2e616e6e6f756e63656d656e74222c226d6573736167655f6964223a227368613235363a37386235386365323464313762336561313963383962613764366166356266633333396465323235353030653864636664356239323663393038343239633561222c226e6f6e6365223a2244656c6976657279566563746f724e6f6e636530313233343536373839222c227061796c6f6164223a7b22626f6479223a2268656c6c6f222c22736571223a317d2c227061796c6f61645f68617368223a227368613235363a33663230633965623637303738613636636133633137313566613136653337353530373433366436646365643863653636303334323033326163373135336633222c2270726f746f636f6c223a226e74682d7472616e73706f72742d656e76656c6f7065222c22726563697069656e74223a2264616f3a636f7265222c22726f7574696e67223a7b22686f705f636f756e74223a302c22686f705f6c696d6974223a337d2c2273656e6465725f646964223a226469643a6b65793a7a364d6b6a63686866557344366d6d766e69386d436458487732313658726d39625165326d424831503552446a564a47222c227369676e6174757265223a22466b67304f486238576178597a776f494e7a34453958744952504c363454784f4e6954334875597761507a56503464362d30644f436e516b4f524e6334705579517867485156303739486b31646458307967424e4141222c2276657273696f6e223a317d",
+        "expected_envelope_sha256": "sha256:d48c006662973b31f512184cab228726c8f495cb7f51fe26b766622904aa5181",
+        "expected_message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+        "expected_reason": "ok",
+        "expected_valid": true,
+        "id": "delivery-envelope-001",
+        "input": {
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "mission.announcement",
+          "message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+          "nonce": "DeliveryVectorNonce0123456789",
+          "payload": {
+            "body": "hello",
+            "seq": 1
+          },
+          "payload_hash": "sha256:3f20c9eb67078a66ca3c1715fa16e375507436d6dced8ce660342032ac7153f3",
+          "protocol": "nth-transport-envelope",
+          "recipient": "dao:core",
+          "routing": {
+            "hop_count": 0,
+            "hop_limit": 3
+          },
+          "sender_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "Fkg0OHb8WaxYzwoINz4E9XtIRPL64TxONiT3HuYwaPzVP4d6-0dOCnQkORNc4pUyQxgHQV079Hk1ddX0ygBNAA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "Tampered payload → payload hash gate rejects",
+        "expected_reason": "payload hash does not match payload",
+        "expected_valid": false,
+        "id": "delivery-envelope-002",
+        "input": {
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "mission.announcement",
+          "message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+          "nonce": "DeliveryVectorNonce0123456789",
+          "payload": {
+            "body": "evil",
+            "seq": 1
+          },
+          "payload_hash": "sha256:3f20c9eb67078a66ca3c1715fa16e375507436d6dced8ce660342032ac7153f3",
+          "protocol": "nth-transport-envelope",
+          "recipient": "dao:core",
+          "routing": {
+            "hop_count": 0,
+            "hop_limit": 3
+          },
+          "sender_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "Fkg0OHb8WaxYzwoINz4E9XtIRPL64TxONiT3HuYwaPzVP4d6-0dOCnQkORNc4pUyQxgHQV079Hk1ddX0ygBNAA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "Tampered signature byte → signature gate rejects",
+        "expected_reason": "envelope signature verification failed",
+        "expected_valid": false,
+        "id": "delivery-envelope-003",
+        "input": {
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "mission.announcement",
+          "message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+          "nonce": "DeliveryVectorNonce0123456789",
+          "payload": {
+            "body": "hello",
+            "seq": 1
+          },
+          "payload_hash": "sha256:3f20c9eb67078a66ca3c1715fa16e375507436d6dced8ce660342032ac7153f3",
+          "protocol": "nth-transport-envelope",
+          "recipient": "dao:core",
+          "routing": {
+            "hop_count": 0,
+            "hop_limit": 3
+          },
+          "sender_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "Fkg0OHb8AaxYzwoINz4E9XtIRPL64TxONiT3HuYwaPzVP4d6-0dOCnQkORNc4pUyQxgHQV079Hk1ddX0ygBNAA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "Verification after expiry → TTL gate rejects",
+        "expected_reason": "envelope expired",
+        "expected_valid": false,
+        "id": "delivery-envelope-004",
+        "input": {
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "mission.announcement",
+          "message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+          "nonce": "DeliveryVectorNonce0123456789",
+          "payload": {
+            "body": "hello",
+            "seq": 1
+          },
+          "payload_hash": "sha256:3f20c9eb67078a66ca3c1715fa16e375507436d6dced8ce660342032ac7153f3",
+          "protocol": "nth-transport-envelope",
+          "recipient": "dao:core",
+          "routing": {
+            "hop_count": 0,
+            "hop_limit": 3
+          },
+          "sender_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "Fkg0OHb8WaxYzwoINz4E9XtIRPL64TxONiT3HuYwaPzVP4d6-0dOCnQkORNc4pUyQxgHQV079Hk1ddX0ygBNAA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000060001
+      },
+      {
+        "description": "Unknown protocol version → fail closed",
+        "expected_reason": "unsupported envelope version",
+        "expected_valid": false,
+        "id": "delivery-envelope-005",
+        "input": {
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "mission.announcement",
+          "message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+          "nonce": "DeliveryVectorNonce0123456789",
+          "payload": {
+            "body": "hello",
+            "seq": 1
+          },
+          "payload_hash": "sha256:3f20c9eb67078a66ca3c1715fa16e375507436d6dced8ce660342032ac7153f3",
+          "protocol": "nth-transport-envelope",
+          "recipient": "dao:core",
+          "routing": {
+            "hop_count": 0,
+            "hop_limit": 3
+          },
+          "sender_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "Fkg0OHb8WaxYzwoINz4E9XtIRPL64TxONiT3HuYwaPzVP4d6-0dOCnQkORNc4pUyQxgHQV079Hk1ddX0ygBNAA",
+          "version": 2
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "Unknown field → fail closed",
+        "expected_reason": "envelope has missing or unknown fields",
+        "expected_valid": false,
+        "id": "delivery-envelope-006",
+        "input": {
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "extra": "nope",
+          "kind": "mission.announcement",
+          "message_id": "sha256:78b58ce24d17b3ea19c89ba7d6af5bfc339de225500e8dcfd5b926c908429c5a",
+          "nonce": "DeliveryVectorNonce0123456789",
+          "payload": {
+            "body": "hello",
+            "seq": 1
+          },
+          "payload_hash": "sha256:3f20c9eb67078a66ca3c1715fa16e375507436d6dced8ce660342032ac7153f3",
+          "protocol": "nth-transport-envelope",
+          "recipient": "dao:core",
+          "routing": {
+            "hop_count": 0,
+            "hop_limit": 3
+          },
+          "sender_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "Fkg0OHb8WaxYzwoINz4E9XtIRPL64TxONiT3HuYwaPzVP4d6-0dOCnQkORNc4pUyQxgHQV079Hk1ddX0ygBNAA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      }
+    ],
     "did_key_encoding": [
       {
         "description": "Encode pubkey 00000000... as did:key",

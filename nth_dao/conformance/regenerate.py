@@ -925,6 +925,127 @@ def gen_trade_offer_head_proof_v1() -> list:
     ]
 
 
+def gen_delivery_envelope_v1() -> list:
+    """TransportEnvelope v1: canonical bytes, content address, negatives.
+
+    Deterministic: fixed seed key, fixed timestamps, fixed nonce. A port
+    must reproduce the canonical bytes, the message_id, the wire digest,
+    and the exact accept/reject reason strings.
+    """
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+    from copy import deepcopy
+
+    from ..delivery.envelope import (
+        TransportEnvelope,
+        TransportEnvelopeRejected,
+        envelope_digest,
+        sign_envelope,
+        validate_envelope,
+    )
+    from ..identity import AgentID, AgentIdentity
+
+    sk = SigningKey(bytes.fromhex(ALICE_SEED_HEX))
+    verify_bytes = sk.verify_key.encode()
+    identity = AgentIdentity(
+        agent_id=AgentID.from_pubkey(verify_bytes.hex()),
+        label="vector-alice",
+        _signing_key=bytes.fromhex(ALICE_SEED_HEX),
+        _verify_key=verify_bytes,
+    )
+    envelope = sign_envelope(
+        identity,
+        kind="mission.announcement",
+        recipient="dao:core",
+        payload={"body": "hello", "seq": 1},
+        created_at_ms=1_750_000_000_000,
+        expires_at_ms=1_750_000_060_000,
+        hop_limit=3,
+        nonce="DeliveryVectorNonce0123456789",
+    )
+    wire = envelope.to_dict()
+    verification_time_ms = 1_750_000_001_000
+
+    def _reason(data: dict, now_ms: int) -> tuple:
+        try:
+            candidate = TransportEnvelope.from_dict(data)
+            return validate_envelope(candidate, now_ms=now_ms)
+        except TransportEnvelopeRejected as exc:
+            return (False, str(exc))
+
+    vectors = [
+        {
+            "id": "delivery-envelope-001",
+            "description": "Signed envelope validates; canonical bytes, message id, and wire digest are stable",
+            "input": deepcopy(wire),
+            "verification_time_ms": verification_time_ms,
+            "expected_valid": True,
+            "expected_reason": "ok",
+            "expected_canonical_hex": canonical_json(wire).hex(),
+            "expected_message_id": envelope.message_id,
+            "expected_envelope_sha256": envelope_digest(envelope),
+        },
+    ]
+
+    def _negative(vid: str, description: str, mutate, now_ms: int = verification_time_ms) -> dict:
+        data = deepcopy(wire)
+        mutate(data)
+        ok, reason = _reason(data, now_ms)
+        assert not ok, f"vector {vid} unexpectedly validates"
+        return {
+            "id": vid,
+            "description": description,
+            "input": data,
+            "verification_time_ms": now_ms,
+            "expected_valid": False,
+            "expected_reason": reason,
+        }
+
+    def _tamper_payload(data):
+        data["payload"]["body"] = "evil"
+
+    def _tamper_signature(data):
+        sig = list(data["signature"])
+        sig[8] = "A" if sig[8] != "A" else "B"
+        data["signature"] = "".join(sig)
+
+    def _bump_version(data):
+        data["version"] = 2
+
+    def _add_unknown_field(data):
+        data["extra"] = "nope"
+
+    vectors.append(_negative(
+        "delivery-envelope-002",
+        "Tampered payload → payload hash gate rejects",
+        _tamper_payload,
+    ))
+    vectors.append(_negative(
+        "delivery-envelope-003",
+        "Tampered signature byte → signature gate rejects",
+        _tamper_signature,
+    ))
+    vectors.append(_negative(
+        "delivery-envelope-004",
+        "Verification after expiry → TTL gate rejects",
+        lambda data: None,
+        now_ms=1_750_000_060_001,
+    ))
+    vectors.append(_negative(
+        "delivery-envelope-005",
+        "Unknown protocol version → fail closed",
+        _bump_version,
+    ))
+    vectors.append(_negative(
+        "delivery-envelope-006",
+        "Unknown field → fail closed",
+        _add_unknown_field,
+    ))
+    return vectors
+
+
 def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors = {
         "format": "nth-dao-conformance-v1",
@@ -948,6 +1069,7 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             "handoff_review_packet_v1":    gen_handoff_review_packet_v1(),
             "trade_offer_announcement_v1": gen_trade_offer_announcement_v1(),
             "trade_offer_head_proof_v1":   gen_trade_offer_head_proof_v1(),
+            "delivery_envelope_v1":        gen_delivery_envelope_v1(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

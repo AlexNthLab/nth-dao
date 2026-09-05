@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Delivery layer Phase 0 (`nth_dao/delivery/`), the transport-agnostic signed
+  envelope spine from the integration design doc §5/§9: `TransportEnvelope v1`
+  (canonical JSON, content-addressed `message_id`, Ed25519 author signature,
+  TTL/nonce, hop-limited relay forwarding), signed `DeliveryAck` bound to the
+  received wire digest, crash-safe `DurableOutbox` (JSONL journal, fsync,
+  ACK-terminal, bounded, cross-process lock), fail-closed `DeliveryInbox`
+  (size→signature→TTL→nonce→dedup→authorize pipeline with a persistent replay
+  cache), policy-scored `DeliveryRouter` (no fixed transport fallback order,
+  health cooldowns), and pluggable transports: loopback hub (centralized
+  relay) / loopback mesh (federated broadcast) / signed file bundle (offline
+  carry). 172 unit tests including end-to-end pipeline integration tests;
+  `delivery_envelope_v1` conformance category added
+  (6 vectors, pinned reason strings); design notes and a three-round
+  adversarial-review record in `docs/architecture/DELIVERY_LAYER.md`.
+
 - A Host-only, immutable Intent acceptance policy snapshot that binds one exact
   reviewed draft to direct member DIDs, roles, monotonic revocations,
   membership/revocation source digests, solver classes, automation ceilings,
