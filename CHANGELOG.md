@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Phase 1 real transports for the delivery layer: `WebSocketGossipTransport`
+  wraps the existing signed P2P `GossipNode` as a synchronous delivery
+  Transport (background loop bridge, node-signed gossip messages carrying
+  author-signed envelopes, trusted-pubkey passthrough, `TeamChannel`
+  truncation bypassed via a signing shim channel), and
+  `FederationTransport` + stdlib `FederationIngestServer` push signed
+  envelopes to known peers over bounded HTTPS/loopback HTTP (strict URL
+  policy, capped responses, no redirects, concurrency gate, Content-Length
+  bounds with a bounded 413 drain). ACKs travel back as `delivery.ack`
+  envelopes unwrapped by `ack_from_envelope` (author must be the ACK
+  receiver). End-to-end integration tests run the full
+  outbox → router → real wire → inbox → signed-ACK-return → delivered flow
+  for both transports, plus router policy selection and gossip→federation
+  fallback. 46 new tests (including signature-interop, raw-socket hostile
+  Content-Length, and client-side validation pins); `GossipNode.start()` now
+  reports the actual bound port when constructed with `port=0`.
+
 - Delivery layer Phase 0 (`nth_dao/delivery/`), the transport-agnostic signed
   envelope spine from the integration design doc §5/§9: `TransportEnvelope v1`
   (canonical JSON, content-addressed `message_id`, Ed25519 author signature,

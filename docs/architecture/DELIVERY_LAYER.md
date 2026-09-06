@@ -123,6 +123,33 @@ plugin transport wire limit), `MAX_PAYLOAD_DEPTH=16`, `MAX_TTL_MS=7 days`,
 negative gates with pinned reason strings). A non-Python port is
 wire-compatible when `run_all_vectors()` reports zero failures.
 
+## Phase 1 — Real Transports (implemented)
+
+The design doc §8.1 first priority is done: both existing network stacks are
+now delivery Transports, borrowed as-is (no new wire protocol).
+
+| Module | Role |
+|---|---|
+| `transports/websocket_gossip.py` | sync adapter over the borrowed async `GossipNode` (background loop thread, `run_coroutine_threadsafe` bridging). Outbound: the canonical envelope JSON is the content of one node-signed `ChannelMessage`; inbound: node-signed gossip is queued as envelopes for `poll()`. Trust stays in the borrowed layer (`require_signature=True`, pinned pubkeys / web-of-trust). `TeamChannel` is deliberately bypassed — it truncates content at 10 000 chars, which would destroy 512 KiB envelopes; the shim channel signs the identical payload shape without truncation or ledger. |
+| `transports/federation.py` | client `FederationTransport` (POST canonical envelope bytes to every configured peer `/delivery/ingest`, strict per-peer timeout, bounded overall fan-out deadline, no redirects followed, response reads capped) and a stdlib `FederationIngestServer` (exact path, Content-Length capped with bounded 413 drain, canonical-bytes discipline, per-connection timeout, concurrency gate with 503, `DeliveryInbox` performs all validation). Core stays zero-dependency. |
+
+ACK return path: the receiver wraps its signed `DeliveryAck` as an ordinary
+envelope (`kind="delivery.ack"`, payload exactly `{"ack": ...}`); the host
+unwraps via `ack_from_envelope` after inbox validation, which also enforces
+that the envelope author IS the ACK receiver.
+
+Borrowed-layer fix found during integration: `GossipNode.start()` built its
+URL from the constructor port, so `port=0` (OS-assigned) produced a
+`ws://host:0` URL — `start()` now reads the bound socket and the `url`
+property reflects it.
+
+Integration tests: `tests/test_delivery_integration_phase1.py` — full
+outbox → router → real-wire → inbox → signed-ACK-return → delivered flows
+for both HTTP federation and the gossip mesh, router policy selection
+between the two real transports, gossip→federation fallback inside one
+`send()`, and authorize-hook rejection at the ingest door (valid signature,
+no allowlist entry → 422 → `peers-unreachable`).
+
 ## Adversarial Review Record
 
 Round 1 (pre-review) fixed: journal-first ordering for the replay cache,
@@ -168,6 +195,46 @@ defects plus one test-coverage gap; each has a pinned regression test:
 Round 2 had fixed 8 defects (A–H, table above); round 1 fixed journal-first
 ordering, journal size caps, expired-enqueue rejection, and an in-function
 import.
+
+Round 8 (independent programming review of the cumulative fixes) found and
+fixed 4 items; each has a pinned test or a documented rationale:
+
+| # | Item | Fix |
+|---|---|---|
+| AJ | ingest `Content-Length: ²` — unicode `isdigit()` chars pass `isdigit()` but explode `int()`, killing the handler thread (log-spam DoS) | strict ASCII-digit check → clean 400 (raw-socket pinned) |
+| AB | `_EnvelopeChannel.MAX_CONTENT_LENGTH` dead attribute implied truncation exists | removed |
+| AD | gossip loop teardown left the boot task "destroyed but pending" | boot task cancelled and drained on the loop before `close()` |
+| AF | flood drops on the gossip inbound queue were silent | observable `dropped_inbound` counter |
+| AA | deliberate design note added: the TTL *window* is the receiver's inbox decision — sender-side clock checks would break deterministic replay | documented in both real transports' `send()` |
+
+Round 7 (full review of the Phase-1 deliverables) hardened the adapters
+further; every item has a pinned test:
+
+| # | Item | Fix |
+|---|---|---|
+| — | shim-channel signature interop was untested | pinned: shim-signed messages verify through gossip's own `_verify_msg_signature` with the same payload shape as `TeamChannel.send` |
+| — | hostile deeply-nested gossip content could raise `RecursionError` out of the receive callback | caught with the other malformed-content paths |
+| — | `GossipNode.direct_message` would `AttributeError` on the shim channel | shim `dm` routes to send with a DM scope |
+| — | duplicate port bind raised the borrowed layer's raw `ValueError` | construction wrapped — lifecycle errors are uniformly `GossipTransportError` |
+| — | both real transports broadcast/POSTed envelopes WITHOUT client-side signature validation, unlike the file-bundle transport | `validate_envelope` runs before any wire I/O in `send()` (before the peer-count check, so error names the real problem) |
+
+Round 6 (adversarial review of the Phase-1 adapters as submitted) found and
+fixed 3 defects; each has a pinned regression test:
+
+| # | Defect | Fix |
+|---|---|---|
+| W | gossip `send()` checked `peer_count` only BEFORE broadcasting — peers disconnecting inside the send window produced a false accept (nothing delivered, outbox would never retry) | post-broadcast peer re-check: an empty peer table after the send is an honest `no-connected-peers` failure |
+| X | `no_proxy` loopback bypass used `setdefault` — a user with an existing `no_proxy` lacking loopback entries stayed broken through their system proxy | loopback entries are merged into any existing value, idempotently |
+| Y | federation `verify_tls=False` built a fresh unverified SSL context on every POST | context built once per process |
+
+Round 5 (Phase-1 review) found and fixed 2 defects in the new adapters plus
+one borrowed-layer latent bug:
+
+| # | Defect | Fix |
+|---|---|---|
+| U | `WebSocketGossipTransport` restart left the startup event set and a stale `_start_error`, so a second `start()` returned before the new node had bound its port | startup event/error reset in `start()`; failure paths shut the loop thread down |
+| V | `WebSocketGossipTransport.start()` returned `GossipNode.url` — the constructor-valued property (`ws://host:0` under ephemeral ports) instead of the bound URL | adapter returns the URL captured from `start()`; `GossipNode` now records the bound-port URL in `start()` and its `url` property reports it |
+| — | macOS/Windows system proxies intercept loopback WebSockets (503 through the proxy) | adapter `start()` sets `no_proxy` for loopback via `setdefault`, honouring pre-existing user configuration |
 
 ## Not In Scope (per design doc Phase gating)
 
