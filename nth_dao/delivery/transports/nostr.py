@@ -16,7 +16,7 @@ this transport for sensitive traffic automatically.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Any, List
 
 from nth_dao.delivery.envelope import TransportEnvelope
 from nth_dao.delivery.transports.base import (
