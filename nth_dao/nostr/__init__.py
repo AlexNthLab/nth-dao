@@ -11,12 +11,14 @@ delegated to the maintained `nostr-sdk` binding (optional extra
 protection). This package adds only the NTH-specific mapping:
 
 OPERABILITY/SECURITY WARNING: content published through relays is WORLD-
-READABLE. Only public-tier envelopes (broadcast discovery, public channels)
-may ride this tier; private payloads (single-recipient DMs, payment data)
-must never be wrapped here. The N3 transport adapter enforces a public-tier
-policy and its allowlist is fed exclusively by VERIFIED NostrKeyBinding
-documents (latest-wins per NTH did) — an unverified npub is never accepted
-as a NTH member's relay identity.
+READABLE and IMMUTABLE — even with a NIP-40 expiration tag, not all relays
+honor deletion. Once published, assume the envelope content is permanently
+accessible. Only public-tier envelopes (broadcast discovery, public
+channels) may ride this tier; private payloads (single-recipient DMs,
+payment data) must never be wrapped here. The N3 transport adapter
+enforces a public-tier policy and its allowlist is fed exclusively by
+VERIFIED NostrKeyBinding documents (latest-wins per NTH did) — an
+unverified npub is never accepted as a NTH member's relay identity.
 
 * :class:`NostrKeys` — thin wrapper over ``nostr_sdk.Keys`` (deterministic
   parse, x-only public key hex).
@@ -295,9 +297,19 @@ def envelope_event(
     # replay impossible — same envelope+keys produced fresh ids every run)
     from nostr_sdk import Timestamp as _Timestamp
 
+    # NIP-40 expiration tag: tells relays to delete the event after the
+    # envelope's own TTL — without it, expired envelopes remain world-
+    # readable on relays indefinitely (round-17 bug BB-w2)
+    expiration_tag = _Tag.parse([
+        "expiration",
+        str(envelope.expires_at_ms // 1000),
+    ])
     return (
         _EventBuilder(_Kind(NOSTR_EVENT_KIND), content)
-        .tags([_Tag.parse([_ENVELOPE_EVENT_D_TAG, envelope.message_id])])
+        .tags([
+            _Tag.parse([_ENVELOPE_EVENT_D_TAG, envelope.message_id]),
+            expiration_tag,
+        ])
         .custom_created_at(_Timestamp.from_secs(created_at_seconds))
         .finalize(nostr_keys.raw)
     )

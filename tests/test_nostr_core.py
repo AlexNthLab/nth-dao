@@ -305,3 +305,33 @@ class TestHardening:
         ).finalize(nostr_keys.raw)
         with pytest.raises(Exception, match="d tag does not address"):
             envelope_from_event(event)
+
+
+# ─────────────────── adversarial review round 17 (BB-w2) ───────────────────
+
+
+class TestExpirationTag:
+    def test_nip40_expiration_tag_present(self, alice_identity, nostr_keys):
+        """Bug BB-w2: the event must carry a NIP-40 expiration tag derived
+        from the envelope's TTL — without it, expired envelopes remain
+        world-readable on relays indefinitely."""
+
+        from nth_dao.nostr import envelope_event
+
+        envelope = _envelope(alice_identity, payload={"n": 1})
+        event = envelope_event(envelope, nostr_keys, created_at_seconds=int(time.time()))
+        tags = [tag.to_vec() for tag in event.tags()]
+        exp_tags = [tag for tag in tags if tag[0] == "expiration"]
+        assert len(exp_tags) == 1, f"expected exactly one expiration tag, got {tags}"
+        expected_seconds = str(envelope.expires_at_ms // 1000)
+        assert exp_tags[0][1] == expected_seconds
+
+    def test_d_tag_still_present_alongside_expiration(self, alice_identity, nostr_keys):
+        from nth_dao.nostr import envelope_event
+
+        envelope = _envelope(alice_identity, payload={"n": 1})
+        event = envelope_event(envelope, nostr_keys, created_at_seconds=int(time.time()))
+        tags = [tag.to_vec() for tag in event.tags()]
+        d_tags = [tag for tag in tags if tag[0] == "d"]
+        assert len(d_tags) == 1
+        assert d_tags[0][1] == envelope.message_id

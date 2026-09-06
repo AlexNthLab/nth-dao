@@ -171,6 +171,15 @@ are pinned xfail.
 
 ## Adversarial Review Record
 
+Round 17 (design/security/operability review of the Nostr core) found and
+fixed 2 findings; each has a pinned test or a documented boundary:
+
+| # | Item | Fix |
+|---|---|---|
+| BB-w2 | No NIP-40 expiration tag on envelope events — expired envelopes remain world-readable on relays indefinitely | `["expiration", str(expires_at_secs)]` tag added, derived from the envelope's TTL |
+| BB-x2 | `health()` only checks the transport's own running flag, not relay connection state | documented limitation: nostr-sdk handles reconnection internally; relay-level health requires the N3 continuation |
+| BB-y2 | module docstring lacked an immutability warning | "WORLD-READABLE and IMMUTABLE" — not all relays honor NIP-40 deletion |
+
 Round 16 (adversarial review of the Nostr transport) found and fixed 2
 operability findings:
 
