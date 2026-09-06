@@ -442,3 +442,66 @@ class TestRejectionTrimLockAndTmp:
         inbox.compact_rejections(max_keep=2)
         leftovers = [p for p in directory.iterdir() if p.name.endswith(".tmp")]
         assert leftovers == []
+
+
+# ─────────────────── adversarial review round 11 (bug BB-p) ───────────────────
+
+
+class TestCacheJournalAutoCompact:
+    def test_oversized_cache_compacts_losslessly_instead_of_bricking(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        """Bug BB-p: the cache journal grows monotonically; past the byte cap
+        the inbox used to brick itself forever with DeliveryInboxCacheCorrupt.
+        Now it folds + rewrites losslessly and keeps working."""
+
+        import nth_dao.delivery.inbox as inbox_module
+
+        monkeypatch.setattr(inbox_module, "MAX_CACHE_JOURNAL_BYTES", 2_048)
+        directory = tmp_path / "delivery"
+        # eviction (8 live entries) and the journal cap compose: the live
+        # state always fits the compacted journal
+        inbox = DeliveryInbox(
+            directory, clock=lambda: NOW_MS, max_replay_entries=8
+        )
+        envelopes = []
+        for i in range(100):
+            envelope = _envelope(alice_identity, payload={"n": i})
+            decision = inbox.accept(envelope, now_ms=NOW_MS + i)
+            assert decision.accepted, decision.reason
+            envelopes.append(envelope)
+        cache = directory / "inbox.cache.jsonl"
+        assert cache.stat().st_size <= inbox_module.MAX_CACHE_JOURNAL_BYTES
+
+        # dedup semantics unchanged for every live entry — probe the ORIGINAL
+        # envelopes (recreated ones carry fresh nonces and are new messages)
+        reloaded = DeliveryInbox(
+            directory, clock=lambda: NOW_MS, max_replay_entries=8
+        )
+        for envelope in envelopes[-8:]:
+            decision = reloaded.accept(envelope, now_ms=NOW_MS + 1_000)
+            assert decision.duplicate, envelope.message_id
+        for envelope in envelopes[:8]:
+            assert not reloaded.seen(envelope.message_id)  # evicted long ago
+        # and fresh content is still accepted
+        fresh = _envelope(alice_identity, payload={"fresh": True})
+        decision = reloaded.accept(fresh, now_ms=NOW_MS + 2_000)
+        assert decision.accepted
+
+    def test_corrupt_cache_still_fails_closed_after_compact_path(self, tmp_path, alice_identity, monkeypatch):
+        """Compaction must not weaken corruption detection: a hostile mid-file
+        corruption still fails closed even when the size cap is crossed."""
+
+        import nth_dao.delivery.inbox as inbox_module
+
+        monkeypatch.setattr(inbox_module, "MAX_CACHE_JOURNAL_BYTES", 1_024)
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        for i in range(40):
+            inbox.accept(_envelope(alice_identity, payload={"n": i}), now_ms=NOW_MS)
+        cache = directory / "inbox.cache.jsonl"
+        lines = cache.read_bytes().split(b"\n")
+        lines[0] = b"{busted"
+        cache.write_bytes(b"\n".join(lines))
+        with pytest.raises(DeliveryInboxCacheCorrupt):
+            DeliveryInbox(directory, clock=lambda: NOW_MS)

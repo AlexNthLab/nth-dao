@@ -381,6 +381,60 @@ class DeliveryInbox:
         if evicted_key is not None and evicted_id is not None:
             self._by_message_id.pop(evicted_id, None)
             self._nonces.pop(evicted_key, None)
+        # bound the journal on the append path too: crossing the cap folds
+        # and rewrites losslessly instead of growing forever (round-11 BB-p)
+        try:
+            if self._cache_path.stat().st_size > MAX_CACHE_JOURNAL_BYTES:
+                self._compact_cache_journal()
+        except OSError:  # pragma: no cover - stat raced an external replace
+            pass
+
+    def _compact_cache_journal(self) -> None:
+        """Losslessly rewrite an oversized cache journal to its live entries.
+
+        The oversized journal is folded into memory first (torn tail
+        tolerated, corruption still fails closed), then the journal is
+        rewritten holding only the live entries. The rewritten journal folds
+        to the identical in-memory state, so dedup semantics are unchanged
+        and the inbox recovers instead of bricking (round-11 bug BB-p). The
+        caller must hold ``self._thread_lock``.
+        """
+
+        import os
+        import secrets
+
+        self._by_message_id.clear()
+        self._nonces.clear()
+        raw = self._cache_path.read_bytes()
+        self._fold_cache_lines(raw)
+        tmp = self._cache_path.with_suffix(f".jsonl.{secrets.token_hex(4)}.tmp")
+        try:
+            with (
+                InterProcessLock(self._lock_path),
+                open(tmp, "wb") as handle,
+            ):
+                for message_id, (sender_did, nonce) in self._by_message_id.items():
+                    handle.write(canonical_json({
+                        "event": "accepted",
+                        "message_id": message_id,
+                        "sender_did": sender_did,
+                        "nonce": nonce,
+                    }) + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._cache_path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+        try:
+            stat = self._cache_path.stat()
+            self._cache_stat = (stat.st_mtime_ns, stat.st_size)
+        except OSError:  # pragma: no cover - stat after our own replace
+            self._cache_stat = None
+        logger.warning(
+            "inbox cache journal exceeded %d bytes; compacted to %d live "
+            "entries", MAX_CACHE_JOURNAL_BYTES, len(self._by_message_id),
+        )
 
     def _refold_if_changed(self) -> None:
         """Re-fold the cache journal when another process appended to it.
@@ -406,16 +460,22 @@ class DeliveryInbox:
             self._cache_stat = None
             return
         if self._cache_path.stat().st_size > MAX_CACHE_JOURNAL_BYTES:
-            raise DeliveryInboxCacheCorrupt(
-                f"inbox cache journal exceeds {MAX_CACHE_JOURNAL_BYTES} bytes "
-                "(fail closed against disk-exhaustion floods)"
-            )
+            # round-11 bug BB-p: the journal grows monotonically (accepted +
+            # evicted pairs), so at the cap the inbox used to brick itself
+            # forever. Compaction IS the recovery: fold, rewrite losslessly,
+            # and continue with a live state (no operator intervention).
+            self._compact_cache_journal()
+            return
         try:
             stat = self._cache_path.stat()
             self._cache_stat = (stat.st_mtime_ns, stat.st_size)
         except OSError:  # pragma: no cover - raced an external replace
             self._cache_stat = None
-        raw = self._cache_path.read_bytes()
+        self._fold_cache_lines(self._cache_path.read_bytes())
+
+    def _fold_cache_lines(self, raw: bytes) -> None:
+        """Fold cache journal bytes into the in-memory state (fail closed)."""
+
         torn_tail = bool(raw) and not raw.endswith(b"\n")
         lines = raw.split(b"\n")
         for index, line in enumerate(lines):

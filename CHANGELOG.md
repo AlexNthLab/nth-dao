@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Trade adapter runtime (Slice B): `nth_dao/trade_rules/adapter_runtime.py`
+  executes an approved, digest-pinned adapter artifact as a bounded
+  subprocess speaking `nth-trade-adapter-rpc/1` — a minimal MCP-shaped
+  JSON-lines stdio protocol (digest handshake, hook invocation, result).
+  Hard bounds on every axis (wall-clock kill, stdout/stderr/stdin caps,
+  fresh cwd, `python -I`, minimal env, artifact digest re-verified from
+  bytes pre-spawn); hook-level failures become `outcome="failed"` problem
+  payloads while all protocol violations fail closed. The first end-to-end
+  test runs a bilaterally signed Order's adapter-mode Hook through the
+  runtime and notarizes the content-addressed result with
+  `TradeExecutionCoordinator.issue`. 29 tests including a hostile battery
+  (timeout kill, output flood, artifact digest tampering, NaN/float
+  canonical-escape probes, concurrent runs, CRLF adapters, silent exits).
+
 - Phase 1 real transports for the delivery layer: `WebSocketGossipTransport`
   wraps the existing signed P2P `GossipNode` as a synchronous delivery
   Transport (background loop bridge, node-signed gossip messages carrying
@@ -27,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reports the actual bound port when constructed with `port=0`.
 
 - Delivery layer Phase 0 (`nth_dao/delivery/`), the transport-agnostic signed
+  envelope spine: the replay-cache journal now auto-compacts losslessly when
+  it exceeds its byte cap (previously the inbox bricked itself permanently
+  past the cap; found in round-11 whole-stage review),
   envelope spine from the integration design doc §5/§9: `TransportEnvelope v1`
   (canonical JSON, content-addressed `message_id`, Ed25519 author signature,
   TTL/nonce, hop-limited relay forwarding), signed `DeliveryAck` bound to the

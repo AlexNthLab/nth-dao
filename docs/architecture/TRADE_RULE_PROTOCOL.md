@@ -921,6 +921,32 @@ wrong-recipient, expiry, future-time, acknowledgement-binding, and tamper
 outcomes so another implementation must exercise wire semantics rather than
 only parse a signature. Those keys must never be reused or trusted.
 
+## Adapter Runtime (v1, Slice B)
+
+The first execution surface for mode `adapter` is
+`nth_dao.trade_rules.adapter_runtime.SubprocessAdapterRunner`: it runs one
+approved, digest-pinned adapter artifact as an isolated subprocess speaking
+`nth-trade-adapter-rpc/1` — a minimal, MCP-shaped JSON-lines protocol over
+stdio (initialize-with-digest handshake → hook invocation → result; the
+message shapes follow MCP's initialize/tools-call pattern without importing
+any MCP SDK).
+
+Boundaries that are deliberate:
+
+* The runner is a pure hook executor. Bilateral consent, readiness,
+  permission scoping, and schema validation stay in
+  `TradeExecutionCoordinator.issue`; the runner adds process isolation and
+  hard resource bounds (wall-clock kill, bounded stdout/stderr/stdin, fresh
+  cwd, `python -I`, minimal env, artifact digest re-verified from bytes
+  before every spawn).
+* The subprocess is process isolation, not a capability sandbox: an approved
+  artifact can do whatever its host platform allows. Permission tokens
+  declare intent for local policy and receipts; technical enforcement of
+  per-permission access is future work.
+* A hook that runs and reports `ok:false` yields `outcome="failed"` with a
+  `{"error": ...}` problem payload (no output-schema validation, per the
+  receipt rule that only successful results are schema-checked).
+
 ## Compatibility
 
 Existing Commerce v1 remains a separate compatibility profile:

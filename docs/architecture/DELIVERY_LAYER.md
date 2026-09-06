@@ -196,6 +196,50 @@ Round 2 had fixed 8 defects (A–H, table above); round 1 fixed journal-first
 ordering, journal size caps, expired-enqueue rejection, and an in-function
 import.
 
+Round 11 (whole-stage adversarial review of every fix) found the last
+design-level defect in the delivery layer:
+
+| # | Item | Fix |
+|---|---|---|
+| BB-p | the inbox replay-cache journal grew monotonically (accepted + evicted pairs); past the 16 MiB cap the inbox bricked itself forever with `DeliveryInboxCacheCorrupt` and no recovery path | lossless auto-compaction: fold → rewrite live entries under the cross-process lock, on both the load path and the append path; corruption still fails closed (pinned by raw tests) |
+
+Also swept with no findings: conformance vector regeneration is byte-idempotent,
+`__all__` exports complete, no patch-script debris (double docstrings, dead
+attributes), and the three per-module re-fold implementations are
+semantically equivalent.
+
+Round 10 (design/execution/security/maintainability review of Slice B)
+found and fixed 2 design-level findings:
+
+| # | Item | Fix |
+|---|---|---|
+| BB-n | a spawn failure (missing interpreter, fd/memory exhaustion) escaped `run()` as a raw `OSError` | wrapped — surfaces as a **retryable** `AdapterHookRejected` |
+| BB-o | `AdapterHookRejected` conflated transient failures (timeout, crash, spawn) with permanent ones (digest mismatch, protocol violations) — outbox-style callers could not decide on retries | the exception now carries `retryable`; timeout/crash/spawn are retryable, everything else permanent |
+
+Maintainability notes carried as documented boundaries rather than fixes:
+the runner is Python-artifact-only in v1 (`python -I`), and the subprocess
+is process isolation, not a capability sandbox.
+
+Upstream note (pre-existing, unrelated to this PR): the live-HTTP harness
+in `test_trade_rule_agreement.py` acquires ports with a bind(0)-close-
+rebind race (`_free_tcp_port`) and polls `server.started`, which flakes
+intermittently (~1 in 4 file-scoped runs, never in a full-suite run, on
+code with and without this PR's changes). A bind-and-hold socket handed to
+uvicorn would close it.
+
+Round 9 (full-test hunt on the Slice-B runtime) found and fixed 2
+contract-escape bugs, both of the same family as Phase-0 bug A; each has a
+pinned test:
+
+| # | Defect | Fix |
+|---|---|---|
+| BB-i | `input_payload` containing `NaN`/`Infinity` passes `json.loads` but explodes `canonical_json` with a raw `TypeError`, escaping the `AdapterHookRejected` contract | canonicalization wrapped — contract type restored |
+| BB-m | an adapter returning a float (or printing `NaN`) in its result hit the same raw `TypeError` at result serialization | same wrap on the result path |
+
+Also pinned: eight concurrent `run()` calls stay independent, CRLF-line
+adapters parse, a silent `exit(0)` adapter with no protocol lines fails
+closed, and NaN-class inputs are refused before any subprocess spawns.
+
 Round 8 (independent programming review of the cumulative fixes) found and
 fixed 4 items; each has a pinned test or a documented rationale:
 
