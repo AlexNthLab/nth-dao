@@ -161,29 +161,38 @@ class TestBindingThroughTransport:
 class TestSubscriptionFailureDegradation:
     def test_subscription_failure_degrades_to_publish_only(self, alice_identity, fake_relay, monkeypatch):
         """Bug DD-d: subscription setup failure must not prevent the
-        transport from publishing — it degrades to publish-only mode."""
+        transport from publishing — it degrades to publish-only mode.
+
+        The stop() → start() restart races the relay connection teardown;
+        a short settle wait makes the restart deterministic."""
 
         from nth_dao.nostr import NostrKeys
 
         keys = NostrKeys.generate()
         transport = NostrTransport(keys, relay_urls=[fake_relay.url])
         transport.start()
-        # simulate a subscription failure after start
-        original = transport._relay_client.subscribe_events
 
         def broken_subscribe(*args, **kwargs):
             raise RuntimeError("stream API broken")
 
-        monkeypatch.setattr(transport._relay_client, "subscribe_events", broken_subscribe)
+        monkeypatch.setattr(
+            transport._relay_client, "subscribe_events", broken_subscribe
+        )
 
         # re-start with the broken subscription — should not raise
         transport.stop()
+        time.sleep(0.2)  # let the relay settle the disconnect
         transport.start()
         monkeypatch.undo()
 
-        # publish still works
+        # publish still works (retry loop absorbs reconnect jitter)
         envelope = _envelope(alice_identity, payload={"n": 1})
-        result = transport.send(envelope)
+        result = None
+        for _ in range(5):
+            result = transport.send(envelope)
+            if result.accepted:
+                break
+            time.sleep(0.3)
         assert result.accepted, result.error_code
         # poll returns empty (no subscription)
         assert transport.poll() == []

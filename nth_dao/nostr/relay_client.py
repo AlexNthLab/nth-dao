@@ -236,6 +236,12 @@ class NostrRelayClient:
             except Exception:  # noqa: BLE001 - stream errors end the pump
                 logger.exception("nostr event stream ended with error")
 
+        # cancel any previous pump before replacing it: a second
+        # subscribe_events would otherwise leak the first coroutine
+        # (round-20 bug GG-16)
+        previous = getattr(self, "_stream_task", None)
+        if previous is not None and not previous.done():
+            previous.cancel()
         self._stream_task = asyncio.get_event_loop().create_task(_pump())
 
     def poll_events(self, *, max_items: int = 64) -> List[Any]:

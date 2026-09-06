@@ -171,6 +171,25 @@ are pinned xfail.
 
 ## Adversarial Review Record
 
+Round 20 (adversarial review of every remaining commit: Phase 1 6182f4c,
+Slice B bf28c9a, Phase 2 N1 ac92d5a, N2/N3 d104bf9, fix commits
+0bb3209/bd71e5a/f1e4cae) found and fixed 1 resource leak; 19 hypotheses
+probed and cleared:
+
+| # | Defect | Fix |
+|---|---|---|
+| GG-16 | `NostrRelayClient._subscribe_async` overwrote `_stream_task` without cancelling the previous pump — a second `subscribe_events` call leaked the first coroutine forever | previous task cancelled before replacement |
+
+Cleared by probe: BOM-prefixed JSON bodies (canonical-bytes discipline
+rejects), deque flood performance (0.4ms/10k ops), file-bundle naming
+idempotency, adapter-runtime fd lifecycle (GC + OS reclaim), glob on
+10k-file directories (33.6ms), event-loop json.loads cost (0.13ms/200KB),
+identity-probe side effects (constructor is pure), repeated-import cost
+(cached), fake-relay set iteration (single-loop async), stderr cap
+asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
+call, remainder queued), HTTPError fp-None handling, binding-less sends
+(already logged), NIP-40 expiration arithmetic (int-typed by validation).
+
 Round 19 (adversarial review of the Phase-0 core as shipped in 64d92a1)
 found and fixed 1 contract hole; 10 further hypotheses probed and cleared:
 
