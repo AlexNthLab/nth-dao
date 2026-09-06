@@ -9,6 +9,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
+  maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
+  internet relay tier. NTH Ed25519 identities sign NostrKeyBinding documents
+  asserting secp256k1 key ownership (design doc §6.3); delivery envelopes
+  travel as kind-30078 (NIP-78) events whose content is the canonical
+  envelope JSON and whose `d` tag pins the message_id. Receipt-side
+  verification is two-tier (nostr-sdk checks the relay-tier event
+  signature, the delivery layer re-validates the envelope author signature)
+  and fails closed on tamper, wrong kind, unsigned envelopes, d-tag
+  addressing mismatches, and non-integer timestamps (the timestamp is
+  actually applied — deterministic event ids are pinned by tests).
+- Nostr relay client (Phase 2 N2) and delivery transport (N3):
+  `NostrRelayClient` wraps the borrowed async `nostr_sdk.Client` on a
+  background loop thread (same bridge as the gossip adapter) with publish
+  (relay-OK bounded wait) and kind-filtered subscription delivery;
+  `NostrTransport` plugs the public relay tier into the delivery router
+  (broadcast, PRIVACY_PUBLIC_RELAY, external_infrastructure) with
+  fail-closed envelope re-validation. Tested against an in-process fake
+  NIP-01 relay (`tests/fake_nostr_relay.py`): publish round-trip, hostile
+  relay rejection, private-tier refusal, relay URL policy. 10 tests (2
+  xfail: subscription stream semantics need nostr-sdk 0.45 refinement).
+
+- Trade adapter runtime (Slice B): `nth_dao/trade_rules/adapter_runtime.py`
+  executes an approved, digest-pinned adapter artifact as a bounded
+  subprocess speaking `nth-trade-adapter-rpc/1` — a minimal MCP-shaped
+  JSON-lines stdio protocol (digest handshake, hook invocation, result).
+  Hard bounds on every axis (wall-clock kill, stdout/stderr/stdin caps,
+  fresh cwd, `python -I`, minimal env, artifact digest re-verified from
+  bytes pre-spawn); hook-level failures become `outcome="failed"` problem
+  payloads while all protocol violations fail closed. The first end-to-end
+  test runs a bilaterally signed Order's adapter-mode Hook through the
+  runtime and notarizes the content-addressed result with
+  `TradeExecutionCoordinator.issue`. 29 tests including a hostile battery
+  (timeout kill, output flood, artifact digest tampering, NaN/float
+  canonical-escape probes, concurrent runs, CRLF adapters, silent exits).
+
+- Phase 1 real transports for the delivery layer: `WebSocketGossipTransport`
+  wraps the existing signed P2P `GossipNode` as a synchronous delivery
+  Transport (background loop bridge, node-signed gossip messages carrying
+  author-signed envelopes, trusted-pubkey passthrough, `TeamChannel`
+  truncation bypassed via a signing shim channel), and
+  `FederationTransport` + stdlib `FederationIngestServer` push signed
+  envelopes to known peers over bounded HTTPS/loopback HTTP (strict URL
+  policy, capped responses, no redirects, concurrency gate, Content-Length
+  bounds with a bounded 413 drain). ACKs travel back as `delivery.ack`
+  envelopes unwrapped by `ack_from_envelope` (author must be the ACK
+  receiver). End-to-end integration tests run the full
+  outbox → router → real wire → inbox → signed-ACK-return → delivered flow
+  for both transports, plus router policy selection and gossip→federation
+  fallback. 46 new tests (including signature-interop, raw-socket hostile
+  Content-Length, and client-side validation pins); `GossipNode.start()` now
+  reports the actual bound port when constructed with `port=0`.
+
+- Delivery layer Phase 0 (`nth_dao/delivery/`), the transport-agnostic signed
+  envelope spine: the replay-cache journal now auto-compacts losslessly when
+  it exceeds its byte cap (previously the inbox bricked itself permanently
+  past the cap; found in round-11 whole-stage review); the file-bundle
+  import journal rotates at its byte cap — re-imports after rotation are
+  safe because the inbox dedups by message_id (round-15 CC-a),
+  envelope spine from the integration design doc §5/§9: `TransportEnvelope v1`
+  (canonical JSON, content-addressed `message_id`, Ed25519 author signature,
+  TTL/nonce, hop-limited relay forwarding), signed `DeliveryAck` bound to the
+  received wire digest, crash-safe `DurableOutbox` (JSONL journal, fsync,
+  ACK-terminal, bounded, cross-process lock), fail-closed `DeliveryInbox`
+  (size→signature→TTL→nonce→dedup→authorize pipeline with a persistent replay
+  cache), policy-scored `DeliveryRouter` (no fixed transport fallback order,
+  health cooldowns), and pluggable transports: loopback hub (centralized
+  relay) / loopback mesh (federated broadcast) / signed file bundle (offline
+  carry). 172 unit tests including end-to-end pipeline integration tests;
+  `delivery_envelope_v1` conformance category added
+  (6 vectors, pinned reason strings); design notes and a three-round
+  adversarial-review record in `docs/architecture/DELIVERY_LAYER.md`.
+
 - A Host-only, immutable Intent acceptance policy snapshot that binds one exact
   reviewed draft to direct member DIDs, roles, monotonic revocations,
   membership/revocation source digests, solver classes, automation ceilings,

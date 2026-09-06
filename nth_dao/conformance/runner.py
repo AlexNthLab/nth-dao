@@ -598,6 +598,71 @@ def check_trade_offer_head_proof_v1(
     return failures
 
 
+def check_delivery_envelope_v1(vectors: List[dict]) -> List[ConformanceFailure]:
+    """Verify TransportEnvelope v1 canonical bytes, content address, gates."""
+    from ..delivery.envelope import (
+        TransportEnvelope,
+        TransportEnvelopeRejected,
+        envelope_digest,
+        validate_envelope,
+    )
+
+    failures: List[ConformanceFailure] = []
+    for vector in vectors:
+        try:
+            envelope = TransportEnvelope.from_dict(vector["input"])
+            ok, reason = validate_envelope(
+                envelope, now_ms=vector["verification_time_ms"]
+            )
+        except TransportEnvelopeRejected as exc:
+            envelope, ok, reason = None, False, str(exc)
+        except (KeyError, TypeError, ValueError) as exc:
+            ok, reason = False, str(exc)
+        expected_ok = vector["expected_valid"]
+        expected_reason = vector.get("expected_reason")
+        if ok != expected_ok or (expected_reason is not None and reason != expected_reason):
+            failures.append(ConformanceFailure(
+                vector_id=vector.get("id", "delivery-envelope:invalid"),
+                category="delivery_envelope_v1",
+                description="validation result",
+                expected=(expected_ok, expected_reason),
+                actual=(ok, reason),
+            ))
+            continue
+        if envelope is None:
+            continue
+        expected_canonical = vector.get("expected_canonical_hex")
+        if expected_canonical is not None:
+            actual_hex = canonical_json(envelope.to_dict()).hex()
+            if actual_hex != expected_canonical:
+                failures.append(ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="delivery_envelope_v1",
+                    description="canonical envelope bytes",
+                    expected=expected_canonical,
+                    actual=actual_hex,
+                ))
+        expected_message_id = vector.get("expected_message_id")
+        if expected_message_id is not None and envelope.message_id != expected_message_id:
+            failures.append(ConformanceFailure(
+                vector_id=vector["id"],
+                category="delivery_envelope_v1",
+                description="content-addressed message id",
+                expected=expected_message_id,
+                actual=envelope.message_id,
+            ))
+        expected_digest = vector.get("expected_envelope_sha256")
+        if expected_digest is not None and envelope_digest(envelope) != expected_digest:
+            failures.append(ConformanceFailure(
+                vector_id=vector["id"],
+                category="delivery_envelope_v1",
+                description="wire digest",
+                expected=expected_digest,
+                actual=envelope_digest(envelope),
+            ))
+    return failures
+
+
 _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "canonical_json":              check_canonical_json,
     "fingerprint":                 check_fingerprint,
@@ -620,6 +685,7 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "handoff_review_packet_v1":    check_handoff_review_packet_v1,
     "trade_offer_announcement_v1": check_trade_offer_announcement_v1,
     "trade_offer_head_proof_v1":   check_trade_offer_head_proof_v1,
+    "delivery_envelope_v1":        check_delivery_envelope_v1,
 }
 
 

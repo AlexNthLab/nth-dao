@@ -269,7 +269,14 @@ class GossipNode:
             self.host,
             self.port,
         )
-        url = f"ws://{self.host}:{self.port}"
+        # port=0 时回填 OS 实际分配的端口，让 url 可直接用于 peer 连接
+        bound_port = self.port
+        if bound_port == 0 and self._server is not None:
+            for sock in self._server.sockets:
+                bound_port = sock.getsockname()[1]
+                break
+        url = f"ws://{self.host}:{bound_port}"
+        self._bound_url = url
 
         #  bootstrap peers
         for peer_url in self.bootstrap_urls:
@@ -521,7 +528,8 @@ class GossipNode:
 
     @property
     def url(self) -> str:
-        return f"ws://{self.host}:{self.port}"
+        # start() 后返回 OS 实际绑定端口的 url（port=0 场景）
+        return getattr(self, "_bound_url", f"ws://{self.host}:{self.port}")
 
     #
 
