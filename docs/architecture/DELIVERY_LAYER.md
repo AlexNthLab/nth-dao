@@ -171,6 +171,20 @@ are pinned xfail.
 
 ## Adversarial Review Record
 
+Round 19 (adversarial review of the Phase-0 core as shipped in 64d92a1)
+found and fixed 1 contract hole; 10 further hypotheses probed and cleared:
+
+| # | Defect | Fix |
+|---|---|---|
+| FF-5 | `envelope_digest()` silently digested ANY dict — callers could compute digests over malformed shapes and bind them into ACKs and outbox records | plain dicts now require the exact envelope field set before digesting |
+
+Cleared by probe (no fix needed): forward without TTL check (defense in
+depth — inbox owns the clock), copy_count vs transport count (min-clamped),
+hub first-poller-wins (by-design at-most-once for a shared recipient),
+compact lock ordering (refold inside the cross-process lock), ACK
+future-time skew, payload mutability through content_body, accept-path
+refold, to_dict deepcopy cost at 100KB payloads (3.4ms).
+
 Round 17 (design/security/operability review of the Nostr core) found and
 fixed 2 findings; each has a pinned test or a documented boundary:
 

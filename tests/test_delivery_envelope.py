@@ -439,3 +439,30 @@ def _content_address_hex(envelope):
 
     body = envelope.content_body()
     return "sha256:" + hashlib.sha256(canonical_json(body)).hexdigest()
+
+
+# ─────────────────── adversarial review round 19 (bug FF-5) ───────────────────
+
+
+class TestEnvelopeDigestDictContract:
+    def test_digest_rejects_unknown_fields(self, alice_identity):
+        """Bug FF-5: envelope_digest(uncalid dict) used to silently digest
+        any shape — now the field set is checked first."""
+
+        envelope = _signed(alice_identity)
+        hostile = dict(envelope.to_dict())
+        hostile["extra"] = True
+        with pytest.raises(TransportEnvelopeRejected, match="unknown fields"):
+            envelope_digest(hostile)
+
+    def test_digest_rejects_missing_fields(self, alice_identity):
+        envelope = _signed(alice_identity)
+        hostile = dict(envelope.to_dict())
+        del hostile["nonce"]
+        with pytest.raises(TransportEnvelopeRejected, match="missing"):
+            envelope_digest(hostile)
+
+    def test_digest_accepts_exact_envelope_shape(self, alice_identity):
+        envelope = _signed(alice_identity)
+        exact = envelope.to_dict()
+        assert envelope_digest(exact) == envelope_digest(envelope)

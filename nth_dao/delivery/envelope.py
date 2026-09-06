@@ -466,11 +466,21 @@ def validate_envelope(
 
 
 def envelope_digest(envelope: Union[TransportEnvelope, Dict[str, Any]]) -> str:
-    """Content digest of the canonical wire bytes of one envelope."""
+    """Content digest of the canonical wire bytes of one envelope.
+
+    When handed a plain dict, the field set must be an exact envelope
+    projection (round-19 bug FF-5: previously any dict was digested
+    unchecked, letting callers compute digests over malformed shapes and
+    bind them into ACKs and outbox records).
+    """
 
     if isinstance(envelope, TransportEnvelope):
         wire = _recode_envelope(envelope)
     else:
+        if frozenset(envelope) not in TransportEnvelope.allowed_field_sets():
+            raise TransportEnvelopeRejected(
+                "envelope dict has missing or unknown fields"
+            )
         wire = envelope
     return "sha256:" + hashlib.sha256(canonical_json(wire)).hexdigest()
 
