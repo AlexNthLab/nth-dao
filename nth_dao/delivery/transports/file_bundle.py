@@ -78,6 +78,7 @@ BUNDLE_MAX_BUNDLES_PER_DIR = 4_096
 BUNDLE_MAX_ENVELOPES = 256
 BUNDLE_MAX_FILE_BYTES = 64 * 1024 * 1024
 _IMPORTED_JOURNAL = "imported.jsonl"
+_IMPORTED_JOURNAL_CAP = 1024 * 1024
 
 _BUNDLE_FIELDS = (
     "protocol",
@@ -363,6 +364,29 @@ class FileBundleTransport(Transport):
                     self._imported_stat = (stat.st_mtime_ns, stat.st_size)
                 except OSError:  # pragma: no cover - fstat on our own fd
                     pass
+            # bound the journal (round-15 bug CC-a): rotate to the newest
+            # half when it crosses the cap — safe because the inbox dedups
+            # redeliveries by message_id, so rotation can at most cause a
+            # re-import whose envelopes the inbox drops as duplicates
+            if self._imported_path.stat().st_size > _IMPORTED_JOURNAL_CAP:
+                lines = self._imported_path.read_bytes().splitlines()
+                keep = lines[-max(1, len(lines) // 2):]
+                tmp = self._imported_path.with_suffix(
+                    f".jsonl.{os.getpid()}-{secrets.token_hex(4)}.tmp"
+                )
+                with open(tmp, "wb") as handle:
+                    for line in keep:
+                        handle.write(line + b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, self._imported_path)
+                self._imported = {
+                    json.loads(line)["envelopes_sha256"] for line in keep
+                }
+                logger.warning(
+                    "import journal exceeded %d bytes; rotated to %d entries",
+                    _IMPORTED_JOURNAL_CAP, len(keep),
+                )
 
 
 __all__ = [

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
+  maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
+  internet relay tier. NTH Ed25519 identities sign NostrKeyBinding documents
+  asserting secp256k1 key ownership (design doc §6.3); delivery envelopes
+  travel as kind-30078 (NIP-78) events whose content is the canonical
+  envelope JSON and whose `d` tag pins the message_id. Receipt-side
+  verification is two-tier (nostr-sdk checks the relay-tier event
+  signature, the delivery layer re-validates the envelope author signature)
+  and fails closed on tamper, wrong kind, unsigned envelopes, d-tag
+  addressing mismatches, and non-integer timestamps (the timestamp is
+  actually applied — deterministic event ids are pinned by tests).
+
 - Trade adapter runtime (Slice B): `nth_dao/trade_rules/adapter_runtime.py`
   executes an approved, digest-pinned adapter artifact as a bounded
   subprocess speaking `nth-trade-adapter-rpc/1` — a minimal MCP-shaped
@@ -43,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Delivery layer Phase 0 (`nth_dao/delivery/`), the transport-agnostic signed
   envelope spine: the replay-cache journal now auto-compacts losslessly when
   it exceeds its byte cap (previously the inbox bricked itself permanently
-  past the cap; found in round-11 whole-stage review),
+  past the cap; found in round-11 whole-stage review); the file-bundle
+  import journal rotates at its byte cap — re-imports after rotation are
+  safe because the inbox dedups by message_id (round-15 CC-a),
   envelope spine from the integration design doc §5/§9: `TransportEnvelope v1`
   (canonical JSON, content-addressed `message_id`, Ed25519 author signature,
   TTL/nonce, hop-limited relay forwarding), signed `DeliveryAck` bound to the

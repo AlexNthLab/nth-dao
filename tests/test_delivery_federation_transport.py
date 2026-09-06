@@ -20,6 +20,8 @@ from nth_dao.delivery.transports.federation import (
     ack_from_envelope,
     validate_peer_url,
 )
+from nth_dao.delivery.transports.file_bundle import FileBundleTransport
+from nth_dao.nostr import NostrKeys
 
 pytest.importorskip("nacl")
 
@@ -49,6 +51,12 @@ def _envelope(alice_identity, payload=None):
         created_at_ms=NOW_MS,
         expires_at_ms=NOW_MS + 120_000,
     )
+
+
+@pytest.fixture()
+def nostr_keys():
+
+    return NostrKeys.generate()
 
 
 @pytest.fixture()
@@ -337,3 +345,146 @@ class TestContentLengthStrictness:
         ident = AgentIdentity.generate(label="still-alive")
         envelope = _envelope(ident)
         assert transport.send(envelope).accepted
+
+
+# ─────────────────── adversarial review round 15 ───────────────────
+
+
+class TestPublicTierPolicy:
+    def test_private_did_recipient_rejected_on_public_tier(self, alice_identity, nostr_keys):
+        """Bug CC-b: single-recipient (did:key) envelopes are private traffic
+        and must be refused on the world-readable relay tier."""
+
+        from nth_dao.delivery.envelope import TransportEnvelopeRejected
+        from nth_dao.identity import AgentIdentity
+        from nth_dao.nostr import envelope_event
+
+        bob = AgentIdentity.generate(label="bob")
+        private_dm = sign_envelope(
+            alice_identity,
+            kind="dm.message",
+            recipient=bob.as_did(),
+            payload={"secret": "private payload"},
+            created_at_ms=NOW_MS,
+            expires_at_ms=NOW_MS + 60_000,
+        )
+        with pytest.raises(TransportEnvelopeRejected, match="broadcast traffic only"):
+            envelope_event(private_dm, nostr_keys, created_at_seconds=NOW_MS // 1000)
+        # broadcast recipients remain fine
+        assert envelope_event(
+            _envelope(alice_identity), nostr_keys, created_at_seconds=NOW_MS // 1000
+        ) is not None
+
+
+class TestBindingEnforcement:
+    def test_publish_with_verified_binding_succeeds(self, alice_identity, nostr_keys):
+        import time as time_mod
+
+        from nth_dao.nostr import envelope_event, sign_key_binding
+
+        binding = sign_key_binding(
+            alice_identity,
+            nostr_keys=nostr_keys,
+            created_at_ms=int(time_mod.time() * 1000),
+        )
+        envelope = _envelope(alice_identity)
+        event = envelope_event(
+            envelope,
+            nostr_keys,
+            created_at_seconds=int(time_mod.time()),
+            binding=binding,
+        )
+        assert event.author().to_hex() == nostr_keys.public_key_hex
+
+    def test_publish_with_mismatched_key_rejected(self, alice_identity, nostr_keys):
+        """Bug CC-c: an envelope must not be published under a relay key that
+        no verified binding delivers."""
+
+        import time as time_mod
+
+        from nth_dao.nostr import envelope_event, sign_key_binding
+
+        other = NostrKeys.generate()
+        binding = sign_key_binding(
+            alice_identity,
+            nostr_keys=other,
+            created_at_ms=int(time_mod.time() * 1000),
+        )
+        envelope = _envelope(alice_identity)
+        with pytest.raises(Exception, match="does not name the publishing key"):
+            envelope_event(
+                envelope,
+                nostr_keys,
+                created_at_seconds=int(time_mod.time()),
+                binding=binding,
+            )
+
+    def test_forged_binding_signature_rejected(self, alice_identity, nostr_keys, tmp_path):
+        """The publish-side gate verifies the binding signature against the
+        DID decoded from the binding itself — no identity object needed."""
+
+        import time as time_mod
+        from dataclasses import replace
+
+        from nth_dao.nostr import envelope_event, sign_key_binding
+
+        binding = sign_key_binding(
+            alice_identity,
+            nostr_keys=nostr_keys,
+            created_at_ms=int(time_mod.time() * 1000),
+        )
+        forged = replace(binding, signature="00" * 64)
+        envelope = _envelope(alice_identity)
+        with pytest.raises(Exception, match="binding invalid"):
+            envelope_event(
+                envelope,
+                nostr_keys,
+                created_at_seconds=int(time_mod.time()),
+                binding=forged,
+            )
+
+
+class TestImportedJournalRotation:
+    def test_journal_rotates_at_cap(self, tmp_path, alice_identity, bob_identity, monkeypatch):
+        """Bug CC-a: the imported journal is bounded — past the cap it
+        rotates to the newest half instead of growing forever."""
+
+        import nth_dao.delivery.transports.file_bundle as fb
+
+        monkeypatch.setattr(fb, "_IMPORTED_JOURNAL_CAP", 1_024)
+        exchange = tmp_path / "exchange"
+        sender = FileBundleTransport(
+            exchange, alice_identity, state_dir=exchange / ".s-alice", clock=lambda: NOW_MS
+        )
+        receiver = FileBundleTransport(
+            exchange, bob_identity, state_dir=exchange / ".s-bob", clock=lambda: NOW_MS
+        )
+        sent = []
+        for i in range(30):
+            envelope = _envelope(alice_identity, payload={"n": i})
+            sender.send(envelope)
+            sent.append(envelope)
+            receiver.poll()  # import (rotation may drop old digests)
+        latest = _envelope(alice_identity, payload={"n": 999})
+        sender.send(latest)
+        sent.append(latest)
+        receiver.poll()
+
+        journal = exchange / ".s-bob" / "imported.jsonl"
+        assert journal.stat().st_size <= fb._IMPORTED_JOURNAL_CAP + 2_048
+
+        # design contract: every sent envelope is DELIVERABLE across
+        # rotations — poll until stable, the set of seen message ids must
+        # cover all 31 sends, with no double-import inside one poll
+        all_polled: list = []
+        for _ in range(3):
+            polled = receiver.poll(max_items=256)
+            all_polled.extend(polled)
+            # within ONE poll call there must be no duplicate message id
+            poll_ids = [envelope.message_id for envelope in polled]
+            assert len(poll_ids) == len(set(poll_ids))
+        seen_ids = {envelope.message_id for envelope in all_polled}
+        expected_ids = {envelope.message_id for envelope in sent}
+        assert seen_ids >= expected_ids, (
+            f"missing {len(expected_ids - seen_ids)} envelopes after rotation"
+        )

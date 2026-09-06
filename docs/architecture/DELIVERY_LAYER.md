@@ -150,7 +150,50 @@ between the two real transports, gossip→federation fallback inside one
 `send()`, and authorize-hook rejection at the ingest door (valid signature,
 no allowlist entry → 422 → `peers-unreachable`).
 
+## Phase 2 — Nostr relay tier (in progress)
+
+`nth_dao/nostr/` wraps the maintained `nostr-sdk` binding (optional extra
+`nth-dao[nostr]`): secp256k1 BIP340 keys, NIP-01 events, and relay wire
+protocol are all borrowed. NTH-specific mapping: `NostrKeyBinding` (an NTH
+Ed25519 identity signs ownership of one Nostr key, one-year validity) and
+kind-30078 envelope events whose `d` tag pins the envelope message_id —
+receiver-side verification is two-tier (event signature via nostr-sdk,
+envelope author signature via the delivery layer) and the d tag must
+address the carried envelope (round-12: slot-collision and non-integer
+timestamps fixed). Relay client (N2) and transport adapter (N3) next.
+
 ## Adversarial Review Record
+
+Round 15 (whole-stage review of the cumulative fixes) found and fixed 3
+findings across the three deliverables:
+
+| # | Item | Fix |
+|---|---|---|
+| CC-b | `envelope_event` accepted single-recipient (did:key) envelopes onto the world-readable relay tier — the round-14 warning had no technical enforcement | public-tier policy enforced: broadcast recipients (dao:/channel:) only |
+| CC-c | an envelope could be published under a relay key that no verified binding delivers (publish-side binding enforcement missing) | optional `binding` param verified at publish: standalone signature check against the DID-decoded pubkey, key match, sender match |
+| CC-a | the file-bundle import journal was unbounded (memory + startup DoS via valid-member flooding) | byte cap with newest-half rotation — safe because the inbox dedups redeliveries by message_id (pinned by the design-contract test) |
+
+Round 14 (design/security/operability review of the Nostr core) hardened
+the tier; each item has a pinned test or a documented boundary:
+
+| # | Item | Fix |
+|---|---|---|
+| BB-u | extreme-depth hostile content (100k nesting) — RecursionError added to the catch list as defense-in-depth (probe showed the stack holds via the Rust serde boundary + field-set check) | hardening |
+| BB-v | no explicit warning that relay content is world-readable | operability/security warning in the module docstring; N3 must enforce public-tier-only |
+| BB-w | binding discovery/disambiguation unspecified for N3 | documented: transport allowlists are fed exclusively by VERIFIED bindings, latest-wins per NTH did |
+| BB-x | `nostr-sdk` is pre-1.0 — API churn risk | pinned `>=0.45,<0.46` |
+| BB-y | envelope rejections were silent | module logger warns with the reason |
+
+Round 13 (full-test hunt on the Nostr core) found 1 validation-theater bug;
+pinned by tests:
+
+| # | Defect | Fix |
+|---|---|---|
+| BB-t | `envelope_event` validated `created_at_seconds` then silently DROPPED it (wall clock applied instead) — validation theater; deterministic replay was impossible | the timestamp is now applied via `custom_created_at`; same envelope+keys+timestamp reproduces the same event id (pinned), different timestamps produce different ids (pinned); BIP340 aux-random signatures documented as spec-allowed |
+
+Also swept with no findings: unicode Content-Length probes, d-tag
+extraction edge cases (empty value, multiple tags — first-tag semantics
+matches NIP-01 replaceable rules).
 
 Round 1 (pre-review) fixed: journal-first ordering for the replay cache,
 journal size caps, expired-envelope enqueue rejection, and an in-function
