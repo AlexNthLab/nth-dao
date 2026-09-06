@@ -113,3 +113,78 @@ class TestNostrTransport:
             assert "broadcast traffic only" in result.error_code
         finally:
             transport.stop()
+
+
+# ─────────────────── adversarial review round 16 (bug DD-a) ───────────────────
+
+
+class TestBindingThroughTransport:
+    def test_transport_passes_binding_to_envelope_event(self, alice_identity, fake_relay):
+        """Bug DD-a: the transport's send() must pass the binding through so
+        the N1 publish-side enforcement is not bypassed at the transport tier."""
+
+        from nth_dao.nostr import NostrKeys, sign_key_binding
+
+        keys = NostrKeys.generate()
+        binding = sign_key_binding(
+            alice_identity, nostr_keys=keys, created_at_ms=int(time.time() * 1000)
+        )
+        transport = NostrTransport(
+            keys, relay_urls=[fake_relay.url], binding=binding
+        )
+        transport.start()
+        try:
+            envelope = _envelope(alice_identity)
+            result = transport.send(envelope)
+            assert result.accepted, result.error_code
+        finally:
+            transport.stop()
+
+    def test_transport_without_binding_still_publishes(self, alice_identity, fake_relay):
+        """No binding → publish succeeds but the event is 'unbound' and strict
+        allowlist receivers will drop it. This is documented, not an error."""
+
+        keys = NostrKeys.generate()
+        transport = NostrTransport(keys, relay_urls=[fake_relay.url])
+        transport.start()
+        try:
+            envelope = _envelope(alice_identity)
+            result = transport.send(envelope)
+            assert result.accepted
+        finally:
+            transport.stop()
+
+
+# ─────────────────── adversarial review round 16 (bug DD-d) ───────────────────
+
+
+class TestSubscriptionFailureDegradation:
+    def test_subscription_failure_degrades_to_publish_only(self, alice_identity, fake_relay, monkeypatch):
+        """Bug DD-d: subscription setup failure must not prevent the
+        transport from publishing — it degrades to publish-only mode."""
+
+        from nth_dao.nostr import NostrKeys
+
+        keys = NostrKeys.generate()
+        transport = NostrTransport(keys, relay_urls=[fake_relay.url])
+        transport.start()
+        # simulate a subscription failure after start
+        original = transport._relay_client.subscribe_events
+
+        def broken_subscribe(*args, **kwargs):
+            raise RuntimeError("stream API broken")
+
+        monkeypatch.setattr(transport._relay_client, "subscribe_events", broken_subscribe)
+
+        # re-start with the broken subscription — should not raise
+        transport.stop()
+        transport.start()
+        monkeypatch.undo()
+
+        # publish still works
+        envelope = _envelope(alice_identity, payload={"n": 1})
+        result = transport.send(envelope)
+        assert result.accepted, result.error_code
+        # poll returns empty (no subscription)
+        assert transport.poll() == []
+        transport.stop()

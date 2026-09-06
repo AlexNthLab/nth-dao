@@ -49,6 +49,7 @@ class NostrTransport(Transport):
         relay_urls: List[str],
         name: str = "nostr",
         publish_timeout: float = 10.0,
+        binding: Any = None,
     ) -> None:
         self._relay_client = NostrRelayClient(
             identity_keys,
@@ -57,6 +58,7 @@ class NostrTransport(Transport):
             publish_timeout=publish_timeout,
         )
         self._keys = identity_keys
+        self._binding = binding
         self.capabilities = TransportCapabilities(
             name=name,
             unicast=False,
@@ -69,7 +71,13 @@ class NostrTransport(Transport):
 
     def start(self) -> None:
         self._relay_client.start()
-        self._relay_client.subscribe_events(kinds=NOSTR_SUBSCRIBE_KINDS)
+        try:
+            self._relay_client.subscribe_events(kinds=NOSTR_SUBSCRIBE_KINDS)
+        except Exception as exc:  # noqa: BLE001 - operability: publish-only
+            logger.warning(
+                "nostr subscription setup failed; transport continues in "
+                "publish-only mode (poll returns empty): %s", exc
+            )
 
     def stop(self) -> None:
         self._relay_client.stop()
@@ -77,7 +85,8 @@ class NostrTransport(Transport):
     def send(self, envelope: TransportEnvelope) -> SendResult:
         try:
             event = envelope_event(
-                envelope, self._keys, created_at_seconds=int(_time())
+                envelope, self._keys, created_at_seconds=int(_time()),
+                binding=self._binding,
             )
         except Exception as exc:  # noqa: BLE001 - policy/crypto rejections
             logger.warning("nostr send rejected: %s", exc)

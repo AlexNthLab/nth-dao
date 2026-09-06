@@ -171,6 +171,14 @@ are pinned xfail.
 
 ## Adversarial Review Record
 
+Round 16 (adversarial review of the Nostr transport) found and fixed 2
+operability findings:
+
+| # | Item | Fix |
+|---|---|---|
+| DD-a | `NostrTransport.send()` did not pass the binding through to `envelope_event` — the N1 publish-side enforcement (CC-c) was bypassed at the transport tier | `binding` parameter added to the transport constructor and wired into `send()` |
+| DD-d | subscription setup failure in `start()` left the transport broken (publish + poll both dead) | subscription failure caught and logged; transport degrades to publish-only mode |
+
 Round 15 (whole-stage review of the cumulative fixes) found and fixed 3
 findings across the three deliverables:
 
