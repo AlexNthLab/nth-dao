@@ -160,7 +160,14 @@ kind-30078 envelope events whose `d` tag pins the envelope message_id —
 receiver-side verification is two-tier (event signature via nostr-sdk,
 envelope author signature via the delivery layer) and the d tag must
 address the carried envelope (round-12: slot-collision and non-integer
-timestamps fixed). Relay client (N2) and transport adapter (N3) next.
+timestamps fixed). Relay client (N2) and transport adapter (N3)
+implemented: `NostrRelayClient` bridges the borrowed async relay pool on a
+background thread (same pattern as the gossip adapter); `NostrTransport`
+plugs into the delivery router with `PRIVACY_PUBLIC_RELAY` + broadcast
+capabilities. Tested against an in-process fake NIP-01 relay: publish
+round-trip, hostile-relay rejection, private-tier refusal. Subscription
+stream semantics (nostr-sdk 0.45 `ClientEventStream`) need refinement and
+are pinned xfail.
 
 ## Adversarial Review Record
 

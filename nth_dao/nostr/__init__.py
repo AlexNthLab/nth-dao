@@ -374,3 +374,10 @@ __all__ = [
     "verify_key_binding",
     "verify_key_binding_standalone",
 ]
+
+from nth_dao.nostr.relay_client import (  # noqa: E402 - re-export
+    NostrRelayClient,
+    NostrRelayError,
+)
+
+__all__ += ["NostrRelayClient", "NostrRelayError"]

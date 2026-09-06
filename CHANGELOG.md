@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and fails closed on tamper, wrong kind, unsigned envelopes, d-tag
   addressing mismatches, and non-integer timestamps (the timestamp is
   actually applied — deterministic event ids are pinned by tests).
+- Nostr relay client (Phase 2 N2) and delivery transport (N3):
+  `NostrRelayClient` wraps the borrowed async `nostr_sdk.Client` on a
+  background loop thread (same bridge as the gossip adapter) with publish
+  (relay-OK bounded wait) and kind-filtered subscription delivery;
+  `NostrTransport` plugs the public relay tier into the delivery router
+  (broadcast, PRIVACY_PUBLIC_RELAY, external_infrastructure) with
+  fail-closed envelope re-validation. Tested against an in-process fake
+  NIP-01 relay (`tests/fake_nostr_relay.py`): publish round-trip, hostile
+  relay rejection, private-tier refusal, relay URL policy. 10 tests (2
+  xfail: subscription stream semantics need nostr-sdk 0.45 refinement).
 
 - Trade adapter runtime (Slice B): `nth_dao/trade_rules/adapter_runtime.py`
   executes an approved, digest-pinned adapter artifact as a bounded
