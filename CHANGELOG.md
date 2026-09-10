@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Courier envelope (Phase 4): `nth_dao/delivery/courier.py` seals a signed
+  delivery envelope to the recipient's X25519 public key (libsodium RFC 7748
+  conversion from the Ed25519 did:key — one key pair per identity) using
+  PyNaCl SealedBox (anonymous sender by design; the inner envelope carries
+  the author signature). Wire contract: claimed recipient DID (plaintext for
+  routing), carrier ID, base64url ciphertext, SHA-256 integrity over the
+  ciphertext. Opening verifies the claimed recipient, the integrity digest,
+  the key-to-DID match, and the full delivery-layer envelope validation
+  (including TTL against the carrier-delivery clock) — a hostile or careless
+  courier can drop, duplicate, or corrupt, but cannot read, tamper, or
+  forge. 9 tests.
+
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
   internet relay tier. NTH Ed25519 identities sign NostrKeyBinding documents
