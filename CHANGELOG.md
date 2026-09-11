@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   are re-ACKed idempotently while the inbox stays single-count.
   `ack_envelopes_from_report` wraps ACKs as delivery.ack envelopes for
   the return leg. 6 tests.
+- Courier spray-and-wait (Phase 4): `nth_dao/delivery/courier_spray.py` —
+  restart-surviving bookkeeping for replicating one logical message to at
+  most N carriers (each carrier gets its own ephemeral seal, so carriers
+  cannot correlate copies); when ANY carrier delivers, cancel_siblings
+  hands the copies back from every other store and completes the spray.
+  The journal persists DIGESTS only, never ciphertexts (no sensitive-
+  material multiplication on disk); after a restart, cancellations are
+  recorded from the journal's carrier names even without in-memory
+  ciphertexts. 14 tests.
 
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
