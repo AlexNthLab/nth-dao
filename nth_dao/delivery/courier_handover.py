@@ -21,7 +21,8 @@ the recipient's inbox.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Optional
 
 from nth_dao.delivery.acknowledgement import DeliveryAck, sign_ack
 from nth_dao.delivery.courier import (
@@ -65,7 +66,11 @@ def process_handover(
     """
 
     recipient_did = recipient.as_did()
-    now = now_ms
+    # a missing clock defaults to the wall clock, never to a skipped TTL
+    # check (round-21 bug HH-1: now_ms=0 made open_courier_envelope's
+    # expiry gate a no-op, so stale envelopes could be admitted whenever
+    # the host inbox also lacked a clock)
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
     accepted_acks: List[DeliveryAck] = []
     opened_envelopes: List[Any] = []
     rejected: List[Dict[str, str]] = []
@@ -78,7 +83,7 @@ def process_handover(
                 courier,
                 recipient_did=recipient_did,
                 identity_private=identity_private,
-                now_ms=now if now is not None else 0,
+                now_ms=now,
             )
         except CourierEnvelopeRejected as exc:
             logger.info("courier handover rejected %s: %s", courier_id, exc)
