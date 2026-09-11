@@ -157,3 +157,49 @@ class TestPersistence:
         journal.write_bytes(b"\n".join(lines))
         with pytest.raises(CourierStoreError, match="corrupt"):
             CourierStore(tmp_path / "carrier")
+
+
+# ─────────────────── adversarial review round 23 (KK-9) ───────────────────
+
+
+class TestCrossProcessQuota:
+    def test_two_processes_cannot_bypass_quota(self, tmp_path):
+        """Bug KK-9: two processes sealing into the same directory each saw
+        only their own memory state and both passed the quota. seal_into now
+        re-parses the journal under the file lock before checking."""
+
+        import subprocess
+        import sys
+
+        directory = tmp_path / "carrier"
+        code = (
+            "import sys\n"
+            "from nth_dao.delivery.courier_store import CourierStore, CourierStoreFull\n"
+            f"store = CourierStore({str(directory)!r}, max_envelopes=1)\n"
+            "from nth_dao.identity import AgentIdentity\n"
+            "from nth_dao.delivery.envelope import sign_envelope\n"
+            "from nth_dao.delivery.courier import seal_courier_envelope\n"
+            "import time\n"
+            "NOW = int(time.time()*1000)\n"
+            "ident = AgentIdentity.generate(label=sys.argv[1])\n"
+            "env = sign_envelope(ident, kind='k.a', recipient='dao:c', payload={'n':1},\n"
+            "    created_at_ms=NOW, expires_at_ms=NOW+60000)\n"
+            "try:\n"
+            "    store.seal_into(seal_courier_envelope(env, recipient_did=ident.as_did()))\n"
+            "    print('sealed')\n"
+            "except CourierStoreFull:\n"
+            "    print('rejected')\n"
+        )
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", code, name],
+                stdout=subprocess.PIPE, text=True,
+            )
+            for name in ("A", "B")
+        ]
+        outputs = [proc.communicate(timeout=30)[0].strip() for proc in procs]
+        outcomes = sorted(outputs)
+        assert outcomes == ["rejected", "sealed"], outputs
+        journal = directory / "courier.journal.jsonl"
+        lines = [line for line in journal.read_bytes().split(b"\n") if line.strip()]
+        assert len(lines) == 1  # quota=1 held across processes

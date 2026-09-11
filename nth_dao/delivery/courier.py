@@ -114,6 +114,11 @@ def seal_courier_envelope(
         raise CourierEnvelopeRejected("recipient_did must be a did:key")
     if len(courier_id) > COURIER_ID_MAX:
         raise CourierEnvelopeRejected("courier_id exceeds 128 chars")
+    # round-23 KK-2 hardening: control characters (newline, NUL, ...) in the
+    # carrier label are refused — JSON escaping already neutralizes journal
+    # injection, but labels are also rendered by hosts and copied into logs
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in courier_id):
+        raise CourierEnvelopeRejected("courier_id must not contain control characters")
     content = canonical_json(envelope.to_dict())
     if len(content) > MAX_ENVELOPE_BYTES:
         raise TransportEnvelopeRejected("envelope exceeds the wire byte limit")

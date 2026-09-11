@@ -85,12 +85,24 @@ class CourierStore:
     # ─────────────────────── persistence ───────────────────────
 
     def _load(self) -> None:
+        """Constructor-time load (rotation allowed — no lock held)."""
+
         if not self._journal_path.exists():
             return
         if self._journal_path.stat().st_size > _JOURNAL_MAX_BYTES:
             self._rotate_from_memory()
             return
-        raw = self._journal_path.read_bytes()
+        pool, order = self._parse_journal(self._journal_path.read_bytes())
+        self._pool = pool
+        self._pool_order = order
+
+    @staticmethod
+    def _parse_journal(raw: bytes) -> "tuple[Dict[str, Dict[str, Any]], List[str]]":
+        """Parse journal bytes into (pool, order); no side effects, no locks
+        (usable under the file lock without deadlocking)."""
+
+        pool: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
         torn = bool(raw) and not raw.endswith(b"\n")
         lines = raw.split(b"\n")
         for index, line in enumerate(lines):
@@ -108,15 +120,16 @@ class CourierStore:
             kind = event.get("event")
             if kind == "sealed":
                 digest = event.get("digest", "")
-                self._pool[digest] = event.get("envelope", {})
-                self._pool_order.append(digest)
+                pool[digest] = event.get("envelope", {})
+                order.append(digest)
             elif kind == "handed_over":
                 digest = event.get("digest", "")
-                self._pool.pop(digest, None)
-                if digest in self._pool_order:
-                    self._pool_order.remove(digest)
+                pool.pop(digest, None)
+                if digest in order:
+                    order.remove(digest)
             else:
                 raise CourierStoreError(f"unknown courier journal event: {kind!r}")
+        return pool, order
 
     def _append(self, event: Dict[str, Any]) -> None:
         with self._acquire_file_lock():
@@ -191,7 +204,17 @@ class CourierStore:
         ).hexdigest()
         ciphertext = courier.get("ciphertext", "")
         envelope_bytes = (len(ciphertext) * 3) // 4  # b64url expansion
-        with self._lock:
+        with self._lock, self._acquire_file_lock():
+            # cross-process quota enforcement (round-23 bug KK-9): re-parse
+            # the journal under the file lock (pure parse — no rotation, so
+            # no second-lock deadlock) so the check sees every process's
+            # envelopes
+            if self._journal_path.exists():
+                disk_pool, disk_order = self._parse_journal(
+                    self._journal_path.read_bytes()
+                )
+                self._pool = disk_pool
+                self._pool_order = disk_order
             if digest in self._pool:
                 return digest  # idempotent re-offer
             current_bytes = sum(
@@ -217,10 +240,25 @@ class CourierStore:
                 "envelope": courier,
                 "sealed_at_ms": now,
             }
-            self._append(event)
+            # write INLINE under the already-held file lock — calling
+            # _append() here would re-acquire the same flock on a new fd
+            # and deadlock (round-23 review)
+            with open(self._journal_path, "ab") as handle:
+                handle.write(canonical_json(event) + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             self._pool[digest] = courier
             self._pool_order.append(digest)
-            return digest
+            journal_bytes = (
+                self._journal_path.stat().st_size
+                if self._journal_path.exists()
+                else 0
+            )
+        # rotation (which takes the file lock fresh) runs OUTSIDE the held
+        # lock so it can never self-deadlock
+        if journal_bytes > _JOURNAL_MAX_BYTES:
+            self._rotate_from_memory()
+        return digest
 
     def drain_for(
         self,
