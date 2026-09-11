@@ -220,6 +220,13 @@ asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
 call, remainder queued), HTTPError fp-None handling, binding-less sends
 (already logged), NIP-40 expiration arithmetic (int-typed by validation).
 
+Round 22 (adversarial review of the spray module) found and fixed 2:
+
+| # | Defect | Fix |
+|---|---|---|
+| JJ-1 | the spray journal persisted full courier ciphertexts — sensitive-material multiplication on the sender's disk for no operational need | journal holds DIGESTS only; ciphertexts stay in memory |
+| JJ-2 | after a restart cancel_siblings had no carrier names (memory lost) and silently cancelled nothing | journal carrier names union with in-memory carriers; restart cancels record correctly |
+
 Round 21 (adversarial review of the Phase-4 Courier) found and fixed 1
 security bug:
 
