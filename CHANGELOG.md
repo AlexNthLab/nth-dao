@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Claim intent lifecycle (Phase 5): `nth_dao/market/claim_intent.py` —
+  the design doc §7.1 offline-safe claim lifecycle on top of the borrowed
+  CAS authority. `sign_claim_intent` produces a small signed intent
+  (announcement binding, claimant DID, cap-token id, nonce, TTL) that
+  reserves NOTHING and expires on its own clock; `admit_claim_intent`
+  verifies the intent, cross-binds it to the accompanying pre-signed
+  receipt (same announcement, same claimant, and — round-24 — the intent
+  must cite the submitted cap_token), then delegates to the existing
+  `record_foreign_claim` CAS (accepted → ClaimOutcome; race lost →
+  ClaimConflict). `IntentTracker` gives hosts the mandated UI distinction
+  (pending vs confirmed/rejected/expired) with a crash-safe journal and
+  TTL sweep. 23 tests.
+
 - Courier envelope (Phase 4): `nth_dao/delivery/courier.py` seals a signed
   delivery envelope to the recipient's X25519 public key (libsodium RFC 7748
   conversion from the Ed25519 did:key — one key pair per identity) using
