@@ -248,3 +248,41 @@ class TestHostileCarrier:
         assert len(report["rejected"]) == 1
         assert "not allowlisted" in report["rejected"][0]["reason"]
         assert store.stats()["envelopes"] == 1
+
+
+# ─────────────────── adversarial review round 21 (bug HH-1) ───────────────────
+
+
+class TestClockDefault:
+    def test_no_now_ms_defaults_to_wall_clock_not_skipped(self, tmp_path, alice):
+        """Bug HH-1: process_handover without now_ms must default to the
+        wall clock — a skipped TTL check let stale envelopes through when
+        the host inbox also lacked a clock."""
+
+        from nth_dao.delivery.courier import seal_courier_envelope
+        from nth_dao.delivery.courier_store import CourierStore
+        from nth_dao.delivery.inbox import DeliveryInbox
+        from nth_dao.delivery.envelope import sign_envelope as _sign
+
+        recipient, signing, did = _make_recipient()
+        stale = _sign(
+            alice,
+            kind="channel.message",
+            recipient="dao:core",
+            payload={"old": True},
+            created_at_ms=int(time.time() * 1000) - 100_000,
+            expires_at_ms=int(time.time() * 1000) - 50_000,
+        )
+        courier = seal_courier_envelope(stale, recipient_did=did)
+        store = CourierStore(tmp_path / "carrier")
+        store.seal_into(courier)
+        # the host inbox has NO clock override (real wall clock) — the
+        # open-stage gate must still independently reject
+        inbox = DeliveryInbox(tmp_path / "inbox")
+        report = process_handover(
+            store, recipient=recipient, identity_private=signing, inbox=inbox,
+            now_ms=None,
+        )
+        assert report["accepted"] == []
+        assert len(report["rejected"]) == 1
+        assert "expired" in report["rejected"][0]["reason"]

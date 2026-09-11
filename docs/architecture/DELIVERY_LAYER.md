@@ -220,6 +220,17 @@ asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
 call, remainder queued), HTTPError fp-None handling, binding-less sends
 (already logged), NIP-40 expiration arithmetic (int-typed by validation).
 
+Round 21 (adversarial review of the Phase-4 Courier) found and fixed 1
+security bug:
+
+| # | Defect | Fix |
+|---|---|---|
+| HH-1 | `process_handover(now_ms=None)` passed `now_ms=0` to `open_courier_envelope`, silently skipping the TTL gate — stale envelopes could be admitted whenever the host inbox also lacked a clock | default to the wall clock, never to a skipped check |
+
+Also probed and cleared: carrier journal torn-tail/corruption (fail
+closed), idempotent re-seal, per-recipient drain isolation, batch
+poisoning (per-envelope isolation holds), unauthorized sender retention.
+
 Round 19 (adversarial review of the Phase-0 core as shipped in 64d92a1)
 found and fixed 1 contract hole; 10 further hypotheses probed and cleared:
 
