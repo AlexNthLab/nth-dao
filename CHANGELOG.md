@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (including TTL against the carrier-delivery clock) — a hostile or careless
   courier can drop, duplicate, or corrupt, but cannot read, tamper, or
   forge. 9 tests.
+- Courier store (Phase 4): `nth_dao/delivery/courier_store.py` — a
+  quota-bounded JSONL-journal pool of sealed envelopes on one carrier.
+  Fail-closed quotas (total bytes, envelope count, per-recipient),
+  idempotent re-seal, hand-over removal after successful open, crash-safe
+  journal (fsync, torn-tail tolerated, size-cap rotation), recipient-
+  isolated drain. TTL enforcement stays at open time (the courier cannot
+  be trusted with the wall clock). 12 tests.
 
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
