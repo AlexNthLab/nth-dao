@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   journal (fsync, torn-tail tolerated, size-cap rotation), recipient-
   isolated drain. TTL enforcement stays at open time (the courier cannot
   be trusted with the wall clock). 12 tests.
+- Courier handover (Phase 4): `nth_dao/delivery/courier_handover.py` —
+  the recipient-side protocol that drains the carrier, opens and
+  validates each sealed envelope (integrity, TTL, author signature),
+  admits it to the delivery inbox, signs a DeliveryAck per accepted
+  envelope, and removes it from the carrier only after success.
+  Per-envelope isolation: one hostile or expired envelope is rejected
+  and retained for inspection without poisoning the batch; duplicates
+  are re-ACKed idempotently while the inbox stays single-count.
+  `ack_envelopes_from_report` wraps ACKs as delivery.ack envelopes for
+  the return leg. 6 tests.
 
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
