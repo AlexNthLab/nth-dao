@@ -1850,6 +1850,679 @@ class _CodexCliAskBackend(_AskBackend):
         }
 
 
+class _ZCodeCliAskBackend(_AskBackend):
+    """Supervised local ZCode backend pinned to GLM-5.3-Flash.
+
+    ZCode is a separate backend kind. It never delegates to Hermes, Codex, or
+    Claude when discovery, authentication, or execution fails. Credentials are
+    operator-owned: either the exact BigModel Coding Plan profile maintained by
+    the installed ZCode desktop app or ``NTH_ZCODE_API_KEY`` supplied to the
+    NTH process. Request bodies cannot carry credentials or select a different
+    model.
+    """
+
+    name = "zcode"
+    DEFAULT_TIMEOUT_S = 300.0
+    REQUIRED_MODEL = "bigmodel/glm-5.3-flash"
+    DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic"
+    DESKTOP_PROVIDER_ID = "builtin:bigmodel-coding-plan"
+    DESKTOP_MODEL_ID = "GLM-5.3-Flash"
+    _MAX_DESKTOP_CONFIG_BYTES = 2 * 1024 * 1024
+    _MAX_ROLLOUT_BYTES = 64 * 1024 * 1024
+    _MAX_ROLLOUT_LINE_BYTES = 16 * 1024 * 1024
+    _SESSION_ID_PATTERN = re.compile(r"sess_[A-Za-z0-9_-]{8,128}")
+    _ALLOWED_PROVIDER_IDS = frozenset({
+        "bigmodel",
+        DESKTOP_PROVIDER_ID,
+    })
+    _SAFE_ENV_NAMES = (
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+    )
+    _PREFLIGHT_TIMEOUT_S = 45.0
+    _PREFLIGHT_TTL_S = 300.0
+    _preflight_lock = threading.Lock()
+    _preflight_cache: ClassVar[dict[tuple[str, ...], tuple[float, str]]] = {}
+    MANDATORY_DENIED_TOOLS = (
+        "Agent",
+        "Bash(git push *)",
+        "Bash(git reset *)",
+        "Bash(git clean *)",
+        "Bash(git checkout -- *)",
+        "Bash(rm -rf *)",
+    )
+    _ERROR_MARKERS = (
+        "turn execution failed",
+        "model config is missing",
+        "api key is missing",
+        "authentication failed",
+        "unauthorized",
+        "invalid api key",
+        "token is invalid",
+        "token expired",
+        "oauth_provider_inactive",
+    )
+
+    def __init__(
+        self,
+        *,
+        workdir: Path | None = None,
+        work_access: str | None = None,
+    ) -> None:
+        self._workdir = workdir.resolve() if workdir is not None else None
+        self._work_access = work_access.strip().lower() if work_access else None
+
+    @staticmethod
+    def _node_binary() -> str:
+        import shutil
+
+        explicit = os.environ.get("NTH_DAO_NODE", "").strip()
+        if explicit:
+            path = Path(explicit).expanduser()
+            if path.is_dir():
+                path = path / ("node.exe" if sys.platform.startswith("win") else "node")
+            if path.is_file():
+                return str(path)
+        resolved = shutil.which("node")
+        if resolved:
+            return resolved
+        raise RuntimeError(
+            "ZCode backend requires Node.js; set NTH_DAO_NODE to node.exe"
+        )
+
+    @classmethod
+    def _resolve_launcher(cls) -> list[str]:
+        """Return a non-shell argv prefix for the installed ZCode CLI."""
+
+        import shutil
+
+        explicit = os.environ.get("NTH_ZCODE_CLI", "").strip()
+        candidates: list[Path] = []
+        if explicit:
+            candidates.append(Path(explicit).expanduser())
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            candidates.append(
+                Path(local_app_data)
+                / "Programs" / "ZCode" / "resources" / "glm" / "zcode.cjs"
+            )
+        candidates.append(
+            Path.home()
+            / "AppData" / "Local" / "Programs" / "ZCode"
+            / "resources" / "glm" / "zcode.cjs"
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return [cls._node_binary(), str(candidate.resolve())]
+
+        shim = shutil.which("zcode")
+        if shim:
+            return [shim]
+        raise RuntimeError(
+            "ZCode CLI was not found; set NTH_ZCODE_CLI to the installed "
+            "resources/glm/zcode.cjs file"
+        )
+
+    @classmethod
+    def _desktop_config_path(cls) -> Path:
+        explicit = os.environ.get("NTH_ZCODE_DESKTOP_CONFIG", "").strip()
+        if explicit:
+            return Path(explicit).expanduser()
+        return Path.home() / ".zcode" / "v2" / "config.json"
+
+    @classmethod
+    def _desktop_coding_plan_key(cls) -> str:
+        """Load only the exact enabled desktop GLM-5.3-Flash provider.
+
+        ZCode 0.16.5 keeps the desktop provider registry separate from its CLI
+        config. The CLI can still run the same Agent when NTH injects the
+        desktop Coding Plan credential into the child environment. Keep that
+        credential in memory only and reject lookalike provider definitions.
+        """
+
+        path = cls._desktop_config_path()
+        try:
+            if path.is_symlink() or not path.is_file():
+                return ""
+            if path.stat().st_size > cls._MAX_DESKTOP_CONFIG_BYTES:
+                return ""
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        providers = data.get("provider")
+        if not isinstance(providers, dict):
+            return ""
+        provider = providers.get(cls.DESKTOP_PROVIDER_ID)
+        if not isinstance(provider, dict):
+            return ""
+        if provider.get("enabled") is not True or provider.get("systemDisabledReason"):
+            return ""
+        if provider.get("kind") != "anthropic":
+            return ""
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            return ""
+        model_config = models.get(cls.DESKTOP_MODEL_ID)
+        if not isinstance(model_config, dict):
+            return ""
+        options = provider.get("options")
+        if not isinstance(options, dict):
+            return ""
+        if str(options.get("baseURL") or "").rstrip("/") != cls.DEFAULT_BASE_URL:
+            return ""
+        key = options.get("apiKey")
+        return key.strip() if isinstance(key, str) else ""
+
+    @classmethod
+    def _unattended_api_key(cls) -> str:
+        explicit = os.environ.get("NTH_ZCODE_API_KEY", "").strip()
+        return explicit or cls._desktop_coding_plan_key()
+
+    @classmethod
+    def _credential_profile_present(cls) -> bool:
+        return bool(cls._unattended_api_key())
+
+    @classmethod
+    def _subprocess_env(cls) -> dict[str, str]:
+        env = {
+            name: value
+            for name in cls._SAFE_ENV_NAMES
+            if (value := os.environ.get(name))
+        }
+        env["ZCODE_MODEL"] = cls.REQUIRED_MODEL
+        env["ZCODE_BASE_URL"] = cls.DEFAULT_BASE_URL
+        env["ZCODE_TOOL_ENV_PASSTHROUGH_JSON"] = "{}"
+
+        # Only the dedicated ZCode secret crosses the child-process boundary.
+        # Tool/plugin subprocesses receive no host environment passthrough.
+        zcode_key = cls._unattended_api_key()
+        if zcode_key:
+            env["ANTHROPIC_API_KEY"] = zcode_key
+        return env
+
+    @classmethod
+    def _terminate_process_tree(cls, process: Any) -> None:
+        import subprocess as _sp
+
+        if process.poll() is not None:
+            return
+        if sys.platform.startswith("win"):
+            creation_flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
+            try:
+                _sp.run(
+                    ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
+                    stdin=_sp.DEVNULL,
+                    stdout=_sp.DEVNULL,
+                    stderr=_sp.DEVNULL,
+                    timeout=10.0,
+                    check=False,
+                    creationflags=creation_flags,
+                )
+            except (OSError, _sp.SubprocessError, ValueError):
+                pass
+        else:
+            try:
+                os.killpg(int(process.pid), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    @classmethod
+    def _run_cli(
+        cls,
+        argv: list[str],
+        *,
+        timeout: float,
+        env: dict[str, str],
+        cwd: str,
+    ) -> Any:
+        import subprocess as _sp
+
+        popen_kwargs: dict[str, Any] = {
+            "stdin": _sp.DEVNULL,
+            "stdout": _sp.PIPE,
+            "stderr": _sp.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "env": env,
+            "cwd": cwd,
+        }
+        if sys.platform.startswith("win"):
+            popen_kwargs["creationflags"] = (
+                getattr(_sp, "CREATE_NO_WINDOW", 0)
+                | getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+        process = _sp.Popen(argv, **popen_kwargs)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except _sp.TimeoutExpired:
+            cls._terminate_process_tree(process)
+            try:
+                process.communicate(timeout=5.0)
+            except _sp.TimeoutExpired:
+                cls._terminate_process_tree(process)
+            raise
+        return _sp.CompletedProcess(
+            argv,
+            process.returncode,
+            stdout,
+            stderr,
+        )
+
+    @classmethod
+    def _cli_contract_preflight(
+        cls, launcher: list[str],
+    ) -> tuple[bool, str, str]:
+        import subprocess as _sp
+
+        cache_key = tuple(os.path.normcase(str(part)) for part in launcher)
+        current = time.monotonic()
+        with cls._preflight_lock:
+            cached = cls._preflight_cache.get(cache_key)
+            if cached is not None and current - cached[0] < cls._PREFLIGHT_TTL_S:
+                return True, "", cached[1]
+        creation_flags = (
+            getattr(_sp, "CREATE_NO_WINDOW", 0)
+            if sys.platform.startswith("win") else 0
+        )
+        try:
+            help_result = _sp.run(
+                [*launcher, "--help"],
+                stdin=_sp.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=cls._PREFLIGHT_TIMEOUT_S,
+                check=False,
+                creationflags=creation_flags,
+                env=cls._subprocess_env(),
+            )
+        except (OSError, _sp.TimeoutExpired):
+            return False, "ZCode CLI could not complete a bounded preflight", ""
+
+        help_text = f"{help_result.stdout}\n{help_result.stderr}"
+        version = help_text.strip().splitlines()[0][:120] if help_text.strip() else ""
+        required = (
+            "--prompt", "--attach", "--cwd", "--mode", "--json",
+            "--disallowed-tools",
+        )
+        missing = [flag for flag in required if flag not in help_text]
+        if help_result.returncode != 0 or missing:
+            return (
+                False,
+                "installed ZCode CLI does not support the required supervised flags",
+                version,
+            )
+        with cls._preflight_lock:
+            cls._preflight_cache[cache_key] = (current, version)
+        return True, "", version
+
+    @classmethod
+    def _clear_preflight_cache(cls) -> None:
+        with cls._preflight_lock:
+            cls._preflight_cache.clear()
+
+    @classmethod
+    def _parse_response(cls, stdout: str) -> tuple[str, dict[str, Any]]:
+        """Parse ZCode machine output and retain its execution identity."""
+
+        raw = stdout.strip()
+        if not raw:
+            raise RuntimeError("ZCode CLI exited without machine-readable output")
+
+        payload: Any = None
+        candidates = [raw, *reversed([line for line in raw.splitlines() if line.strip()])]
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+        if payload is None:
+            raise RuntimeError("ZCode CLI output was not valid JSON")
+
+        if not isinstance(payload, dict):
+            raise TypeError("ZCode JSON response must be an object")
+        error_value = payload.get("error")
+        status = str(payload.get("status") or "").lower()
+        if error_value or status in {"error", "failed", "failure"}:
+            detail = cls._redact_diagnostic(
+                str(error_value or payload.get("message") or status),
+            )[:1000]
+            raise RuntimeError(f"ZCode reported a failed turn: {detail}")
+        for key in ("response", "result", "output", "content", "text", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip(), payload
+            if isinstance(value, dict):
+                for nested_key in ("content", "text", "message", "output"):
+                    nested = value.get(nested_key)
+                    if isinstance(nested, str) and nested.strip():
+                        return nested.strip(), payload
+        raise RuntimeError("ZCode JSON did not contain a response payload")
+
+    @classmethod
+    def _extract_response(cls, stdout: str) -> str:
+        """Compatibility wrapper for callers that only need response text."""
+
+        return cls._parse_response(stdout)[0]
+
+    @classmethod
+    def _rollout_dir(cls) -> Path:
+        override = os.environ.get("NTH_ZCODE_ROLLOUT_DIR", "").strip()
+        if override:
+            return Path(override).expanduser().resolve()
+        return (Path.home() / ".zcode" / "cli" / "rollout").resolve()
+
+    @classmethod
+    def _verify_model_attestation(cls, session_id: str) -> dict[str, Any]:
+        """Fail closed unless every recorded model call used the pinned model."""
+
+        if cls._SESSION_ID_PATTERN.fullmatch(session_id) is None:
+            raise RuntimeError("ZCode returned an invalid session identity")
+        rollout_dir = cls._rollout_dir()
+        rollout_path = rollout_dir / f"model-io-{session_id}.jsonl"
+        try:
+            if rollout_path.is_symlink() or not rollout_path.is_file():
+                raise RuntimeError("ZCode model attestation file is unavailable")
+            raw_rollout = rollout_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError("ZCode model attestation file is unavailable") from exc
+        size = len(raw_rollout)
+        if size <= 0 or size > cls._MAX_ROLLOUT_BYTES:
+            raise RuntimeError("ZCode model attestation file has an invalid size")
+
+        call_count = 0
+        providers: set[str] = set()
+        models: set[str] = set()
+        sources: set[str] = set()
+        try:
+            rollout_text = raw_rollout.decode("utf-8")
+            for line_number, line in enumerate(rollout_text.splitlines(), start=1):
+                if len(line.encode("utf-8")) > cls._MAX_ROLLOUT_LINE_BYTES:
+                    raise RuntimeError(
+                        f"ZCode model attestation line {line_number} is oversized"
+                    )
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"ZCode model attestation line {line_number} is invalid"
+                    ) from exc
+                if not isinstance(record, dict) or record.get("sessionId") != session_id:
+                    raise RuntimeError("ZCode model attestation session mismatch")
+                model = record.get("model")
+                if not isinstance(model, dict):
+                    raise TypeError("ZCode model attestation is missing model data")
+                provider_id = str(model.get("providerId") or "").strip()
+                model_id = str(model.get("modelId") or "").strip()
+                source = str(model.get("source") or "").strip()
+                if (
+                    provider_id not in cls._ALLOWED_PROVIDER_IDS
+                    or model_id.casefold() != cls.DESKTOP_MODEL_ID.casefold()
+                ):
+                    raise RuntimeError(
+                        "ZCode executed with a provider or model outside the pinned policy"
+                    )
+                call_count += 1
+                providers.add(provider_id)
+                models.add(model_id)
+                if source:
+                    sources.add(source)
+        except UnicodeError as exc:
+            raise RuntimeError("ZCode model attestation could not be read") from exc
+        if call_count == 0:
+            raise RuntimeError("ZCode model attestation contained no model calls")
+        return {
+            "session_id": session_id,
+            "provider_ids": sorted(providers),
+            "model_ids": sorted(models),
+            "sources": sorted(sources),
+            "call_count": call_count,
+            "rollout_sha256": hashlib.sha256(raw_rollout).hexdigest(),
+            "rollout_size_bytes": size,
+        }
+
+    @classmethod
+    def _attestation_matches_policy(cls, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        session_id = value.get("session_id")
+        providers = value.get("provider_ids")
+        models = value.get("model_ids")
+        call_count = value.get("call_count")
+        sources = value.get("sources")
+        rollout_sha256 = value.get("rollout_sha256")
+        rollout_size = value.get("rollout_size_bytes")
+        return (
+            isinstance(session_id, str)
+            and cls._SESSION_ID_PATTERN.fullmatch(session_id) is not None
+            and isinstance(providers, list)
+            and bool(providers)
+            and all(
+                isinstance(provider, str)
+                and provider in cls._ALLOWED_PROVIDER_IDS
+                for provider in providers
+            )
+            and isinstance(models, list)
+            and bool(models)
+            and all(
+                isinstance(model, str)
+                and model.casefold() == cls.DESKTOP_MODEL_ID.casefold()
+                for model in models
+            )
+            and isinstance(call_count, int)
+            and not isinstance(call_count, bool)
+            and call_count > 0
+            and isinstance(sources, list)
+            and all(isinstance(source, str) for source in sources)
+            and isinstance(rollout_sha256, str)
+            and len(rollout_sha256) == 64
+            and all(char in "0123456789abcdef" for char in rollout_sha256)
+            and isinstance(rollout_size, int)
+            and not isinstance(rollout_size, bool)
+            and 0 < rollout_size <= cls._MAX_ROLLOUT_BYTES
+        )
+
+    @classmethod
+    def _redact_diagnostic(cls, value: str) -> str:
+        """Keep provider failures useful without echoing credentials."""
+
+        redacted = value
+        secrets = (
+            os.environ.get("NTH_ZCODE_API_KEY", "").strip(),
+            os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+            os.environ.get("OPENAI_API_KEY", "").strip(),
+            cls._desktop_coding_plan_key(),
+        )
+        for secret in secrets:
+            if secret:
+                redacted = redacted.replace(secret, "[REDACTED]")
+        redacted = re.sub(
+            r'''(?i)(["']?(?:api[_-]?key|authorization|access[_-]?token|token)'''
+            r'''["']?\s*[:=]\s*)["'][^"']*["']''',
+            r"\1[REDACTED]",
+            redacted,
+        )
+        redacted = re.sub(
+            r"(?i)(authorization\s*[:=]\s*)[^;\r\n]+",
+            r"\1[REDACTED]",
+            redacted,
+        )
+        redacted = re.sub(
+            r"(?i)((?:api[_-]?key|authorization|access[_-]?token|token)\s*"
+            r"[:=]\s*)([^\s,;]+)",
+            r"\1[REDACTED]",
+            redacted,
+        )
+        return redacted
+
+    def ask(
+        self, params: dict[str, Any], timeout_s: float,
+    ) -> dict[str, Any]:
+        import subprocess as _sp
+
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("zcode backend requires a 'prompt' param")
+        if len(prompt) > 32 * 1024:
+            raise ValueError(f"prompt too long ({len(prompt)} chars); 32KB cap")
+        for forbidden_param in ("api_key", "token", "credential", "base_url"):
+            if forbidden_param in params:
+                raise ValueError(
+                    f"zcode request cannot carry {forbidden_param}; configure NTH environment"
+                )
+        requested_model = str(params.get("model") or self.REQUIRED_MODEL).strip()
+        if requested_model != self.REQUIRED_MODEL:
+            raise ValueError(
+                f"zcode backend is pinned to {self.REQUIRED_MODEL}; "
+                f"requested {requested_model!r}"
+            )
+        if not self._credential_profile_present():
+            raise RuntimeError(
+                "ZCode CLI has no unattended credential profile. Run 'zcode login' "
+                "for the CLI or set NTH_ZCODE_API_KEY; Hermes fallback is disabled."
+            )
+
+        work_access = self._work_access or os.environ.get(
+            "NTH_AGENT_WORK_ACCESS", "workspace-write",
+        ).strip().lower()
+        if work_access not in {"read-only", "workspace-write"}:
+            raise RuntimeError("invalid supervised Agent work access policy")
+        mode = "plan" if work_access == "read-only" else "edit"
+        workdir_path = self._workdir or Path.cwd().resolve()
+        if not workdir_path.is_dir():
+            raise RuntimeError("supervised ZCode workdir is not an existing directory")
+        workdir = str(workdir_path)
+        extra_denied = os.environ.get("NTH_ZCODE_EXTRA_DENIED_TOOLS", "").strip()
+        deny_tools = " ".join(
+            [*self.MANDATORY_DENIED_TOOLS, *([extra_denied] if extra_denied else [])]
+        )
+        launcher = self._resolve_launcher()
+        ok, reason, _version = self._cli_contract_preflight(launcher)
+        if not ok:
+            raise RuntimeError(reason)
+        argv = [
+            *launcher,
+            "--cwd", workdir,
+            "--surface", "terminal",
+            "--mode", mode,
+            "--json",
+            "--no-color",
+        ]
+        argv.extend(["--disallowed-tools", deny_tools])
+        # ZCode has no stdin prompt mode. Put the task in an owner-only system
+        # temporary attachment so confidential instructions do not appear in
+        # process listings and a crash cannot dirty a read-only repository.
+        import tempfile
+
+        fd, prompt_path_raw = tempfile.mkstemp(
+            prefix="nth-zcode-task-", suffix=".txt",
+        )
+        prompt_path = Path(prompt_path_raw)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(prompt)
+            try:
+                prompt_path.chmod(0o600)
+            except OSError:
+                pass
+            argv.extend([
+                "--attach", str(prompt_path),
+                "--prompt",
+                "Execute the attached NTH task exactly within the current work scope.",
+            ])
+            try:
+                completed = self._run_cli(
+                    argv,
+                    timeout=timeout_s,
+                    env=self._subprocess_env(),
+                    cwd=workdir,
+                )
+            except _sp.TimeoutExpired as exc:
+                raise TimeoutError(
+                    f"ZCode GLM-5.3-Flash did not finish within {exc.timeout:.1f}s"
+                ) from exc
+        finally:
+            try:
+                prompt_path.unlink(missing_ok=True)
+            except OSError:
+                _print_error(
+                    event="zcode_prompt_cleanup_failed",
+                    detail="temporary task attachment could not be removed",
+                )
+
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        # A successful response may legitimately discuss authentication errors.
+        # Treat only stderr as an out-of-band failure channel when the CLI exits
+        # successfully; structured stdout failures are rejected by _parse_response.
+        failure_diagnostic = (
+            f"{stderr}\n{stdout}" if completed.returncode != 0 else stderr
+        )
+        failure_text = failure_diagnostic.lower()
+        marker = next(
+            (item for item in self._ERROR_MARKERS if item in failure_text),
+            "",
+        )
+        if completed.returncode != 0 or marker:
+            tail = self._redact_diagnostic(
+                (failure_diagnostic or "no diagnostic output")[-2000:],
+            )
+            if any(
+                item in failure_text
+                for item in ("401", "unauthorized", "token is invalid", "token expired")
+            ):
+                raise RuntimeError(
+                    "ZCode authentication failed; refresh the ZCode CLI credential. "
+                    "Hermes fallback is disabled."
+                )
+            raise RuntimeError(
+                f"ZCode CLI failed (exit={completed.returncode}, marker={marker or 'none'}): {tail}"
+            )
+        response, payload = self._parse_response(stdout)
+        session_id = payload.get("sessionId")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise RuntimeError("ZCode output did not contain a session identity")
+        model_attestation = self._verify_model_attestation(session_id.strip())
+        return {
+            "response": response,
+            "backend": self.name,
+            "model": self.REQUIRED_MODEL,
+            "model_attestation": model_attestation,
+            "exit_code": completed.returncode,
+        }
+
+
 class _HermesAskBackend(_AskBackend):
     """Phase 5.4b (2026-06-12): local Hermes sub-agent backend.
 
@@ -2572,7 +3245,7 @@ def _check_token_model_scope(
 # the v2_api spawn endpoint pre-validates against this set so a
 # typo in operator input fails at the HTTP boundary with a clear
 # 422 instead of getting silently demoted to mock.
-KNOWN_BACKEND_KINDS = frozenset({"mock", "claude-code", "codex", "hermes"})
+KNOWN_BACKEND_KINDS = frozenset({"mock", "claude-code", "codex", "hermes", "zcode"})
 
 
 
@@ -2634,12 +3307,26 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
         codex_cli = False
         codex_error = str(exc)
     codex_profile = (home / ".codex").exists()
+    zcode_error = ""
+    zcode_version = ""
+    try:
+        zcode_launcher = _ZCodeCliAskBackend._resolve_launcher()
+        zcode_available = True
+        zcode_contract_ok, zcode_error, zcode_version = (
+            _ZCodeCliAskBackend._cli_contract_preflight(zcode_launcher)
+        )
+    except RuntimeError as exc:
+        zcode_available = False
+        zcode_contract_ok = False
+        zcode_error = str(exc)
+    zcode_profile = _ZCodeCliAskBackend._credential_profile_present()
     hermes_pkg = importlib.util.find_spec("run_agent") is not None
     hermes_profile = (home / ".hermes").exists()
     hermes_unsafe_tools = _HermesAskBackend.unsafe_tools_enabled()
 
     claude_ready = (anthropic_key and anthropic_pkg) or claude_cli_ready
     codex_ready = codex_cli and codex_profile and codex_contract_ok
+    zcode_ready = zcode_available and zcode_profile and zcode_contract_ok
     hermes_ready = hermes_pkg and hermes_profile
 
     statuses = {
@@ -2757,6 +3444,25 @@ def backend_runtime_status() -> Dict[str, Dict[str, Any]]:
                 "Provider retries may run until NTH_CODEX_ASK_TIMEOUT_S."
             ),
         },
+        "zcode": {
+            "kind": "zcode",
+            "label": "ZCode GLM-5.3-Flash",
+            "ready": zcode_ready,
+            "available": zcode_available,
+            "runtime": "local-zcode-cli" if zcode_available else "missing",
+            "version": zcode_version,
+            "model": _ZCodeCliAskBackend.REQUIRED_MODEL,
+            "detail": (
+                "ZCode CLI, supervised flags, and unattended credential profile detected."
+                if zcode_ready else
+                "ZCode CLI detected, but no unattended CLI credential profile was found."
+                if zcode_available and zcode_contract_ok and not zcode_profile else
+                zcode_error or "Install ZCode and configure its CLI credential profile."
+            ),
+            "warning": (
+                "Pinned to GLM-5.3-Flash. Failures stop closed; Hermes fallback is disabled."
+            ),
+        },
         "hermes": {
             "kind": "hermes",
             "label": "Hermes",
@@ -2826,6 +3532,8 @@ def _resolve_ask_backend(kind: str) -> _AskBackend:
         # ``codex login`` the backend's ``ask`` raises a clear
         # RuntimeError pointing at the fix.
         return _CodexCliAskBackend()
+    if kind == "zcode":
+        return _ZCodeCliAskBackend()
     if kind == "hermes":
         # Phase 5.4b (2026-06-12): hermes-agent in-process backend.
         # Call ``AIAgent.chat()`` through ``import run_agent``. Auth and

@@ -14,7 +14,9 @@ def test_backend_status_endpoint_lists_supported_kinds_without_paths(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     backends = body["backends"]
-    assert set(backends) == {"claude-code", "codex", "hermes"}
+    assert set(backends) == {"claude-code", "codex", "hermes", "zcode"}
+    assert backends["zcode"]["model"] == "bigmodel/glm-5.3-flash"
+    assert "Hermes fallback is disabled" in backends["zcode"]["warning"]
     assert backends["hermes"]["provider_verified"] is False
     assert backends["codex"]["ask_timeout_s"] > 90
     assert backends["hermes"]["ask_timeout_s"] >= 170

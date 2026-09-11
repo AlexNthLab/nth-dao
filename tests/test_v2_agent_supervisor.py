@@ -1553,13 +1553,13 @@ def test_handshake_timeout_env_var_falls_back_on_bad_input(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Phase 3c: malformed env values must log a WARNING and fall
-    back to the 10s default — silently inheriting bad values would
+    back to the 30s default — silently inheriting bad values would
     hide ops mistakes. """
     import logging
     monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", "not-a-number")
     with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
         runner = SubprocessRunner()
-    assert runner._handshake_timeout == 10.0  # type: ignore[attr-defined]
+    assert runner._handshake_timeout == 30.0  # type: ignore[attr-defined]
     assert any(
         "is not a number" in r.getMessage() for r in caplog.records
     ), f"expected a WARNING about the bad env value; got {caplog.records!r}"
@@ -1575,7 +1575,7 @@ def test_handshake_timeout_env_var_rejects_non_positive(
     monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", "0")
     with caplog.at_level(logging.WARNING, logger="nth_dao.web.agent_supervisor"):
         runner = SubprocessRunner()
-    assert runner._handshake_timeout == 10.0  # type: ignore[attr-defined]
+    assert runner._handshake_timeout == 30.0  # type: ignore[attr-defined]
     assert any(
         "must be positive" in r.getMessage() for r in caplog.records
     )
@@ -1849,6 +1849,34 @@ def test_subprocess_runner_passes_cap_token_file_arg(tmp_path: Path) -> None:
     assert "--exec-workdir" in cmd
     exec_idx = cmd.index("--exec-workdir")
     assert Path(cmd[exec_idx + 1]) == cap_token_file.resolve().parent
+
+
+def test_subprocess_runner_wakes_immediately_when_child_stdout_closes(
+    tmp_path: Path,
+) -> None:
+    """A crashed child must not consume the full production timeout."""
+    from unittest import mock
+
+    runner = SubprocessRunner(workspace=tmp_path, handshake_timeout=5.0)
+
+    class _ClosedStdoutProc:
+        pid = 99996
+        stdout: tuple[str, ...] = ()
+        stderr: tuple[str, ...] = ()
+
+        def poll(self) -> int: return 1
+        def terminate(self) -> None: pass
+        def kill(self) -> None: pass
+        def wait(self, timeout: float = 0) -> int: return 1
+
+    started = time.monotonic()
+    with mock.patch("subprocess.Popen", return_value=_ClosedStdoutProc()):
+        pid, did = runner.start("aid-crashed", "mock")
+    elapsed = time.monotonic() - started
+
+    assert pid is None
+    assert did == ""
+    assert elapsed < 1.0
 
 
 def test_dummy_agent_rejects_exec_workdir_outside_workspace(
@@ -2959,8 +2987,6 @@ def test_child_stream_ask_flushes_error_event_when_backend_raises_mid_stream(
     exercise the in-process A2AHandler logic via a unit-style
     test that constructs the handler's _stream_ask closure with
     a synthetic backend. """
-    import socket as _sk
-    import threading as _th
     import io as _io
 
     pytest.importorskip("nacl")
@@ -4650,7 +4676,6 @@ def test_hermes_backend_returns_response_via_fake_agent(
     Hermes creds or 30s of construct time. Verify the backend
     threads the prompt through chat() and packages the response
     into the expected {response, backend, model} shape. """
-    import builtins
     import sys as _sys
     import types as _types
     from nth_dao.web.dummy_agent import _HermesAskBackend
@@ -7002,9 +7027,9 @@ def test_a2a_forward_timeout_rejects_bool_and_bounds_extreme_values() -> None:
 # Real subprocess smoke
 # ─────────────────────────────────────────────────────────────
 
-# Smoke test timeout — polish 2026-06-11: extracted from a magic
-# literal so a slower CI can bump it without a code rebrowse.
-_SMOKE_TIMEOUT = 5.0
+# Real subprocess startup and localhost HTTP can be delayed substantially by
+# antivirus scanning or a saturated Windows host. Keep one explicit hard bound.
+_SMOKE_TIMEOUT = 30.0
 
 
 def test_subprocess_runner_smoke() -> None:
@@ -7208,7 +7233,7 @@ def test_a2a_post_end_to_end_with_real_subprocess(
             },
             method="POST",
         )
-        with _ureq.urlopen(req, timeout=2.0) as resp:  # noqa: S310
+        with _ureq.urlopen(req, timeout=_SMOKE_TIMEOUT) as resp:  # noqa: S310
             assert resp.status == 200, resp.status
             body = json.loads(resp.read().decode("utf-8"))
         result = body["result"]
@@ -7236,7 +7261,7 @@ def test_a2a_post_end_to_end_with_real_subprocess(
             method="POST",
         )
         try:
-            with _ureq.urlopen(req2, timeout=2.0):  # noqa: S310
+            with _ureq.urlopen(req2, timeout=_SMOKE_TIMEOUT):  # noqa: S310
                 pytest.fail("child should have rejected bogus issuer")
         except urllib.error.HTTPError as exc:
             assert exc.code == 401, exc.code

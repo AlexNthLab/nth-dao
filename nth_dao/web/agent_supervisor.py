@@ -300,9 +300,11 @@ class AgentRunner(Protocol):
 
 # Phase 3b: how long SubprocessRunner waits for the child's first
 # ``agent_started`` event before assuming the spawn failed. Python
-# startup + AgentIdentity.generate() takes ~200ms on a warm cache,
-# up to a few seconds on first-ever import. 10s is conservative.
-_DEFAULT_HANDSHAKE_TIMEOUT_S = 10.0
+# startup + AgentIdentity.generate() takes ~200ms on a warm cache, but a
+# saturated Windows host or real-time antivirus scan can delay a new Python
+# interpreter beyond 10 seconds.  Child EOF wakes the waiter immediately, so
+# this larger ceiling protects healthy slow starts without delaying crashes.
+_DEFAULT_HANDSHAKE_TIMEOUT_S = 30.0
 
 # Phase 3c: env-var override. Production hubs on slow filesystems
 # (network-mounted workspaces, Windows AV scanning) may need a
@@ -657,9 +659,9 @@ class SubprocessRunner:
         the child accidentally print()s a stray line, the operator
         sees it. """
         stdout = proc.stdout
-        if stdout is None:
-            return
         try:
+            if stdout is None:
+                return
             for line in stdout:
                 line = line.strip()
                 if not line:
@@ -711,6 +713,17 @@ class SubprocessRunner:
         except Exception as exc:  # noqa: BLE001
             # The child may have been killed mid-read; that's fine.
             logger.debug("agent reader %s loop ended: %s", agent_id, exc)
+        finally:
+            # If stdout closes before agent_started, the child cannot complete
+            # the protocol. Wake start() now instead of waiting for the full
+            # production timeout; start() will observe the missing DID and reap
+            # the process through its existing failure path.
+            with self._lock:
+                slot = self._handshake_data.get(agent_id)
+                ev = self._handshake_events.get(agent_id)
+                handshake_missing = slot is not None and not slot.get("did")
+            if handshake_missing and ev is not None:
+                ev.set()
 
     def _read_stderr_loop(self, agent_id: str, proc: subprocess.Popen) -> None:
         """H-1 fix (2026-06-11): drain the child's stderr to the
