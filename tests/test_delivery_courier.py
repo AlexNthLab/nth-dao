@@ -197,3 +197,29 @@ class TestOpen:
                 identity_private=recipient,
                 now_ms=NOW_MS + 2_000,
             )
+
+
+class TestCourierIdCharset:
+    def test_control_characters_rejected(self, alice):
+        """Round-23 KK-2: newline/NUL in the carrier label are refused at
+        seal time (defense in depth on top of JSON escaping)."""
+
+        from nacl.signing import SigningKey
+        from nth_dao.did_key import encode_ed25519_did_key
+        from nth_dao.delivery.courier import (
+            CourierEnvelopeRejected,
+            seal_courier_envelope,
+        )
+
+        recipient = SigningKey(b"\x01" * 32)
+        did = encode_ed25519_did_key(recipient.verify_key.encode())
+        envelope = sign_envelope(
+            alice, kind="channel.message", recipient="dao:core",
+            payload={"n": 1}, created_at_ms=NOW_MS, expires_at_ms=NOW_MS + 60_000,
+        )
+        for hostile in ("a\nb", "a\x00b", "a\x7fb"):
+            with pytest.raises(CourierEnvelopeRejected, match="control"):
+                seal_courier_envelope(envelope, recipient_did=did, courier_id=hostile)
+        # plain printable ids remain fine
+        sealed = seal_courier_envelope(envelope, recipient_did=did, courier_id="usb-42")
+        assert sealed["courier_id"] == "usb-42"

@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   material multiplication on disk); after a restart, cancellations are
   recorded from the journal's carrier names even without in-memory
   ciphertexts. 14 tests.
+- Courier store hardening (round-23 review): seal_into re-parses the
+  journal under the file lock so cross-process quota enforcement holds
+  (two processes previously both passed the same quota); the append is
+  inline under the held lock and rotation runs after release (the naive
+  fix deadlocked). courier_id refuses control characters at seal time.
+  +2 regression tests.
 
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the

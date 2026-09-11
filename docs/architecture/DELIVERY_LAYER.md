@@ -220,6 +220,20 @@ asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
 call, remainder queued), HTTPError fp-None handling, binding-less sends
 (already logged), NIP-40 expiration arithmetic (int-typed by validation).
 
+Round 23 (adversarial review of the Courier seal + store — the two
+commits that had only been tested, not reviewed; process-gap fix) found
+and fixed 1 real bug plus 1 hardening:
+
+| # | Defect | Fix |
+|---|---|---|
+| KK-9 | cross-process quota bypass: two processes sealing into the same carrier directory each saw only their own memory state and BOTH passed the quota (probe: quota=1, journal got 2) | seal_into re-parses the journal under the file lock (pure parse — the naive `_load` fix deadlocked via rotation re-locking, and the `_append` call re-locked too; the write is now inline under the held lock, rotation runs after release) |
+| KK-2 | courier_id accepted control characters (newline/NUL) | refused at seal time (JSON escaping already neutralized journal injection; this is defense in depth for host-rendered labels) |
+
+Cleared by probe: oversized DIDs (format-checked), b64url decode of
+hostile inputs, empty ciphertext (SealedBox length gate), byte-estimation
+accuracy, newline journal injection (JSON-escaped, single line), O(n)
+per-recipient scan at the 512-envelope cap (negligible).
+
 Round 22 (adversarial review of the spray module) found and fixed 2:
 
 | # | Defect | Fix |
