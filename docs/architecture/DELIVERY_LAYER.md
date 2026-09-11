@@ -220,6 +220,38 @@ asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
 call, remainder queued), HTTPError fp-None handling, binding-less sends
 (already logged), NIP-40 expiration arithmetic (int-typed by validation).
 
+Round 23 (adversarial review of the Courier seal + store — the two
+commits that had only been tested, not reviewed; process-gap fix) found
+and fixed 1 real bug plus 1 hardening:
+
+| # | Defect | Fix |
+|---|---|---|
+| KK-9 | cross-process quota bypass: two processes sealing into the same carrier directory each saw only their own memory state and BOTH passed the quota (probe: quota=1, journal got 2) | seal_into re-parses the journal under the file lock (pure parse — the naive `_load` fix deadlocked via rotation re-locking, and the `_append` call re-locked too; the write is now inline under the held lock, rotation runs after release) |
+| KK-2 | courier_id accepted control characters (newline/NUL) | refused at seal time (JSON escaping already neutralized journal injection; this is defense in depth for host-rendered labels) |
+
+Cleared by probe: oversized DIDs (format-checked), b64url decode of
+hostile inputs, empty ciphertext (SealedBox length gate), byte-estimation
+accuracy, newline journal injection (JSON-escaped, single line), O(n)
+per-recipient scan at the 512-envelope cap (negligible).
+
+Round 22 (adversarial review of the spray module) found and fixed 2:
+
+| # | Defect | Fix |
+|---|---|---|
+| JJ-1 | the spray journal persisted full courier ciphertexts — sensitive-material multiplication on the sender's disk for no operational need | journal holds DIGESTS only; ciphertexts stay in memory |
+| JJ-2 | after a restart cancel_siblings had no carrier names (memory lost) and silently cancelled nothing | journal carrier names union with in-memory carriers; restart cancels record correctly |
+
+Round 21 (adversarial review of the Phase-4 Courier) found and fixed 1
+security bug:
+
+| # | Defect | Fix |
+|---|---|---|
+| HH-1 | `process_handover(now_ms=None)` passed `now_ms=0` to `open_courier_envelope`, silently skipping the TTL gate — stale envelopes could be admitted whenever the host inbox also lacked a clock | default to the wall clock, never to a skipped check |
+
+Also probed and cleared: carrier journal torn-tail/corruption (fail
+closed), idempotent re-seal, per-recipient drain isolation, batch
+poisoning (per-envelope isolation holds), unauthorized sender retention.
+
 Round 19 (adversarial review of the Phase-0 core as shipped in 64d92a1)
 found and fixed 1 contract hole; 10 further hypotheses probed and cleared:
 
