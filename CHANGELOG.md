@@ -77,6 +77,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and fails closed on tamper, wrong kind, unsigned envelopes, d-tag
   addressing mismatches, and non-integer timestamps (the timestamp is
   actually applied — deterministic event ids are pinned by tests).
+- Mission completion records (Phase 5): `nth_dao/market/mission_completion.py`
+  — a signed binding of announcement + mission + claim-receipt digest +
+  execution-receipt digest + outcome (succeeded/failed — honest failures
+  are recorded, not hidden). Sign-time sanity: the execution receipt's
+  signer must be the claimant, so a completion record cannot cite someone
+  else's work. Verify-time: signature, shape, age window, and — when the
+  receipts are supplied — re-derived digests must match (proves the
+  claimant holds the claimed chain). 8 tests.
 - Nostr relay client (Phase 2 N2) and delivery transport (N3):
   `NostrRelayClient` wraps the borrowed async `nostr_sdk.Client` on a
   background loop thread (same bridge as the gossip adapter) with publish

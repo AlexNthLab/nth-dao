@@ -220,6 +220,13 @@ asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
 call, remainder queued), HTTPError fp-None handling, binding-less sends
 (already logged), NIP-40 expiration arithmetic (int-typed by validation).
 
+Round 25 (self-review during Phase-5 development, before any commit) —
+two fixes already folded into the initial implementation: the naive
+deep-copy cost probe showed 3.4ms/100KB (acceptable), and the completion
+record's signer binding initially looked at timeline entries (execution
+receipts carry the signer at the top level, not per-entry) — corrected
+before tests were written against the wrong shape.
+
 Round 23 (adversarial review of the Courier seal + store — the two
 commits that had only been tested, not reviewed; process-gap fix) found
 and fixed 1 real bug plus 1 hardening:
