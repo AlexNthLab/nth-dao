@@ -249,10 +249,11 @@ class TestAdmit:
 
 
 class TestIntentTracker:
-    def _intent(self, agent, announcement_id, token, nonce=None, ttl=DEFAULT_INTENT_TTL_MS):
+    def _intent(self, agent, announcement_id, token, nonce=None, ttl=DEFAULT_INTENT_TTL_MS, created_at_ms=None):
         return sign_claim_intent(
             agent, announcement_id=announcement_id, cap_token=token,
-            created_at_ms=NOW_MS, ttl_ms=ttl, nonce=nonce,
+            created_at_ms=created_at_ms if created_at_ms is not None else NOW_MS,
+            ttl_ms=ttl, nonce=nonce,
         )
 
     def test_pending_then_confirmed(self, tmp_path):
@@ -267,14 +268,20 @@ class TestIntentTracker:
         assert tracker.stats()["confirmed"] == 1
 
     def test_sweep_expired(self, tmp_path):
+        """Uses the real clock: record_sent self-verifies against the wall
+        clock, so a module-constant NOW_MS would be stale by the time the
+        full suite reaches this file (round-25 flake fix)."""
+
         _, _, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
+        now = int(time.time() * 1000)
         intent = self._intent(
             agent, ann.announcement_id, token, nonce="b" * 16, ttl=1_000,
+            created_at_ms=now,
         )
         tracker = IntentTracker(tmp_path / "tracker")
         tracker.record_sent(intent)
-        assert tracker.sweep_expired(now_ms=NOW_MS + 2_000) == 1
+        assert tracker.sweep_expired(now_ms=now + 2_000) == 1
         assert tracker.stats()["expired"] == 1
 
     def test_restart_preserves_state(self, tmp_path):
@@ -335,25 +342,26 @@ class TestOfflineStory:
         feed, store, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         # offline: sign both, track as pending
+        now = int(time.time() * 1000)  # real clock: tracker self-verifies
         intent = sign_claim_intent(
             agent, announcement_id=ann.announcement_id, cap_token=token,
-            created_at_ms=NOW_MS,
+            created_at_ms=now,
         )
         receipt = sign_claim_receipt(ann, agent, token)
         tracker = IntentTracker(tmp_path / "tracker")
         tracker.record_sent(intent)
-        assert len(tracker.pending(now_ms=NOW_MS + 1)) == 1  # UI: pending
+        assert len(tracker.pending(now_ms=now + 1)) == 1  # UI: pending
 
         # later, at the authority (any transport carried the pair)
         out = admit_claim_intent(
             feed, store, intent, receipt, cap_token=token,
-            now_ms_override=NOW_MS + 60_000,
+            now_ms_override=now + 60_000,
         )
         assert out.claim_record["claimant_did"] == agent.as_did()
 
         # the response comes back; the tracker flips pending → confirmed
         tracker.mark(intent, "confirmed")
-        assert tracker.pending(now_ms=NOW_MS + 61_000) == []
+        assert tracker.pending(now_ms=now + 61_000) == []
         assert tracker.stats()["confirmed"] == 1  # UI: confirmed
 
 
