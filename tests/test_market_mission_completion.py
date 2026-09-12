@@ -52,14 +52,18 @@ def claimed_task(tmp_path):
     )
     feed.publish(ann)
     token = _selfissue(agent, ["code_review"])
+    # the cap_token is signed at the REAL wall clock; admitting at a
+    # collection-time constant (NOW_MS) lands before the token's
+    # not-before and fails — admit at the real clock instead
+    now = int(time.time() * 1000)
     intent = sign_claim_intent(
         agent, announcement_id=ann.announcement_id, cap_token=token,
-        created_at_ms=NOW_MS,
+        created_at_ms=now,
     )
     claim_receipt = sign_claim_receipt(ann, agent, token)
     admit_claim_intent(
         feed, store, intent, claim_receipt, cap_token=token,
-        now_ms_override=NOW_MS + 1_000,
+        now_ms_override=now + 1_000,
     )
     return agent, ann, claim_receipt
 
