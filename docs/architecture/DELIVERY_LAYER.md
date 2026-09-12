@@ -235,6 +235,13 @@ closed the remaining persistence and boundary gaps:
 | LL-8 | a core-only install reached absent PyNaCl classes and failed with an opaque `NoneType` call | every courier cryptographic entry point now fails with an actionable `nth-dao[crypto]` dependency error |
 | LL-9 | retrying handover after carrier deletion failed signed a fresh ACK envelope each time, allowing one stuck carrier to fill the durable outbox; a short ACK TTL could also expire while the original courier remained valid | the inbox durably retains first acceptance time, ACK envelopes use a deterministic nonce, and their TTL covers the maximum inbound lifetime, making delayed, concurrent, and restarted retries content-address idempotent |
 
+Round 25 (self-review during Phase-5 development, before any commit) —
+two fixes already folded into the initial implementation: the naive
+deep-copy cost probe showed 3.4ms/100KB (acceptable), and the completion
+record's signer binding initially looked at timeline entries (execution
+receipts carry the signer at the top level, not per-entry) — corrected
+before tests were written against the wrong shape.
+
 Round 23 (adversarial review of the Courier seal + store — the two
 commits that had only been tested, not reviewed; process-gap fix) found
 and fixed 1 real bug plus 1 hardening:
