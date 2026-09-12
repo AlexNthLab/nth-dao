@@ -1454,6 +1454,18 @@ export interface AnnounceTaskInput {
  *  homogeneously. */
 export type AgentSource = "local" | "contact" | "lan" | "a2a";
 
+export interface BackendActivity {
+  active: boolean;
+  phase: string;
+  call_id?: string;
+  task_id?: string;
+  started_at_ms?: number;
+  updated_at_ms?: number;
+  observed_at_ms?: number;
+  timeout_s?: number;
+  error_code?: string;
+}
+
 export interface AgentEntry {
   did: string;
   code: string;
@@ -1505,6 +1517,8 @@ export interface AgentEntry {
   /** Provider execution state; transport readiness alone is not a live model guarantee. */
   provider_state?: "unknown" | "ready" | "degraded" | string;
   provider_checked_at?: string;
+  /** Prompt-free execution status projected from a supervised backend heartbeat. */
+  backend_activity?: BackendActivity;
   /** Phase G (Phase 6b cap_token scope, frontend integration):
    *  the cap_token's `scope_model_allowlist` joined into the agent
    *  listing. Wire semantics (matches the cap_token wire field):

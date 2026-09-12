@@ -1121,6 +1121,21 @@ class CapTokenSummaryM(_Model):
     use_count: int
 
 
+class BackendActivityM(BaseModel):
+    """Bounded, prompt-free status emitted by a supervised backend."""
+
+    model_config = {"extra": "forbid"}
+    active: bool
+    phase: str
+    call_id: Optional[str] = None
+    task_id: Optional[str] = None
+    started_at_ms: Optional[int] = None
+    updated_at_ms: Optional[int] = None
+    observed_at_ms: Optional[int] = None
+    timeout_s: Optional[float] = None
+    error_code: Optional[str] = None
+
+
 class AgentEntryM(_Model):
     agent_id: Optional[str] = None
     did: str
@@ -1143,6 +1158,7 @@ class AgentEntryM(_Model):
     work_access: Optional[str] = None
     work_revision: Optional[str] = None
     provider_checked_at: Optional[str] = None
+    backend_activity: Optional[BackendActivityM] = None
     # Phase 3d (2026-06-11): the child's localhost A2A HTTP port,
     # advertised on agent_started.a2a_port and stamped by the
     # supervisor at spawn time. None when the child didn't bind
@@ -4256,6 +4272,63 @@ async def _drive_supervised_agent_ask(
     return resp_status, content, rec, receipt_meta
 
 
+async def _cancel_live_supervised_agent(
+    request: Request,
+    rec: Any,
+    job_id: str,
+) -> Tuple[int, Any]:
+    """Send an authenticated control message without taking the work lease.
+
+    The running ask owns that lease. Cancellation must travel outside it or
+    the control request will deadlock until provider execution has finished.
+    """
+    import urllib.error
+    import urllib.request
+
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND,
+        encode_authorization_header,
+    )
+
+    store = _state_cap_tokens_store(request)
+    token_id = getattr(rec, "cap_token_id", None)
+    token = store.get(token_id) if (token_id and store is not None) else None
+    if not _cap_token_usable(
+        token,
+        store,
+        required_capabilities=[CAP_A2A_MESSAGE_SEND],
+    ):
+        token = _refresh_supervised_agent_cap_token(
+            request,
+            rec,
+            previous_token=token if isinstance(token, dict) else None,
+        )
+        rec.cap_token_id = str(token.get("token_id") or "")
+
+    body_bytes = json.dumps({"task_id": job_id}).encode("utf-8")
+    url = f"http://127.0.0.1:{rec.a2a_port}/a2a/cancel"
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": str(len(body_bytes)),
+        "Authorization": f"CapToken {encode_authorization_header(token)}",
+    }
+
+    def _do_forward() -> Tuple[int, bytes]:
+        req = urllib.request.Request(
+            url, data=body_bytes, headers=headers, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(  # noqa: S310
+                req,
+                timeout=_A2A_METHOD_TIMEOUTS["cancel"],
+            ) as resp:
+                return resp.status, _read_local_a2a_body(resp)
+        except urllib.error.HTTPError as http_exc:
+            return http_exc.code, _read_local_a2a_body(http_exc)
+
+    return await _forward_local_agent_with_readiness_retry(_do_forward)
+
+
 # NOTE: prev_content_hash lookup goes through the canonical
 # ``ReceiptStore.head_content_hash(signer_did)`` method
 # (execution_receipt.py:844) which has documented tie-breaking
@@ -4339,12 +4412,26 @@ _CODEX_FORWARD_TIMEOUT_S = min(
     _CODEX_ASK_TIMEOUT_S + _A2A_TIMEOUT_SLACK_S,
     _A2A_MAX_FORWARD_TIMEOUT_S,
 )
+_ZCODE_ASK_TIMEOUT_S = min(
+    _env_float(
+        "NTH_ZCODE_ASK_TIMEOUT_S",
+        300.0,
+        minimum=60.0,
+        maximum=300.0,
+    ),
+    max(5.0, _A2A_MAX_FORWARD_TIMEOUT_S - _A2A_TIMEOUT_SLACK_S),
+)
+_ZCODE_FORWARD_TIMEOUT_S = min(
+    _ZCODE_ASK_TIMEOUT_S + _A2A_TIMEOUT_SLACK_S,
+    _A2A_MAX_FORWARD_TIMEOUT_S,
+)
 _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
     "ask": 65.0,    # claude-code backend default is 60s + 5s slack
     # Phase 5.2: streaming variant gets a longer window because the
     # caller may keep the connection open while the model generates.
     # 125s = 120s backend allowance + 5s for hub round-trip overhead.
     "ask-stream": 125.0,
+    "cancel": 10.0,
 }
 _A2A_BACKEND_METHOD_TIMEOUTS: Dict[Tuple[str, str], float] = {
     # Hermes provider queues can exceed 170s in local field tests. The
@@ -4357,11 +4444,18 @@ _A2A_BACKEND_METHOD_TIMEOUTS: Dict[Tuple[str, str], float] = {
     # child is a Codex agent.
     ("codex", "ask"): _CODEX_FORWARD_TIMEOUT_S,
     ("codex", "ask-stream"): _CODEX_FORWARD_TIMEOUT_S,
+    # ZCode is pinned to GLM-5.3-Flash and its CLI has a 300s execution
+    # ceiling. Keep the hub alive slightly longer so the child owns timeout
+    # classification and process-tree cleanup instead of surfacing a generic
+    # upstream socket timeout first.
+    ("zcode", "ask"): _ZCODE_FORWARD_TIMEOUT_S,
+    ("zcode", "ask-stream"): _ZCODE_FORWARD_TIMEOUT_S,
 }
 _CHANNEL_DISPATCH_DEFAULT_ASK_TIMEOUT_S = 120.0
 _CHANNEL_DISPATCH_ASK_TIMEOUTS: Dict[str, float] = {
     "hermes": _HERMES_ASK_TIMEOUT_S,
     "codex": _CODEX_ASK_TIMEOUT_S,
+    "zcode": _ZCODE_ASK_TIMEOUT_S,
     "claude-code": 120.0,
     "mock": 30.0,
 }
@@ -5404,6 +5498,7 @@ def _proxy_ssestream(
     body_bytes: bytes,
     req_headers: Dict[str, str],
     forward_timeout: float,
+    lease_factory: Optional[Callable[[], Any]] = None,
 ) -> Any:
     """Phase 5.2f (deferred backlog, refactored to httpx + native
     async): forward an SSE response from the child to the operator's
@@ -5459,42 +5554,47 @@ def _proxy_ssestream(
 
     async def _gen():
         try:
-            async with httpx.AsyncClient(timeout=forward_timeout) as client:
-                async with client.stream(
-                    "POST", url, content=body_bytes, headers=req_headers,
-                ) as resp:
-                    if resp.status_code != 200:
-                        body = bytearray()
-                        async for chunk in resp.aiter_bytes():
-                            remaining = _ERR_BODY_CAP - len(body)
-                            if remaining <= 0:
-                                break
-                            body.extend(chunk[:remaining])
-                        yield _error_event(
-                            f"upstream-{resp.status_code}",
-                            bytes(body).decode(
-                                "utf-8", errors="replace",
-                            ),
-                        )
-                        return
-                    # aiter_bytes yields each chunk httpx receives. No
-                    # forced 1KB read size — we hand them up the SSE
-                    # pipe at whatever granularity the child emitted,
-                    # preserving event boundaries.
-                    streamed = 0
-                    async for chunk in resp.aiter_bytes():
-                        if streamed + len(chunk) > _MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES:
+            lease = lease_factory() if lease_factory is not None else nullcontext()
+            # The lease must span the complete upstream stream. Acquiring it
+            # only while constructing StreamingResponse would release the
+            # workspace before the provider starts executing.
+            with lease:
+                async with httpx.AsyncClient(timeout=forward_timeout) as client:
+                    async with client.stream(
+                        "POST", url, content=body_bytes, headers=req_headers,
+                    ) as resp:
+                        if resp.status_code != 200:
+                            body = bytearray()
+                            async for chunk in resp.aiter_bytes():
+                                remaining = _ERR_BODY_CAP - len(body)
+                                if remaining <= 0:
+                                    break
+                                body.extend(chunk[:remaining])
                             yield _error_event(
-                                "response-too-large",
-                                (
-                                    "streamed A2A response exceeds "
-                                    f"{_MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES} bytes; "
-                                    "return a summary and artifact reference"
+                                f"upstream-{resp.status_code}",
+                                bytes(body).decode(
+                                    "utf-8", errors="replace",
                                 ),
                             )
                             return
-                        streamed += len(chunk)
-                        yield chunk
+                        # aiter_bytes yields each chunk httpx receives. No
+                        # forced 1KB read size — preserve event boundaries.
+                        streamed = 0
+                        async for chunk in resp.aiter_bytes():
+                            if streamed + len(chunk) > _MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES:
+                                yield _error_event(
+                                    "response-too-large",
+                                    (
+                                        "streamed A2A response exceeds "
+                                        f"{_MAX_LOCAL_A2A_HTTP_RESPONSE_BYTES} bytes; "
+                                        "return a summary and artifact reference"
+                                    ),
+                                )
+                                return
+                            streamed += len(chunk)
+                            yield chunk
+        except WorkScopeBusy as exc:
+            yield _error_event("work-scope-busy", str(exc))
         except httpx.TimeoutException as exc:
             yield _error_event(
                 "proxy-failed", f"TimeoutException: {exc}",
@@ -23362,6 +23462,126 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="AgentLink job not found")
         return job.to_dict()
 
+    @app.post("/api/v2/agents/{did}/link/{job_id}/cancel")
+    async def v2_agent_link_cancel(
+        did: str, job_id: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Cancel durable delivery and, for ZCode, its live CLI process."""
+        _require_console_bearer_for_sensitive_read(request)
+        manager = _state_agent_link(request)
+        job = manager.get(job_id)
+        if job is None or job.agent_did != did:
+            raise HTTPException(status_code=404, detail="AgentLink job not found")
+
+        supervisor = _state_supervisor(request)
+        records = (
+            [
+                record for record in supervisor.list_agents()
+                if (
+                    record.did == did
+                    and str(getattr(record, "agent_id", "") or "") == job.agent_id
+                    and record.a2a_port is not None
+                    and record.alive
+                )
+            ]
+            if supervisor is not None else []
+        )
+        record = records[0] if records else None
+        if record is not None and getattr(record, "kind", "") != "zcode":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"backend {getattr(record, 'kind', '')!r} does not support "
+                    "provider process cancellation"
+                ),
+            )
+
+        try:
+            cancelled = manager.cancel(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="AgentLink job not found") from exc
+        except Exception as exc:  # noqa: BLE001
+            from .agent_link import AgentLinkConflict
+
+            if isinstance(exc, AgentLinkConflict):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "AgentLink cancellation could not be persisted: "
+                    f"{type(exc).__name__}"
+                ),
+            ) from exc
+
+        provider_status = "unconfirmed"
+        provider_warning = ""
+        if record is None:
+            provider_warning = (
+                "Durable output was cancelled, but the provider process is not "
+                "reachable; external side effects cannot be ruled out."
+            )
+        else:
+            try:
+                status, content = await _cancel_live_supervised_agent(
+                    request, record, job_id,
+                )
+                result = content.get("result") if isinstance(content, dict) else None
+                accepted = bool(
+                    status == 200 and isinstance(result, dict)
+                    and result.get("accepted") is True
+                )
+                if accepted and result.get("termination_confirmed") is True:
+                    provider_status = "termination_confirmed"
+                elif accepted and result.get("pre_cancelled") is True:
+                    provider_status = "queued_prevented"
+                elif accepted:
+                    provider_status = "accepted"
+                    provider_warning = (
+                        "The provider accepted cancellation, but process termination "
+                        "has not been confirmed."
+                    )
+                else:
+                    provider_warning = (
+                        "Durable output was cancelled, but the provider did not "
+                        f"confirm process cancellation (status={status})."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "AgentLink %s persisted cancellation but provider control failed: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
+                provider_warning = (
+                    "Durable output was cancelled, but provider process cancellation "
+                    f"could not be confirmed ({type(exc).__name__})."
+                )
+
+        try:
+            cancelled = manager.update_cancellation(
+                job_id,
+                provider_status=provider_status,
+                detail=provider_warning,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Provider cancellation outcome could not be persisted: "
+                    f"{type(exc).__name__}"
+                ),
+            ) from exc
+
+        persisted_status = cancelled.provider_cancel_status
+        persisted_warning = cancelled.provider_cancel_detail
+        return {
+            **cancelled.to_dict(),
+            "provider_cancelled": persisted_status == "termination_confirmed",
+            "provider_cancel_accepted": persisted_status in {
+                "accepted", "queued_prevented", "termination_confirmed",
+            },
+            "provider_warning": persisted_warning,
+        }
+
     @app.post("/api/v2/agents/{did}/link/{job_id}/reconcile")
     async def v2_agent_link_reconcile(
         did: str, job_id: str, request: Request,
@@ -23945,25 +24165,33 @@ def register_v2_routes(app: FastAPI) -> None:
                 body_bytes=body_bytes,
                 req_headers=req_headers,
                 forward_timeout=forward_timeout,
+                lease_factory=lambda: _work_scope_lease(request, rec),
             )
 
         def _do_forward() -> Tuple[int, bytes]:
-            req = urllib.request.Request(
-                url, data=body_bytes, headers=req_headers, method="POST",
+            lease = (
+                _work_scope_lease(request, rec)
+                if method == "ask" else nullcontext()
             )
-            try:
-                with urllib.request.urlopen(  # noqa: S310
-                    req, timeout=forward_timeout,
-                ) as resp:
-                    return resp.status, _read_local_a2a_body(resp)
-            except urllib.error.HTTPError as http_exc:
-                # Child returned non-2xx — forward status + body.
-                return http_exc.code, _read_local_a2a_body(http_exc)
+            with lease:
+                req = urllib.request.Request(
+                    url, data=body_bytes, headers=req_headers, method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(  # noqa: S310
+                        req, timeout=forward_timeout,
+                    ) as resp:
+                        return resp.status, _read_local_a2a_body(resp)
+                except urllib.error.HTTPError as http_exc:
+                    # Child returned non-2xx — forward status + body.
+                    return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
             resp_status, content = (
                 await _forward_local_agent_with_readiness_retry(_do_forward)
             )
+        except WorkScopeBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except urllib.error.URLError as exc:
             raise HTTPException(
                 status_code=502,
@@ -24074,22 +24302,26 @@ def register_v2_routes(app: FastAPI) -> None:
             return _proxy_ssestream(
                 url=url, body_bytes=body_bytes,
                 req_headers=req_headers, forward_timeout=forward_timeout,
+                lease_factory=lambda: _work_scope_lease(request, rec),
             )
 
         def _do_forward() -> Tuple[int, bytes]:
-            req = urllib.request.Request(
-                url, data=body_bytes, headers=req_headers, method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
-                    return resp.status, _read_local_a2a_body(resp)
-            except urllib.error.HTTPError as http_exc:
-                return http_exc.code, _read_local_a2a_body(http_exc)
+            with _work_scope_lease(request, rec):
+                req = urllib.request.Request(
+                    url, data=body_bytes, headers=req_headers, method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=forward_timeout) as resp:  # noqa: S310
+                        return resp.status, _read_local_a2a_body(resp)
+                except urllib.error.HTTPError as http_exc:
+                    return http_exc.code, _read_local_a2a_body(http_exc)
 
         try:
             resp_status, content = (
                 await _forward_local_agent_with_readiness_retry(_do_forward)
             )
+        except WorkScopeBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -24231,19 +24463,22 @@ def register_v2_routes(app: FastAPI) -> None:
         timeout = _A2A_METHOD_TIMEOUTS.get("ask", _A2A_DEFAULT_TIMEOUT_S)
 
         def _forward() -> Tuple[int, bytes]:
-            req = urllib.request.Request(
-                url, data=body_bytes, headers=req_headers, method="POST"
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                    return resp.status, _read_local_a2a_body(resp)
-            except urllib.error.HTTPError as e:
-                return e.code, (_read_local_a2a_body(e) if e.fp else b"")
+            with _work_scope_lease(request, rec):
+                req = urllib.request.Request(
+                    url, data=body_bytes, headers=req_headers, method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                        return resp.status, _read_local_a2a_body(resp)
+                except urllib.error.HTTPError as e:
+                    return e.code, (_read_local_a2a_body(e) if e.fp else b"")
 
         try:
             status, raw = await asyncio.get_event_loop().run_in_executor(
                 None, _forward,
             )
+        except WorkScopeBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (
             urllib.error.URLError,
             TimeoutError,

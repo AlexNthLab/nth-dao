@@ -25,7 +25,7 @@ import {
 import { SignaturePanel } from "./SignaturePanel";
 import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
-import type { BackendStatus } from "../api";
+import type { BackendStatus, CancelAgentLinkResult } from "../api";
 import type { AgentEntry, AgentSource } from "../types-v2";
 
 export interface AgentDirectoryViewProps {
@@ -70,6 +70,8 @@ export interface AgentDirectoryViewProps {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ) => Promise<{ status: number; body: unknown }>;
+  /** Refresh supervisor state while the Agent view remains mounted. */
+  onRefreshAgents?: (signal?: AbortSignal) => Promise<void>;
   /** UI 集成（2026-06-13）：给一个 supervised agent 派一个任务，**流式**
    *  接收输出。hub 替操作员注入 cap_token（浏览器无签名私钥）。omitted
    *  或 agent 非 supervised 时工作面板隐藏。onDelta 逐块回调，onStatus
@@ -80,7 +82,12 @@ export interface AgentDirectoryViewProps {
     onDelta: (delta: string) => void,
     signal?: AbortSignal,
     onStatus?: (status: string) => void,
+    onTaskAccepted?: (jobId: string) => void,
   ) => Promise<{ text: string; backend?: string; model?: string }>;
+  onCancelAgentTask?: (
+    did: string,
+    jobId: string,
+  ) => Promise<CancelAgentLinkResult>;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -103,8 +110,9 @@ type Filter = "all" | AgentSource;
 
 export function AgentDirectoryView({
   agents, backendStatuses = {}, onAddByDid, onScanLan, onIssueCap,
-  onSpawnBackend, onStopAgent, onSendMessage,
+  onSpawnBackend, onStopAgent, onRefreshAgents, onSendMessage,
   onPingAgent, onA2AEcho, onAskAgent,
+  onCancelAgentTask,
 }: AgentDirectoryViewProps) {
   const { t } = useLang();
   const [filter, setFilter] = useState<Filter>("all");
@@ -124,6 +132,45 @@ export function AgentDirectoryView({
   const [selectedDid, setSelectedDid] = useState<string | null>(
     agents[0]?.did ?? null,
   );
+  const [refreshError, setRefreshError] = useState("");
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!onRefreshAgents) return undefined;
+    let stopped = false;
+    let timer: number | undefined;
+    let controller: AbortController | undefined;
+
+    const poll = async () => {
+      controller = new AbortController();
+      try {
+        await onRefreshAgents(controller.signal);
+        if (!stopped) {
+          setRefreshError("");
+          setLastRefreshAt(Date.now());
+        }
+      } catch (error) {
+        if (!stopped && (error as Error)?.name !== "AbortError") {
+          const detail = (error as Error)?.message?.trim();
+          setRefreshError(
+            detail
+              ? detail.slice(0, 240)
+              : "Agent status refresh failed",
+          );
+        }
+      } finally {
+        controller = undefined;
+        if (!stopped) timer = window.setTimeout(() => void poll(), 1500);
+      }
+    };
+
+    timer = window.setTimeout(() => void poll(), 1500);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      controller?.abort();
+    };
+  }, [onRefreshAgents]);
   /** Phase 3f: per-agent test result — last /ping or /a2a/echo outcome.
    *  Keyed by DID so each row's button has its own state without us
    *  carrying an "active row" ref. The Map is replaced (not mutated)
@@ -153,11 +200,15 @@ export function AgentDirectoryView({
   const [workPrompt, setWorkPrompt] = useState("");
   const [workOutput, setWorkOutput] = useState("");
   const [workStatus, setWorkStatus] = useState<
-    "idle" | "running" | "done" | "error"
+    "idle" | "running" | "cancelling" | "cancelled" | "done" | "error"
   >("idle");
   const [workMeta, setWorkMeta] = useState("");
   const [workError, setWorkError] = useState("");
   const workAbort = useRef<AbortController | null>(null);
+  const workGeneration = useRef(0);
+  const workCancelledGeneration = useRef<number | null>(null);
+  const [workJobId, setWorkJobId] = useState("");
+  const [workDid, setWorkDid] = useState("");
   useEffect(() => {
     const map = inflight.current;
     return () => {
@@ -181,8 +232,8 @@ export function AgentDirectoryView({
     if (status.startsWith("warming:")) {
       const attempt = status.slice("warming:".length);
       return t(
-        `Hermes 正在冷启动/加载凭证（第 ${attempt} 次尝试）…`,
-        `Hermes is warming up (attempt ${attempt})…`,
+        `Agent 服务正在冷启动/加载凭证（第 ${attempt} 次尝试）…`,
+        `Agent provider is warming up (attempt ${attempt})…`,
       );
     }
     return status;
@@ -191,20 +242,39 @@ export function AgentDirectoryView({
   async function runAgentWork(did: string) {
     if (!onAskAgent || !workPrompt.trim()) return;
     workAbort.current?.abort();
+    const generation = workGeneration.current + 1;
+    workGeneration.current = generation;
     const ctrl = new AbortController();
     workAbort.current = ctrl;
     setWorkOutput("");
     setWorkError("");
     setWorkMeta("");
+    setWorkJobId("");
+    setWorkDid(did);
     setWorkStatus("running");
     try {
       const res = await onAskAgent(
         did,
         workPrompt.trim(),
-        (delta) => setWorkOutput((cur) => cur + delta),
+        (delta) => {
+          if (workGeneration.current !== generation || ctrl.signal.aborted) return;
+          setWorkOutput((cur) => cur + delta);
+        },
         ctrl.signal,
-        (status) => setWorkMeta(describeWorkStatus(status)),
+        (status) => {
+          if (workGeneration.current !== generation || ctrl.signal.aborted) return;
+          setWorkMeta(describeWorkStatus(status));
+        },
+        (jobId) => {
+          if (workGeneration.current !== generation || ctrl.signal.aborted) return;
+          setWorkJobId(jobId);
+        },
       );
+      if (
+        workGeneration.current !== generation
+        || ctrl.signal.aborted
+        || workCancelledGeneration.current === generation
+      ) return;
       if (res.text && res.text.length > 0) setWorkOutput(res.text);
       setWorkMeta(
         [res.backend && `backend: ${res.backend}`, res.model && `model: ${res.model}`]
@@ -213,9 +283,62 @@ export function AgentDirectoryView({
       );
       setWorkStatus("done");
     } catch (e) {
-      if ((e as Error)?.name === "AbortError") return; // 取消不算错
+      if (workGeneration.current !== generation) return;
+      if (
+        (e as Error)?.name === "AbortError"
+        && workCancelledGeneration.current === generation
+      ) return;
       setWorkError((e as Error)?.message ?? String(e));
       setWorkStatus("error");
+    } finally {
+      if (workAbort.current === ctrl) workAbort.current = null;
+    }
+  }
+
+  async function cancelAgentWork() {
+    if (!onCancelAgentTask || !workDid || !workJobId) return;
+    const generation = workGeneration.current;
+    const ctrl = workAbort.current;
+    setWorkStatus("cancelling");
+    setWorkError("");
+    try {
+      const result = await onCancelAgentTask(workDid, workJobId);
+      if (result.state !== "cancelled") {
+        throw new Error(`cancel returned unexpected state: ${result.state}`);
+      }
+      if (workGeneration.current !== generation) return;
+      workCancelledGeneration.current = generation;
+      ctrl?.abort();
+      const cancellationMessages: Record<string, string> = {
+        termination_confirmed: t(
+          "任务已取消，ZCode 进程退出已确认",
+          "Task cancelled; ZCode process exit confirmed",
+        ),
+        queued_prevented: t(
+          "任务已取消，已阻止提供方开始执行",
+          "Task cancelled before provider execution",
+        ),
+        accepted: t(
+          "任务已取消，提供方已接受停止请求，退出仍待确认",
+          "Task cancelled; provider accepted stop request, exit pending",
+        ),
+        unconfirmed: t(
+          "任务记录已取消，提供方进程状态无法确认",
+          "Task cancelled; provider process state unconfirmed",
+        ),
+      };
+      const cancellationMessage = cancellationMessages[result.provider_cancel_status ?? ""] ?? t(
+        "任务已取消，提供方进程状态无法确认",
+        "Task cancelled; provider process state unconfirmed",
+      );
+      setWorkMeta(cancellationMessage);
+      setWorkError(result.provider_warning || "");
+      setWorkStatus("cancelled");
+    } catch (error) {
+      setWorkError((error as Error)?.message ?? String(error));
+      setWorkStatus((current) => (
+        current === "cancelling" ? "running" : current
+      ));
     }
   }
 
@@ -440,6 +563,26 @@ export function AgentDirectoryView({
         </div>
 
         <div className="main-body">
+          {refreshError && (
+            <div
+              role="alert"
+              className="mono"
+              style={{
+                marginBottom: 12,
+                padding: "8px 10px",
+                border: "1px solid var(--danger, #cf222e)",
+                borderRadius: 6,
+                color: "var(--danger, #cf222e)",
+                fontSize: 11,
+              }}
+            >
+              {t(
+                "Agent 状态刷新失败，当前显示的是上次已知状态。",
+                "Agent status refresh failed; showing last known state.",
+              )} {refreshError}
+              {lastRefreshAt !== null && ` · ${new Date(lastRefreshAt).toLocaleTimeString()}`}
+            </div>
+          )}
           {/* Action row — add by DID + scan LAN + search */}
           <div
             style={{
@@ -1086,6 +1229,31 @@ export function AgentDirectoryView({
                       <span className="key">{t("Project access", "Project access")}</span>
                       <span className="value">{selected.work_access || "—"}</span>
                     </div>
+                    {selected.backend_activity && (
+                      <>
+                        <div className="detail-row">
+                          <span className="key">{t("任务阶段", "Task phase")}</span>
+                          <span className="value">{selected.backend_activity.phase}</span>
+                        </div>
+                        {selected.backend_activity.task_id && (
+                          <div className="detail-row">
+                            <span className="key">{t("任务号", "Task ID")}</span>
+                            <span
+                              className="value"
+                              title={selected.backend_activity.task_id}
+                              style={{
+                                maxWidth: 190,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {selected.backend_activity.task_id}
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -1113,18 +1281,28 @@ export function AgentDirectoryView({
                     <button
                       type="button"
                       className="btn btn-primary"
-                      disabled={workStatus === "running" || !workPrompt.trim()}
+                      disabled={
+                        workStatus === "running"
+                        || workStatus === "cancelling"
+                        || !workPrompt.trim()
+                      }
                       onClick={() => void runAgentWork(selected.did)}
                     >
-                      {workStatus === "running" ? t("运行中…", "Running…") : t("运行", "Run")}
+                      {workStatus === "running" || workStatus === "cancelling"
+                        ? t("运行中…", "Running…")
+                        : t("运行", "Run")}
                     </button>
-                    {workStatus === "running" && (
+                    {(workStatus === "running" || workStatus === "cancelling")
+                     && onCancelAgentTask && selected.kind === "zcode" && (
                       <button
                         type="button"
                         className="btn btn-ghost"
-                        onClick={() => workAbort.current?.abort()}
+                        disabled={!workJobId || workStatus === "cancelling"}
+                        onClick={() => void cancelAgentWork()}
                       >
-                        {t("停止", "Stop")}
+                        {workStatus === "cancelling"
+                          ? t("正在停止…", "Stopping…")
+                          : t("停止", "Stop")}
                       </button>
                     )}
                     {workMeta && (
@@ -1142,10 +1320,14 @@ export function AgentDirectoryView({
                         fontFamily: "var(--t-mono)",
                       }}
                     >
-                      {workOutput || (workStatus === "running" ? (workMeta || "…") : "")}
+                      {workOutput || (
+                        workStatus === "running" || workStatus === "cancelling"
+                          ? (workMeta || "…")
+                          : workMeta
+                      )}
                     </pre>
                   )}
-                  {workStatus === "error" && (
+                  {workError && (
                     <div
                       className="mono"
                       style={{ marginTop: 6, fontSize: 11, color: "var(--danger, #cf222e)" }}

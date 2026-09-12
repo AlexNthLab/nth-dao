@@ -23,7 +23,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  a2aEchoApi, activateMission, addAgentByDid, createMission, createProcess,
+  a2aEchoApi, activateMission, addAgentByDid, cancelAgentLink, createMission, createProcess,
   discoverLanAgents, fetchAgents, fetchBackendStatus, fetchCapTokens, fetchIdentity,
   fetchConversations, fetchDecisions, fetchMessages, fetchMissions,
   fetchProcesses, fetchReceipts, fetchRules, fetchSocialMe, listCapRequests, listDisputes, pingAgentApi, probeHub,
@@ -973,6 +973,7 @@ function AppInner() {
     onDelta: (delta: string) => void,
     signal?: AbortSignal,
     onStatus?: (status: string) => void,
+    onTaskAccepted?: (jobId: string) => void,
   ) {
     const idempotencyKey = `directory-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const backendTimeoutS = agentBackendTimeoutS(agents, did) ?? 120;
@@ -982,10 +983,13 @@ function AppInner() {
       idempotencyKey,
       signal,
     );
+    onTaskAccepted?.(link.job_id);
     onStatus?.(link.state);
     let executionDeadline: number | undefined;
     let job = await getAgentLink(did, link.job_id, signal);
-      while (!new Set(["completed", "completed_unverified", "failed", "delivery_unknown"]).has(job.state)) {
+    while (!new Set([
+      "completed", "completed_unverified", "failed", "cancelled", "delivery_unknown",
+    ]).has(job.state)) {
       onStatus?.(job.state);
       executionDeadline ??= agentLinkExecutionDeadline(job, backendTimeoutS);
       if (executionDeadline !== undefined && Date.now() >= executionDeadline) {
@@ -995,6 +999,9 @@ function AppInner() {
       job = await getAgentLink(did, link.job_id, signal);
     }
     onStatus?.(job.state);
+    if (job.state === "cancelled") {
+      throw new Error(job.error || "agent task was cancelled");
+    }
     if (job.state === "failed" || job.state === "delivery_unknown") {
       throw new Error(
         job.error ||
@@ -1057,6 +1064,10 @@ function AppInner() {
       );
     }
   }
+
+  const handleRefreshSupervisedAgents = useCallback(async (signal?: AbortSignal) => {
+    setAgents(await fetchAgents(signal));
+  }, []);
 
   async function handleAddAgent(did: string, label: string) {
     const res = await addAgentByDid({
@@ -1297,6 +1308,7 @@ function AppInner() {
         onAddByDid={handleAddAgent}
         onSpawnBackend={handleSpawnBackend}
         onStopAgent={handleStopAgent}
+        onRefreshAgents={handleRefreshSupervisedAgents}
         onScanLan={handleScanLan}
         onIssueCap={handleIssueCap}
         onSendMessage={handleSendToAgent}
@@ -1312,6 +1324,7 @@ function AppInner() {
         /* UI 集成（2026-06-13）：派任务 + 流式输出。hub 替操作员注入
            cap_token（浏览器无签名私钥）。 */
         onAskAgent={handleAgentDirectoryAsk}
+        onCancelAgentTask={(did, jobId) => cancelAgentLink(did, jobId)}
       />
     );
   } else if (active === "chat") {

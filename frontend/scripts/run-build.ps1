@@ -36,4 +36,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $node $vite build
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+# Vite preserves template newlines around injected asset tags. On Windows this
+# can produce mixed CRLF/LF output and even a stray CR before </div>, making
+# generated release artifacts fail git diff --check. Normalize HTML only after
+# a successful build; JavaScript and CSS bundles remain byte-for-byte intact.
+$staticRoot = Join-Path (Split-Path -Parent $root) "nth_dao\web\static"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+Get-ChildItem -LiteralPath $staticRoot -Filter "*.html" -File | ForEach-Object {
+    $content = [System.IO.File]::ReadAllText($_.FullName)
+    $normalized = $content.Replace("`r`n", "`n").Replace("`r", "`n")
+    [System.IO.File]::WriteAllText($_.FullName, $normalized, $utf8NoBom)
+}
+
+exit 0

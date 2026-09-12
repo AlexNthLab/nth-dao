@@ -359,6 +359,49 @@ def test_spawn_endpoint_returns_201(hub_client: TestClient) -> None:
     assert entry["has_active_cap"] is True
 
 
+def test_agents_endpoint_preserves_sanitized_backend_activity(
+    hub_client: TestClient,
+) -> None:
+    spawned = hub_client.post("/api/v2/agents/spawn", json={
+        "kind": "zcode",
+        "label": "activity-api",
+        "capabilities": ["nth-dao.chat"],
+    })
+    assert spawned.status_code == 201, spawned.text
+    agent_id = spawned.json()["agent_id"]
+    supervisor = hub_client.app.state.v2_supervisor
+    supervisor.on_event(agent_id, {
+        "event": "heartbeat",
+        "backend_activity": {
+            "active": True,
+            "phase": "executing",
+            "call_id": f"zcall_{'c' * 32}",
+            "task_id": "3" * 32,
+            "started_at_ms": 100,
+            "updated_at_ms": 200,
+            "timeout_s": 300.0,
+            "prompt": "must not cross the API boundary",
+        },
+    })
+
+    listing = hub_client.get("/api/v2/agents")
+    assert listing.status_code == 200, listing.text
+    activity = listing.json()[0]["backend_activity"]
+    observed_at_ms = activity.pop("observed_at_ms")
+    assert isinstance(observed_at_ms, int) and observed_at_ms > 0
+    assert activity == {
+        "active": True,
+        "phase": "executing",
+        "call_id": f"zcall_{'c' * 32}",
+        "task_id": "3" * 32,
+        "started_at_ms": 100,
+        "updated_at_ms": 200,
+        "timeout_s": 300.0,
+        "error_code": None,
+    }
+    assert "must not cross" not in repr(activity)
+
+
 def test_hub_ask_injects_cap_token_where_raw_proxy_401s(
     tmp_path: Path,
 ) -> None:
@@ -7023,6 +7066,25 @@ def test_a2a_forward_timeout_rejects_bool_and_bounds_extreme_values() -> None:
     ) == _v2._A2A_MAX_FORWARD_TIMEOUT_S
 
 
+def test_zcode_timeout_budget_is_registered_end_to_end() -> None:
+    """ZCode must not inherit the 120s generic budget while its CLI uses 300s."""
+    import nth_dao.web.v2_api as _v2
+
+    ask_timeout = _v2._backend_ask_timeout("zcode")
+    assert ask_timeout == _v2._ZCODE_ASK_TIMEOUT_S
+    assert _v2._CHANNEL_DISPATCH_ASK_TIMEOUTS["zcode"] == ask_timeout
+    expected_forward = min(
+        ask_timeout + _v2._A2A_TIMEOUT_SLACK_S,
+        _v2._A2A_MAX_FORWARD_TIMEOUT_S,
+    )
+    assert _v2._A2A_BACKEND_METHOD_TIMEOUTS[("zcode", "ask")] == expected_forward
+    assert _v2._A2A_BACKEND_METHOD_TIMEOUTS[("zcode", "ask-stream")] == expected_forward
+    body = json.dumps({"timeout_s": ask_timeout}).encode("utf-8")
+    assert _v2._a2a_forward_timeout(
+        "ask", body, backend_kind="zcode",
+    ) == expected_forward
+
+
 # ─────────────────────────────────────────────────────────────
 # Real subprocess smoke
 # ─────────────────────────────────────────────────────────────
@@ -7141,6 +7203,35 @@ def test_supervisor_stamps_a2a_port_on_real_subprocess_spawn() -> None:
         assert entry["a2a_port"] == r.a2a_port
     finally:
         sup.stop(r.agent_id)
+
+
+def test_zcode_activity_heartbeat_reaches_supervisor(monkeypatch) -> None:
+    """Real child heartbeat must project ZCode state without invoking the model."""
+    from nth_dao.web.agent_supervisor import build_default_supervisor
+
+    monkeypatch.setenv("NTH_AGENT_HANDSHAKE_TIMEOUT_S", str(_SMOKE_TIMEOUT))
+    sup = build_default_supervisor()
+    try:
+        record = sup.spawn(kind="zcode", label="zcode-activity", capabilities=[])
+    except RuntimeError as exc:
+        pytest.skip(f"subprocess could not start: {exc}")
+    try:
+        entry: dict = {}
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            listed = sup.list_agents()
+            if listed:
+                entry = listed[0].to_agent_entry()
+                if entry.get("backend_activity"):
+                    break
+            time.sleep(0.05)
+        assert entry.get("backend_activity") == {
+            "active": False,
+            "phase": "idle",
+        }
+        assert "prompt" not in repr(entry["backend_activity"]).lower()
+    finally:
+        sup.stop(record.agent_id)
 
 
 def test_a2a_post_end_to_end_with_real_subprocess(
@@ -7579,6 +7670,147 @@ def test_supervisor_tracks_provider_state_separately() -> None:
     assert snapshot.to_agent_entry()["provider_state"] == "degraded"
     assert sup.mark_provider_state(rec.agent_id, "ready") is True
     assert sup.get(rec.agent_id).provider_state == "ready"  # type: ignore[union-attr]
+
+
+def test_supervisor_projects_sanitized_backend_activity_from_heartbeat() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    sup = AgentSupervisor(InMemoryRunner())
+    rec = AgentRecord(
+        agent_id="activity-state",
+        kind="zcode",
+        label="activity-state",
+        did="did:key:z6MkActivityState",
+        capabilities=[],
+        started_at="now",
+        last_seen="now",
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+    sup.on_event(rec.agent_id, {
+        "event": "heartbeat",
+        "backend_activity": {
+            "active": True,
+            "phase": "executing",
+            "call_id": f"zcall_{'a' * 32}",
+            "task_id": "job-123",
+            "started_at_ms": 100,
+            "updated_at_ms": 200,
+            "timeout_s": 300.0,
+            "ignored_secret": "must-not-project",
+        },
+    })
+
+    activity = sup.list_agents()[0].to_agent_entry()["backend_activity"]
+    observed_at_ms = activity.pop("observed_at_ms")
+    assert isinstance(observed_at_ms, int) and observed_at_ms > 0
+    assert activity == {
+        "active": True,
+        "phase": "executing",
+        "call_id": f"zcall_{'a' * 32}",
+        "task_id": "job-123",
+        "started_at_ms": 100,
+        "updated_at_ms": 200,
+        "timeout_s": 300.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("active", False),
+        ("call_id", "zcall_bad"),
+        ("task_id", "contains private prompt spaces"),
+        ("started_at_ms", True),
+        ("updated_at_ms", -1),
+        ("timeout_s", 901.0),
+        ("timeout_s", float("inf")),
+    ],
+)
+def test_backend_activity_sanitizer_rejects_each_poisoned_field(
+    field: str,
+    value: object,
+) -> None:
+    from nth_dao.web.agent_supervisor import _sanitize_backend_activity
+
+    now_ms = int(time.time() * 1000)
+    payload = {
+        "active": True,
+        "phase": "executing",
+        "call_id": f"zcall_{'d' * 32}",
+        "task_id": "5" * 32,
+        "started_at_ms": now_ms - 100,
+        "updated_at_ms": now_ms,
+        "timeout_s": 300.0,
+    }
+    payload[field] = value
+    assert _sanitize_backend_activity(payload) == {}
+
+
+def test_stale_active_backend_activity_is_degraded_in_snapshot_only() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    runner = InMemoryRunner()
+    sup = AgentSupervisor(runner)
+    record = sup.spawn(kind="zcode", label="stale-activity", capabilities=[])
+    stored = sup.get(record.agent_id)
+    assert stored is not None
+    stored.backend_activity = {
+        "active": True,
+        "phase": "executing",
+        "call_id": f"zcall_{'e' * 32}",
+        "task_id": "6" * 32,
+        "started_at_ms": 100,
+        "updated_at_ms": 200,
+        "observed_at_ms": 0,
+        "timeout_s": 300.0,
+    }
+
+    activity = sup.list_agents()[0].to_agent_entry()["backend_activity"]
+    assert activity["active"] is False
+    assert activity["phase"] == "stale"
+    assert activity["error_code"] == "heartbeat_stale"
+    assert stored.backend_activity["active"] is True
+    assert stored.backend_activity["phase"] == "executing"
+
+
+def test_supervisor_rejects_invalid_backend_activity_without_losing_last_good_state() -> None:
+    from nth_dao.web.agent_supervisor import (
+        AgentRecord, AgentSupervisor, InMemoryRunner,
+    )
+
+    sup = AgentSupervisor(InMemoryRunner())
+    rec = AgentRecord(
+        agent_id="activity-reject",
+        kind="zcode",
+        label="activity-reject",
+        did="did:key:z6MkActivityReject",
+        capabilities=[],
+        started_at="now",
+        last_seen="now",
+        backend_activity={"active": False, "phase": "idle"},
+    )
+    sup._agents[rec.agent_id] = rec  # type: ignore[attr-defined]
+
+    sup.on_event(rec.agent_id, {
+        "event": "heartbeat",
+        "backend_activity": {
+            "active": False,
+            "phase": "executing",
+            "call_id": f"zcall_{'b' * 32}",
+            "task_id": "private prompt must not survive",
+            "started_at_ms": 100,
+            "updated_at_ms": 200,
+            "timeout_s": float("inf"),
+        },
+    })
+
+    activity = sup.list_agents()[0].to_agent_entry()["backend_activity"]
+    assert activity == {"active": False, "phase": "idle"}
+    assert "private prompt" not in repr(activity)
 
 
 def test_cap_token_marker_ignores_mtime_for_identical_content(

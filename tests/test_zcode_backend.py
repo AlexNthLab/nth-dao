@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -227,6 +228,7 @@ def test_zcode_uses_fixed_model_safe_mode_and_workdir(
 
     argv = captured["argv"]
     env = captured["kwargs"]["env"]
+    execution = result.pop("execution")
     assert result == {
         "response": "checked",
         "backend": "zcode",
@@ -242,6 +244,11 @@ def test_zcode_uses_fixed_model_safe_mode_and_workdir(
         },
         "exit_code": 0,
     }
+    assert execution["call_id"].startswith("zcall_")
+    assert execution["task_id"] == execution["call_id"]
+    assert execution["timeout_s"] == 42.0
+    assert execution["completed_at_ms"] >= execution["started_at_ms"]
+    assert execution["duration_ms"] >= 0
     assert argv[argv.index("--mode") + 1] == "edit"
     assert argv[argv.index("--cwd") + 1] == str(tmp_path.resolve())
     assert "--disallowed-tools" in argv
@@ -345,6 +352,371 @@ def test_zcode_read_only_scope_uses_plan_mode(tmp_path: Path, monkeypatch) -> No
 
     assert captured[captured.index("--mode") + 1] == "plan"
     assert result["response"] == "read-only report"
+
+
+def test_zcode_rejects_a_second_concurrent_cli_call(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """One supervised ZCode agent owns at most one CLI process at a time."""
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    errors: list[BaseException] = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = '{"response":"checked","sessionId":"sess_test_12345678"}'
+
+    def fake_run(_argv, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(2.0)
+        return Result()
+
+    monkeypatch.setenv("NTH_ZCODE_API_KEY", "configured")
+    rollout_dir = tmp_path / "rollout"
+    monkeypatch.setenv("NTH_ZCODE_ROLLOUT_DIR", str(rollout_dir))
+    _write_model_attestation(rollout_dir)
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_resolve_launcher",
+        classmethod(lambda cls: ["zcode"]),
+    )
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_cli_contract_preflight",
+        classmethod(lambda cls, launcher: (True, "", "zcode 0.16.5")),
+    )
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_run_cli",
+        classmethod(lambda cls, argv, **kwargs: fake_run(argv, **kwargs)),
+    )
+    backend = dummy_agent._ZCodeCliAskBackend(
+        workdir=tmp_path,
+        work_access="read-only",
+    )
+
+    def first_call() -> None:
+        try:
+            backend.ask({"prompt": "first"}, 30.0)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=first_call)
+    thread.start()
+    assert started.wait(1.0)
+    try:
+        with pytest.raises(dummy_agent.BackendBusyError, match="already executing"):
+            backend.ask({"prompt": "second"}, 30.0)
+    finally:
+        release.set()
+        thread.join(3.0)
+
+    assert thread.is_alive() is False
+    assert errors == []
+    assert calls == 1
+
+
+def test_zcode_releases_single_flight_lock_after_failure(monkeypatch) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    calls = 0
+
+    def fake_once(_params, _timeout_s):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("simulated timeout")
+        return {"response": "recovered", "backend": "zcode"}
+
+    monkeypatch.setattr(backend, "_ask_once", fake_once)
+
+    with pytest.raises(TimeoutError, match="simulated timeout"):
+        backend.ask({"prompt": "first"}, 30.0)
+    assert backend.ask({"prompt": "retry"}, 30.0)["response"] == "recovered"
+
+
+def test_zcode_activity_initialization_failure_does_not_poison_state_or_lock(
+    monkeypatch,
+) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    original_start = backend._start_activity
+    attempts = 0
+
+    def flaky_start(params, timeout_s):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("activity store unavailable")
+        return original_start(params, timeout_s)
+
+    monkeypatch.setattr(backend, "_start_activity", flaky_start)
+    monkeypatch.setattr(
+        backend,
+        "_ask_once",
+        lambda _params, _timeout_s: {"response": "recovered", "backend": "zcode"},
+    )
+
+    with pytest.raises(RuntimeError, match="activity store unavailable"):
+        backend.ask({"prompt": "first"}, 30.0)
+    assert backend.activity_snapshot() == {"active": False, "phase": "idle"}
+    assert backend.ask({"prompt": "retry"}, 30.0)["response"] == "recovered"
+
+
+def test_zcode_reports_bounded_activity_and_execution_metadata(monkeypatch) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    during: dict = {}
+    job_id = "1" * 32
+
+    def fake_once(_params, _timeout_s):
+        during.update(backend.activity_snapshot())
+        return {"response": "checked", "backend": "zcode"}
+
+    monkeypatch.setattr(backend, "_ask_once", fake_once)
+    result = backend.ask(
+        {"prompt": "private prompt", "agent_link_job_id": job_id},
+        42.0,
+    )
+
+    assert during["active"] is True
+    assert during["phase"] == "starting"
+    assert during["task_id"] == job_id
+    assert "prompt" not in repr(during).lower()
+    final = backend.activity_snapshot()
+    assert final["active"] is False
+    assert final["phase"] == "succeeded"
+    assert final["task_id"] == job_id
+    assert result["execution"]["call_id"] == final["call_id"]
+    assert result["execution"]["task_id"] == job_id
+    assert result["execution"]["duration_ms"] >= 0
+
+
+def test_zcode_activity_retains_safe_timeout_diagnostic(monkeypatch) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    monkeypatch.setattr(
+        backend,
+        "_ask_once",
+        lambda _params, _timeout_s: (_ for _ in ()).throw(TimeoutError("secret detail")),
+    )
+
+    with pytest.raises(TimeoutError, match="secret detail"):
+        backend.ask(
+            {"prompt": "private prompt", "agent_link_job_id": "2" * 32},
+            5.0,
+        )
+
+    final = backend.activity_snapshot()
+    assert final["active"] is False
+    assert final["phase"] == "timed_out"
+    assert final["error_code"] == "timeout"
+    assert "private prompt" not in repr(final)
+    assert "secret detail" not in repr(final)
+
+
+def test_zcode_cancel_terminates_matching_active_process(monkeypatch) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    started = threading.Event()
+    killed = threading.Event()
+    errors: list[BaseException] = []
+    job_id = "7" * 32
+
+    class FakeProcess:
+        pid = 1234
+
+        def poll(self):
+            return 1 if killed.is_set() else None
+
+    process = FakeProcess()
+
+    def fake_terminate(_cls, candidate):
+        assert candidate is process
+        killed.set()
+        return True
+
+    def fake_once(_params, _timeout_s):
+        backend._register_active_process(process)
+        started.set()
+        try:
+            assert killed.wait(2.0)
+            raise dummy_agent.BackendCancelledError("cancelled in test")
+        finally:
+            backend._clear_active_process(process)
+
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_terminate_process_tree",
+        classmethod(fake_terminate),
+    )
+    monkeypatch.setattr(backend, "_ask_once", fake_once)
+
+    def execute() -> None:
+        try:
+            backend.ask(
+                {"prompt": "must not survive", "agent_link_job_id": job_id},
+                30.0,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=execute)
+    thread.start()
+    assert started.wait(1.0)
+    outcome = backend.cancel(job_id)
+    thread.join(3.0)
+
+    assert outcome == {
+        "accepted": True,
+        "active_match": True,
+        "pre_cancelled": False,
+        "termination_confirmed": True,
+        "target_id": job_id,
+    }
+    assert thread.is_alive() is False
+    assert len(errors) == 1
+    assert isinstance(errors[0], dummy_agent.BackendCancelledError)
+    assert backend.activity_snapshot()["phase"] == "cancelled"
+    assert backend.activity_snapshot()["active"] is False
+
+
+def test_zcode_pre_cancel_prevents_queued_job_from_starting(monkeypatch) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    job_id = "8" * 32
+    ask_once = pytest.fail
+    monkeypatch.setattr(backend, "_ask_once", ask_once)
+
+    outcome = backend.cancel(job_id)
+    with pytest.raises(
+        dummy_agent.BackendCancelledError,
+        match="cancelled before execution",
+    ):
+        backend.ask(
+            {"prompt": "must not execute", "agent_link_job_id": job_id},
+            30.0,
+        )
+
+    assert outcome["accepted"] is True
+    assert outcome["pre_cancelled"] is True
+    assert outcome["termination_confirmed"] is False
+    assert backend.activity_snapshot()["phase"] == "cancelled"
+
+
+def test_zcode_cancel_rejects_unbound_identifiers() -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    with pytest.raises(ValueError, match="valid AgentLink job_id"):
+        backend.cancel("../../arbitrary")
+
+    outcome = backend.cancel(f"zcall_{'9' * 32}")
+    assert outcome["accepted"] is False
+    assert outcome["active_match"] is False
+    assert outcome["pre_cancelled"] is False
+    assert outcome["termination_confirmed"] is False
+
+
+def test_zcode_cancel_never_reopens_a_concurrently_finished_activity(
+    monkeypatch,
+) -> None:
+    backend = dummy_agent._ZCodeCliAskBackend()
+    job_id = "a" * 32
+    backend._start_activity(
+        {"prompt": "bounded", "agent_link_job_id": job_id},
+        30.0,
+    )
+
+    original_terminate = backend._terminate_process_tree
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return 0
+
+    process = FakeProcess()
+    backend._active_process = process
+
+    def finish_during_termination(_candidate):
+        backend._mark_activity(
+            "cancelled", active=False, error_code="cancelled",
+        )
+        return True
+
+    monkeypatch.setattr(backend, "_terminate_process_tree", finish_during_termination)
+    try:
+        assert backend.cancel(job_id)["active_match"] is True
+    finally:
+        monkeypatch.setattr(backend, "_terminate_process_tree", original_terminate)
+
+    final = backend.activity_snapshot()
+    assert final["active"] is False
+    assert final["phase"] == "cancelled"
+
+
+def test_zcode_a2a_cancel_is_authenticated_and_latches_queued_job() -> None:
+    import urllib.request
+
+    pytest.importorskip("nacl")
+    from nth_dao.cap_token import (
+        CAP_A2A_MESSAGE_SEND,
+        encode_authorization_header,
+        sign_cap_token,
+    )
+    from nth_dao.identity import AgentIdentity
+
+    issuer = AgentIdentity.generate(label="cancel-issuer")
+    child = AgentIdentity.generate(label="cancel-child")
+    peer = AgentIdentity.generate(label="cancel-peer")
+    holder = dummy_agent._CapTokenHolder()
+    holder.set(sign_cap_token(
+        issuer=issuer,
+        subject_did=child.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+    ))
+    peer_token = sign_cap_token(
+        issuer=issuer,
+        subject_did=peer.as_did(),
+        capabilities=[CAP_A2A_MESSAGE_SEND],
+    )
+    backend = dummy_agent._ZCodeCliAskBackend()
+    job_id = "e" * 32
+    port, server = dummy_agent._start_a2a_server(
+        {
+            "agent_id": "cancel-child",
+            "kind": "zcode",
+            "did": child.as_did(),
+            "pubkey_hex": child.pubkey_hex,
+            "started_at": int(time.time() * 1000),
+        },
+        holder,
+        backend,
+    )
+    assert port is not None and server is not None
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/a2a/cancel",
+            data=json.dumps({"task_id": job_id}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": (
+                    "CapToken " + encode_authorization_header(peer_token)
+                ),
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=3.0) as response:  # noqa: S310
+            body = json.loads(response.read().decode("utf-8"))
+        assert body["result"]["accepted"] is True
+        assert body["result"]["pre_cancelled"] is True
+        with pytest.raises(dummy_agent.BackendCancelledError):
+            backend.ask(
+                {"prompt": "must not run", "agent_link_job_id": job_id},
+                30.0,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_zcode_model_attestation_rejects_wrong_or_mixed_model(
@@ -488,6 +860,77 @@ def test_zcode_timeout_reaps_real_windows_child_process(tmp_path: Path) -> None:
 
     assert not is_running(parent_pid)
     assert not is_running(child_pid)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows process-tree test")
+def test_zcode_cancel_confirms_real_windows_child_process_exit(tmp_path: Path) -> None:
+    pid_file = tmp_path / "cancel-process-tree-pids.txt"
+    child_program = "import time; time.sleep(60)"
+    parent_program = (
+        "import os, pathlib, subprocess, sys, time; "
+        f"child = subprocess.Popen([sys.executable, '-c', {child_program!r}]); "
+        f"pathlib.Path({str(pid_file)!r}).write_text("
+        "f'{os.getpid()} {child.pid}', encoding='utf-8'); "
+        "time.sleep(60)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", parent_program],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=str(tmp_path),
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
+    backend = dummy_agent._ZCodeCliAskBackend()
+    job_id = "f" * 32
+
+    def is_running(pid: int) -> bool:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            check=False,
+        )
+        return f'"{pid}"' in result.stdout
+
+    try:
+        deadline = time.monotonic() + 3.0
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists()
+        parent_pid, child_pid = (
+            int(value) for value in pid_file.read_text(encoding="utf-8").split()
+        )
+        backend._start_activity(
+            {"prompt": "cancel real tree", "agent_link_job_id": job_id},
+            30.0,
+        )
+        backend._register_active_process(process)
+
+        outcome = backend.cancel(job_id)
+
+        assert outcome["accepted"] is True
+        assert outcome["active_match"] is True
+        assert outcome["termination_confirmed"] is True
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and (
+            is_running(parent_pid) or is_running(child_pid)
+        ):
+            time.sleep(0.05)
+        assert not is_running(parent_pid)
+        assert not is_running(child_pid)
+    finally:
+        backend._clear_active_process(process)
+        if process.poll() is None:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5.0,
+                check=False,
+            )
 
 
 def test_zcode_rejects_exit_zero_error_payload(tmp_path: Path, monkeypatch) -> None:

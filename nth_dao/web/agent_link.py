@@ -12,6 +12,7 @@ backpressure is explicit. Job metadata is persisted without storing prompts.
 """
 from __future__ import annotations
 
+import hashlib
 import queue
 import logging
 import threading
@@ -32,8 +33,17 @@ from nth_dao.util.io import (
 
 LinkWorker = Callable[[], Any]
 UNCERTAIN_STATES = frozenset({"delivery_unknown"})
-TERMINAL_STATES = frozenset({"completed", "completed_unverified", "failed"}) | UNCERTAIN_STATES
+TERMINAL_STATES = frozenset({
+    "completed", "completed_unverified", "failed", "cancelled",
+}) | UNCERTAIN_STATES
 MAX_AGENT_LINK_RESPONSE_BYTES = 100_000
+PROVIDER_CANCEL_STATUSES = frozenset({
+    "requested",
+    "accepted",
+    "queued_prevented",
+    "termination_confirmed",
+    "unconfirmed",
+})
 logger = logging.getLogger("nth_dao.web.agent_link")
 
 
@@ -71,6 +81,15 @@ class LinkJob:
     response: str = ""
     response_truncated: bool = False
     receipt_id: str = ""
+    cancel_requested_at: str = ""
+    provider_cancel_status: str = ""
+    provider_cancel_updated_at: str = ""
+    provider_cancel_detail: str = ""
+    late_result_recorded_at: str = ""
+    late_result_receipt_id: str = ""
+    late_result_response_sha256: str = ""
+    late_result_error: str = ""
+    late_result_truncated: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -89,6 +108,15 @@ class LinkJob:
             "response": self.response,
             "response_truncated": self.response_truncated,
             "receipt_id": self.receipt_id,
+            "cancel_requested_at": self.cancel_requested_at,
+            "provider_cancel_status": self.provider_cancel_status,
+            "provider_cancel_updated_at": self.provider_cancel_updated_at,
+            "provider_cancel_detail": self.provider_cancel_detail,
+            "late_result_recorded_at": self.late_result_recorded_at,
+            "late_result_receipt_id": self.late_result_receipt_id,
+            "late_result_response_sha256": self.late_result_response_sha256,
+            "late_result_error": self.late_result_error,
+            "late_result_truncated": self.late_result_truncated,
         }
 
 
@@ -101,13 +129,17 @@ class AgentLinkConflict(ValueError):
 
 
 _ALLOWED_TRANSITIONS = {
-    "accepted": frozenset({"processing", "failed", "delivery_unknown"}),
+    "accepted": frozenset({
+        "processing", "failed", "cancelled", "delivery_unknown",
+    }),
     "processing": frozenset({
-        "completed", "completed_unverified", "failed", "delivery_unknown",
+        "completed", "completed_unverified", "failed", "cancelled",
+        "delivery_unknown",
     }),
     "completed": frozenset({"completed"}),
     "completed_unverified": frozenset({"completed_unverified"}),
     "failed": frozenset({"failed"}),
+    "cancelled": frozenset({"cancelled"}),
     "delivery_unknown": frozenset({"delivery_unknown"}),
 }
 
@@ -211,10 +243,25 @@ class AgentLinkStore:
                 return job
 
     def get(self, job_id: str) -> Optional[LinkJob]:
+        key = str(job_id)
         with self._lock:
-            with self._process_lock():
-                self._refresh_from_disk()
-                return self._jobs.get(str(job_id))
+            if self.root is None:
+                return self._jobs.get(key)
+
+            # Job files are replaced atomically, so a point read never needs the
+            # global writer lock. Taking that lock here made status polling scan
+            # every job and could starve the worker that needed to publish its
+            # terminal state.
+            path = self._path(key)
+            if path is None or not path.exists():
+                self._jobs.pop(key, None)
+                return None
+            job = self._job_from_data(safe_load_json(path, fallback=None))
+            if job is None:
+                self._jobs.pop(key, None)
+                return None
+            self._jobs[key] = job
+            return job
 
     def transition(
         self,
@@ -242,13 +289,14 @@ class AgentLinkStore:
                         f"for {job_id!r}"
                     )
                 normalized_response, was_truncated = bound_agent_response(response)
+                updated_at = _now()
                 updated = LinkJob(
                     job_id=current.job_id,
                     agent_id=current.agent_id,
                     agent_did=current.agent_did,
                     state=state,
                     created_at=current.created_at,
-                    updated_at=_now(),
+                    updated_at=updated_at,
                     idempotency_key=current.idempotency_key,
                     request_hash=current.request_hash,
                     prompt_sha256=current.prompt_sha256,
@@ -258,6 +306,24 @@ class AgentLinkStore:
                     response=normalized_response,
                     response_truncated=bool(response_truncated or was_truncated),
                     receipt_id=str(receipt_id or "")[:200],
+                    cancel_requested_at=(
+                        current.cancel_requested_at
+                        or (updated_at if state == "cancelled" else "")
+                    ),
+                    provider_cancel_status=(
+                        current.provider_cancel_status
+                        or ("requested" if state == "cancelled" else "")
+                    ),
+                    provider_cancel_updated_at=(
+                        current.provider_cancel_updated_at
+                        or (updated_at if state == "cancelled" else "")
+                    ),
+                    provider_cancel_detail=current.provider_cancel_detail,
+                    late_result_recorded_at=current.late_result_recorded_at,
+                    late_result_receipt_id=current.late_result_receipt_id,
+                    late_result_response_sha256=current.late_result_response_sha256,
+                    late_result_error=current.late_result_error,
+                    late_result_truncated=current.late_result_truncated,
                 )
                 self._jobs[updated.job_id] = updated
                 self._save(updated)
@@ -296,11 +362,148 @@ class AgentLinkStore:
                     data.get("response_truncated", False) or was_truncated
                 ),
                 receipt_id=str(data.get("receipt_id", "")),
+                cancel_requested_at=str(data.get("cancel_requested_at", "")),
+                provider_cancel_status=(
+                    str(data.get("provider_cancel_status", ""))
+                    if str(data.get("provider_cancel_status", ""))
+                    in PROVIDER_CANCEL_STATUSES
+                    else ""
+                ),
+                provider_cancel_updated_at=str(
+                    data.get("provider_cancel_updated_at", "")
+                ),
+                provider_cancel_detail=str(
+                    data.get("provider_cancel_detail", "")
+                )[:2000],
+                late_result_recorded_at=str(
+                    data.get("late_result_recorded_at", "")
+                ),
+                late_result_receipt_id=str(
+                    data.get("late_result_receipt_id", "")
+                )[:200],
+                late_result_response_sha256=str(
+                    data.get("late_result_response_sha256", "")
+                )[:64],
+                late_result_error=str(data.get("late_result_error", ""))[:200],
+                late_result_truncated=bool(data.get("late_result_truncated", False)),
             )
         except (KeyError, TypeError, ValueError):
             return None
         valid_states = {"accepted", "processing", *TERMINAL_STATES}
         return job if job.state in valid_states else None
+
+    def update_cancellation(
+        self,
+        job_id: str,
+        *,
+        provider_status: str,
+        detail: str = "",
+    ) -> LinkJob:
+        """Persist provider-side cancellation evidence on a cancelled job."""
+
+        if provider_status not in PROVIDER_CANCEL_STATUSES:
+            raise ValueError(f"invalid provider cancellation status: {provider_status!r}")
+        status_rank = {
+            "": -1,
+            "requested": 0,
+            "unconfirmed": 1,
+            "accepted": 2,
+            "queued_prevented": 3,
+            "termination_confirmed": 4,
+        }
+        with self._lock:
+            with self._process_lock():
+                self._refresh_from_disk()
+                current = self._jobs.get(str(job_id))
+                if current is None:
+                    raise KeyError(f"unknown AgentLink job: {job_id!r}")
+                if current.state != "cancelled":
+                    raise ValueError("provider cancellation can only update a cancelled job")
+                if status_rank.get(current.provider_cancel_status, -1) > status_rank[
+                    provider_status
+                ]:
+                    return current
+                updated_at = _now()
+                updated = LinkJob(
+                    **{
+                        **current.to_dict(),
+                        "updated_at": updated_at,
+                        "cancel_requested_at": current.cancel_requested_at or updated_at,
+                        "provider_cancel_status": provider_status,
+                        "provider_cancel_updated_at": updated_at,
+                        "provider_cancel_detail": str(detail or "")[:2000],
+                    }
+                )
+                self._jobs[updated.job_id] = updated
+                self._save(updated)
+                return updated
+
+    def record_cancelled_late_result(self, job_id: str, outcome: Any) -> LinkJob:
+        """Quarantine a provider outcome that arrived after durable cancellation."""
+
+        if outcome is False:
+            fields: Dict[str, Any] = {
+                "error": "AgentLink worker returned failure without a reason"
+            }
+        elif not isinstance(outcome, dict):
+            fields = {
+                "error": (
+                    "AgentLink worker returned an invalid result type: "
+                    f"{type(outcome).__name__}"
+                )
+            }
+        else:
+            fields = outcome
+        raw_response = str(fields.get("response", "") or "")
+        response_sha256 = hashlib.sha256(raw_response.encode("utf-8")).hexdigest()
+        response, response_truncated = bound_agent_response(raw_response)
+        response_truncated = bool(
+            response_truncated or fields.get("response_truncated", False)
+        )
+        recorded_at = _now()
+        receipt_id = str(fields.get("receipt_id", "") or "")[:200]
+        error = str(fields.get("error", "") or "")[:2000]
+        public_error = "provider_error" if error else ""
+
+        with self._lock:
+            with self._process_lock():
+                self._refresh_from_disk()
+                current = self._jobs.get(str(job_id))
+                if current is None:
+                    raise KeyError(f"unknown AgentLink job: {job_id!r}")
+                if current.state != "cancelled":
+                    raise ValueError("late results can only be recorded for cancelled jobs")
+                if self.root is not None:
+                    evidence_path = (
+                        self.root / "agent_links" / "quarantine"
+                        / f"{safe_id(current.job_id)}.json"
+                    )
+                    atomic_write_json(evidence_path, {
+                        "schema_version": 1,
+                        "job_id": current.job_id,
+                        "agent_id": current.agent_id,
+                        "agent_did": current.agent_did,
+                        "recorded_at": recorded_at,
+                        "response": response,
+                        "response_truncated": response_truncated,
+                        "response_sha256": response_sha256,
+                        "receipt_id": receipt_id,
+                        "error": error,
+                    })
+                updated = LinkJob(
+                    **{
+                        **current.to_dict(),
+                        "updated_at": recorded_at,
+                        "late_result_recorded_at": recorded_at,
+                        "late_result_receipt_id": receipt_id,
+                        "late_result_response_sha256": response_sha256,
+                        "late_result_error": public_error,
+                        "late_result_truncated": response_truncated,
+                    }
+                )
+                self._jobs[updated.job_id] = updated
+                self._save(updated)
+                return updated
 
     def _read_disk_jobs(self) -> Dict[str, LinkJob]:
         path = self.root / "agent_links" / "jobs" if self.root else None
@@ -547,6 +750,49 @@ class AgentLinkManager:
     def get(self, job_id: str) -> Optional[LinkJob]:
         return self.store.get(job_id)
 
+    def cancel(self, job_id: str) -> LinkJob:
+        """Persist cancellation before a queued/running worker can publish output."""
+        current = self.store.get(job_id)
+        if current is None:
+            raise KeyError(f"unknown AgentLink job: {job_id!r}")
+        if current.state == "cancelled":
+            return current
+        if current.state not in {"accepted", "processing"}:
+            raise AgentLinkConflict(
+                f"AgentLink job is already terminal: {current.state}"
+            )
+        try:
+            return self.store.transition(
+                job_id,
+                "cancelled",
+                error="Cancelled by the operator.",
+            )
+        except ValueError as exc:
+            # The worker can cross into a terminal state between get() and
+            # transition(). Normalize that race instead of leaking a generic
+            # ValueError that the HTTP layer would misclassify as a 500.
+            latest = self.store.get(job_id)
+            if latest is not None and latest.state == "cancelled":
+                return latest
+            if latest is not None and latest.state in TERMINAL_STATES:
+                raise AgentLinkConflict(
+                    f"AgentLink job is already terminal: {latest.state}"
+                ) from exc
+            raise
+
+    def update_cancellation(
+        self,
+        job_id: str,
+        *,
+        provider_status: str,
+        detail: str = "",
+    ) -> LinkJob:
+        return self.store.update_cancellation(
+            job_id,
+            provider_status=provider_status,
+            detail=detail,
+        )
+
     def reconcile_completed(
         self,
         job_id: str,
@@ -582,14 +828,23 @@ class AgentLinkManager:
                         if item is not None:
                             job, _worker = item
                             self._queued_job_ids.discard(job.job_id)
-                            self.store.transition(
-                                job.job_id,
-                                "delivery_unknown",
-                                error=(
-                                    "Hub shut down before the AgentLink job "
-                                    "was delivered; execution outcome is unknown."
-                                ),
-                            )
+                            current = self.store.get(job.job_id)
+                            if current is not None and current.state in {
+                                "accepted", "processing",
+                            }:
+                                try:
+                                    self.store.transition(
+                                        job.job_id,
+                                        "delivery_unknown",
+                                        error=(
+                                            "Hub shut down before the AgentLink job "
+                                            "was delivered; execution outcome is unknown."
+                                        ),
+                                    )
+                                except ValueError:
+                                    latest = self.store.get(job.job_id)
+                                    if latest is None or latest.state not in TERMINAL_STATES:
+                                        raise
                     finally:
                         q.task_done()
                 try:
@@ -613,8 +868,42 @@ class AgentLinkManager:
                 with self._lock:
                     self._queued_job_ids.discard(job.job_id)
                 try:
-                    self.store.transition(job.job_id, "processing")
-                    outcome = worker()
+                    current = self.store.get(job.job_id)
+                    if current is None or current.state == "cancelled":
+                        continue
+                    try:
+                        self.store.transition(job.job_id, "processing")
+                    except ValueError:
+                        latest = self.store.get(job.job_id)
+                        if latest is not None and latest.state == "cancelled":
+                            continue
+                        raise
+                    try:
+                        outcome = worker()
+                    except Exception as worker_exc:  # noqa: BLE001
+                        failure = {
+                            "error": f"{type(worker_exc).__name__}: {worker_exc}"
+                        }
+                        try:
+                            self.store.transition(
+                                job.job_id, "failed", error=failure["error"],
+                            )
+                        except ValueError:
+                            latest = self.store.get(job.job_id)
+                            if latest is None or latest.state != "cancelled":
+                                raise
+                            try:
+                                self.store.record_cancelled_late_result(
+                                    job.job_id, failure,
+                                )
+                            except Exception as evidence_exc:  # noqa: BLE001
+                                logger.error(
+                                    "AgentLink job %s produced a late failure that "
+                                    "could not be quarantined: %s",
+                                    job.job_id,
+                                    type(evidence_exc).__name__,
+                                )
+                        continue
                     if outcome is False:
                         fields: Dict[str, Any] = {
                             "error": "AgentLink worker returned failure without a reason"
@@ -635,16 +924,32 @@ class AgentLinkManager:
                         if error
                         else ("completed" if receipt_id else "completed_unverified")
                     )
-                    self.store.transition(
-                        job.job_id,
-                        terminal_state,
-                        error=error,
-                        response=str(fields.get("response", "")),
-                        response_truncated=bool(
-                            fields.get("response_truncated", False)
-                        ),
-                        receipt_id=receipt_id,
-                    )
+                    try:
+                        self.store.transition(
+                            job.job_id,
+                            terminal_state,
+                            error=error,
+                            response=str(fields.get("response", "")),
+                            response_truncated=bool(
+                                fields.get("response_truncated", False)
+                            ),
+                            receipt_id=receipt_id,
+                        )
+                    except ValueError:
+                        latest = self.store.get(job.job_id)
+                        if latest is None or latest.state != "cancelled":
+                            raise
+                        try:
+                            self.store.record_cancelled_late_result(
+                                job.job_id, outcome,
+                            )
+                        except Exception as evidence_exc:  # noqa: BLE001
+                            logger.error(
+                                "AgentLink job %s produced a late result that "
+                                "could not be quarantined: %s",
+                                job.job_id,
+                                type(evidence_exc).__name__,
+                            )
                 except Exception as exc:  # noqa: BLE001
                     error = f"{type(exc).__name__}: {exc}"
                     try:
@@ -652,6 +957,15 @@ class AgentLinkManager:
                             job.job_id,
                             "failed",
                             error=error,
+                        )
+                    except ValueError as persist_exc:
+                        latest = self.store.get(job.job_id)
+                        if latest is not None and latest.state == "cancelled":
+                            continue
+                        logger.error(
+                            "AgentLink job %s failed and failure state conflicted: %s",
+                            job.job_id,
+                            persist_exc,
                         )
                     except Exception as persist_exc:  # noqa: BLE001
                         logger.error(

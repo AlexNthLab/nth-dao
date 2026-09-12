@@ -61,10 +61,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -72,6 +75,98 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 logger = logging.getLogger(__name__)
+
+_BACKEND_ACTIVITY_PHASES = frozenset({
+    "idle",
+    "starting",
+    "preflight",
+    "executing",
+    "parsing_output",
+    "verifying_attestation",
+    "cancelling",
+    "cancelled",
+    "succeeded",
+    "timed_out",
+    "failed",
+})
+_BACKEND_ACTIVITY_ACTIVE_PHASES = frozenset({
+    "starting",
+    "preflight",
+    "executing",
+    "parsing_output",
+    "verifying_attestation",
+    "cancelling",
+})
+_BACKEND_CALL_ID_PATTERN = re.compile(r"zcall_[0-9a-f]{32}")
+_BACKEND_TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_BACKEND_ERROR_CODE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+_BACKEND_ACTIVITY_MAX_TIMESTAMP_MS = 9_999_999_999_999
+_BACKEND_ACTIVITY_MAX_CLOCK_SKEW_MS = 30_000
+_BACKEND_ACTIVITY_HEARTBEAT_STALE_MS = 10_000
+
+
+def _sanitize_backend_activity(value: Any) -> Dict[str, Any]:
+    """Project only bounded, prompt-free child execution telemetry."""
+    if not isinstance(value, dict):
+        return {}
+    active = value.get("active")
+    phase = value.get("phase")
+    if not isinstance(active, bool) or phase not in _BACKEND_ACTIVITY_PHASES:
+        return {}
+    if active != (phase in _BACKEND_ACTIVITY_ACTIVE_PHASES):
+        return {}
+    if phase == "idle":
+        return {"active": False, "phase": "idle"}
+
+    call_id = value.get("call_id")
+    task_id = value.get("task_id")
+    started_at_ms = value.get("started_at_ms")
+    updated_at_ms = value.get("updated_at_ms")
+    timeout_s = value.get("timeout_s")
+    observed_at_ms = int(time.time() * 1000)
+    if not isinstance(call_id, str) or not _BACKEND_CALL_ID_PATTERN.fullmatch(call_id):
+        return {}
+    if not isinstance(task_id, str) or not _BACKEND_TASK_ID_PATTERN.fullmatch(task_id):
+        return {}
+    if (
+        isinstance(started_at_ms, bool)
+        or not isinstance(started_at_ms, int)
+        or started_at_ms < 0
+        or started_at_ms > _BACKEND_ACTIVITY_MAX_TIMESTAMP_MS
+        or isinstance(updated_at_ms, bool)
+        or not isinstance(updated_at_ms, int)
+        or updated_at_ms < started_at_ms
+        or updated_at_ms > _BACKEND_ACTIVITY_MAX_TIMESTAMP_MS
+        or started_at_ms > observed_at_ms + _BACKEND_ACTIVITY_MAX_CLOCK_SKEW_MS
+        or updated_at_ms > observed_at_ms + _BACKEND_ACTIVITY_MAX_CLOCK_SKEW_MS
+    ):
+        return {}
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or not 0 < float(timeout_s) <= 900.0
+    ):
+        return {}
+
+    sanitized: Dict[str, Any] = {
+        "active": active,
+        "phase": phase,
+        "call_id": call_id,
+        "task_id": task_id,
+        "started_at_ms": started_at_ms,
+        "updated_at_ms": updated_at_ms,
+        "observed_at_ms": observed_at_ms,
+        "timeout_s": float(timeout_s),
+    }
+    error_code = value.get("error_code")
+    if (
+        phase in {"timed_out", "failed", "cancelled"}
+        and isinstance(error_code, str)
+        and _BACKEND_ERROR_CODE_PATTERN.fullmatch(error_code)
+    ):
+        sanitized["error_code"] = error_code
+    return sanitized
 
 
 # 运行态 agent 数量天花板(2026-06-14 审查补:项目反复强调 auto/scale 路径
@@ -193,6 +288,7 @@ class AgentRecord:
     provider_state: str = "unknown"
     provider_checked_at: str = ""
     work_scope: WorkScope = field(default_factory=WorkScope)
+    backend_activity: Dict[str, Any] = field(default_factory=dict)
 
     def to_agent_entry(self) -> Dict[str, Any]:
         """Translate to the dict shape /api/v2/agents returns.
@@ -225,6 +321,11 @@ class AgentRecord:
             "work_scope_root": self.work_scope.root,
             "work_access": self.work_scope.access,
             "work_revision": self.work_scope.revision,
+            **(
+                {"backend_activity": dict(self.backend_activity)}
+                if self.backend_activity
+                else {}
+            ),
         }
 
 
@@ -1207,6 +1308,7 @@ class AgentSupervisor:
         alive_map = {r.agent_id: self._runner.is_alive(r.agent_id)
                      for r in records}
         out: List[AgentRecord] = []
+        observed_now_ms = int(time.time() * 1000)
         with self._lock:
             for r in records:
                 # Pick the current record from the dict in case
@@ -1214,6 +1316,22 @@ class AgentSupervisor:
                 current = self._agents.get(r.agent_id)
                 if current is None:
                     continue  # was stopped between the two reads
+                backend_activity = dict(current.backend_activity)
+                observed_at_ms = backend_activity.get("observed_at_ms")
+                if (
+                    backend_activity.get("active") is True
+                    and (
+                        isinstance(observed_at_ms, bool)
+                        or not isinstance(observed_at_ms, int)
+                        or observed_now_ms - observed_at_ms
+                        > _BACKEND_ACTIVITY_HEARTBEAT_STALE_MS
+                    )
+                ):
+                    backend_activity.update({
+                        "active": False,
+                        "phase": "stale",
+                        "error_code": "heartbeat_stale",
+                    })
                 snap = AgentRecord(
                     agent_id=current.agent_id,
                     kind=current.kind,
@@ -1233,6 +1351,7 @@ class AgentSupervisor:
                     provider_state=current.provider_state,
                     provider_checked_at=current.provider_checked_at,
                     work_scope=current.work_scope,
+                    backend_activity=backend_activity,
                 )
                 out.append(snap)
         return out
@@ -1312,6 +1431,11 @@ class AgentSupervisor:
                 record = self._agents.get(agent_id)
                 if record is not None:
                     record.last_seen = _now_iso()
+                    sanitized = _sanitize_backend_activity(
+                        event.get("backend_activity")
+                    )
+                    if sanitized:
+                        record.backend_activity = sanitized
         elif kind == "agent_started":
             # Phase 3d: a2a_port stamping happens at spawn time
             # (pulled from runner.handshake_data) — race-free

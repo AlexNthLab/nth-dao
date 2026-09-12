@@ -45,6 +45,7 @@ const noopProps = {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 describe("AgentDirectoryView — Phase G scope badge", () => {
@@ -261,7 +262,265 @@ it("shows the effective project boundary for a supervised agent", () => {
   expect(screen.getByText("workspace-write")).toBeTruthy();
 });
 
-it("surfaces Hermes warmup status while an agent task is starting", async () => {
+it("shows supervised backend task activity without exposing the prompt", () => {
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkActiveZCode", {
+          kind: "zcode",
+          backend_activity: {
+            active: true,
+            phase: "executing",
+            call_id: "zcall_abc123",
+            task_id: "job-123",
+            started_at_ms: 100,
+            updated_at_ms: 200,
+            timeout_s: 300,
+          },
+        })]}
+        {...noopProps}
+      />
+    </LangProvider>,
+  );
+
+  expect(screen.getByText("executing")).toBeTruthy();
+  expect(screen.getByText("job-123")).toBeTruthy();
+  expect(screen.queryByText("private prompt")).toBeNull();
+});
+
+it("polls live supervisor state without overlap and aborts on unmount", async () => {
+  vi.useFakeTimers();
+  let resolveRefresh!: () => void;
+  const onRefreshAgents = vi.fn((_signal?: AbortSignal) => new Promise<void>((resolve) => {
+    resolveRefresh = resolve;
+  }));
+  const view = render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkPollingAgent")]}
+        onRefreshAgents={onRefreshAgents}
+        {...noopProps}
+      />
+    </LangProvider>,
+  );
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(onRefreshAgents).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(4500));
+  expect(onRefreshAgents).toHaveBeenCalledTimes(1);
+
+  const signal = onRefreshAgents.mock.calls[0]?.[0];
+  view.unmount();
+  expect(signal?.aborted).toBe(true);
+  resolveRefresh();
+  await act(async () => Promise.resolve());
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  expect(onRefreshAgents).toHaveBeenCalledTimes(1);
+});
+
+it("surfaces polling failures instead of silently showing stale agent state", async () => {
+  vi.useFakeTimers();
+  const onRefreshAgents = vi.fn(async () => {
+    throw new Error("hub status unavailable");
+  });
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent("did:key:z6MkStaleAgent")]}
+        onRefreshAgents={onRefreshAgents}
+        {...noopProps}
+      />
+    </LangProvider>,
+  );
+
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+
+  expect(screen.getByRole("alert").textContent).toContain(
+    "Agent status refresh failed; showing last known state.",
+  );
+  expect(screen.getByRole("alert").textContent).toContain("hub status unavailable");
+});
+
+it("cancels the durable AgentLink job before aborting local polling", async () => {
+  const did = "did:key:z6MkCancelableAgent";
+  const jobId = "b".repeat(32);
+  let taskSignal: AbortSignal | undefined;
+  const onAskAgent = vi.fn((
+    _did: string,
+    _prompt: string,
+    _onDelta: (delta: string) => void,
+    signal?: AbortSignal,
+    _onStatus?: (status: string) => void,
+    onTaskAccepted?: (acceptedJobId: string) => void,
+  ) => {
+    taskSignal = signal;
+    onTaskAccepted?.(jobId);
+    return new Promise<{ text: string }>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => {
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    });
+  });
+  const onCancelAgentTask = vi.fn(async () => ({
+    job_id: jobId,
+    agent_id: "cancel-agent",
+    agent_did: did,
+    state: "cancelled",
+    created_at: "2026-09-12T00:00:00Z",
+    updated_at: "2026-09-12T00:00:01Z",
+    provider_cancelled: true,
+    provider_cancel_accepted: true,
+    provider_cancel_status: "termination_confirmed",
+    provider_warning: "",
+  }));
+
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent(did, { kind: "zcode" })]}
+        {...noopProps}
+        onAskAgent={onAskAgent}
+        onCancelAgentTask={onCancelAgentTask}
+      />
+    </LangProvider>,
+  );
+  fireEvent.change(screen.getByPlaceholderText(/派一个任务|Assign a task/), {
+    target: { value: "run bounded work" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /运行|Run/ }));
+  const stop = await screen.findByRole("button", { name: /停止|Stop/ });
+  await waitFor(() => expect(stop.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(stop);
+
+  await waitFor(() => {
+    expect(onCancelAgentTask).toHaveBeenCalledWith(did, jobId);
+    expect(screen.getAllByText("Task cancelled; ZCode process exit confirmed").length).toBeGreaterThan(0);
+  });
+  expect(taskSignal?.aborted).toBe(true);
+  expect(screen.getByRole("button", { name: /运行|Run/ }).hasAttribute("disabled")).toBe(false);
+});
+
+it("ignores stale callbacks and errors after a replacement run starts", async () => {
+  const did = "did:key:z6MkRunGeneration";
+  const jobId = "d".repeat(32);
+  let firstReject!: (error: Error) => void;
+  let firstDelta!: (delta: string) => void;
+  let secondResolve!: (value: { text: string; backend: string; model: string }) => void;
+  let callCount = 0;
+  const onAskAgent = vi.fn((
+    _did: string,
+    _prompt: string,
+    onDelta: (delta: string) => void,
+    _signal?: AbortSignal,
+    _onStatus?: (status: string) => void,
+    onTaskAccepted?: (acceptedJobId: string) => void,
+  ) => {
+    callCount += 1;
+    if (callCount === 1) {
+      firstDelta = onDelta;
+      onTaskAccepted?.(jobId);
+      return new Promise<{ text: string; backend: string; model: string }>(
+        (_resolve, reject) => { firstReject = reject; },
+      );
+    }
+    return new Promise<{ text: string; backend: string; model: string }>(
+      (resolve) => { secondResolve = resolve; },
+    );
+  });
+  const onCancelAgentTask = vi.fn(async () => ({
+    job_id: jobId,
+    agent_id: "generation-agent",
+    agent_did: did,
+    state: "cancelled",
+    created_at: "2026-09-12T00:00:00Z",
+    updated_at: "2026-09-12T00:00:01Z",
+    provider_cancelled: true,
+    provider_cancel_accepted: true,
+    provider_cancel_status: "termination_confirmed",
+    provider_warning: "",
+  }));
+
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent(did, { kind: "zcode" })]}
+        {...noopProps}
+        onAskAgent={onAskAgent}
+        onCancelAgentTask={onCancelAgentTask}
+      />
+    </LangProvider>,
+  );
+  const prompt = screen.getByPlaceholderText(/派一个任务|Assign a task/);
+  fireEvent.change(prompt, { target: { value: "first run" } });
+  fireEvent.click(screen.getByRole("button", { name: /运行|Run/ }));
+  const stop = await screen.findByRole("button", { name: /停止|Stop/ });
+  await waitFor(() => expect(stop.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(stop);
+  await waitFor(() => expect(
+    screen.getAllByText("Task cancelled; ZCode process exit confirmed").length,
+  ).toBeGreaterThan(0));
+
+  fireEvent.change(prompt, { target: { value: "replacement run" } });
+  fireEvent.click(screen.getByRole("button", { name: /运行|Run/ }));
+  await waitFor(() => expect(onAskAgent).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    firstDelta("stale output");
+    firstReject(new Error("stale first failure"));
+    await Promise.resolve();
+  });
+  expect(screen.queryByText("stale output")).toBeNull();
+  expect(screen.queryByText("stale first failure")).toBeNull();
+
+  await act(async () => {
+    secondResolve({ text: "replacement result", backend: "zcode", model: "glm" });
+  });
+  expect(await screen.findByText("replacement result")).toBeTruthy();
+});
+
+it("keeps polling alive and reports an error when server cancellation fails", async () => {
+  const did = "did:key:z6MkCancelFailure";
+  const jobId = "c".repeat(32);
+  let taskSignal: AbortSignal | undefined;
+  const onAskAgent = vi.fn((
+    _did: string,
+    _prompt: string,
+    _onDelta: (delta: string) => void,
+    signal?: AbortSignal,
+    _onStatus?: (status: string) => void,
+    onTaskAccepted?: (acceptedJobId: string) => void,
+  ) => {
+    taskSignal = signal;
+    onTaskAccepted?.(jobId);
+    return new Promise<{ text: string }>(() => undefined);
+  });
+  const onCancelAgentTask = vi.fn(async () => {
+    throw new Error("server cancellation unavailable");
+  });
+
+  render(
+    <LangProvider>
+      <AgentDirectoryView
+        agents={[baseAgent(did, { kind: "zcode" })]}
+        {...noopProps}
+        onAskAgent={onAskAgent}
+        onCancelAgentTask={onCancelAgentTask}
+      />
+    </LangProvider>,
+  );
+  fireEvent.change(screen.getByPlaceholderText(/派一个任务|Assign a task/), {
+    target: { value: "keep running if cancel fails" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /运行|Run/ }));
+  const stop = await screen.findByRole("button", { name: /停止|Stop/ });
+  await waitFor(() => expect(stop.hasAttribute("disabled")).toBe(false));
+  fireEvent.click(stop);
+
+  expect(await screen.findByText("server cancellation unavailable")).toBeTruthy();
+  expect(taskSignal?.aborted).toBe(false);
+  expect(screen.getByRole("button", { name: /停止|Stop/ })).toBeTruthy();
+});
+
+it("surfaces provider-neutral warmup status while an agent task is starting", async () => {
   let finishAsk!: (value: { text: string; backend: string; model: string }) => void;
   const onAskAgent = vi.fn((
     _did: string,
@@ -282,6 +541,7 @@ it("surfaces Hermes warmup status while an agent task is starting", async () => 
         agents={[baseAgent("did:key:z6MkHermesWarmup", { kind: "hermes", label: "Hermes" })]}
         {...noopProps}
         onAskAgent={onAskAgent}
+        onCancelAgentTask={vi.fn()}
       />
     </LangProvider>,
   );
@@ -298,8 +558,11 @@ it("surfaces Hermes warmup status while an agent task is starting", async () => 
   await waitFor(() => {
     expect(onAskAgent).toHaveBeenCalled();
   });
+  expect(screen.queryByRole("button", { name: /停止|Stop/ })).toBeNull();
   await waitFor(() => {
-    expect(screen.getAllByText(/Hermes 正在冷启动|Hermes is warming up/).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/Agent 服务正在冷启动|Agent provider is warming up/).length,
+    ).toBeGreaterThan(0);
   });
   await act(async () => {
     finishAsk({ text: "Hermes online.", backend: "hermes", model: "deepseek-v4-pro" });

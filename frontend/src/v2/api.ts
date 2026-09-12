@@ -588,12 +588,27 @@ export interface AgentLinkJob {
   job_id: string;
   agent_id: string;
   agent_did: string;
-  state: "accepted" | "processing" | "completed" | "completed_unverified" | "failed" | "delivery_unknown" | string;
+  state: "accepted" | "processing" | "completed" | "completed_unverified" | "failed" | "cancelled" | "delivery_unknown" | string;
   created_at: string;
   updated_at: string;
   response?: string;
   receipt_id?: string;
   error?: string;
+  cancel_requested_at?: string;
+  provider_cancel_status?: "requested" | "accepted" | "queued_prevented" | "termination_confirmed" | "unconfirmed" | string;
+  provider_cancel_updated_at?: string;
+  provider_cancel_detail?: string;
+  late_result_recorded_at?: string;
+  late_result_receipt_id?: string;
+  late_result_response_sha256?: string;
+  late_result_error?: string;
+  late_result_truncated?: boolean;
+}
+
+export interface CancelAgentLinkResult extends AgentLinkJob {
+  provider_cancelled: boolean;
+  provider_cancel_accepted: boolean;
+  provider_warning: string;
 }
 
 export const submitAgentLink = (
@@ -616,6 +631,12 @@ export const getAgentLink = (did: string, jobId: string, signal?: AbortSignal) =
   getJson<AgentLinkJob>(
     `/agents/${encodeURIComponent(did)}/link/${encodeURIComponent(jobId)}`,
     signal,
+  );
+
+export const cancelAgentLink = (did: string, jobId: string) =>
+  postJson<CancelAgentLinkResult>(
+    `/agents/${encodeURIComponent(did)}/link/${encodeURIComponent(jobId)}/cancel`,
+    {},
   );
 
 export const reconcileAgentLink = (
@@ -767,8 +788,13 @@ export async function askAgentStream(
   onStatus?: (status: string) => void,
   idleTimeoutMs = 120_000,
   backendTimeoutS?: number,
+  allowWarmupRetry = false,
 ): Promise<AskAgentResult> {
-  const maxWarmupAttempts = 6;
+  // Retrying a provider call is unsafe by default: a workspace-write Agent
+  // may have committed filesystem side effects before the transport failed.
+  // Callers may opt in only for operations they have independently proven
+  // idempotent (for example, a read-only readiness probe).
+  const maxWarmupAttempts = allowWarmupRetry ? 6 : 1;
   const warmupDelayMs = 750;
   onStatus?.("authorizing");
   // 传输层兜底:在调用方 signal 之外再加"空闲超时"。收到响应头、以及每

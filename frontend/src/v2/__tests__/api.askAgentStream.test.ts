@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { askAgentStream } from "../api";
+import { askAgentStream, cancelAgentLink } from "../api";
 
 function streamFrom(chunks: string[]): Response {
   const enc = new TextEncoder();
@@ -119,4 +119,76 @@ describe("askAgentStream", () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(String(init.body))).toEqual({ prompt: "hi", timeout_s: 300 });
   });
+
+  it("does not replay a failed provider call by default", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => streamFrom([
+      'data: {"error":{"code":"upstream-502","message":"result transport failed"}}\n\n',
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      askAgentStream("did:key:zX", "write task", () => {}),
+    ).rejects.toThrow(/upstream-502/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only when the caller explicitly marks the operation safe", async () => {
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => Promise.resolve(streamFrom([
+        'data: {"error":{"code":"upstream-502","message":"warming"}}\n\n',
+      ])))
+      .mockImplementationOnce(() => Promise.resolve(streamFrom([
+        'data: {"delta":"ready"}\n\n',
+        'data: {"done":true,"backend":"zcode"}\n\n',
+      ])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await askAgentStream(
+      "did:key:zX",
+      "read-only probe",
+      () => {},
+      undefined,
+      undefined,
+      120_000,
+      undefined,
+      true,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.text).toBe("ready");
+  });
+});
+
+it("sends AgentLink cancellation to the job-specific control endpoint", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({
+      job_id: "d".repeat(32),
+      agent_id: "zcode-1",
+      agent_did: "did:key:z6MkCancel",
+      state: "cancelled",
+      created_at: "2026-09-12T00:00:00Z",
+      updated_at: "2026-09-12T00:00:01Z",
+      provider_cancelled: true,
+      provider_cancel_accepted: true,
+      provider_cancel_status: "termination_confirmed",
+      provider_warning: "",
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  const jobId = "d".repeat(32);
+  const result = await cancelAgentLink("did:key:z6MkCancel", jobId);
+
+  const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(url).toContain(
+    `/agents/did%3Akey%3Az6MkCancel/link/${jobId}/cancel`,
+  );
+  expect(init.method).toBe("POST");
+  expect(JSON.parse(String(init.body))).toEqual({});
+  expect(result.state).toBe("cancelled");
+  expect(result.provider_cancelled).toBe(true);
+  expect(result.provider_cancel_accepted).toBe(true);
+  expect(result.provider_cancel_status).toBe("termination_confirmed");
 });

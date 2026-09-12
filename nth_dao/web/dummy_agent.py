@@ -71,6 +71,7 @@ import socketserver
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, ClassVar, Dict, FrozenSet, Iterator, Optional, Tuple
 
@@ -331,6 +332,10 @@ _A2A_METHOD_CAPABILITIES: Dict[str, str] = {
     # protocol-layer act ("peer sends a message to this agent and
     # gets a response") is identical; only the transport differs.
     "ask-stream": "a2a:message_send",
+    # Cancellation is a control message for a previously authorized ask.
+    # It deliberately reuses the same delegated message capability so an
+    # unrelated peer cannot terminate operator-owned work.
+    "cancel": "a2a:message_send",
     # Slice B: market-claim methods. Wire authorization matches
     # ``ask`` (a2a:message_send = "hub may drive this agent"). The
     # actual claim authorization is the per-call cap_token carried in
@@ -515,7 +520,11 @@ class _AskBackend:
 
 
 class BackendBusyError(RuntimeError):
-    """The backend already has an uncancellable provider call in flight."""
+    """The backend already has a provider call in flight."""
+
+
+class BackendCancelledError(RuntimeError):
+    """The operator cancelled a supervised provider call."""
 
 
 class _MockAskBackend(_AskBackend):
@@ -1871,6 +1880,7 @@ class _ZCodeCliAskBackend(_AskBackend):
     _MAX_ROLLOUT_BYTES = 64 * 1024 * 1024
     _MAX_ROLLOUT_LINE_BYTES = 16 * 1024 * 1024
     _SESSION_ID_PATTERN = re.compile(r"sess_[A-Za-z0-9_-]{8,128}")
+    _AGENT_LINK_JOB_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
     _ALLOWED_PROVIDER_IDS = frozenset({
         "bigmodel",
         DESKTOP_PROVIDER_ID,
@@ -1928,6 +1938,149 @@ class _ZCodeCliAskBackend(_AskBackend):
     ) -> None:
         self._workdir = workdir.resolve() if workdir is not None else None
         self._work_access = work_access.strip().lower() if work_access else None
+        # A ZCode instance represents one supervised execution lane. AgentLink
+        # already serializes its durable inbox, but direct /ask and /ask-stream
+        # calls can arrive concurrently on the threaded A2A server. Starting a
+        # second CLI would duplicate model spend and race on the same worktree.
+        self._call_lock = threading.Lock()
+        self._activity_lock = threading.Lock()
+        self._process_lock = threading.RLock()
+        self._active_process: Any = None
+        self._cancel_event = threading.Event()
+        self._pre_cancelled_tasks: dict[str, float] = {}
+        self._activity: dict[str, Any] = {
+            "active": False,
+            "phase": "idle",
+        }
+
+    @classmethod
+    def _safe_task_id(cls, params: dict[str, Any], call_id: str) -> str:
+        raw = params.get("agent_link_job_id")
+        if isinstance(raw, str) and cls._AGENT_LINK_JOB_ID_PATTERN.fullmatch(raw):
+            return raw
+        return call_id
+
+    def _start_activity(
+        self, params: dict[str, Any], timeout_s: float,
+    ) -> str:
+        now_ms = int(time.time() * 1000)
+        call_id = f"zcall_{uuid.uuid4().hex}"
+        task_id = self._safe_task_id(params, call_id)
+        with self._process_lock:
+            current = time.monotonic()
+            self._pre_cancelled_tasks = {
+                key: created
+                for key, created in self._pre_cancelled_tasks.items()
+                if current - created <= 60.0
+            }
+            was_pre_cancelled = task_id in self._pre_cancelled_tasks
+            self._pre_cancelled_tasks.pop(task_id, None)
+            self._cancel_event.clear()
+            if was_pre_cancelled:
+                self._cancel_event.set()
+            with self._activity_lock:
+                self._activity = {
+                    "active": True,
+                    "phase": "starting",
+                    "call_id": call_id,
+                    "task_id": task_id,
+                    "started_at_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                    "timeout_s": float(timeout_s),
+                }
+        return call_id
+
+    def _mark_activity(
+        self,
+        phase: str,
+        *,
+        active: Optional[bool] = None,
+        error_code: str = "",
+    ) -> None:
+        with self._activity_lock:
+            if not self._activity.get("call_id"):
+                return
+            self._activity["phase"] = str(phase)[:64]
+            self._activity["updated_at_ms"] = int(time.time() * 1000)
+            if active is not None:
+                self._activity["active"] = bool(active)
+            if error_code:
+                self._activity["error_code"] = str(error_code)[:64]
+            else:
+                self._activity.pop("error_code", None)
+
+    def activity_snapshot(self) -> dict[str, Any]:
+        """Return prompt-free execution telemetry for heartbeat projection."""
+        with self._activity_lock:
+            return dict(self._activity)
+
+    def _register_active_process(self, process: Any) -> None:
+        with self._process_lock:
+            self._active_process = process
+            should_cancel = self._cancel_event.is_set()
+        if should_cancel:
+            self._terminate_process_tree(process)
+
+    def _clear_active_process(self, process: Any) -> None:
+        with self._process_lock:
+            if self._active_process is process:
+                self._active_process = None
+
+    def cancel(self, target_id: str) -> dict[str, Any]:
+        """Cancel an active call or latch cancellation for a queued Link job."""
+
+        target = str(target_id or "").strip()
+        is_job_id = bool(self._AGENT_LINK_JOB_ID_PATTERN.fullmatch(target))
+        is_call_id = bool(re.fullmatch(r"zcall_[0-9a-f]{32}", target))
+        if not is_job_id and not is_call_id:
+            raise ValueError("cancel requires a valid AgentLink job_id or ZCode call_id")
+
+        process: Any = None
+        active_match = False
+        with self._process_lock:
+            now = time.monotonic()
+            self._pre_cancelled_tasks = {
+                key: created
+                for key, created in self._pre_cancelled_tasks.items()
+                if now - created <= 60.0
+            }
+            with self._activity_lock:
+                active_match = bool(
+                    self._activity.get("active") is True
+                    and target in {
+                        self._activity.get("task_id"),
+                        self._activity.get("call_id"),
+                    }
+                )
+                if active_match:
+                    # Update while still holding the same lock order used by
+                    # _start_activity. A concurrently finishing ask may write
+                    # cancelled after this, but cancelling can never overwrite
+                    # an already-terminal activity snapshot.
+                    self._activity["phase"] = "cancelling"
+                    self._activity["updated_at_ms"] = int(time.time() * 1000)
+                    self._activity.pop("error_code", None)
+            if active_match:
+                self._cancel_event.set()
+                process = self._active_process
+            elif is_job_id:
+                if len(self._pre_cancelled_tasks) >= 128:
+                    oldest = min(
+                        self._pre_cancelled_tasks,
+                        key=self._pre_cancelled_tasks.__getitem__,
+                    )
+                    self._pre_cancelled_tasks.pop(oldest, None)
+                self._pre_cancelled_tasks[target] = now
+        termination_confirmed = False
+        if active_match and process is not None:
+            termination_confirmed = self._terminate_process_tree(process)
+        return {
+            "accepted": bool(active_match or is_job_id),
+            "active_match": active_match,
+            "pre_cancelled": bool(is_job_id and not active_match),
+            "termination_confirmed": termination_confirmed,
+            "target_id": target,
+        }
 
     @staticmethod
     def _node_binary() -> str:
@@ -2060,11 +2213,11 @@ class _ZCodeCliAskBackend(_AskBackend):
         return env
 
     @classmethod
-    def _terminate_process_tree(cls, process: Any) -> None:
+    def _terminate_process_tree(cls, process: Any) -> bool:
         import subprocess as _sp
 
         if process.poll() is not None:
-            return
+            return True
         if sys.platform.startswith("win"):
             creation_flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
             try:
@@ -2089,6 +2242,11 @@ class _ZCodeCliAskBackend(_AskBackend):
                 process.kill()
             except OSError:
                 pass
+        try:
+            process.wait(timeout=2.0)
+        except (AttributeError, OSError, ValueError, _sp.SubprocessError):
+            pass
+        return process.poll() is not None
 
     @classmethod
     def _run_cli(
@@ -2098,6 +2256,8 @@ class _ZCodeCliAskBackend(_AskBackend):
         timeout: float,
         env: dict[str, str],
         cwd: str,
+        process_started: Optional[Callable[[Any], None]] = None,
+        process_finished: Optional[Callable[[Any], None]] = None,
     ) -> Any:
         import subprocess as _sp
 
@@ -2119,7 +2279,11 @@ class _ZCodeCliAskBackend(_AskBackend):
         else:
             popen_kwargs["start_new_session"] = True
         process = _sp.Popen(argv, **popen_kwargs)
+        registered = False
         try:
+            if process_started is not None:
+                process_started(process)
+            registered = True
             stdout, stderr = process.communicate(timeout=timeout)
         except _sp.TimeoutExpired:
             cls._terminate_process_tree(process)
@@ -2128,12 +2292,13 @@ class _ZCodeCliAskBackend(_AskBackend):
             except _sp.TimeoutExpired:
                 cls._terminate_process_tree(process)
             raise
-        return _sp.CompletedProcess(
-            argv,
-            process.returncode,
-            stdout,
-            stderr,
-        )
+        except Exception:
+            cls._terminate_process_tree(process)
+            raise
+        finally:
+            if registered and process_finished is not None:
+                process_finished(process)
+        return _sp.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     @classmethod
     def _cli_contract_preflight(
@@ -2389,6 +2554,57 @@ class _ZCodeCliAskBackend(_AskBackend):
     def ask(
         self, params: dict[str, Any], timeout_s: float,
     ) -> dict[str, Any]:
+        if not self._call_lock.acquire(blocking=False):
+            raise BackendBusyError(
+                "ZCode backend is already executing a supervised task; retry later"
+            )
+        call_id: Optional[str] = None
+        try:
+            call_id = self._start_activity(params, timeout_s)
+            if self._cancel_event.is_set():
+                raise BackendCancelledError("ZCode task was cancelled before execution")
+            result = self._ask_once(params, timeout_s)
+            if not isinstance(result, dict):
+                raise TypeError("ZCode backend returned a non-object result")
+        except BackendCancelledError:
+            if call_id is not None:
+                self._mark_activity(
+                    "cancelled", active=False, error_code="cancelled",
+                )
+            raise
+        except TimeoutError:
+            if call_id is not None:
+                self._mark_activity("timed_out", active=False, error_code="timeout")
+            raise
+        except Exception as exc:
+            if call_id is not None:
+                self._mark_activity(
+                    "failed",
+                    active=False,
+                    error_code=type(exc).__name__,
+                )
+            raise
+        else:
+            self._mark_activity("succeeded", active=False)
+            activity = self.activity_snapshot()
+            started_at_ms = int(activity.get("started_at_ms") or 0)
+            completed_at_ms = int(activity.get("updated_at_ms") or started_at_ms)
+            result["execution"] = {
+                "call_id": activity["call_id"],
+                "task_id": activity["task_id"],
+                "started_at_ms": started_at_ms,
+                "completed_at_ms": completed_at_ms,
+                "duration_ms": max(0, completed_at_ms - started_at_ms),
+                "timeout_s": activity["timeout_s"],
+            }
+            return result
+        finally:
+            self._cancel_event.clear()
+            self._call_lock.release()
+
+    def _ask_once(
+        self, params: dict[str, Any], timeout_s: float,
+    ) -> dict[str, Any]:
         import subprocess as _sp
 
         prompt = str(params.get("prompt") or "").strip()
@@ -2428,6 +2644,7 @@ class _ZCodeCliAskBackend(_AskBackend):
             [*self.MANDATORY_DENIED_TOOLS, *([extra_denied] if extra_denied else [])]
         )
         launcher = self._resolve_launcher()
+        self._mark_activity("preflight")
         ok, reason, _version = self._cli_contract_preflight(launcher)
         if not ok:
             raise RuntimeError(reason)
@@ -2462,13 +2679,20 @@ class _ZCodeCliAskBackend(_AskBackend):
                 "Execute the attached NTH task exactly within the current work scope.",
             ])
             try:
+                self._mark_activity("executing")
                 completed = self._run_cli(
                     argv,
                     timeout=timeout_s,
                     env=self._subprocess_env(),
                     cwd=workdir,
+                    process_started=self._register_active_process,
+                    process_finished=self._clear_active_process,
                 )
             except _sp.TimeoutExpired as exc:
+                if self._cancel_event.is_set():
+                    raise BackendCancelledError(
+                        "ZCode task was cancelled by the operator"
+                    ) from exc
                 raise TimeoutError(
                     f"ZCode GLM-5.3-Flash did not finish within {exc.timeout:.1f}s"
                 ) from exc
@@ -2481,8 +2705,12 @@ class _ZCodeCliAskBackend(_AskBackend):
                     detail="temporary task attachment could not be removed",
                 )
 
+        if self._cancel_event.is_set():
+            raise BackendCancelledError("ZCode task was cancelled by the operator")
+
         stderr = (completed.stderr or "").strip()
         stdout = (completed.stdout or "").strip()
+        self._mark_activity("parsing_output")
         # A successful response may legitimately discuss authentication errors.
         # Treat only stderr as an out-of-band failure channel when the CLI exits
         # successfully; structured stdout failures are rejected by _parse_response.
@@ -2513,6 +2741,7 @@ class _ZCodeCliAskBackend(_AskBackend):
         session_id = payload.get("sessionId")
         if not isinstance(session_id, str) or not session_id.strip():
             raise RuntimeError("ZCode output did not contain a session identity")
+        self._mark_activity("verifying_attestation")
         model_attestation = self._verify_model_attestation(session_id.strip())
         return {
             "response": response,
@@ -3755,6 +3984,9 @@ def _start_a2a_server(
                 except BackendBusyError as exc:
                     self._json_error(429, "backend-busy", str(exc))
                     return
+                except BackendCancelledError as exc:
+                    self._json_error(409, "backend-cancelled", str(exc))
+                    return
                 except TimeoutError as exc:
                     self._json_error(
                         504, "backend-timeout", str(exc),
@@ -3846,6 +4078,31 @@ def _start_a2a_server(
                 # the buffered _respond at the bottom.
                 self._stream_ask(ask_backend, params, token)
                 return
+            elif method == "cancel":
+                target_id = str(
+                    params.get("task_id") or params.get("call_id") or ""
+                ).strip()
+                cancel = getattr(ask_backend, "cancel", None)
+                if not callable(cancel):
+                    self._json_error(
+                        409,
+                        "cancel-unsupported",
+                        f"{ask_backend.name} backend does not support cancellation",
+                    )
+                    return
+                try:
+                    result = cancel(target_id)
+                except ValueError as exc:
+                    self._json_error(400, "bad-request", str(exc))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._json_error(
+                        502,
+                        "cancel-failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+                response = {"result": {"method": method, **result}}
             elif method == "claim":
                 # Slice B: the agent claims a market announcement with
                 # its own private key. The hub does not hold agent
@@ -3966,7 +4223,7 @@ def _start_a2a_server(
                 self._json_error(
                     404, "method-not-found",
                     f"method {method!r} not supported "
-                    "(echo, ask, ask-stream, claim, claim-sign)",
+                    "(echo, ask, ask-stream, cancel, claim, claim-sign)",
                 )
                 return
             if method == "ask" and callable(
@@ -4148,6 +4405,14 @@ def _start_a2a_server(
                 write_event({
                     "error": {
                         "code": "backend-busy",
+                        "message": str(exc),
+                    },
+                })
+            except BackendCancelledError as exc:
+                stream_ok = False
+                write_event({
+                    "error": {
+                        "code": "backend-cancelled",
                         "message": str(exc),
                     },
                 })
@@ -4598,12 +4863,30 @@ def main(argv: list[str] | None = None) -> int:
     cap_token_loaded = False
     cap_token_marker: Optional[Tuple[int, str]] = None
     cap_token_path: str = (args.cap_token_file or "").strip()
+    activity_snapshot_failed = False
     while not _STOP:
-        _print_event(
-            event="heartbeat",
-            agent_id=args.id,
-            ts=int(time.time() * 1000),
-        )
+        heartbeat: Dict[str, Any] = {
+            "event": "heartbeat",
+            "agent_id": args.id,
+            "ts": int(time.time() * 1000),
+        }
+        activity_reader = getattr(ask_backend, "activity_snapshot", None)
+        if callable(activity_reader):
+            try:
+                backend_activity = activity_reader()
+            except Exception as exc:  # noqa: BLE001
+                if not activity_snapshot_failed:
+                    _print_error(
+                        event="backend_activity_snapshot_failed",
+                        agent_id=args.id,
+                        detail=type(exc).__name__,
+                    )
+                activity_snapshot_failed = True
+            else:
+                activity_snapshot_failed = False
+                if isinstance(backend_activity, dict):
+                    heartbeat["backend_activity"] = backend_activity
+        _print_event(**heartbeat)
         # Poll for atomic token-file replacement and revoke the in-memory
         # Token replacement is checked on every heartbeat.
         # bearer when the file disappears or fails verification.

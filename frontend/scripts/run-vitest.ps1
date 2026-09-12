@@ -69,5 +69,15 @@ if (-not $hasFileParallelism) {
     $resolvedArgs.Add("--fileParallelism=false")
 }
 
+# The full jsdom suite can exceed Vitest's 5s per-test default on Windows when
+# antivirus or process scheduling stalls DOM work. Keep hangs bounded while
+# avoiding false CI failures observed at 12-15s under the complete suite.
+$hasTestTimeout = $lowerArgs | Where-Object {
+    $_ -eq "--testtimeout" -or $_ -like "--testtimeout=*"
+}
+if (-not $hasTestTimeout) {
+    $resolvedArgs.Add("--testTimeout=20000")
+}
+
 & $node $vitest @resolvedArgs
 exit $LASTEXITCODE
