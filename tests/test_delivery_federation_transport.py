@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import socket
+from threading import Event, Thread
+import time
 
 import pytest
 
@@ -104,6 +107,26 @@ class TestPeerUrlValidation:
 
 
 class TestFederationTransport:
+    def test_health_is_send_only(self):
+        transport = FederationTransport(peer_urls=["https://peer.example"])
+
+        health = transport.health()
+
+        assert health.reachable is True
+        assert health.receive_reachable is False
+
+    @pytest.mark.parametrize(
+        "max_body",
+        [True, 0, -1, 1.5, 512 * 1024 + 64 * 1024 + 1],
+    )
+    def test_ingest_server_rejects_invalid_body_limits(
+        self, tmp_path, max_body
+    ):
+        inbox = DeliveryInbox(tmp_path / "inbox")
+
+        with pytest.raises(ValueError, match="max_body"):
+            FederationIngestServer(inbox, max_body=max_body)
+
     def test_requires_peers(self):
         with pytest.raises(ValueError, match="peer_urls"):
             FederationTransport(peer_urls=[])
@@ -122,6 +145,69 @@ class TestFederationTransport:
         result = transport.send(_envelope(alice_identity))
         assert not result.accepted
         assert result.error_code == "peers-unreachable"
+
+    def test_send_uses_stable_snapshot_when_caller_mutates_after_validation(
+        self, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.transports.federation as federation_module
+
+        transport = FederationTransport(peer_urls=["https://peer.example"])
+        envelope = _envelope(alice_identity)
+        validation_done = Event()
+        caller_mutated = Event()
+        real_validate = federation_module.validate_envelope
+        captured = {}
+
+        def mutate_caller():
+            assert validation_done.wait(timeout=2)
+            envelope.payload["body"] = "forged-after-validation"
+            caller_mutated.set()
+
+        def pause_after_validation(candidate, **kwargs):
+            result = real_validate(candidate, **kwargs)
+            validation_done.set()
+            assert caller_mutated.wait(timeout=2)
+            return result
+
+        def capture_body(url, body, **kwargs):
+            captured["body"] = json.loads(body)
+            return 202, b""
+
+        monkeypatch.setattr(
+            federation_module, "validate_envelope", pause_after_validation
+        )
+        monkeypatch.setattr(federation_module, "_http_post_bytes", capture_body)
+        mutation = Thread(target=mutate_caller)
+        mutation.start()
+
+        result = transport.send(envelope)
+        mutation.join(timeout=2)
+
+        assert result.accepted is True
+        assert mutation.is_alive() is False
+        assert envelope.payload == {"body": "forged-after-validation"}
+        assert captured["body"]["payload"] == {"body": "hi"}
+
+    def test_network_failure_log_does_not_expose_provider_detail(
+        self, alice_identity, monkeypatch, caplog
+    ):
+        import nth_dao.delivery.transports.federation as federation_module
+
+        secret = "provider-secret-token-should-not-leak"
+
+        def fail_request(*args, **kwargs):
+            raise OSError(secret)
+
+        monkeypatch.setattr(federation_module, "_http_post_bytes", fail_request)
+
+        result = FederationTransport(
+            peer_urls=["https://peer.example"]
+        ).send(_envelope(alice_identity))
+
+        assert result.accepted is False
+        assert result.error_code == "peers-unreachable"
+        assert secret not in caplog.text
+        assert "OSError" in caplog.text
 
     def test_capabilities_declare_broadcast_push(self):
         transport = FederationTransport(peer_urls=["https://a.example.com"])
@@ -187,6 +273,20 @@ class TestFederationTransport:
 
 
 class TestIngestServer:
+    def test_windows_connection_abort_is_a_clean_disconnect(self):
+        from nth_dao.delivery.transports.federation import _IngestHandler
+
+        class DisconnectedRequest:
+            close_connection = False
+
+            def _do_post(self):
+                raise ConnectionAbortedError("peer closed")
+
+        request = DisconnectedRequest()
+        _IngestHandler.do_POST(request)
+
+        assert request.close_connection is True
+
 
     def test_roundtrip_accepts_valid_envelope(self, server, alice_identity):
         httpd, inbox = server
@@ -297,6 +397,25 @@ class TestIngestServer:
             raise AssertionError("expected HTTP 413")
         except urllib.error.HTTPError as exc:
             assert exc.code == 413
+            assert exc.headers["Connection"] == "close"
+
+    def test_ambiguous_framing_response_declares_connection_close(self, server):
+        httpd, _ = server
+        port = httpd._httpd.server_address[1]
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            sock.sendall(
+                b"POST /delivery/ingest HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Length: 2\r\n"
+                b"Content-Length: 2\r\n\r\n{}"
+            )
+            response = sock.recv(4096)
+        finally:
+            sock.close()
+
+        assert response.startswith(b"HTTP/1.1 400")
+        assert b"Connection: close" in response
 
     def test_expired_envelope_422(self, server, alice_identity):
         import urllib.error
@@ -444,6 +563,49 @@ class TestContentLengthStrictness:
         assert transport.send(envelope).accepted
 
 
+class TestConnectionConcurrencyBound:
+    def test_idle_connection_exhausts_permit_before_thread_creation(
+        self, tmp_path, bob_identity
+    ):
+        inbox = DeliveryInbox(
+            tmp_path / "bounded-inbox",
+            authorize=lambda envelope: (True, "ok"),
+        )
+        httpd = FederationIngestServer(
+            inbox,
+            host="127.0.0.1",
+            port=0,
+            max_connections=1,
+        )
+        httpd.start()
+        first = socket.create_connection(httpd._httpd.server_address, timeout=2.0)
+        second = None
+        try:
+            # The first connection deliberately sends no request line. Its
+            # handler must consume the sole permit before another thread is made.
+            deadline = time.monotonic() + 2.0
+            while httpd._httpd.gate.acquire(blocking=False):
+                httpd._httpd.gate.release()
+                if time.monotonic() >= deadline:
+                    pytest.fail("idle connection did not acquire the server gate")
+                time.sleep(0.01)
+
+            second = socket.create_connection(httpd._httpd.server_address, timeout=2.0)
+            second.sendall(
+                b"POST /delivery/ingest HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}"
+            )
+            response = second.recv(4096)
+
+            assert response.startswith(b"HTTP/1.1 503")
+            assert b"Connection: close" in response
+        finally:
+            first.close()
+            if second is not None:
+                second.close()
+            httpd.stop()
+
+
 # ─────────────────── adversarial review round 15 ───────────────────
 
 
@@ -546,8 +708,7 @@ class TestBindingEnforcement:
 
 class TestImportedJournalRotation:
     def test_journal_rotates_at_cap(self, tmp_path, alice_identity, bob_identity, monkeypatch):
-        """Bug CC-a: the imported journal is bounded — past the cap it
-        rotates to the newest half instead of growing forever."""
+        """Compaction retains every terminal import instead of replaying old work."""
 
         import nth_dao.delivery.transports.file_bundle as fb
 
@@ -559,32 +720,24 @@ class TestImportedJournalRotation:
         receiver = FileBundleTransport(
             exchange, bob_identity, state_dir=exchange / ".s-bob", clock=lambda: NOW_MS
         )
-        sent = []
+        inbox = DeliveryInbox(tmp_path / "bundle-inbox", clock=lambda: NOW_MS)
         for i in range(30):
             envelope = _envelope(alice_identity, payload={"n": i})
             sender.send(envelope)
-            sent.append(envelope)
-            receiver.poll()  # import (rotation may drop old digests)
+            decisions = receiver.poll_into(inbox)
+            assert decisions and all(item.accepted for item in decisions)
         latest = _envelope(alice_identity, payload={"n": 999})
         sender.send(latest)
-        sent.append(latest)
-        receiver.poll()
+        decisions = receiver.poll_into(inbox)
+        assert decisions and all(item.accepted for item in decisions)
 
         journal = exchange / ".s-bob" / "imported.jsonl"
-        assert journal.stat().st_size <= fb._IMPORTED_JOURNAL_CAP + 2_048
+        assert journal.stat().st_size <= fb._IMPORTED_JOURNAL_CAP + 4_096
 
-        # design contract: every sent envelope is DELIVERABLE across
-        # rotations — poll until stable, the set of seen message ids must
-        # cover all 31 sends, with no double-import inside one poll
-        all_polled: list = []
-        for _ in range(3):
-            polled = receiver.poll(max_items=256)
-            all_polled.extend(polled)
-            # within ONE poll call there must be no duplicate message id
-            poll_ids = [envelope.message_id for envelope in polled]
-            assert len(poll_ids) == len(set(poll_ids))
-        seen_ids = {envelope.message_id for envelope in all_polled}
-        expected_ids = {envelope.message_id for envelope in sent}
-        assert seen_ids >= expected_ids, (
-            f"missing {len(expected_ids - seen_ids)} envelopes after rotation"
+        restarted = FileBundleTransport(
+            exchange,
+            bob_identity,
+            state_dir=exchange / ".s-bob",
+            clock=lambda: NOW_MS,
         )
+        assert restarted.poll(max_items=256) == []

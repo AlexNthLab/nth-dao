@@ -671,6 +671,7 @@ def check_delivery_ack_v1(vectors: List[dict]) -> List[ConformanceFailure]:
         ack_digest,
         validate_ack,
     )
+    from ..did_key import decode_ed25519_did_key_hex
 
     failures: List[ConformanceFailure] = []
     for vector in vectors:
@@ -720,6 +721,35 @@ def check_delivery_ack_v1(vectors: List[dict]) -> List[ConformanceFailure]:
                     description="ACK digest",
                     expected=expected_digest,
                     actual=ack_digest(ack),
+                )
+            )
+        expected_signing_body = vector.get("expected_signing_body_hex")
+        if (
+            expected_signing_body is not None
+            and canonical_json(ack.signing_body()).hex() != expected_signing_body
+        ):
+            failures.append(
+                ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="delivery_ack_v1",
+                    description="canonical ACK signing body",
+                    expected=expected_signing_body,
+                    actual=canonical_json(ack.signing_body()).hex(),
+                )
+            )
+        expected_verify_key = vector.get("expected_verify_key_hex")
+        actual_verify_key = decode_ed25519_did_key_hex(ack.receiver_did)
+        if (
+            expected_verify_key is not None
+            and actual_verify_key != expected_verify_key
+        ):
+            failures.append(
+                ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="delivery_ack_v1",
+                    description="ACK receiver verification key",
+                    expected=expected_verify_key,
+                    actual=actual_verify_key,
                 )
             )
     return failures

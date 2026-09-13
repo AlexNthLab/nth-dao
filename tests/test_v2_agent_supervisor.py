@@ -6524,7 +6524,7 @@ def test_subprocess_real_a2a_ask_mock_backend(
             },
             method="POST",
         )
-        with _ureq.urlopen(req, timeout=3.0) as resp:  # noqa: S310
+        with _ureq.urlopen(req, timeout=_SMOKE_TIMEOUT) as resp:  # noqa: S310
             assert resp.status == 200
             body = json.loads(resp.read().decode("utf-8"))
         result = body["result"]
@@ -7074,7 +7074,7 @@ def test_zcode_timeout_budget_is_registered_end_to_end() -> None:
     assert ask_timeout == _v2._ZCODE_ASK_TIMEOUT_S
     assert _v2._CHANNEL_DISPATCH_ASK_TIMEOUTS["zcode"] == ask_timeout
     expected_forward = min(
-        ask_timeout + _v2._A2A_TIMEOUT_SLACK_S,
+        ask_timeout + _v2._ZCODE_TIMEOUT_SLACK_S,
         _v2._A2A_MAX_FORWARD_TIMEOUT_S,
     )
     assert _v2._A2A_BACKEND_METHOD_TIMEOUTS[("zcode", "ask")] == expected_forward
@@ -7083,6 +7083,23 @@ def test_zcode_timeout_budget_is_registered_end_to_end() -> None:
     assert _v2._a2a_forward_timeout(
         "ask", body, backend_kind="zcode",
     ) == expected_forward
+    shorter_body = json.dumps({"timeout_s": 60.0}).encode("utf-8")
+    assert _v2._a2a_forward_timeout(
+        "ask", shorter_body, backend_kind="zcode",
+    ) == expected_forward
+
+
+def test_backend_timeout_policy_caps_a_larger_caller_timeout(monkeypatch) -> None:
+    import nth_dao.web.v2_api as _v2
+
+    monkeypatch.setitem(_v2._CHANNEL_DISPATCH_ASK_TIMEOUTS, "zcode", 120.0)
+
+    assert _v2._with_backend_ask_timeout(
+        {"prompt": "bounded", "timeout_s": 300.0}, "zcode",
+    )["timeout_s"] == 120.0
+    assert _v2._with_backend_ask_timeout(
+        {"prompt": "short", "timeout_s": 60.0}, "zcode",
+    )["timeout_s"] == 60.0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -7750,7 +7767,7 @@ def test_backend_activity_sanitizer_rejects_each_poisoned_field(
 
 def test_stale_active_backend_activity_is_degraded_in_snapshot_only() -> None:
     from nth_dao.web.agent_supervisor import (
-        AgentRecord, AgentSupervisor, InMemoryRunner,
+        AgentSupervisor, InMemoryRunner,
     )
 
     runner = InMemoryRunner()

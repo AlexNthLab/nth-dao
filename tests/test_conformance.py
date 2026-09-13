@@ -6,6 +6,7 @@ implementation MUST pass its own vectors; otherwise the file is wrong.
 """
 
 import pytest
+from copy import deepcopy
 
 from nth_dao.conformance import (
     load_vectors,
@@ -84,9 +85,27 @@ def test_main_regenerator_preserves_documented_categories(tmp_path):
 
 def test_delivery_ack_vectors_cover_binding_time_and_version_failures():
     cases = load_vectors()["vectors"].get("delivery_ack_v1", [])
-    assert len(cases) == 4
+    assert len(cases) == 10
     assert cases[0]["expected_valid"] is True
     assert all(case["expected_valid"] is False for case in cases[1:])
+    assert cases[0]["expected_signing_body_hex"]
+    assert cases[0]["expected_verify_key_hex"]
+    assert {case["id"] for case in cases[1:]} == {
+        f"delivery-ack-{index:03d}" for index in range(2, 11)
+    }
+
+
+def test_delivery_ack_runner_enforces_expected_verification_key():
+    from nth_dao.conformance.runner import check_delivery_ack_v1
+
+    vector = deepcopy(load_vectors()["vectors"]["delivery_ack_v1"][0])
+    vector["expected_verify_key_hex"] = "00" * 32
+
+    failures = check_delivery_ack_v1([vector])
+
+    assert [failure.description for failure in failures] == [
+        "ACK receiver verification key"
+    ]
 
 
 def test_main_regenerator_matches_shipped_vectors_byte_for_byte(tmp_path):

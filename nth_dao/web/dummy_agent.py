@@ -73,8 +73,13 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, ClassVar, Dict, FrozenSet, Iterator, Optional, Tuple
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, Iterator, Optional, Tuple
 
+from nth_dao.util.process_tree import (
+    WINDOWS_CREATE_SUSPENDED,
+    attach_process_tree_guard,
+    resume_suspended_process,
+)
 
 _STOP = False
 # Hermes' embedded runtime replaces ``sys.stdout``/``sys.stderr`` during
@@ -1929,6 +1934,23 @@ class _ZCodeCliAskBackend(_AskBackend):
         "token expired",
         "oauth_provider_inactive",
     )
+    _RATE_LIMIT_MARKERS = (
+        "rate_limit_error",
+        "providercode: '1310'",
+        'providercode: "1310"',
+        "provider code 1310",
+        "usage limit",
+        "quota exceeded",
+    )
+    _AUTH_FAILURE_MARKERS = (
+        "401",
+        "unauthorized",
+        "authentication failed",
+        "invalid api key",
+        "token is invalid",
+        "token expired",
+        "oauth_provider_inactive",
+    )
 
     def __init__(
         self,
@@ -1946,6 +1968,7 @@ class _ZCodeCliAskBackend(_AskBackend):
         self._activity_lock = threading.Lock()
         self._process_lock = threading.RLock()
         self._active_process: Any = None
+        self._active_process_guard: Any = None
         self._cancel_event = threading.Event()
         self._pre_cancelled_tasks: dict[str, float] = {}
         self._activity: dict[str, Any] = {
@@ -2014,17 +2037,24 @@ class _ZCodeCliAskBackend(_AskBackend):
         with self._activity_lock:
             return dict(self._activity)
 
-    def _register_active_process(self, process: Any) -> None:
+    def _register_active_process(self, process: Any, process_tree_guard: Any = None) -> None:
         with self._process_lock:
             self._active_process = process
+            self._active_process_guard = process_tree_guard
             should_cancel = self._cancel_event.is_set()
         if should_cancel:
+            if process_tree_guard is not None:
+                try:
+                    process_tree_guard.terminate()
+                except OSError:
+                    pass
             self._terminate_process_tree(process)
 
-    def _clear_active_process(self, process: Any) -> None:
+    def _clear_active_process(self, process: Any, process_tree_guard: Any = None) -> None:
         with self._process_lock:
             if self._active_process is process:
                 self._active_process = None
+                self._active_process_guard = None
 
     def cancel(self, target_id: str) -> dict[str, Any]:
         """Cancel an active call or latch cancellation for a queued Link job."""
@@ -2036,6 +2066,7 @@ class _ZCodeCliAskBackend(_AskBackend):
             raise ValueError("cancel requires a valid AgentLink job_id or ZCode call_id")
 
         process: Any = None
+        process_tree_guard: Any = None
         active_match = False
         with self._process_lock:
             now = time.monotonic()
@@ -2063,6 +2094,7 @@ class _ZCodeCliAskBackend(_AskBackend):
             if active_match:
                 self._cancel_event.set()
                 process = self._active_process
+                process_tree_guard = self._active_process_guard
             elif is_job_id:
                 if len(self._pre_cancelled_tasks) >= 128:
                     oldest = min(
@@ -2073,7 +2105,14 @@ class _ZCodeCliAskBackend(_AskBackend):
                 self._pre_cancelled_tasks[target] = now
         termination_confirmed = False
         if active_match and process is not None:
-            termination_confirmed = self._terminate_process_tree(process)
+            guard_terminated = True
+            if process_tree_guard is not None:
+                try:
+                    guard_terminated = bool(process_tree_guard.terminate())
+                except OSError:
+                    guard_terminated = False
+            process_terminated = self._terminate_process_tree(process)
+            termination_confirmed = bool(guard_terminated and process_terminated)
         return {
             "accepted": bool(active_match or is_job_id),
             "active_match": active_match,
@@ -2256,8 +2295,8 @@ class _ZCodeCliAskBackend(_AskBackend):
         timeout: float,
         env: dict[str, str],
         cwd: str,
-        process_started: Optional[Callable[[Any], None]] = None,
-        process_finished: Optional[Callable[[Any], None]] = None,
+        process_started: Optional[Callable[[Any, Any], None]] = None,
+        process_finished: Optional[Callable[[Any, Any], None]] = None,
     ) -> Any:
         import subprocess as _sp
 
@@ -2271,33 +2310,79 @@ class _ZCodeCliAskBackend(_AskBackend):
             "env": env,
             "cwd": cwd,
         }
-        if sys.platform.startswith("win"):
+        is_windows = sys.platform.startswith("win")
+        if is_windows:
             popen_kwargs["creationflags"] = (
                 getattr(_sp, "CREATE_NO_WINDOW", 0)
                 | getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0)
+                | WINDOWS_CREATE_SUSPENDED
             )
         else:
             popen_kwargs["start_new_session"] = True
         process = _sp.Popen(argv, **popen_kwargs)
+        process_tree_guard = None
+        try:
+            process_tree_guard = attach_process_tree_guard(process)
+            if is_windows:
+                resume_suspended_process(process)
+        except OSError as exc:
+            # Never execute a provider CLI without durable process-tree
+            # ownership. In particular, a crashed Hub must not leave ZCode's
+            # Node descendants running with access to the provider credential.
+            if process_tree_guard is not None:
+                process_tree_guard.terminate()
+            cls._terminate_process_tree(process)
+            if process_tree_guard is not None:
+                try:
+                    process_tree_guard.close()
+                except OSError:
+                    pass
+            raise RuntimeError(
+                "ZCode CLI process containment could not be established"
+            ) from exc
         registered = False
+        primary_error: BaseException | None = None
         try:
             if process_started is not None:
-                process_started(process)
+                process_started(process, process_tree_guard)
             registered = True
             stdout, stderr = process.communicate(timeout=timeout)
-        except _sp.TimeoutExpired:
+        except _sp.TimeoutExpired as exc:
+            primary_error = exc
             cls._terminate_process_tree(process)
             try:
                 process.communicate(timeout=5.0)
-            except _sp.TimeoutExpired:
+            except (_sp.TimeoutExpired, OSError):
                 cls._terminate_process_tree(process)
             raise
-        except Exception:
+        except BaseException as exc:
+            primary_error = exc
             cls._terminate_process_tree(process)
             raise
         finally:
+            # Closing a Windows Job Object configured with KILL_ON_JOB_CLOSE,
+            # or the POSIX process group guard, reaps descendants that outlive
+            # the direct CLI process. Keep the process registered until this
+            # containment boundary has closed so cancellation cannot race it.
+            cleanup_error: BaseException | None = None
+            try:
+                process_tree_guard.close()
+            except BaseException as exc:
+                cleanup_error = exc
             if registered and process_finished is not None:
-                process_finished(process)
+                try:
+                    process_finished(process, process_tree_guard)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                if primary_error is None:
+                    raise cleanup_error
+                logger.warning(
+                    "ZCode process cleanup also failed while preserving the "
+                    "primary execution failure (%s)",
+                    type(cleanup_error).__name__,
+                )
         return _sp.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     @classmethod
@@ -2378,10 +2463,14 @@ class _ZCodeCliAskBackend(_AskBackend):
         error_value = payload.get("error")
         status = str(payload.get("status") or "").lower()
         if error_value or status in {"error", "failed", "failure"}:
-            detail = cls._redact_diagnostic(
-                str(error_value or payload.get("message") or status),
-            )[:1000]
-            raise RuntimeError(f"ZCode reported a failed turn: {detail}")
+            diagnostic = str(error_value or payload.get("message") or status)
+            classified = cls._classify_provider_failure(diagnostic)
+            if classified:
+                raise RuntimeError(classified)
+            raise RuntimeError(
+                "ZCode provider turn failed; inspect local ZCode logs. "
+                "Hermes fallback is disabled."
+            )
         for key in ("response", "result", "output", "content", "text", "message"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
@@ -2550,6 +2639,23 @@ class _ZCodeCliAskBackend(_AskBackend):
             redacted,
         )
         return redacted
+
+    @classmethod
+    def _classify_provider_failure(cls, diagnostic: str) -> str:
+        """Map untrusted provider text to a stable public error or empty."""
+
+        lowered = str(diagnostic or "").lower()
+        if any(marker in lowered for marker in cls._RATE_LIMIT_MARKERS):
+            return (
+                "ZCode provider usage limit reached; retry after the provider "
+                "reset window. Hermes fallback is disabled."
+            )
+        if any(marker in lowered for marker in cls._AUTH_FAILURE_MARKERS):
+            return (
+                "ZCode authentication failed; refresh the ZCode CLI credential. "
+                "Hermes fallback is disabled."
+            )
+        return ""
 
     def ask(
         self, params: dict[str, Any], timeout_s: float,
@@ -2723,19 +2829,18 @@ class _ZCodeCliAskBackend(_AskBackend):
             "",
         )
         if completed.returncode != 0 or marker:
-            tail = self._redact_diagnostic(
-                (failure_diagnostic or "no diagnostic output")[-2000:],
-            )
-            if any(
-                item in failure_text
-                for item in ("401", "unauthorized", "token is invalid", "token expired")
-            ):
-                raise RuntimeError(
-                    "ZCode authentication failed; refresh the ZCode CLI credential. "
-                    "Hermes fallback is disabled."
-                )
+            # Provider stderr is an untrusted diagnostic channel. It can carry
+            # local paths, response headers, cookies, request payloads, or
+            # credentials that our token-focused redactor cannot enumerate
+            # safely. Never propagate it into A2A or durable AgentLink errors.
+            # Keep only stable classifications at this trust boundary.
+            classified = self._classify_provider_failure(failure_text)
+            if classified:
+                raise RuntimeError(classified)
             raise RuntimeError(
-                f"ZCode CLI failed (exit={completed.returncode}, marker={marker or 'none'}): {tail}"
+                f"ZCode CLI failed (exit={completed.returncode}, "
+                f"marker={marker or 'none'}); inspect local ZCode logs. "
+                "Hermes fallback is disabled."
             )
         response, payload = self._parse_response(stdout)
         session_id = payload.get("sessionId")

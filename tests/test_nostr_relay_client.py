@@ -206,6 +206,58 @@ class TestSubscription:
         assert client._subscription_id is None
         assert client._thread is None
 
+    def test_subscription_health_clears_when_pump_terminates(
+        self, nostr_keys, fake_relay
+    ):
+        import asyncio
+
+        from nth_dao.nostr import NostrRelayClient
+
+        client = NostrRelayClient(nostr_keys, relay_urls=[fake_relay.url])
+        client.start()
+        try:
+            client.subscribe_events(kinds=[30078])
+            assert client.subscription_active is True
+
+            async def cancel_pump():
+                task = client._stream_task
+                assert task is not None
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            future = asyncio.run_coroutine_threadsafe(cancel_pump(), client._loop)
+            future.result(timeout=5.0)
+
+            assert _wait_until(lambda: not client.subscription_active)
+        finally:
+            client.stop()
+
+    def test_subscription_task_creation_failure_clears_health_and_state(
+        self, nostr_keys, fake_relay, monkeypatch
+    ):
+        import nth_dao.nostr.relay_client as relay_client_module
+        from nth_dao.nostr import NostrRelayClient
+
+        client = NostrRelayClient(nostr_keys, relay_urls=[fake_relay.url])
+        client.start()
+
+        def fail_create_task(coroutine):
+            raise RuntimeError("task creation failed")
+
+        monkeypatch.setattr(relay_client_module.asyncio, "create_task", fail_create_task)
+        try:
+            with pytest.raises(RuntimeError, match="task creation failed"):
+                client.subscribe_events(kinds=[30078])
+
+            assert client.subscription_active is False
+            assert client._stream_task is None
+            assert client._subscription_id is None
+        finally:
+            client.stop()
+
     @pytest.mark.parametrize(
         "kwargs",
         [

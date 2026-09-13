@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from nth_dao.delivery.envelope import TransportEnvelopeRejected, sign_envelope
+from nth_dao.delivery.envelope import (
+    TransportEnvelopeRejected,
+    sign_envelope,
+    validate_envelope,
+)
 from nth_dao.delivery.policy import (
     CENTRALIZED_POLICY,
     DECENTRALIZED_POLICY,
@@ -26,6 +30,7 @@ from nth_dao.delivery.transports.base import (
     Transport,
     TRANSPORT_ACK_NONE,
     TransportCapabilities,
+    TransportHealth,
 )
 from nth_dao.delivery.transports.loopback import (
     MODE_HUB,
@@ -64,7 +69,7 @@ class _StaticTransport(Transport):
 
     def __init__(self, name, *, privacy=PRIVACY_PEER, realtime=True, infra=False,
                  accept=True, error_code="unreachable", max_bytes=524_288,
-                 ack_mode="host"):
+                 ack_mode="host", reachable=True):
         self.capabilities = TransportCapabilities(
             name=name,
             realtime=realtime,
@@ -75,6 +80,7 @@ class _StaticTransport(Transport):
         )
         self._accept = accept
         self._error_code = error_code
+        self._reachable = reachable
         self.sent = []
 
     def send(self, envelope):
@@ -82,6 +88,18 @@ class _StaticTransport(Transport):
         if self._accept:
             return SendResult(accepted=True)
         return SendResult(accepted=False, error_code=self._error_code)
+
+    def health(self):
+        return TransportHealth(reachable=self._reachable)
+
+
+class _MutatingTransport(_StaticTransport):
+    def send(self, envelope):
+        self.sent.append(envelope)
+        envelope.payload["body"] = "forged"
+        envelope.recipient = "attacker:queue"
+        envelope.signature = ""
+        return SendResult(accepted=False, error_code="transport-mutated-input")
 
 
 class TestRoutePolicy:
@@ -127,6 +145,58 @@ class TestRoutePolicy:
 
 
 class TestRouter:
+    @pytest.mark.parametrize(
+        "kwargs,error",
+        [
+            ({"name": "bad\nname"}, ValueError),
+            ({"name": "界" * 22}, ValueError),
+            ({"unicast": 1}, TypeError),
+            ({"broadcast": 1}, TypeError),
+            ({"realtime": 1}, TypeError),
+            ({"external_infrastructure": 1}, TypeError),
+            ({"privacy_level": True}, ValueError),
+            ({"privacy_level": 1.0}, ValueError),
+            ({"max_envelope_bytes": True}, ValueError),
+            ({"max_envelope_bytes": 1.5}, ValueError),
+            ({"ack_mode": 1}, ValueError),
+        ],
+    )
+    def test_transport_capabilities_reject_type_confusion(self, kwargs, error):
+        values = {"name": "valid"}
+        values.update(kwargs)
+        with pytest.raises(error):
+            TransportCapabilities(**values)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"failure_threshold": True},
+            {"failure_threshold": 1.5},
+            {"cooldown_ms": True},
+            {"cooldown_ms": 1.5},
+        ],
+    )
+    def test_constructor_rejects_non_integer_limits(self, kwargs):
+        with pytest.raises(ValueError, match="integer"):
+            DeliveryRouter(**kwargs)
+
+    def test_constructor_rejects_non_callable_clock(self):
+        with pytest.raises(TypeError, match="clock"):
+            DeliveryRouter(clock=1)
+
+    @pytest.mark.parametrize("value", [True, -1, 1.5, "100"])
+    def test_runtime_rejects_invalid_clock_values(self, value):
+        router = DeliveryRouter(clock=lambda: value)
+        with pytest.raises(ValueError, match="router clock"):
+            router.stats()
+
+    @pytest.mark.parametrize(
+        "error_code", ["failed\u0085forged", "failed\u2028forged", "界" * 86]
+    )
+    def test_send_result_rejects_nonportable_error_text(self, error_code):
+        with pytest.raises(ValueError, match="printable text"):
+            SendResult(accepted=False, error_code=error_code)
+
     def test_register_and_list(self):
         router = DeliveryRouter()
         router.register(_StaticTransport("a"))
@@ -138,6 +208,111 @@ class TestRouter:
         router.register(_StaticTransport("a"))
         with pytest.raises(ValueError, match="already registered"):
             router.register(_StaticTransport("a"))
+
+    def test_duplicate_registration_does_not_probe_rejected_provider(self):
+        router = DeliveryRouter()
+        router.register(_StaticTransport("a"))
+        duplicate = _StaticTransport("a")
+        probed = []
+        duplicate.health = lambda: probed.append(True) or TransportHealth()
+
+        with pytest.raises(ValueError, match="already registered"):
+            router.register(duplicate)
+
+        assert probed == []
+
+    def test_unreachable_transport_is_excluded_at_registration(self, alice_identity):
+        router = DeliveryRouter()
+        down = _StaticTransport("down", reachable=False)
+        router.register(down)
+
+        result = router.send(_envelope(alice_identity))
+
+        assert result.accepted is False
+        assert down.sent == []
+        assert router.health_of("down").reachable is False
+
+    def test_dynamic_health_refresh_allows_recovered_transport(self, alice_identity):
+        router = DeliveryRouter()
+        recovering = _StaticTransport("recovering", reachable=False)
+        router.register(recovering)
+        assert router.send(_envelope(alice_identity)).accepted is False
+
+        recovering._reachable = True
+        result = router.send(_envelope(alice_identity))
+
+        assert result.sent_via == ["recovering"]
+
+    def test_health_probe_failure_is_fail_closed(self, alice_identity, caplog):
+        router = DeliveryRouter()
+        broken = _StaticTransport("broken")
+
+        def broken_health():
+            raise RuntimeError("sensitive health provider detail")
+
+        broken.health = broken_health
+        router.register(broken)
+
+        assert router.send(_envelope(alice_identity)).accepted is False
+        assert broken.sent == []
+        assert "sensitive health provider detail" not in caplog.text
+
+    def test_recovered_health_probe_clears_probe_failure(self, alice_identity):
+        router = DeliveryRouter(failure_threshold=1, cooldown_ms=60_000)
+        recovering = _StaticTransport("recovering")
+
+        def broken_health():
+            raise RuntimeError("probe failed")
+
+        recovering.health = broken_health
+        router.register(recovering)
+        assert router.health_of("recovering").consecutive_failures == 1
+
+        recovering.health = lambda: TransportHealth(reachable=True)
+        result = router.send(_envelope(alice_identity))
+
+        assert result.sent_via == ["recovering"]
+        assert router.health_of("recovering").consecutive_failures == 0
+
+    def test_health_probe_does_not_erase_router_observed_failure(
+        self, alice_identity
+    ):
+        router = DeliveryRouter()
+        flaky = _StaticTransport("flaky", accept=False)
+        router.register(flaky)
+
+        assert router.send(_envelope(alice_identity)).accepted is False
+        assert router.health_of("flaky").consecutive_failures == 1
+        router.refresh_health()
+        assert router.health_of("flaky").consecutive_failures == 1
+
+        flaky._accept = True
+        assert router.send(_envelope(alice_identity)).accepted is True
+        assert router.health_of("flaky").consecutive_failures == 0
+
+    def test_invalid_send_result_is_failure(self, alice_identity):
+        router = DeliveryRouter()
+        invalid = _StaticTransport("invalid")
+        invalid.send = lambda envelope: {"accepted": True}
+        router.register(invalid)
+
+        result = router.send(_envelope(alice_identity))
+
+        assert result.accepted is False
+        assert result.attempts[0].error_code == "invalid-send-result"
+
+    def test_mutated_send_result_cannot_become_truthy_success(self, alice_identity):
+        router = DeliveryRouter()
+        invalid = _StaticTransport("invalid")
+        forged = SendResult(accepted=False, error_code="rejected")
+        object.__setattr__(forged, "accepted", "false")
+        invalid.send = lambda envelope: forged
+        router.register(invalid)
+
+        result = router.send(_envelope(alice_identity))
+
+        assert result.accepted is False
+        assert result.attempts[0].error_code == "invalid-send-result"
 
     def test_policy_scoring_prefers_realtime(self, alice_identity):
         router = DeliveryRouter()
@@ -240,6 +415,24 @@ class TestRouter:
         assert result.sent_via == ["backup"]
         assert [a.transport for a in result.attempts] == ["primary", "backup"]
 
+    def test_transport_mutation_cannot_poison_caller_or_fallback(
+        self, alice_identity
+    ):
+        router = DeliveryRouter()
+        mutator = _MutatingTransport("a-mutator")
+        backup = _StaticTransport("b-backup")
+        router.register(mutator)
+        router.register(backup)
+        envelope = _envelope(alice_identity)
+        original = envelope.to_dict()
+
+        result = router.send(envelope, RoutePolicy(copy_count=1))
+
+        assert result.sent_via == ["b-backup"]
+        assert envelope.to_dict() == original
+        assert mutator.sent[0] is not backup.sent[0]
+        assert backup.sent[0].to_dict() == original
+
     def test_no_fallback_exhausts(self, alice_identity):
         router = DeliveryRouter()
         router.register(_StaticTransport("primary", accept=False, error_code="unreachable"))
@@ -296,12 +489,12 @@ class TestRouter:
         second = router.send(_envelope(alice_identity), policy)
         assert [a.transport for a in second.attempts] == ["solid"]
 
-    def test_send_exception_counts_as_failure(self, alice_identity):
+    def test_send_exception_counts_as_failure(self, alice_identity, caplog):
         router = DeliveryRouter()
         bomb = _StaticTransport("bomb")
 
         def _boom(envelope):
-            raise RuntimeError("boom")
+            raise RuntimeError("sensitive send provider detail")
 
         bomb.send = _boom
         router.register(bomb)
@@ -309,6 +502,7 @@ class TestRouter:
         result = router.send(_envelope(alice_identity), RoutePolicy(prefer_realtime=True))
         assert result.sent_via == ["safe"]
         assert router.health_of("bomb").consecutive_failures == 1
+        assert "sensitive send provider detail" not in caplog.text
 
     def test_receive_polls_all_transports(self, alice_identity):
         router = DeliveryRouter()
@@ -320,6 +514,43 @@ class TestRouter:
         received = router.receive()
         assert len(received) == 1
         assert received[0].transport == "loopback-n1"
+
+    def test_receive_skips_send_only_degraded_transport(self):
+        router = DeliveryRouter()
+        send_only = _StaticTransport("send-only")
+        send_only.health = lambda: TransportHealth(
+            reachable=True,
+            receive_reachable=False,
+        )
+        polled = []
+        send_only.poll = lambda *, max_items=64: polled.append(max_items) or []
+        router.register(send_only)
+
+        assert router.receive() == []
+        assert polled == []
+        assert router.stats()["send-only"]["reachable"] is True
+        assert router.stats()["send-only"]["receive_reachable"] is False
+
+    def test_receive_failure_does_not_put_send_path_in_cooldown(
+        self, alice_identity, caplog
+    ):
+        router = DeliveryRouter(failure_threshold=1, cooldown_ms=60_000)
+        transport = _StaticTransport("duplex", accept=True)
+
+        def broken_poll(*, max_items=64):
+            raise RuntimeError("sensitive receive provider detail")
+
+        transport.poll = broken_poll
+        router.register(transport)
+
+        assert router.receive() == []
+        assert "sensitive receive provider detail" not in caplog.text
+        failed_health = router.health_of("duplex")
+        assert failed_health.receive_reachable is False
+        assert failed_health.consecutive_failures == 0
+
+        result = router.send(_envelope(alice_identity))
+        assert result.sent_via == ["duplex"]
 
 
 class TestLoopbackModes:
@@ -333,6 +564,59 @@ class TestLoopbackModes:
         assert bob.pending_inbox_depth() == 1
         assert carol.pending_inbox_depth() == 1
         assert alice.pending_inbox_depth() == 0  # sender does not self-deliver
+
+    def test_sender_mutation_after_send_cannot_change_queued_envelope(
+        self, alice_identity
+    ):
+        wire = LoopbackWire()
+        sender = LoopbackEndpoint(wire, "sender", mode=MODE_MESH)
+        receiver = LoopbackEndpoint(wire, "receiver", mode=MODE_MESH)
+        envelope = _envelope(alice_identity)
+
+        assert sender.send(envelope).accepted is True
+        envelope.payload["body"] = "forged-after-send"
+        received = receiver.poll()[0]
+
+        assert received is not envelope
+        assert received.payload == {"body": "hi"}
+        assert validate_envelope(
+            received, now_ms=NOW_MS, require_signature=True
+        ) == (True, "ok")
+
+    def test_mesh_receivers_do_not_share_mutable_envelope_objects(
+        self, alice_identity
+    ):
+        wire = LoopbackWire()
+        sender = LoopbackEndpoint(wire, "sender", mode=MODE_MESH)
+        first = LoopbackEndpoint(wire, "first", mode=MODE_MESH)
+        second = LoopbackEndpoint(wire, "second", mode=MODE_MESH)
+
+        assert sender.send(_envelope(alice_identity)).accepted is True
+        first_copy = first.poll()[0]
+        first_copy.payload["body"] = "receiver-local-change"
+        second_copy = second.poll()[0]
+
+        assert first_copy is not second_copy
+        assert second_copy.payload == {"body": "hi"}
+        assert validate_envelope(
+            second_copy, now_ms=NOW_MS, require_signature=True
+        ) == (True, "ok")
+
+    def test_loopback_rejects_envelope_when_snapshot_fails(self, alice_identity):
+        class HostilePayload:
+            def __deepcopy__(self, memo):
+                raise RuntimeError("sensitive hostile object detail")
+
+        wire = LoopbackWire()
+        sender = LoopbackEndpoint(wire, "sender", mode=MODE_MESH)
+        LoopbackEndpoint(wire, "receiver", mode=MODE_MESH)
+        envelope = _envelope(alice_identity)
+        envelope.payload["body"] = HostilePayload()
+
+        result = sender.send(envelope)
+
+        assert result.accepted is False
+        assert result.error_code == "invalid-envelope"
 
     def test_mesh_isolated_endpoint_cannot_send(self, alice_identity):
         wire = LoopbackWire()

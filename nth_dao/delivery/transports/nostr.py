@@ -116,7 +116,7 @@ class NostrTransport(Transport):
         except Exception as exc:  # noqa: BLE001 - operability: publish-only
             logger.warning(
                 "nostr subscription setup failed; transport continues in "
-                "publish-only mode (poll returns empty): %s", exc
+                "publish-only mode (poll returns empty) (%s)", type(exc).__name__
             )
 
     def stop(self) -> None:
@@ -129,8 +129,8 @@ class NostrTransport(Transport):
                 binding=self._binding,
             )
         except Exception as exc:  # noqa: BLE001 - policy/crypto rejections
-            logger.warning("nostr send rejected: %s", exc)
-            return SendResult(accepted=False, error_code=str(exc)[:200])
+            logger.warning("nostr send rejected (%s)", type(exc).__name__)
+            return SendResult(accepted=False, error_code="invalid-envelope")
         if self._relay_client.publish(event):
             return SendResult(accepted=True)
         return SendResult(accepted=False, error_code="nostr-relay-unreachable")
@@ -160,7 +160,10 @@ class NostrTransport(Transport):
         return envelopes
 
     def health(self) -> TransportHealth:
-        return TransportHealth(reachable=self._relay_client.is_running)
+        return TransportHealth(
+            reachable=self._relay_client.is_running,
+            receive_reachable=self._relay_client.subscription_active,
+        )
 
 
 def _time() -> float:

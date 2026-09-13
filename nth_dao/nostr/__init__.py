@@ -274,10 +274,20 @@ def envelope_event(
       be published under a relay key that no verified allowlist delivers."""
 
     _require_nostr()
-    ok, reason = validate_envelope(envelope, require_signature=True)
+    if not isinstance(envelope, TransportEnvelope):
+        raise TransportEnvelopeRejected("envelope must be a TransportEnvelope")
+    try:
+        stable_envelope = TransportEnvelope.from_dict(
+            TransportEnvelope.to_dict(envelope)
+        )
+    except Exception:  # noqa: BLE001 - hostile mutable input fails closed
+        raise TransportEnvelopeRejected(
+            "envelope snapshot could not be created"
+        ) from None
+    ok, reason = validate_envelope(stable_envelope, require_signature=True)
     if not ok:
         raise TransportEnvelopeRejected(reason)
-    if envelope.recipient.startswith("did:key:"):
+    if stable_envelope.recipient.startswith("did:key:"):
         raise TransportEnvelopeRejected(
             "public relay tier carries broadcast traffic only: did:key "
             "recipients are private and must use a private transport"
@@ -292,7 +302,7 @@ def envelope_event(
             raise TransportEnvelopeRejected(
                 "nostr key binding does not name the publishing key"
             )
-        if binding.nth_did != envelope.sender_did:
+        if binding.nth_did != stable_envelope.sender_did:
             raise TransportEnvelopeRejected(
                 "nostr key binding belongs to a different NTH identity than "
                 "the envelope sender"
@@ -309,7 +319,7 @@ def envelope_event(
             "created_at_seconds must be a positive integer within one hour "
             "of the future"
         )
-    content = canonical_json(envelope.to_dict()).decode("utf-8")
+    content = canonical_json(stable_envelope.to_dict()).decode("utf-8")
     # the validated created_at_seconds is actually applied (round-13 bug BB-t:
     # it used to be validated then silently dropped, making deterministic
     # replay impossible — same envelope+keys produced fresh ids every run)
@@ -320,12 +330,12 @@ def envelope_event(
     # readable on relays indefinitely (round-17 bug BB-w2)
     expiration_tag = _Tag.parse([
         "expiration",
-        str(envelope.expires_at_ms // 1000),
+        str(stable_envelope.expires_at_ms // 1000),
     ])
     return (
         _EventBuilder(_Kind(NOSTR_EVENT_KIND), content)
         .tags([
-            _Tag.parse([_ENVELOPE_EVENT_D_TAG, envelope.message_id]),
+            _Tag.parse([_ENVELOPE_EVENT_D_TAG, stable_envelope.message_id]),
             _Tag.parse(["t", NOSTR_NAMESPACE]),
             expiration_tag,
         ])

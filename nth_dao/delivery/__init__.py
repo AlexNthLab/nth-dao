@@ -39,6 +39,7 @@ from nth_dao.delivery.acknowledgement import (
     sign_ack,
     validate_ack,
 )
+from nth_dao.delivery.authorization import AuthorizationDecision
 from nth_dao.delivery.inbox import DeliveryInbox, InboxDecision
 from nth_dao.delivery.outbox import DurableOutbox, OutboxRecord
 from nth_dao.delivery.policy import (
@@ -74,6 +75,7 @@ __all__ = [
     "OFFLINE_POLICY",
     "DeliveryAck",
     "DeliveryAckRejected",
+    "AuthorizationDecision",
     "DeliveryInbox",
     "DeliveryRouter",
     "DurableOutbox",

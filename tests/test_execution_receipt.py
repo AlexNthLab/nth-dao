@@ -30,10 +30,8 @@ is the canary — it pins a known input to a known SHA-256 output.
 from __future__ import annotations
 
 import base64
-import json
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 
@@ -43,6 +41,7 @@ from nth_dao.execution_receipt import (
     NTH_RECEIPT_KIND,
     NTH_RECEIPT_SPEC,
     ReceiptStore,
+    ReceiptStoreConflict,
     TYPE_GOAL_COMPLETED,
     TYPE_GOAL_STARTED,
     TYPE_NTH_POST_MESSAGE,
@@ -420,6 +419,114 @@ def test_store_concurrent_same_receipt_id_does_not_collide_on_tmp(tmp_path):
     assert not leftover, f"orphaned .tmp files: {leftover}"
 
 
+def test_store_same_receipt_id_cannot_replace_signed_evidence(tmp_path):
+    store = ReceiptStore(tmp_path)
+    ident = AgentIdentity.generate(label="immutable")
+    entry = TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)
+    receipt = sign_receipt(
+        [entry], ident, goal_id="original-goal", receipt_id="immutable-id",
+    )
+    store.save(receipt)
+
+    tampered_envelope = dict(receipt)
+    tampered_envelope["goal_id"] = "replacement-goal"
+    assert verify_receipt(tampered_envelope) is True
+
+    with pytest.raises(ReceiptStoreConflict, match="different content"):
+        store.save(tampered_envelope)
+
+    assert store.load("immutable-id") == receipt
+
+
+def test_store_idempotency_does_not_collapse_distinct_json_scalar_types(tmp_path):
+    store = ReceiptStore(tmp_path)
+    ident = AgentIdentity.generate(label="scalar-types")
+    receipt = sign_receipt(
+        [TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)],
+        ident,
+        receipt_id="scalar-id",
+    )
+    receipt["goal_id"] = True
+    store.save(receipt)
+    different_json = dict(receipt)
+    different_json["goal_id"] = 1
+    assert different_json == receipt
+
+    with pytest.raises(ReceiptStoreConflict, match="different content"):
+        store.save(different_json)
+
+    loaded = store.load("scalar-id")
+    assert loaded is not None
+    assert loaded["goal_id"] is True
+
+
+def test_store_refuses_to_overwrite_corrupt_existing_receipt(tmp_path):
+    store = ReceiptStore(tmp_path)
+    path = tmp_path / "team_receipts" / "corrupt-id.json"
+    path.write_text("{not-json", encoding="utf-8")
+    ident = AgentIdentity.generate(label="corrupt")
+    receipt = sign_receipt(
+        [TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)],
+        ident,
+        receipt_id="corrupt-id",
+    )
+
+    with pytest.raises(ReceiptStoreConflict, match="unreadable"):
+        store.save(receipt)
+
+    assert path.read_text(encoding="utf-8") == "{not-json"
+
+
+def test_store_concurrent_different_content_has_single_winner(tmp_path):
+    store = ReceiptStore(tmp_path)
+    ident = AgentIdentity.generate(label="immutable-race")
+    receipts = [
+        sign_receipt(
+            [TimelineEntry(timestamp=now_ms() + offset, type=TYPE_GOAL_STARTED)],
+            ident,
+            receipt_id="raced-id",
+        )
+        for offset in (0, 1)
+    ]
+
+    def save(receipt):
+        try:
+            store.save(receipt)
+            return "saved"
+        except ReceiptStoreConflict:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(save, receipts))
+
+    assert sorted(outcomes) == ["conflict", "saved"]
+    assert store.load("raced-id") in receipts
+
+
+def test_store_refuses_to_follow_receipt_symlink(tmp_path):
+    store = ReceiptStore(tmp_path)
+    target = tmp_path / "outside.json"
+    target.write_text("outside", encoding="utf-8")
+    link = tmp_path / "team_receipts" / "linked-id.json"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    ident = AgentIdentity.generate(label="symlink")
+    receipt = sign_receipt(
+        [TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)],
+        ident,
+        receipt_id="linked-id",
+    )
+
+    with pytest.raises(ReceiptStoreConflict, match="symbolic link"):
+        store.save(receipt)
+
+    assert store.load("linked-id") is None
+    assert "linked-id" not in store.list_ids()
+    assert target.read_text(encoding="utf-8") == "outside"
+
+
 def test_store_save_recreates_receipts_dir_if_removed(tmp_path):
     """Runtime cleanup or operator repair can remove team_receipts
     after app bootstrap. save() must self-heal the directory instead
@@ -448,6 +555,21 @@ def test_store_rejects_traversal_in_receipt_id(tmp_path):
         store.save(receipt)
 
 
+@pytest.mark.parametrize("receipt_id", ["", "收据", "a" * 201, 123])
+def test_store_rejects_nonportable_or_oversized_receipt_id(tmp_path, receipt_id):
+    store = ReceiptStore(tmp_path)
+    ident = AgentIdentity.generate(label="bounded-id")
+    receipt = sign_receipt(
+        [TimelineEntry(timestamp=now_ms(), type=TYPE_GOAL_STARTED)],
+        ident,
+    )
+    receipt["receipt_id"] = receipt_id
+
+    with pytest.raises(ValueError, match="1..200 ASCII"):
+        store.save(receipt)
+    assert store.load(receipt_id) is None
+
+
 def test_store_list_ids_returns_saved_ids(tmp_path):
     store = ReceiptStore(tmp_path)
     ident = AgentIdentity.generate(label="list")
@@ -464,6 +586,20 @@ def test_store_list_ids_returns_saved_ids(tmp_path):
 def test_store_load_missing_returns_none(tmp_path):
     store = ReceiptStore(tmp_path)
     assert store.load("nonexistent-id") is None
+
+
+def test_store_load_invalid_utf8_returns_none(tmp_path):
+    store = ReceiptStore(tmp_path)
+    (tmp_path / "team_receipts" / "invalid-utf8.json").write_bytes(b"\xff")
+
+    assert store.load("invalid-utf8") is None
+
+
+def test_store_save_non_object_has_stable_type_error(tmp_path):
+    store = ReceiptStore(tmp_path)
+
+    with pytest.raises(TypeError, match="JSON object"):
+        store.save([])
 
 
 def test_store_load_rejects_traversal_id(tmp_path):

@@ -318,6 +318,7 @@ _AT = datetime(2026, 8, 1, tzinfo=timezone.utc)
 _ACCEPTED_AT = datetime(2026, 8, 1, 1, tzinfo=timezone.utc)
 _CREATED = "2026-08-01T00:00:00Z"
 _EXPIRES = "2026-08-02T00:00:00Z"
+_CONCURRENCY_TEST_TIMEOUT_S = 30.0
 
 
 class _AdapterResolver:
@@ -490,7 +491,7 @@ def _process_hold_interprocess_lock(target, entered, release, output):
     try:
         lock.acquire()
         entered.set()
-        if not release.wait(timeout=10.0):
+        if not release.wait(timeout=_CONCURRENCY_TEST_TIMEOUT_S):
             output.put(("error", "release-timeout"))
             return
         output.put(("ok",))
@@ -10526,21 +10527,20 @@ def test_operator_dispute_statement_cross_process_lease_is_retryable(
         args=(str(lock_target), entered, release, output),
     )
     holder.start()
-    assert entered.wait(timeout=10.0)
-    monkeypatch.setattr(
-        web_v2_api,
-        "_TRADE_DISPUTE_STATEMENT_CREATE_LOCK_TIMEOUT_S",
-        0.1,
-    )
-
     try:
+        assert entered.wait(timeout=_CONCURRENCY_TEST_TIMEOUT_S)
+        monkeypatch.setattr(
+            web_v2_api,
+            "_TRADE_DISPUTE_STATEMENT_CREATE_LOCK_TIMEOUT_S",
+            0.1,
+        )
         busy = TestClient(app).post(path, json=body, headers=headers)
     finally:
         release.set()
-        holder.join(timeout=15.0)
+        holder.join(timeout=_CONCURRENCY_TEST_TIMEOUT_S)
 
     assert holder.exitcode == 0
-    assert output.get(timeout=5.0) == ("ok",)
+    assert output.get(timeout=_CONCURRENCY_TEST_TIMEOUT_S) == ("ok",)
     assert busy.status_code == 503, busy.text
     assert busy.headers["retry-after"] == "1"
     assert busy.json()["detail"] == "trade Dispute Statement creation is busy"
@@ -11098,7 +11098,7 @@ def test_operator_dispute_statement_delivery_is_single_flight(
             order=order,
         )
         entered.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=_CONCURRENCY_TEST_TIMEOUT_S)
         acknowledgement = create_trade_dispute_statement_acknowledgement(
             context["taker"],
             delivery=signed_delivery,
@@ -11126,7 +11126,7 @@ def test_operator_dispute_statement_delivery_is_single_flight(
                 json={"target_url": "http://peer.example"},
                 headers=headers,
             )
-            assert entered.wait(timeout=10)
+            assert entered.wait(timeout=_CONCURRENCY_TEST_TIMEOUT_S)
             competing = TestClient(app).post(
                 target,
                 json={"target_url": "http://peer.example"},
@@ -11135,7 +11135,7 @@ def test_operator_dispute_statement_delivery_is_single_flight(
             assert competing.status_code == 503, competing.text
             assert competing.headers["Retry-After"] == "1"
             release.set()
-            completed = active.result(timeout=20)
+            completed = active.result(timeout=_CONCURRENCY_TEST_TIMEOUT_S)
     finally:
         release.set()
 

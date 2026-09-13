@@ -8,6 +8,7 @@ wire), driven through the synchronous Transport contract. Skips when the
 from __future__ import annotations
 
 import json
+from threading import Event, Thread
 import time
 
 import pytest
@@ -131,6 +132,73 @@ class TestGossipTransportLifecycle:
         assert caps.unicast is True
         assert caps.privacy_level == PRIVACY_PEER
         assert caps.external_infrastructure is False
+
+    def test_send_uses_stable_snapshot_when_caller_mutates_after_validation(
+        self, alice_identity, alice_transport, monkeypatch
+    ):
+        import nth_dao.delivery.transports.websocket_gossip as gossip_module
+
+        envelope = _envelope(alice_identity)
+        validation_done = Event()
+        caller_mutated = Event()
+        real_validate = gossip_module.validate_envelope
+        captured = {}
+
+        class FakeSocket:
+            async def close(self):
+                pass
+
+        async def capture_broadcast(content, **kwargs):
+            captured["content"] = json.loads(content)
+
+        def mutate_caller():
+            assert validation_done.wait(timeout=2)
+            envelope.payload["body"] = "forged-after-validation"
+            caller_mutated.set()
+
+        def pause_after_validation(candidate, **kwargs):
+            result = real_validate(candidate, **kwargs)
+            validation_done.set()
+            assert caller_mutated.wait(timeout=2)
+            return result
+
+        alice_transport._node.peers["fake-peer"] = FakeSocket()
+        alice_transport._node.broadcast = capture_broadcast
+        monkeypatch.setattr(
+            gossip_module, "validate_envelope", pause_after_validation
+        )
+        mutation = Thread(target=mutate_caller)
+        mutation.start()
+
+        result = alice_transport.send(envelope)
+        mutation.join(timeout=2)
+
+        assert result.accepted is True
+        assert mutation.is_alive() is False
+        assert envelope.payload == {"body": "forged-after-validation"}
+        assert captured["content"]["payload"] == {"body": "hi"}
+
+    def test_send_failure_log_does_not_expose_provider_detail(
+        self, alice_identity, alice_transport, caplog
+    ):
+        secret = "provider-secret-token-should-not-leak"
+
+        class FakeSocket:
+            async def close(self):
+                pass
+
+        async def fail_broadcast(content, **kwargs):
+            raise RuntimeError(secret)
+
+        alice_transport._node.peers["fake-peer"] = FakeSocket()
+        alice_transport._node.broadcast = fail_broadcast
+
+        result = alice_transport.send(_envelope(alice_identity))
+
+        assert result.accepted is False
+        assert result.error_code == "gossip-send-error"
+        assert secret not in caplog.text
+        assert "RuntimeError" in caplog.text
 
     def test_tofu_is_explicit_not_default(self, alice_identity, bob_identity):
         from nth_dao.delivery.transports.websocket_gossip import WebSocketGossipTransport

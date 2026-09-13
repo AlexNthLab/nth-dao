@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -75,6 +76,22 @@ if TYPE_CHECKING:
     from nth_dao.identity import AgentIdentity
 
 logger = logging.getLogger("nth_dao.execution_receipt")
+_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,200}$")
+
+
+class ReceiptStoreConflict(ValueError):
+    """An immutable receipt id already points at different or unsafe data."""
+
+
+def _json_storage_identity(value: Any) -> str:
+    """Canonicalize JSON storage values without collapsing scalar types."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 # ─── motebit-base event type vocabulary ──────────────────────────────
@@ -766,24 +783,48 @@ class ReceiptStore:
         mid-write leaves either the old file (or no file) and a uniquely
         named orphaned ``.tmp`` that's easy to spot.
         """
-        rid = str(receipt.get("receipt_id", "") or "")
-        if not rid:
-            raise ValueError("receipt is missing receipt_id")
-        # MI-1 (review fix 2026-06-08): allow only [A-Za-z0-9-]. This
-        # is stricter than a path-traversal check — it incidentally
-        # rejects ``..``, ``/`` and ``\`` because none of those satisfy
-        # ``isalnum or '-'``, but the primary intent is "ids must be
-        # plain identifiers", not "only block traversal". Document the
-        # constraint accurately so a future maintainer doesn't relax
-        # it thinking they're just trimming a path-traversal guard.
-        if not all(c.isalnum() or c == "-" for c in rid):
+        if not isinstance(receipt, dict):
+            raise TypeError("receipt must be a JSON object")
+        rid = receipt.get("receipt_id")
+        # Keep evidence filenames portable and bounded across NTFS/ext4.
+        # This is a wire-type check as well as a path-traversal boundary;
+        # callers must not silently coerce non-string identifiers.
+        if not isinstance(rid, str) or _RECEIPT_ID_RE.fullmatch(rid) is None:
             raise ValueError(
-                f"receipt_id must be alphanumeric (or dash); got {rid!r}"
+                "receipt_id must contain 1..200 ASCII letters, digits, or dashes"
             )
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / (rid + self.SUFFIX)
         with InterProcessLock(path, timeout=10.0):
-            atomic_write_json(path, receipt, ensure_ascii=False, indent=2)
+            # Receipt ids are immutable evidence addresses. The envelope id is
+            # not covered by the signature, so replacement would rewrite history.
+            if path.is_symlink():
+                raise ReceiptStoreConflict(
+                    f"receipt target is a symbolic link; refusing overwrite: {rid!r}"
+                )
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ReceiptStoreConflict(
+                        f"existing receipt is unreadable; refusing overwrite: {rid!r}"
+                    ) from exc
+                if not isinstance(existing, dict):
+                    raise ReceiptStoreConflict(
+                        f"existing receipt is not a JSON object; refusing overwrite: {rid!r}"
+                    )
+                if _json_storage_identity(existing) == _json_storage_identity(receipt):
+                    return path
+                raise ReceiptStoreConflict(
+                    f"receipt_id already exists with different content: {rid!r}"
+                )
+            atomic_write_json(
+                path,
+                receipt,
+                ensure_ascii=False,
+                indent=2,
+                durable=True,
+            )
         return path
 
     def sign_and_save(
@@ -847,19 +888,27 @@ class ReceiptStore:
 
     def load(self, receipt_id: str) -> Optional[Dict[str, Any]]:
         """Return the receipt dict, or None if not found."""
-        if not all(c.isalnum() or c == "-" for c in receipt_id):
+        if not isinstance(receipt_id, str) or _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
             return None
         path = self.root / (receipt_id + self.SUFFIX)
-        if not path.exists():
+        if path.is_symlink() or not path.exists():
             return None
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
 
     def list_ids(self) -> List[str]:
         """Enumerate stored receipt IDs (no specific order)."""
-        return [p.stem for p in self.root.glob("*" + self.SUFFIX)]
+        return [
+            path.stem
+            for path in self.root.glob("*" + self.SUFFIX)
+            if (
+                not path.is_symlink()
+                and path.is_file()
+                and _RECEIPT_ID_RE.fullmatch(path.stem) is not None
+            )
+        ]
 
     def __contains__(self, receipt_id: str) -> bool:
         return self.load(receipt_id) is not None

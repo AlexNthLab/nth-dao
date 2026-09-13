@@ -17,10 +17,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import logging
 import time
 from typing import Any, Mapping, Optional
 
-from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import DeliveryAck
 from nth_dao.delivery.envelope import (
     TransportEnvelope,
@@ -47,21 +47,20 @@ from nth_dao.plugins.transport import (
     TRANSPORT_CAPABILITY_ID,
     TRANSPORT_MAX_BATCH_SIZE,
     TRANSPORT_MAX_LEASE_MS,
+    TRANSPORT_MAX_SAFE_INTEGER,
     TransportOperationError,
     transport_envelope_digest,
+    validate_transport_authority,
+    validate_transport_contract,
+    validate_transport_exchange,
+    validate_transport_input,
+    validate_transport_output,
 )
 
 
 RouteResolver = Callable[[str], str]
 Clock = Callable[[], int]
-
-_TRANSIENT_INBOX_REJECTIONS = frozenset(
-    {
-        "authorization callback failed",
-        "inbox replay cache is full of unprocessed envelopes",
-    }
-)
-
+logger = logging.getLogger("nth_dao.delivery")
 
 class PluginDeliveryRuntimeError(RuntimeError):
     """Raised when Host/provider state prevents an honest delivery outcome."""
@@ -92,8 +91,7 @@ class PluginDeliveryRuntime:
     ) -> None:
         if not isinstance(binding, ProviderBinding):
             raise TypeError("binding must be a PluginHost ProviderBinding")
-        if binding.contract.capability_id != TRANSPORT_CAPABILITY_ID:
-            raise ValueError("binding does not provide the delivery transport capability")
+        validate_transport_contract(binding.contract)
         if not isinstance(authority, InvocationAuthority):
             raise TypeError("authority must be an InvocationAuthority")
         if TRANSPORT_CAPABILITY_ID not in authority.capability_ids:
@@ -131,19 +129,34 @@ class PluginDeliveryRuntime:
                 accepted=record.state == OUTBOX_STATE_DELIVERED,
                 error_code="" if record.state == OUTBOX_STATE_DELIVERED else "outbox-terminal",
             )
-        encoded = canonical_json(envelope.to_dict()).decode("utf-8")
+        encoded = record.envelope_json
         try:
-            destination_route = self._route_resolver(envelope.recipient)
-            response = self._binding.invoke(
+            persisted_envelope = TransportEnvelope.from_dict(json.loads(encoded))
+        except (json.JSONDecodeError, TransportEnvelopeRejected, TypeError, ValueError):
+            raise PluginDeliveryRuntimeError(
+                "outbox contains invalid envelope evidence"
+            ) from None
+        if (
+            persisted_envelope.message_id != record.message_id
+            or persisted_envelope.created_at_ms != record.created_at_ms
+            or persisted_envelope.expires_at_ms != record.expires_at_ms
+            or record.envelope_sha256
+            != f"sha256:{transport_envelope_digest(encoded)}"
+        ):
+            raise PluginDeliveryRuntimeError(
+                "outbox envelope evidence does not match its record"
+            )
+        try:
+            destination_route = self._route_resolver(persisted_envelope.recipient)
+            response = self._invoke_transport(
                 {
                     "operation": "send",
-                    "delivery_id": envelope.message_id,
+                    "delivery_id": record.message_id,
                     "destination_route_id": destination_route,
                     "envelope_json": encoded,
                     "envelope_sha256": transport_envelope_digest(encoded),
-                    "expires_at_ms": envelope.expires_at_ms,
-                },
-                authority=self._authority,
+                    "expires_at_ms": record.expires_at_ms,
+                }
             )
         except TransportOperationError as exc:
             outcome = OUTBOX_ATTEMPT_ERROR if exc.retryable else OUTBOX_ATTEMPT_REJECTED
@@ -156,9 +169,12 @@ class PluginDeliveryRuntime:
                 error_code="plugin-invocation-failed",
                 at_ms=now_ms,
             )
+            logger.warning(
+                "delivery transport invocation failed: %s", type(exc).__name__
+            )
             raise PluginDeliveryRuntimeError(
-                f"delivery transport invocation failed: {exc}"
-            ) from exc
+                "delivery transport invocation failed"
+            ) from None
         accepted = response.get("accepted") is True
         self._record_attempt(
             record,
@@ -191,14 +207,13 @@ class PluginDeliveryRuntime:
         if not 1 <= lease_ms <= TRANSPORT_MAX_LEASE_MS:
             raise ValueError(f"lease_ms must be within [1, {TRANSPORT_MAX_LEASE_MS}]")
         try:
-            response = self._binding.invoke(
+            response = self._invoke_transport(
                 {
                     "operation": "receive",
                     "receive_id": receive_id,
                     "limit": max_items,
                     "lease_ms": lease_ms,
-                },
-                authority=self._authority,
+                }
             )
             if response["found"] is not True:
                 return PluginReceiveResult(
@@ -213,7 +228,7 @@ class PluginDeliveryRuntime:
             if any(
                 not decision.accepted
                 and not decision.duplicate
-                and decision.reason in _TRANSIENT_INBOX_REJECTIONS
+                and decision.retryable
                 for decision in decisions
             ):
                 return PluginReceiveResult(
@@ -222,19 +237,19 @@ class PluginDeliveryRuntime:
                     transport_acknowledged=False,
                     replayed=bool(response["replayed"]),
                 )
-            acknowledgement = self._binding.invoke(
+            acknowledgement = self._invoke_transport(
                 {
                     "operation": "ack",
                     "receive_id": response["receive_id"],
                     "lease_id": response["lease_id"],
                     "batch_sha256": response["batch_sha256"],
-                },
-                authority=self._authority,
+                }
             )
         except (TransportOperationError, PluginHostError, PluginSchemaError) as exc:
+            logger.warning("delivery transport receive failed: %s", type(exc).__name__)
             raise PluginDeliveryRuntimeError(
-                f"delivery transport receive failed: {exc}"
-            ) from exc
+                "delivery transport receive failed"
+            ) from None
         if acknowledgement.get("acknowledged") is not True:
             raise PluginDeliveryRuntimeError("delivery transport did not acknowledge the lease")
         return PluginReceiveResult(
@@ -248,6 +263,16 @@ class PluginDeliveryRuntime:
         """Apply a receiver-signed delivery acknowledgement to the outbox."""
 
         return self.outbox.handle_ack(ack, now_ms=self._now_ms())
+
+    def _invoke_transport(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Invoke through Host and independently enforce protocol semantics."""
+
+        validate_transport_input(request)
+        validate_transport_authority(request, self._authority)
+        response = self._binding.invoke(request, authority=self._authority)
+        validate_transport_output(response)
+        validate_transport_exchange(request, response)
+        return response
 
     def _persist_transport_item(self, item: Mapping[str, Any]) -> InboxDecision:
         encoded = item["envelope_json"]
@@ -296,8 +321,14 @@ class PluginDeliveryRuntime:
 
     def _now_ms(self) -> int:
         value = self._clock()
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise PluginDeliveryRuntimeError("delivery clock must return positive integer ms")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= TRANSPORT_MAX_SAFE_INTEGER
+        ):
+            raise PluginDeliveryRuntimeError(
+                "delivery clock must return a positive safe-integer ms timestamp"
+            )
         return value
 
 

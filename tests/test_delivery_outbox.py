@@ -8,12 +8,15 @@ and cross-process lock safety.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Event
 
 import pytest
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import sign_ack
+from nth_dao.delivery.authorization import AuthorizationDecision
 from nth_dao.delivery.envelope import (
     TransportEnvelopeRejected,
     envelope_digest,
@@ -23,8 +26,10 @@ from nth_dao.delivery.envelope import (
 from nth_dao.delivery.outbox import (
     DEFAULT_MAX_PENDING_RECORDS,
     OUTBOX_STATE_DELIVERED,
+    OUTBOX_STATE_EXPIRED,
     OUTBOX_STATE_QUEUED,
     OUTBOX_STATE_REJECTED,
+    DeliveryAckAuthorizationError,
     DeliveryOutboxCorrupt,
     DeliveryOutboxError,
     DeliveryOutboxFull,
@@ -83,6 +88,38 @@ class TestEnqueue:
         assert record.envelope_sha256 == envelope_digest(envelope)
         assert outbox.get(envelope.message_id).envelope_json == record.envelope_json
 
+    def test_caller_mutation_after_snapshot_cannot_change_persisted_bytes(
+        self, outbox, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.outbox as outbox_module
+
+        envelope = _envelope(alice_identity)
+        validation_started = Event()
+        caller_mutated = Event()
+        real_validate = outbox_module.validate_envelope
+
+        def mutate_caller():
+            assert validation_started.wait(timeout=2)
+            envelope.payload["n"] = 999
+            caller_mutated.set()
+
+        def pause_after_validation(candidate, **kwargs):
+            result = real_validate(candidate, **kwargs)
+            validation_started.set()
+            assert caller_mutated.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(outbox_module, "validate_envelope", pause_after_validation)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            mutation = executor.submit(mutate_caller)
+            record = outbox.enqueue(envelope)
+            mutation.result(timeout=2)
+
+        persisted = json.loads(record.envelope_json)
+        assert envelope.payload == {"n": 999}
+        assert persisted["payload"] == {"n": 1}
+        assert record.envelope_sha256 == envelope_digest(persisted)
+
     def test_enqueue_is_idempotent(self, outbox, alice_identity):
         envelope = _envelope(alice_identity)
         first = outbox.enqueue(envelope)
@@ -134,7 +171,7 @@ class TestEnqueue:
 
 
 class TestAttemptsAndTerminalStates:
-    @pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+    @pytest.mark.parametrize("value", [True, 0, -1, 1.5, 9_007_199_254_740_992])
     def test_operation_times_are_strict_positive_integers(
         self, outbox, alice_identity, value
     ):
@@ -162,6 +199,49 @@ class TestAttemptsAndTerminalStates:
                 transport="loopback",
                 outcome="error",
                 error_code="x" * 257,
+            )
+
+    def test_append_refuses_to_cross_restart_read_limit(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.outbox as outbox_module
+
+        directory = tmp_path / "bounded-journal"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity)
+        outbox.enqueue(envelope)
+        journal_path = directory / "outbox.journal.jsonl"
+        before = journal_path.read_bytes()
+        monkeypatch.setattr(outbox_module, "MAX_JOURNAL_BYTES", len(before) + 10)
+
+        with pytest.raises(DeliveryOutboxFull, match=r"compact\(\)"):
+            outbox.record_attempt(
+                envelope.message_id,
+                transport="loopback",
+                outcome="error",
+                error_code="full",
+            )
+
+        assert journal_path.read_bytes() == before
+        reloaded = DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.get(envelope.message_id).attempts == []
+
+    @pytest.mark.parametrize(
+        "error_code",
+        ["failed\nforged", "failed\u0085forged", "failed\u2028forged", "界" * 86],
+    )
+    def test_error_code_is_printable_and_utf8_bounded(
+        self, outbox, alice_identity, error_code
+    ):
+        envelope = _envelope(alice_identity)
+        outbox.enqueue(envelope)
+
+        with pytest.raises(DeliveryOutboxError, match="error_code"):
+            outbox.record_attempt(
+                envelope.message_id,
+                transport="loopback",
+                outcome="error",
+                error_code=error_code,
             )
 
     def test_attempt_sent_recorded(self, outbox, alice_identity):
@@ -328,8 +408,13 @@ class TestAckDelivery:
             envelope_sha256=envelope_digest(envelope),
             received_at_ms=NOW_MS,
         )
-        with pytest.raises(DeliveryOutboxError, match="authorization is required"):
+        with pytest.raises(
+            DeliveryAckAuthorizationError, match="authorization is required"
+        ) as captured:
             denied.handle_ack(ack, now_ms=NOW_MS)
+        assert isinstance(captured.value, DeliveryOutboxError)
+        assert captured.value.code == "ack-authorization-required"
+        assert captured.value.retryable is False
 
         allowed = DurableOutbox(
             tmp_path / "allowed",
@@ -343,6 +428,307 @@ class TestAckDelivery:
         allowed.enqueue(envelope)
         assert allowed.handle_ack(ack, now_ms=NOW_MS).state == OUTBOX_STATE_DELIVERED
 
+    def test_typed_ack_denial_preserves_machine_decision(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            tmp_path / "typed-denial",
+            clock=lambda: NOW_MS,
+            authorize_ack=lambda candidate, queued: AuthorizationDecision.deny(
+                code="membership-store-unavailable",
+                reason="membership store is temporarily unavailable",
+                retryable=True,
+            ),
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with pytest.raises(DeliveryAckAuthorizationError) as captured:
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert captured.value.code == "membership-store-unavailable"
+        assert captured.value.retryable is True
+        assert str(captured.value) == "membership store is temporarily unavailable"
+        assert captured.value.decision.reason == str(captured.value)
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_QUEUED
+
+    def test_ack_authorizer_runs_outside_outbox_locks(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        entered = Event()
+        release = Event()
+
+        def delayed_authorizer(_candidate, _queued):
+            entered.set()
+            assert release.wait(timeout=30)
+            return AuthorizationDecision.allow()
+
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            tmp_path / "lock-free-authorizer",
+            clock=lambda: NOW_MS,
+            authorize_ack=delayed_authorizer,
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ack_future = pool.submit(outbox.handle_ack, ack, now_ms=NOW_MS)
+            assert entered.wait(timeout=5)
+            stats_future = pool.submit(outbox.stats)
+            try:
+                assert stats_future.result(timeout=5)[OUTBOX_STATE_QUEUED] == 1
+            finally:
+                release.set()
+            assert ack_future.result(timeout=10).state == OUTBOX_STATE_DELIVERED
+
+    def test_ack_expiring_during_authorization_is_not_committed(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        clock = [NOW_MS]
+
+        def delayed_authorizer(_candidate, _queued):
+            clock[0] = NOW_MS + 11
+            return AuthorizationDecision.allow()
+
+        envelope = _envelope(alice_identity, ttl_ms=10)
+        outbox = DurableOutbox(
+            tmp_path / "expires-during-authorization",
+            clock=lambda: clock[0],
+            authorize_ack=delayed_authorizer,
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with pytest.raises(DeliveryOutboxError, match="expired"):
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_EXPIRED
+
+    def test_direct_ack_cannot_use_stale_explicit_time_to_bypass_expiry(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        clock = [NOW_MS]
+        envelope = _envelope(
+            alice_identity,
+            ttl_ms=10,
+            recipient=bob_identity.as_did(),
+        )
+        outbox = DurableOutbox(
+            tmp_path / "direct-expiry",
+            clock=lambda: clock[0],
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+        clock[0] = NOW_MS + 11
+
+        with pytest.raises(DeliveryOutboxError, match="expired"):
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_EXPIRED
+
+    def test_ack_authorizer_cannot_mutate_committed_evidence(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        def mutating_authorizer(candidate, queued):
+            candidate.receiver_did = alice_identity.as_did()
+            candidate.signature = ""
+            queued.recipient = "did:key:forged"
+            queued.payload["n"] = "forged"
+            return AuthorizationDecision.allow()
+
+        directory = tmp_path / "isolated-authorizer-input"
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            directory,
+            clock=lambda: NOW_MS,
+            authorize_ack=mutating_authorizer,
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+        original_ack = ack.to_dict()
+
+        delivered = outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert ack.to_dict() == original_ack
+        assert delivered.delivered_by == bob_identity.as_did()
+        reloaded = DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.get(envelope.message_id).delivered_by == bob_identity.as_did()
+
+    def test_concurrent_ack_commit_remains_idempotent_after_authorization(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        directory = tmp_path / "concurrent-authorization"
+        competing_outbox = DurableOutbox(
+            directory,
+            clock=lambda: NOW_MS,
+            authorize_ack=lambda _candidate, _queued: AuthorizationDecision.allow(),
+        )
+
+        def authorize_after_competing_commit(candidate, _queued):
+            competing_outbox.handle_ack(candidate, now_ms=NOW_MS)
+            return AuthorizationDecision.allow()
+
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            directory,
+            clock=lambda: NOW_MS,
+            authorize_ack=authorize_after_competing_commit,
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        delivered = outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert delivered.state == OUTBOX_STATE_DELIVERED
+        assert delivered.delivered_by == bob_identity.as_did()
+        events = [
+            json.loads(line)
+            for line in (directory / "outbox.journal.jsonl").read_text().splitlines()
+        ]
+        assert [event["event"] for event in events].count("delivered") == 1
+
+    def test_ack_authorization_callback_failure_is_retryable(
+        self, tmp_path, alice_identity, bob_identity, caplog
+    ):
+        def unavailable(_candidate, _queued):
+            raise RuntimeError("sensitive provider detail")
+
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            tmp_path / "callback-failure",
+            clock=lambda: NOW_MS,
+            authorize_ack=unavailable,
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with pytest.raises(DeliveryAckAuthorizationError) as captured:
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert captured.value.code == "authorization-callback-failed"
+        assert captured.value.retryable is True
+        assert str(captured.value) == "ack authorization callback failed"
+        assert captured.value.__cause__ is None
+        assert captured.value.__suppress_context__ is True
+        assert "sensitive provider detail" not in caplog.text
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_QUEUED
+
+    def test_truthy_non_bool_ack_authorization_fails_closed(
+        self, tmp_path, alice_identity, bob_identity, caplog
+    ):
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            tmp_path / "invalid-authorizer",
+            clock=lambda: NOW_MS,
+            authorize_ack=lambda candidate, queued: (
+                "false",
+                "sensitive invalid decision detail",
+            ),
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with pytest.raises(
+            DeliveryAckAuthorizationError, match="invalid decision"
+        ) as captured:
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert captured.value.code == "authorization-decision-invalid"
+        assert captured.value.retryable is False
+        assert "sensitive invalid decision detail" not in caplog.text
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_QUEUED
+
+    def test_legacy_ack_denial_uses_stable_machine_code(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            tmp_path / "legacy-denial",
+            clock=lambda: NOW_MS,
+            authorize_ack=lambda candidate, queued: (False, "not a current member"),
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with pytest.raises(DeliveryAckAuthorizationError) as captured:
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert captured.value.code == "ack-receiver-unauthorized"
+        assert captured.value.retryable is False
+        assert str(captured.value) == "not a current member"
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_QUEUED
+
+    def test_mutated_typed_ack_authorization_fails_closed(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        forged = AuthorizationDecision.deny(reason="not a member")
+        object.__setattr__(forged, "allowed", "false")
+        envelope = _envelope(alice_identity)
+        outbox = DurableOutbox(
+            tmp_path / "mutated-authorizer",
+            clock=lambda: NOW_MS,
+            authorize_ack=lambda candidate, queued: forged,
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+
+        with pytest.raises(DeliveryOutboxError, match="invalid decision"):
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_QUEUED
+
     def test_forged_ack_rejected(self, outbox, alice_identity, bob_identity):
         envelope = _envelope(alice_identity, recipient=bob_identity.as_did())
         outbox.enqueue(envelope)
@@ -355,6 +741,26 @@ class TestAckDelivery:
         ack.receiver_did = alice_identity.as_did()  # claims alice signed it — she did not
         with pytest.raises(TransportEnvelopeRejected, match="invalid delivery ack"):
             outbox.handle_ack(ack, now_ms=NOW_MS)
+
+    def test_invalid_signature_cannot_forge_direct_recipient(
+        self, outbox, alice_identity, bob_identity
+    ):
+        envelope = _envelope(alice_identity, recipient=bob_identity.as_did())
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+        replacement = "A" if ack.signature[0] != "A" else "B"
+        ack.signature = replacement + ack.signature[1:]
+        assert ack.receiver_did == envelope.recipient
+
+        with pytest.raises(TransportEnvelopeRejected, match="invalid delivery ack"):
+            outbox.handle_ack(ack, now_ms=NOW_MS)
+
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_QUEUED
 
     def test_ack_unknown_message_rejected(self, outbox, bob_identity):
         ack = sign_ack(
@@ -372,7 +778,6 @@ class TestAckDelivery:
             alice_identity, ttl_ms=1_000, recipient=bob_identity.as_did()
         )
         outbox.enqueue(envelope)
-        assert outbox.pending(now_ms=NOW_MS + 2_000) == []
         ack = sign_ack(
             bob_identity,
             message_id=envelope.message_id,
@@ -381,6 +786,30 @@ class TestAckDelivery:
         )
         with pytest.raises(DeliveryOutboxError, match="expired"):
             outbox.handle_ack(ack, now_ms=NOW_MS + 2_100)
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_EXPIRED
+
+        reloaded = DurableOutbox(tmp_path / "delivery", clock=lambda: NOW_MS)
+        assert reloaded.get(envelope.message_id).state == OUTBOX_STATE_EXPIRED
+
+    def test_late_processing_cannot_revive_expired_record(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        outbox = DurableOutbox(tmp_path / "late-ack", clock=lambda: NOW_MS)
+        envelope = _envelope(
+            alice_identity, ttl_ms=1_000, recipient=bob_identity.as_did()
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS + 500,
+        )
+
+        with pytest.raises(DeliveryOutboxError, match="expired"):
+            outbox.handle_ack(ack, now_ms=NOW_MS + 1_001)
+
+        assert outbox.get(envelope.message_id).state == OUTBOX_STATE_EXPIRED
 
 
 class TestExpiry:
@@ -393,6 +822,36 @@ class TestExpiry:
 
 
 class TestCrashRecovery:
+    def test_loaders_never_use_unbounded_read_bytes(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity)
+        outbox.enqueue(envelope)
+        outbox.record_attempt(
+            envelope.message_id,
+            transport="loopback",
+            outcome="rejected",
+            error_code="rejected",
+        )
+        outbox.compact()
+
+        protected = {
+            directory / "outbox.journal.jsonl",
+            directory / "outbox.tombstones.jsonl",
+        }
+        original_read_bytes = type(directory).read_bytes
+
+        def forbidden_read_bytes(path):
+            if path in protected:
+                raise AssertionError("outbox loading must use bounded reads")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(type(directory), "read_bytes", forbidden_read_bytes)
+        reloaded = DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.stats()["compacted_terminal"] == 1
+
     def test_reload_folds_journal(self, tmp_path, alice_identity, bob_identity):
         directory = tmp_path / "delivery"
         outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
@@ -509,6 +968,143 @@ class TestCompaction:
         reloaded = DurableOutbox(directory, clock=lambda: NOW_MS)
         assert reloaded.get(delivered.message_id) is None
         assert reloaded.get(queued.message_id).state == OUTBOX_STATE_QUEUED
+        assert reloaded.stats()["compacted_terminal"] == 1
+
+        # Re-enqueueing the same content inside the bounded tombstone window
+        # returns the original terminal state and never recreates live work.
+        terminal = reloaded.enqueue(delivered, now_ms=NOW_MS)
+        assert terminal.state == OUTBOX_STATE_DELIVERED
+        assert terminal.delivered_by == bob_identity.as_did()
+        assert reloaded.pending(now_ms=NOW_MS) == [
+            reloaded.get(queued.message_id)
+        ]
+
+    def test_corrupt_tombstone_file_fails_closed(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(
+            alice_identity, recipient=bob_identity.as_did()
+        )
+        outbox.enqueue(envelope)
+        ack = sign_ack(
+            bob_identity,
+            message_id=envelope.message_id,
+            envelope_sha256=envelope_digest(envelope),
+            received_at_ms=NOW_MS,
+        )
+        outbox.handle_ack(ack, now_ms=NOW_MS)
+        outbox.compact()
+        tombstones = directory / "outbox.tombstones.jsonl"
+        tombstones.write_bytes(b'{"state":"delivered"}\n')
+
+        with pytest.raises(DeliveryOutboxCorrupt, match="tombstone"):
+            DurableOutbox(directory, clock=lambda: NOW_MS)
+
+    def test_compact_bounds_tombstones_by_wire_bytes_and_keeps_newest(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.outbox as outbox_module
+
+        probe_dir = tmp_path / "probe"
+        probe = DurableOutbox(probe_dir, clock=lambda: NOW_MS)
+        sample = _envelope(alice_identity, payload={"n": "sample"})
+        probe.enqueue(sample)
+        probe.record_attempt(
+            sample.message_id,
+            transport="loopback",
+            outcome="rejected",
+            error_code="x" * 120,
+        )
+        probe.compact()
+        one_line_bytes = (probe_dir / "outbox.tombstones.jsonl").stat().st_size
+
+        byte_cap = one_line_bytes * 2 + 8
+        monkeypatch.setattr(outbox_module, "MAX_TOMBSTONE_FILE_BYTES", byte_cap)
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        message_ids = []
+        for index in range(4):
+            envelope = _envelope(alice_identity, payload={"n": index})
+            message_ids.append(envelope.message_id)
+            outbox.enqueue(envelope)
+            outbox.record_attempt(
+                envelope.message_id,
+                transport="loopback",
+                outcome="rejected",
+                error_code="x" * 120,
+            )
+
+        outbox.compact()
+        tombstone_path = directory / "outbox.tombstones.jsonl"
+        assert tombstone_path.stat().st_size <= byte_cap
+        retained = [json.loads(line)["message_id"] for line in tombstone_path.read_text().splitlines()]
+        assert retained
+        assert retained == message_ids[-len(retained):]
+        assert message_ids[0] not in retained
+        assert message_ids[-1] in retained
+
+        reloaded = DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.stats()["compacted_terminal"] == len(retained)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("compacted_at_ms", 0),
+            ("delivered_by", "did:key:forged\nlog"),
+            ("last_error_code", "failed\rforged"),
+        ],
+    )
+    def test_corrupt_tombstone_metadata_fails_closed(
+        self, tmp_path, alice_identity, field, value
+    ):
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity)
+        outbox.enqueue(envelope)
+        outbox.record_attempt(
+            envelope.message_id,
+            transport="loopback",
+            outcome="rejected",
+            error_code="rejected",
+        )
+        outbox.compact()
+        path = directory / "outbox.tombstones.jsonl"
+        item = json.loads(path.read_text())
+        item[field] = value
+        path.write_bytes(canonical_json(item) + b"\n")
+
+        with pytest.raises(DeliveryOutboxCorrupt, match="tombstone"):
+            DurableOutbox(directory, clock=lambda: NOW_MS)
+
+    def test_delivered_tombstone_revalidates_receiver_did(
+        self, tmp_path, alice_identity, bob_identity
+    ):
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(
+            alice_identity,
+            recipient=bob_identity.as_did(),
+        )
+        outbox.enqueue(envelope)
+        outbox.handle_ack(
+            sign_ack(
+                bob_identity,
+                message_id=envelope.message_id,
+                envelope_sha256=envelope_digest(envelope),
+                received_at_ms=NOW_MS,
+            ),
+            now_ms=NOW_MS,
+        )
+        outbox.compact()
+        path = directory / "outbox.tombstones.jsonl"
+        item = json.loads(path.read_text())
+        item["delivered_by"] = "not-a-did"
+        path.write_bytes(canonical_json(item) + b"\n")
+
+        with pytest.raises(DeliveryOutboxCorrupt, match="receiver DID"):
+            DurableOutbox(directory, clock=lambda: NOW_MS)
 
     def test_compact_preserves_attempt_history(self, tmp_path, alice_identity):
         directory = tmp_path / "delivery"

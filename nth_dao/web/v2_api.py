@@ -4380,6 +4380,9 @@ _AGENT_LINK_BUILD_LOCK = threading.Lock()
 # wire-test calls while letting ``ask`` honour its real backend cost.
 _A2A_DEFAULT_TIMEOUT_S = 2.0
 _A2A_TIMEOUT_SLACK_S = 5.0
+# ZCode timeout cleanup can spend up to 29 seconds terminating and reaping a
+# Windows process tree before the child can return its classified 504 response.
+_ZCODE_TIMEOUT_SLACK_S = 35.0
 _A2A_MAX_FORWARD_TIMEOUT_S = _env_float(
     "NTH_A2A_MAX_FORWARD_TIMEOUT_S",
     360.0,
@@ -4419,10 +4422,10 @@ _ZCODE_ASK_TIMEOUT_S = min(
         minimum=60.0,
         maximum=300.0,
     ),
-    max(5.0, _A2A_MAX_FORWARD_TIMEOUT_S - _A2A_TIMEOUT_SLACK_S),
+    max(5.0, _A2A_MAX_FORWARD_TIMEOUT_S - _ZCODE_TIMEOUT_SLACK_S),
 )
 _ZCODE_FORWARD_TIMEOUT_S = min(
-    _ZCODE_ASK_TIMEOUT_S + _A2A_TIMEOUT_SLACK_S,
+    _ZCODE_ASK_TIMEOUT_S + _ZCODE_TIMEOUT_SLACK_S,
     _A2A_MAX_FORWARD_TIMEOUT_S,
 )
 _A2A_METHOD_TIMEOUTS: Dict[str, float] = {
@@ -4474,10 +4477,21 @@ def _with_backend_ask_timeout(
     payload: Dict[str, Any],
     backend_kind: str | None,
 ) -> Dict[str, Any]:
-    """Copy an ask payload and apply the server policy when it has no timeout."""
+    """Copy an ask payload and bound its timeout by the server policy."""
 
     normalized = dict(payload)
-    normalized.setdefault("timeout_s", _backend_ask_timeout(backend_kind))
+    policy_timeout = _backend_ask_timeout(backend_kind)
+    requested = normalized.get("timeout_s")
+    if requested is None:
+        normalized["timeout_s"] = policy_timeout
+    elif not isinstance(requested, bool) and isinstance(requested, (int, float)):
+        requested_f = float(requested)
+        if (
+            requested_f == requested_f
+            and requested_f not in (float("inf"), float("-inf"))
+            and requested_f > policy_timeout
+        ):
+            normalized["timeout_s"] = policy_timeout
     return normalized
 
 
@@ -4541,8 +4555,13 @@ def _a2a_forward_timeout(
         return _A2A_MAX_FORWARD_TIMEOUT_S
     if requested_f <= 0 or requested_f != requested_f:
         return base
+    timeout_slack = (
+        _ZCODE_TIMEOUT_SLACK_S
+        if str(backend_kind or "").strip().lower() == "zcode"
+        else _A2A_TIMEOUT_SLACK_S
+    )
     return min(
-        max(base, requested_f + _A2A_TIMEOUT_SLACK_S),
+        max(base, requested_f + timeout_slack),
         _A2A_MAX_FORWARD_TIMEOUT_S,
     )
 
@@ -7989,6 +8008,45 @@ def _a2a_http_error_message(
                         "Retry or configure a faster provider."
                     )
                 return f"backend-timeout: {message or hint}. {hint}"
+            if code == "backend-failed":
+                # The child error body crosses a process trust boundary and
+                # may come from an older or compromised Agent. Never persist
+                # its raw diagnostic in AgentLink or echo it to a channel.
+                # Preserve only actionable, bounded classifications.
+                lowered = message.lower()
+                kind = str(backend_kind or "").strip().lower()
+                label = {
+                    "zcode": "ZCode",
+                    "codex": "Codex",
+                    "hermes": "Hermes",
+                    "claude-code": "Claude Code",
+                }.get(kind, "Agent")
+                if any(marker in lowered for marker in (
+                    "rate_limit_error",
+                    "usage limit",
+                    "quota exceeded",
+                    "provider code 1310",
+                    "providercode: '1310'",
+                    'providercode: "1310"',
+                )):
+                    public = (
+                        f"{label} provider usage limit reached; retry after "
+                        "the provider reset window."
+                    )
+                elif any(marker in lowered for marker in (
+                    "authentication failed",
+                    "unauthorized",
+                    "invalid api key",
+                    "token is invalid",
+                    "token expired",
+                )):
+                    public = f"{label} provider authentication failed."
+                else:
+                    public = (
+                        f"{label} provider request failed; inspect local "
+                        "Agent logs."
+                    )
+                return f"a2a ask HTTP {status_code}: {code}: {public}"
             if message:
                 return f"a2a ask HTTP {status_code}: {code}: {message}"
             return f"a2a ask HTTP {status_code}: {code}"

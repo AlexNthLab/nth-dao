@@ -332,16 +332,26 @@ class WebSocketGossipTransport(Transport):
         # *window* is deliberately NOT checked here: expiry is the receiver's
         # inbox decision (its clock), and a sender-side clock check would
         # break deterministic replay in tests and conformance vectors.
-        ok, reason = validate_envelope(envelope, require_signature=True)
+        if not isinstance(envelope, TransportEnvelope):
+            return SendResult(accepted=False, error_code="invalid-envelope")
+        try:
+            stable_envelope = TransportEnvelope.from_dict(
+                TransportEnvelope.to_dict(envelope)
+            )
+        except Exception:  # noqa: BLE001 - hostile mutable input fails closed
+            return SendResult(accepted=False, error_code="invalid-envelope")
+        ok, reason = validate_envelope(stable_envelope, require_signature=True)
         if not ok:
             return SendResult(accepted=False, error_code=f"invalid-envelope: {reason}")
         if self._node.peer_count() == 0:
             return SendResult(accepted=False, error_code="no-connected-peers")
-        content = canonical_json(envelope.to_dict()).decode("utf-8")
+        content = canonical_json(stable_envelope.to_dict()).decode("utf-8")
         try:
-            if envelope.recipient.startswith("did:key:"):
+            if stable_envelope.recipient.startswith("did:key:"):
                 try:
-                    recipient_pubkey = decode_ed25519_did_key_hex(envelope.recipient)
+                    recipient_pubkey = decode_ed25519_did_key_hex(
+                        stable_envelope.recipient
+                    )
                     recipient_agent = str(AgentID.from_pubkey(recipient_pubkey))
                 except (DIDKeyError, ValueError) as exc:
                     return SendResult(
@@ -377,7 +387,7 @@ class WebSocketGossipTransport(Transport):
             fut.cancel()
             return SendResult(accepted=False, error_code="gossip-send-timeout")
         except Exception as exc:  # noqa: BLE001 - transport bugs are failures
-            logger.warning("gossip send failed: %s", exc)
+            logger.warning("gossip send failed: %s", type(exc).__name__)
             if self._node.peer_count() == 0:
                 return SendResult(
                     accepted=False, error_code="no-connected-peers"

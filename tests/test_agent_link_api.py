@@ -12,6 +12,49 @@ from nth_dao.web.agent_supervisor import AgentRecord, AgentSupervisor, InMemoryR
 from nth_dao.web.agent_link import AgentLinkManager, AgentLinkStore
 
 
+def test_hub_never_exposes_untrusted_child_backend_diagnostic() -> None:
+    from nth_dao.web.v2_api import _a2a_http_error_message
+
+    local_path = r"C:\Users\operator\private\zcode.cjs"
+    cookie = "private-child-cookie"
+    message = _a2a_http_error_message(
+        502,
+        {
+            "error": {
+                "code": "backend-failed",
+                "message": (
+                    f"provider crashed at {local_path}; "
+                    f"set-cookie: session={cookie}"
+                ),
+            },
+        },
+        backend_kind="zcode",
+    )
+
+    assert "ZCode provider request failed" in message
+    assert local_path not in message
+    assert cookie not in message
+    assert "set-cookie" not in message
+
+
+def test_hub_preserves_safe_zcode_rate_limit_classification() -> None:
+    from nth_dao.web.v2_api import _a2a_http_error_message
+
+    message = _a2a_http_error_message(
+        502,
+        {
+            "error": {
+                "code": "backend-failed",
+                "message": "ZCode provider usage limit reached",
+            },
+        },
+        backend_kind="zcode",
+    )
+
+    assert "ZCode provider usage limit reached" in message
+    assert "reset window" in message
+
+
 def _signed_agent_link_receipt(identity, job_id: str, prompt: str, response: str):
     from nth_dao.execution_receipt import TimelineEntry, now_ms, sign_receipt
 
@@ -418,3 +461,55 @@ def test_agent_link_reconcile_requires_signed_binding(tmp_path):
     persisted = ReceiptStore(tmp_path).load(receipt["receipt_id"])
     assert persisted is not None
     assert AgentLinkStore(tmp_path).get(job.job_id).state == "completed"
+
+
+def test_agent_link_reconcile_recovers_after_job_state_persist_failure(
+    tmp_path, monkeypatch,
+):
+    from nth_dao.execution_receipt import ReceiptStore
+    from nth_dao.identity import AgentIdentity
+
+    identity = AgentIdentity.generate(label="reconcile-retry-agent")
+    prompt = "recover after state persistence failure"
+    response = "durable recovered answer"
+    first_store = AgentLinkStore(tmp_path)
+    job = first_store.create(
+        agent_id="reconcile-retry-agent",
+        agent_did=identity.as_did(),
+        idempotency_key="reconcile-retry-key",
+        request_hash="reconcile-retry-request-hash",
+        prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+    )
+    manager = AgentLinkManager(AgentLinkStore(tmp_path))
+    app = create_app(workspace=tmp_path, require_console_auth=False)
+    app.state.agent_link_manager = manager
+    auth = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    receipt = _signed_agent_link_receipt(identity, job.job_id, prompt, response)
+    original_save = manager.store._save
+    failed_once = False
+
+    def fail_first_completed_save(candidate):
+        nonlocal failed_once
+        if candidate.state == "completed" and not failed_once:
+            failed_once = True
+            raise OSError("simulated AgentLink state persistence failure")
+        original_save(candidate)
+
+    monkeypatch.setattr(manager.store, "_save", fail_first_completed_save)
+    endpoint = f"/api/v2/agents/{identity.as_did()}/link/{job.job_id}/reconcile"
+    payload = {"receipt": receipt, "response": response}
+
+    with TestClient(app) as client:
+        first = client.post(endpoint, headers=auth, json=payload)
+        assert first.status_code == 500
+        assert ReceiptStore(tmp_path).load(receipt["receipt_id"]) == receipt
+        assert manager.store._jobs[job.job_id].state == "delivery_unknown"
+        assert AgentLinkStore(tmp_path).get(job.job_id).state == "delivery_unknown"
+
+        monkeypatch.setattr(manager.store, "_save", original_save)
+        retried = client.post(endpoint, headers=auth, json=payload)
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["state"] == "completed"
+    assert retried.json()["receipt_id"] == receipt["receipt_id"]
+    assert ReceiptStore(tmp_path).load(receipt["receipt_id"]) == receipt

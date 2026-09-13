@@ -36,7 +36,6 @@ import logging
 import math
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -46,6 +45,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.util.process_tree import attach_process_tree_guard
 from nth_dao.trade_rules.execution_adapter import (
     MAX_ADAPTER_ARTIFACT_BYTES,
     TradeExecutionAdapter,
@@ -61,6 +61,13 @@ DEFAULT_TIMEOUT_S = 10.0
 MAX_TIMEOUT_S = 60.0
 MAX_CONCURRENT_RUNS = 32
 MAX_CONFIGURED_IO_BYTES = 16 * 1024 * 1024
+
+_ADAPTER_START_MARKER = b"\x00"
+_ADAPTER_BOOTSTRAP = (
+    "import os,runpy,sys;"
+    "os.read(sys.stdin.fileno(),1)==b'\\x00' or sys.exit(125);"
+    "runpy.run_path(sys.argv[1],run_name='__main__')"
+)
 
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_FAILED = "failed"
@@ -378,19 +385,26 @@ class SubprocessAdapterRunner:
             with os.fdopen(artifact_fd, "wb") as handle:
                 handle.write(artifact_bytes)
             stdout, stderr, returncode = self._communicate(
-                [self._python, "-I", artifact_path],
-                stdin_payload,
+                [self._python, "-I", "-c", _ADAPTER_BOOTSTRAP, artifact_path],
+                _ADAPTER_START_MARKER + stdin_payload,
                 timeout=timeout,
                 cap=self._max_result_bytes + 65_536,
                 scratch=scratch,
             )
         finally:
+            active_error = sys.exc_info()[1]
             try:
                 shutil.rmtree(scratch, ignore_errors=False)
             except OSError as exc:
-                raise AdapterHookRejected(
-                    f"adapter scratch cleanup failed: {exc}", retryable=True
-                ) from exc
+                if active_error is None:
+                    raise AdapterHookRejected(
+                        f"adapter scratch cleanup failed: {exc}", retryable=True
+                    ) from exc
+                logger.error(
+                    "adapter scratch cleanup also failed while handling %s: %s",
+                    type(active_error).__name__,
+                    exc,
+                )
         duration_ms = time.monotonic_ns() // 1_000_000 - started_ms
 
         lines = [line for line in stdout.split(b"\n") if line.strip()]
@@ -501,45 +515,46 @@ class SubprocessAdapterRunner:
             raise AdapterHookRejected(
                 f"adapter process could not be started: {exc}", retryable=True
             ) from exc
+        try:
+            process_tree_guard = attach_process_tree_guard(process)
+        except OSError as exc:
+            try:
+                process.kill()
+                process.wait(timeout=5.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                try:
+                    if pipe is not None:
+                        pipe.close()
+                except OSError:
+                    pass
+            raise AdapterHookRejected(
+                f"adapter process containment could not be established: {exc}",
+                retryable=True,
+            ) from exc
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         exceeded_stream: Optional[str] = None
-        killed = False
+        kill_in_progress = False
         state_lock = threading.Lock()
 
-        def _kill() -> None:
-            nonlocal killed
+        def _kill_tree() -> None:
+            nonlocal kill_in_progress
             with state_lock:
-                if killed:
+                if kill_in_progress:
                     return
-                killed = True
-            if os.name == "nt":
-                taskkill = shutil.which("taskkill")
-                if taskkill is not None:
+                kill_in_progress = True
+            try:
+                terminated = process_tree_guard.terminate()
+                if not terminated and process.poll() is None:
                     try:
-                        subprocess.run(  # noqa: S603 - fixed OS utility argv
-                            [taskkill, "/PID", str(process.pid), "/T", "/F"],
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=5.0,
-                            check=False,
-                        )
-                    except (OSError, subprocess.TimeoutExpired):
+                        process.kill()
+                    except OSError:
                         pass
-            else:
-                try:
-                    killpg = getattr(os, "killpg", None)
-                    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    if callable(killpg):
-                        killpg(process.pid, sigkill)
-                except (OSError, ProcessLookupError):
-                    pass
-            if process.poll() is None:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
+            finally:
+                with state_lock:
+                    kill_in_progress = False
 
         def _pump(
             pipe, sink: list[bytes], cap_bytes: int, stream_name: str
@@ -547,7 +562,10 @@ class SubprocessAdapterRunner:
             nonlocal exceeded_stream
             total = 0
             while True:
-                chunk = pipe.read(65_536)
+                try:
+                    chunk = pipe.read(65_536)
+                except (OSError, ValueError):
+                    return
                 if not chunk:
                     return
                 sink.append(chunk)
@@ -556,14 +574,14 @@ class SubprocessAdapterRunner:
                     with state_lock:
                         if exceeded_stream is None:
                             exceeded_stream = stream_name
-                    _kill()
+                    _kill_tree()
                     return
 
         def _write_stdin() -> None:
             try:
                 process.stdin.write(stdin_payload)  # type: ignore[union-attr]
                 process.stdin.close()  # type: ignore[union-attr]
-            except (BrokenPipeError, OSError):
+            except (BrokenPipeError, OSError, ValueError):
                 pass  # a dying adapter must not kill the runtime
 
         pumps = [
@@ -571,37 +589,72 @@ class SubprocessAdapterRunner:
                 target=_pump,
                 args=(process.stdout, stdout_chunks, cap, "stdout"),
                 daemon=True,
+                name=f"nth-adapter-stdout-{process.pid}",
             ),
             threading.Thread(
                 target=_pump,
                 args=(process.stderr, stderr_chunks, 65_536, "stderr"),
                 daemon=True,
+                name=f"nth-adapter-stderr-{process.pid}",
             ),
-            threading.Thread(target=_write_stdin, daemon=True),
+            threading.Thread(
+                target=_write_stdin,
+                daemon=True,
+                name=f"nth-adapter-stdin-{process.pid}",
+            ),
         ]
         for pump in pumps:
             pump.start()
+        primary_error: Optional[AdapterHookRejected] = None
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill()
+            primary_error = AdapterHookRejected(
+                f"adapter exceeded the {timeout}s execution budget",
+                retryable=True,
+            )
+            _kill_tree()
             try:
                 process.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 logger.error("adapter process tree did not terminate after timeout")
-            raise AdapterHookRejected(
-                f"adapter exceeded the {timeout}s execution budget",
-                retryable=True,
-            ) from None
+        if process.poll() is None:
+            _kill_tree()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                if primary_error is None:
+                    primary_error = AdapterHookRejected(
+                        "adapter process could not be reaped",
+                        retryable=True,
+                    )
+        # Closing the guard also terminates descendants after the direct child
+        # has already exited.
+        process_tree_guard.close()
         for pump in pumps:
             pump.join(timeout=5.0)
         if any(pump.is_alive() for pump in pumps):
-            _kill()
+            _kill_tree()
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                try:
+                    if pipe is not None:
+                        pipe.close()
+                except OSError:
+                    pass
             for pump in pumps:
                 pump.join(timeout=1.0)
-            raise AdapterHookRejected(
-                "adapter left inherited stdio open after its parent exited",
-            )
+            if any(pump.is_alive() for pump in pumps) and primary_error is None:
+                primary_error = AdapterHookRejected(
+                    "adapter left inherited stdio open after its parent exited",
+                )
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
+        if primary_error is not None:
+            raise primary_error
         if exceeded_stream is not None:
             # the pump killed the process; report the bound, not the signal
             raise AdapterHookRejected(

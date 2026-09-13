@@ -140,6 +140,7 @@ class NostrRelayClient:
         self._dropped_events = 0
         self._stream_task: Optional[asyncio.Task[None]] = None
         self._subscription_id: Optional[str] = None
+        self._subscription_active = threading.Event()
 
     # ─────────────────────── lifecycle ───────────────────────
 
@@ -229,6 +230,7 @@ class NostrRelayClient:
     async def _stop_async(self) -> None:
         stream_task = self._stream_task
         self._stream_task = None
+        self._subscription_active.clear()
         if stream_task is not None and not stream_task.done():
             stream_task.cancel()
             try:
@@ -344,6 +346,7 @@ class NostrRelayClient:
         notifications = self._client.notifications()
 
         previous = self._stream_task
+        self._subscription_active.clear()
         if previous is not None and not previous.done():
             previous.cancel()
             try:
@@ -393,8 +396,31 @@ class NostrRelayClient:
                 raise
             except Exception:  # noqa: BLE001 - stream errors end the pump
                 logger.exception("nostr event stream ended with error")
+            finally:
+                self._subscription_active.clear()
 
-        self._stream_task = asyncio.create_task(_pump())
+        pump = _pump()
+        self._subscription_active.set()
+        try:
+            self._stream_task = asyncio.create_task(pump)
+        except BaseException:
+            # Task creation can fail while an event loop is shutting down or
+            # under resource pressure. Do not advertise a live receiver or
+            # leak the relay-side subscription/coroutine in that state.
+            self._stream_task = None
+            self._subscription_active.clear()
+            pump.close()
+            subscription_id = self._subscription_id
+            self._subscription_id = None
+            if subscription_id is not None:
+                try:
+                    await self._client.unsubscribe(subscription_id)
+                except Exception as exc:  # noqa: BLE001 - preserve root failure
+                    logger.debug(
+                        "nostr unsubscribe after pump startup failure failed: %s",
+                        exc,
+                    )
+            raise
 
     @staticmethod
     def _event_from_notification(item: Any, subscription_id: str) -> Any:
@@ -451,6 +477,10 @@ class NostrRelayClient:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def subscription_active(self) -> bool:
+        return self._running and self._subscription_active.is_set()
 
     def queue_depth(self) -> int:
         with self._queue_lock:

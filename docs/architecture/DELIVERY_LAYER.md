@@ -37,8 +37,8 @@ DeliveryRouter  (policy-scored; no fixed fallback order)
 |---|---|
 | `delivery/envelope.py` | `TransportEnvelope v1` — canonical JSON, content-addressed `message_id`, author signature, TTL, nonce, hop routing |
 | `delivery/acknowledgement.py` | signed `DeliveryAck` bound to `message_id` + received wire digest |
-| `delivery/outbox.py` | `DurableOutbox` — JSONL journal, fsync-per-event, crash recovery, ACK-terminal, bounded |
-| `delivery/inbox.py` | `DeliveryInbox` — ordered fail-closed pipeline + persistent replay cache |
+| `delivery/outbox.py` | `DurableOutbox` — JSONL journal, fsync-per-event, ACK-terminal, bounded terminal tombstones |
+| `delivery/inbox.py` | `DeliveryInbox` — ordered fail-closed pipeline + typed authorization + persistent replay cache |
 | `delivery/policy.py` | `RoutePolicy` — pure validated routing policy (centralized / decentralized / offline presets) |
 | `delivery/router.py` | `DeliveryRouter` — deterministic scoring, fallback, health cooldowns |
 | `delivery/transports/base.py` | `Transport` ABC + capabilities + health |
@@ -61,12 +61,25 @@ with `DurableOutbox` and `DeliveryInbox`:
    durable. A crash before acknowledgement causes safe redelivery and inbox
    deduplication.
 
+The runtime independently checks the standard transport schema digests,
+minimum security semantics, operation input/output, exchange binding, and
+`InvocationAuthority`. A provider cannot substitute a weaker same-name
+contract or omit the Host's semantic validator to bypass destination scope.
+
 The classes implementing the lower-level `Transport` ABC remain useful for
 adapters, isolated tests, and migration. They do not grant plugin authority and
 must not be treated as a second governance plane. A network transport becomes a
 production provider only after it implements the plugin capability and is
 explicitly installed, authorized, and enabled by the Host. The built-in
 loopback provider is installed disabled by default.
+
+`DeliveryRouter.receive()` exposes raw, untrusted transport output for adapters
+and tests; it is not a domain-layer intake API. Production receive paths must
+terminate in `DeliveryInbox`: federation does so inside its ingest server,
+PluginHost delivery uses leased `PluginDeliveryRuntime.receive()`, and offline
+carry uses `FileBundleTransport.poll_into()`. General crash-safe pull routing
+requires a leased-poll Transport v2 contract; wrapping destructive v1 `poll()`
+after the fact would not close the poll-to-fsync crash window.
 
 ## Wire Contract (v1)
 
@@ -116,7 +129,15 @@ plugin transport wire limit), `MAX_PAYLOAD_DEPTH=16`, `MAX_TTL_MS=7 days`,
 5. **Journal-first persistence.** Outbox and inbox mutate memory only
    after the journal line is fsynced. A torn final line (crash mid-append)
    is ignored on reload; corruption anywhere else raises. Both journals are
-   bounded with explicit compaction (`compact` / `compact_rejections`).
+   bounded with explicit compaction (`compact` / `compact_rejections`). Outbox
+   compaction retains the newest 65,536 terminal message tombstones by default;
+   this is an explicit bounded at-least-once window, not infinite exactly-once.
+   Loaders and rejection-log compaction use hard byte-bounded reads; an
+   externally enlarged local file cannot force an unbounded allocation. The
+   outbox refuses an append before its hard journal limit is crossed. The
+   inbox compacts before its hard append limit and tracks exact serialized
+   live-entry bytes; under pressure it atomically evicts only processed replay
+   entries, never pending entries.
 6. **Live cross-process dedup.** Inbox/outbox re-fold their journal when an
    mtime/size change from another process is observed, so dedup works
    across processes without a broker.
@@ -125,6 +146,32 @@ plugin transport wire limit), `MAX_PAYLOAD_DEPTH=16`, `MAX_TTL_MS=7 days`,
    courier-style store-and-carry (file bundle is the v1 courier), and
    router-tiering are absorbed into the envelope + router contracts; no
    bitchat code is copied (Swift, public domain — patterns only).
+8. **Typed authorization.** Authorization callbacks return an
+   `AuthorizationDecision` (or the strictly validated legacy `(bool, str)`
+   tuple). Human-readable reason text never controls retry behavior; stable
+   codes and the explicit `retryable` bit do. Even an existing decision object
+   is reconstructed and revalidated at the trust boundary, preventing frozen-
+   dataclass mutation or subclass type confusion from changing an allow/deny.
+9. **Directional health.** `TransportHealth.reachable` describes send-side
+   reachability; `receive_reachable` describes intake. A Nostr subscription may
+   degrade to publish-only, and the HTTP federation client is always send-only,
+   without either falsely advertising a working receive path. Provider probe
+   health and failures observed by the router are tracked separately: probe
+   recovery clears probe failures but cannot erase a real send failure.
+   Receive failures are recorded independently and never trip the send-side
+   circuit breaker. Duplicate provider registration is rejected before any
+   provider health callback can run.
+10. **Offline import lease.** File-bundle `poll()` creates a persistent bounded
+    lease. `poll_into()` fsyncs the Inbox before `commit_import()`; a crash in
+    between causes safe redelivery and Inbox deduplication. The import journal
+    is folded as bounded JSONL records with exact event shapes; stale orphan
+    leases are removed during compaction.
+11. **Adapter descendants are one-shot.** POSIX adapters run in a dedicated
+    process group. Windows adapters are attached to a kill-on-close Job Object
+    before a trusted bootstrap gate releases the artifact. A failed containment
+    setup therefore refuses the invocation before artifact code executes, and
+    descendants cannot outlive a normally exiting parent. This is resource
+    containment only, not a filesystem, network, or capability sandbox.
 
 ## Threat Coverage Mapping (design doc §10 → mechanism)
 
@@ -136,7 +183,7 @@ plugin transport wire limit), `MAX_PAYLOAD_DEPTH=16`, `MAX_TTL_MS=7 days`,
 | duplicate delivery across transports | `message_id` dedup in inbox; first signed ACK cancels outbox copies |
 | ACK forgery | ACK signed by `receiver_did`; outbox verifies before terminal transition |
 | oversized / deep flooding | byte + depth caps in envelope and inbox |
-| crash between write and ack | journal-first + fsync; torn-tail recovery |
+| crash between write and ack | journal-first + fsync; leased receive; torn-tail recovery |
 | clock skew attack | future-dated creation beyond 5 min rejected |
 | accidental journal corruption | strict event shapes, canonical bytes, signature revalidation, and content binding fail closed |
 
@@ -149,10 +196,11 @@ independent signed or immutable store.
 ## Conformance
 
 `delivery_envelope_v1` and `delivery_ack_v1` categories in
-`nth_dao/conformance/vectors.json` contain ten fixed vectors covering canonical
-bytes, content addresses, wire digests, signatures, time bounds, version
-gates, and tamper failures. A non-Python port is wire-compatible when its
-equivalent runner reports zero failures.
+`nth_dao/conformance/vectors.json` contain six and ten fixed vectors,
+respectively. ACK vectors publish the fixed verify key and canonical signing
+body, and their negative expectations are protocol literals rather than values
+derived by calling the verifier under test. A non-Python port is wire-compatible
+when its equivalent runner reports zero failures.
 
 ## Phase 1 — Real Transports (implemented)
 
@@ -200,6 +248,28 @@ subscription delivery, publish round-trip, hostile-relay rejection, key-binding
 rotation/conflict handling, and private-tier refusal.
 
 ## Adversarial Review Record
+
+Round 21 (delivery durability and contract review) separated typed policy from
+diagnostic text and hardened every local persistence edge changed in this
+stage. Each defect has a focused negative regression test:
+
+| # | Defect | Fix |
+|---|---|---|
+| HH-1 | authorization retry behavior depended on human-readable reason strings | `AuthorizationDecision` carries stable code + explicit retryability; legacy tuples are strictly coerced |
+| HH-2 | outbox terminal compaction discarded all evidence, allowing compacted messages to be re-enqueued | bounded terminal tombstones preserve message state and signed-ACK-derived receiver evidence |
+| HH-3 | file-bundle import marked a bundle before durable Inbox acceptance | persistent lease then Inbox fsync then import commit; expired leases redeliver safely |
+| HH-4 | adapter timeout cleanup could leave subprocesses or pipe-pump threads alive | process-tree cleanup, bounded stream pumps, and deterministic reaping |
+| HH-5 | federation overload could exceed the connection gate and lose its 503 on Windows | gate acquired before handler thread creation; bounded request drain before best-effort 503 |
+| HH-6 | local journals and bundle files still had stat-then-unbounded-read paths | descriptor-based hard byte limits and bounded JSONL folding |
+| HH-7 | a failed health probe remained in router counters after the provider recovered | provider snapshots separated from router-observed attempt history |
+| HH-8 | runtime clocks and diagnostics accepted cross-language-unsafe integers or Unicode control text | safe-integer time bounds and UTF-8-byte/Unicode-printability validation |
+| HH-9 | ACK conformance vectors did not independently pin the expected verify key | runner decodes the receiver DID and checks the fixed vector key |
+| HH-10 | mutated or subclassed `AuthorizationDecision` objects could bypass boolean validation | exact-type reconstruction re-runs every invariant at the authorization boundary |
+| HH-11 | duplicate router registration invoked attacker-controlled `health()` before rejection; receive failures also poisoned send cooldowns | duplicate pre-check + race-safe re-check; independent receive-attempt state |
+| HH-12 | `TransportCapabilities` accepted truthy integers and malformed names as security declarations | exact bool/int/enum validation plus printable UTF-8-bounded transport names |
+| HH-13 | outbox append could cross its loader's hard byte ceiling and brick the next restart | descriptor-local pre-write size check raises `DeliveryOutboxFull` without changing the journal |
+| HH-14 | inbox count-only eviction allowed serialized live state to exceed its durable read budget | exact live-byte accounting, atomic multi-eviction of processed entries, compact-before-append hard limit |
+| HH-15 | Windows cleanup lost descendants after the direct adapter process exited, and containment setup happened after artifact execution began | Job Object ownership plus a bootstrap start gate; failure is retryable and fail-closed before artifact code |
 
 Round 20 (adversarial review of every remaining commit: Phase 1 6182f4c,
 Slice B bf28c9a, Phase 2 N1 ac92d5a, N2/N3 d104bf9, fix commits
@@ -419,3 +489,10 @@ The current Nostr tier is public-only. Private payload encryption, BLE, sealed
 courier transport, and cross-node claim semantics remain outside delivery v1.
 Network adapters that still expose only the low-level `Transport` ABC must be
 wrapped as governed plugin providers before they are enabled by default.
+
+File-bundle import history preserves every committed message id for exact
+redelivery suppression. Its JSONL fold is streamed and individual events are
+bounded, but the terminal set and compacted snapshot can still grow without a
+retention limit. Large or indefinite deployments need a v2 indexed store plus
+an explicit bundle/archive retention protocol; silently dropping old ids would
+re-enable imports while old courier files remain reachable.

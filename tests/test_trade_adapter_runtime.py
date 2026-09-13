@@ -13,6 +13,7 @@ import hashlib
 import json
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -249,7 +250,32 @@ class TestRunnerHostility:
         finally:
             runner._slots.release()
 
-    def test_timeout_kills_hanging_adapter(self, runner, adapter, tmp_path):
+    def test_timeout_kills_hanging_adapter(
+        self, runner, adapter, tmp_path, monkeypatch
+    ):
+        import subprocess
+        import tempfile
+        import threading
+
+        import nth_dao.trade_rules.adapter_runtime as runtime_module
+
+        processes = []
+        scratch_dirs = []
+        real_popen = subprocess.Popen
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracked_popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        def tracked_mkdtemp(*, prefix):
+            path = real_mkdtemp(prefix=prefix, dir=tmp_path)
+            scratch_dirs.append(Path(path))
+            return path
+
+        monkeypatch.setattr(runtime_module.subprocess, "Popen", tracked_popen)
+        monkeypatch.setattr(runtime_module.tempfile, "mkdtemp", tracked_mkdtemp)
         adapter, _ = adapter
         hang = b"import time; time.sleep(30)"
         hanging = build_execution_adapter(
@@ -266,6 +292,82 @@ class TestRunnerHostility:
         )
         with pytest.raises(AdapterHookRejected, match="execution budget"):
             _run(runner, hanging, hang, timeout_s=0.5)
+
+        assert processes and all(process.poll() is not None for process in processes)
+        assert scratch_dirs and all(not path.exists() for path in scratch_dirs)
+        assert not any(
+            thread.name.startswith("nth-adapter-") and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    def test_parent_exit_cannot_leave_child_holding_stdio(self, adapter):
+        artifact = textwrap.dedent(
+            """
+            import json
+            import subprocess
+            import sys
+
+            json.loads(sys.stdin.readline())
+            print(json.dumps({"ok": True}), flush=True)
+            request = json.loads(sys.stdin.readline())
+            subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            print(json.dumps({
+                "id": request["id"],
+                "ok": True,
+                "result": {"status": "ok"},
+            }), flush=True)
+            """
+        ).encode("utf-8")
+        adapter_desc, _ = adapter
+        child_spawner = build_execution_adapter(
+            adapter_id="org.nthdao.test/child-spawner",
+            adapter_version="1.0.0",
+            artifact_digest="sha256:" + hashlib.sha256(artifact).hexdigest(),
+            execution_modes=["adapter"],
+            hooks=adapter_desc.to_dict()["hooks"],
+            permissions=[],
+        )
+
+        started = time.monotonic()
+        outcome = _run(_unsafe_runner(), child_spawner, artifact)
+
+        assert outcome.outcome == "succeeded"
+        assert time.monotonic() - started < 4.0
+
+    def test_containment_failure_fails_closed_before_protocol(
+        self, tmp_path, monkeypatch
+    ):
+        import nth_dao.trade_rules.adapter_runtime as runtime_module
+
+        def reject_containment(process):
+            raise OSError("simulated containment failure")
+
+        monkeypatch.setattr(
+            runtime_module, "attach_process_tree_guard", reject_containment
+        )
+        marker = tmp_path / "artifact-executed"
+        artifact = (
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+        ).encode("utf-8")
+        adapter_desc = build_execution_adapter(
+            adapter_id="org.nthdao.test/containment-failure",
+            adapter_version="1.0.0",
+            artifact_digest="sha256:" + hashlib.sha256(artifact).hexdigest(),
+            execution_modes=["adapter"],
+            hooks=[{
+                "rule_id": "org.nthdao.test.delivery",
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+            }],
+            permissions=[],
+        )
+
+        with pytest.raises(AdapterHookRejected, match="containment") as info:
+            _run(_unsafe_runner(), adapter_desc, artifact)
+
+        assert info.value.retryable is True
+        assert not marker.exists()
 
     def test_output_flood_bounded(self, adapter):
         flood = (
@@ -653,4 +755,43 @@ class TestScratchCleanup:
         adapter_desc, artifact = adapter
         with pytest.raises(AdapterHookRejected, match="scratch cleanup failed") as info:
             _run(_unsafe_runner(), adapter_desc, artifact)
+        assert info.value.retryable is True
+
+    def test_cleanup_failure_does_not_mask_execution_timeout(
+        self, monkeypatch, adapter
+    ):
+        import shutil
+
+        original = shutil.rmtree
+
+        def remove_then_report(path, *, ignore_errors=False):
+            original(path, ignore_errors=ignore_errors)
+            raise OSError("simulated cleanup report")
+
+        monkeypatch.setattr(
+            "nth_dao.trade_rules.adapter_runtime.shutil.rmtree",
+            remove_then_report,
+        )
+        hang = b"import time; time.sleep(30)"
+        hanging = build_execution_adapter(
+            adapter_id="org.nthdao.test/hang-cleanup",
+            adapter_version="1.0.0",
+            artifact_digest="sha256:" + hashlib.sha256(hang).hexdigest(),
+            execution_modes=["adapter"],
+            hooks=[{
+                "rule_id": "org.nthdao.test.delivery",
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+            }],
+            permissions=[],
+        )
+
+        with pytest.raises(AdapterHookRejected, match="execution budget") as info:
+            _run(
+                _unsafe_runner(default_timeout_s=0.3),
+                hanging,
+                hang,
+                input_payload=b"{}",
+            )
+
         assert info.value.retryable is True

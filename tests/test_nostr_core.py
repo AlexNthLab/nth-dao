@@ -134,6 +134,35 @@ class TestKeyBinding:
 
 
 class TestEnvelopeEvent:
+    def test_serializes_snapshot_validated_before_caller_mutation(
+        self, alice_identity, nostr_keys, monkeypatch
+    ):
+        import nth_dao.nostr as nostr_module
+
+        envelope = _envelope(alice_identity, payload={"body": "original"})
+        real_validate = nostr_module.validate_envelope
+
+        def mutate_caller_after_validation(candidate, **kwargs):
+            result = real_validate(candidate, **kwargs)
+            envelope.payload["body"] = "forged-after-validation"
+            return result
+
+        monkeypatch.setattr(
+            nostr_module,
+            "validate_envelope",
+            mutate_caller_after_validation,
+        )
+
+        event = nostr_module.envelope_event(
+            envelope,
+            nostr_keys,
+            created_at_seconds=NOW_MS // 1000,
+        )
+        wire_envelope = json.loads(json.loads(event.as_json())["content"])
+
+        assert envelope.payload["body"] == "forged-after-validation"
+        assert wire_envelope["payload"]["body"] == "original"
+
     def test_roundtrip_verify(self, alice_identity, nostr_keys):
         from nth_dao.nostr import NOSTR_EVENT_KIND, envelope_event, envelope_from_event
 

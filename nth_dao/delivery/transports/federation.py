@@ -30,6 +30,7 @@ import http.server
 import json
 import logging
 import math
+import socket
 import socketserver
 import threading
 import time
@@ -69,6 +70,9 @@ MAX_RESPONSE_BYTES = 64 * 1024
 UNKNOWN_PATH_DRAIN_MAX_BYTES = 64 * 1024
 BODY_SLACK_BYTES = 64 * 1024
 ACCEPTED_STATUSES = (200, 202)
+DEFAULT_MAX_INGEST_CONNECTIONS = 32
+OVERLOAD_DRAIN_MAX_BYTES = 64 * 1024
+OVERLOAD_IO_TIMEOUT = 0.1
 
 
 class FederationTransportError(ValueError):
@@ -229,11 +233,19 @@ class FederationTransport(Transport):
     def send(self, envelope: TransportEnvelope) -> SendResult:
         # signature/integrity validated here; the TTL window is the
         # receiver's inbox decision (its clock) — see the gossip adapter note
-        ok, reason = validate_envelope(envelope, require_signature=True)
+        if not isinstance(envelope, TransportEnvelope):
+            return SendResult(accepted=False, error_code="invalid-envelope")
+        try:
+            stable_envelope = TransportEnvelope.from_dict(
+                TransportEnvelope.to_dict(envelope)
+            )
+        except Exception:  # noqa: BLE001 - hostile mutable input fails closed
+            return SendResult(accepted=False, error_code="invalid-envelope")
+        ok, reason = validate_envelope(stable_envelope, require_signature=True)
         if not ok:
             return SendResult(accepted=False, error_code=f"invalid-envelope: {reason}")
-        if envelope.recipient.startswith("did:key:"):
-            direct_url = self._recipient_routes.get(envelope.recipient)
+        if stable_envelope.recipient.startswith("did:key:"):
+            direct_url = self._recipient_routes.get(stable_envelope.recipient)
             if direct_url is None:
                 return SendResult(
                     accepted=False, error_code="recipient-route-required"
@@ -243,7 +255,7 @@ class FederationTransport(Transport):
             target_urls = list(
                 dict.fromkeys([*self._peers, *self._recipient_routes.values()])
             )
-        body = canonical_json(envelope.to_dict())
+        body = canonical_json(stable_envelope.to_dict())
         accepted_any = False
         # the per-peer timeout bounds one POST; this overall budget bounds the
         # whole fan-out so a long peer list cannot stall a send for minutes
@@ -263,7 +275,9 @@ class FederationTransport(Transport):
                     verify_tls=self._verify_tls,
                 )
             except (urllib.error.URLError, OSError, ValueError) as exc:
-                logger.warning("federation peer %s unreachable: %s", url, exc)
+                logger.warning(
+                    "federation peer %s unreachable: %s", url, type(exc).__name__
+                )
                 continue
             if status in ACCEPTED_STATUSES:
                 accepted_any = True
@@ -279,7 +293,8 @@ class FederationTransport(Transport):
 
     def health(self) -> TransportHealth:
         return TransportHealth(
-            reachable=bool(self._peers or self._recipient_routes)
+            reachable=bool(self._peers or self._recipient_routes),
+            receive_reachable=False,
         )
 
 
@@ -309,19 +324,10 @@ class _IngestHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802 - http.server naming
-        # concurrency gate: ThreadingMixIn spawns a thread per connection, so
-        # without a bound a connection flood exhausts threads/memory. Beyond
-        # the gate we answer 503 immediately (round-1 Phase-1 hardening).
-        if not self.server.gate.acquire(blocking=False):  # type: ignore[attr-defined]
-            self._respond(503, {"accepted": False, "reason": "server busy"})
-            self.close_connection = True
-            return
         try:
             self._do_post()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             self.close_connection = True
-        finally:
-            self.server.gate.release()  # type: ignore[attr-defined]
 
     def _do_post(self) -> None:
         if self.path != INGEST_PATH:
@@ -332,8 +338,8 @@ class _IngestHandler(http.server.BaseHTTPRequestHandler):
         transfer_encoding = self.headers.get("Transfer-Encoding")
         content_lengths = self.headers.get_all("Content-Length", failobj=[])
         if transfer_encoding is not None or len(content_lengths) != 1:
-            self._respond(400, {"accepted": False, "reason": "ambiguous body framing"})
             self.close_connection = True
+            self._respond(400, {"accepted": False, "reason": "ambiguous body framing"})
             return
         raw_length = content_lengths[0]
         # strict ASCII digits: unicode isdigit() chars like the superscript ²
@@ -348,14 +354,14 @@ class _IngestHandler(http.server.BaseHTTPRequestHandler):
             # instead of a TCP reset; anything beyond the drain bound keeps
             # the reset (unavoidable, and the sender gets no useful answer
             # for bodies that large anyway)
+            self.close_connection = True
             self._drain(length)
             self._respond(413, {"accepted": False, "reason": "body size out of bounds"})
-            self.close_connection = True
             return
         body = self.rfile.read(length)
         if len(body) != length:
-            self._respond(400, {"accepted": False, "reason": "incomplete request body"})
             self.close_connection = True
+            self._respond(400, {"accepted": False, "reason": "incomplete request body"})
             return
         try:
             encoded = body.decode("utf-8")
@@ -432,9 +438,23 @@ class FederationIngestServer:
         host: str = "127.0.0.1",
         port: int = 0,
         max_body: int = MAX_ENVELOPE_BYTES + BODY_SLACK_BYTES,
+        max_connections: int = DEFAULT_MAX_INGEST_CONNECTIONS,
     ) -> None:
-        if max_body <= 0:
-            raise ValueError("max_body must be positive")
+        if (
+            isinstance(max_body, bool)
+            or not isinstance(max_body, int)
+            or not 1 <= max_body <= MAX_ENVELOPE_BYTES + BODY_SLACK_BYTES
+        ):
+            raise ValueError(
+                "max_body must be a positive integer no greater than the "
+                "delivery envelope HTTP limit"
+            )
+        if (
+            isinstance(max_connections, bool)
+            or not isinstance(max_connections, int)
+            or max_connections < 1
+        ):
+            raise ValueError("max_connections must be a positive integer")
         self.inbox = inbox
         self.max_body = max_body
 
@@ -442,11 +462,60 @@ class FederationIngestServer:
             daemon_threads = True
             allow_reuse_address = True
             request_queue_size = 16
+            gate: threading.BoundedSemaphore
+
+            def process_request(self, request, client_address) -> None:
+                if not self.gate.acquire(blocking=False):
+                    self._reject_over_capacity(request)
+                    return
+                try:
+                    super().process_request(request, client_address)
+                except BaseException:
+                    self.gate.release()
+                    raise
+
+            def process_request_thread(self, request, client_address) -> None:
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    self.gate.release()
+
+            def _reject_over_capacity(self, request) -> None:
+                body = canonical_json(
+                    {"accepted": False, "reason": "server busy"}
+                )
+                response = (
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: application/json\r\n"
+                    + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                    + b"Connection: close\r\n\r\n"
+                    + body
+                )
+                try:
+                    request.settimeout(OVERLOAD_IO_TIMEOUT)
+                    request.sendall(response)
+                    # Half-close the response side before draining. On Windows,
+                    # closing a TCP socket with unread request bytes can replace
+                    # the queued 503 with an RST at the client.
+                    request.shutdown(socket.SHUT_WR)
+                    remaining = OVERLOAD_DRAIN_MAX_BYTES
+                    while remaining > 0:
+                        try:
+                            chunk = request.recv(min(4096, remaining))
+                        except (BlockingIOError, InterruptedError, TimeoutError):
+                            break
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except OSError:
+                    pass
+                finally:
+                    self.shutdown_request(request)
 
         self._httpd = _Server((host, port), _IngestHandler)
         self._httpd.inbox = inbox  # type: ignore[attr-defined]
         self._httpd.max_body = max_body  # type: ignore[attr-defined]
-        self._httpd.gate = threading.BoundedSemaphore(32)  # type: ignore[attr-defined]
+        self._httpd.gate = threading.BoundedSemaphore(max_connections)  # type: ignore[attr-defined]
         self._thread: Optional[threading.Thread] = None
         self._running = False
 

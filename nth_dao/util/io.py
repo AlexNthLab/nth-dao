@@ -118,10 +118,18 @@ def atomic_write_json(
     *,
     indent: Optional[int] = 2,
     ensure_ascii: bool = False,
+    durable: bool = False,
 ) -> None:
-    """原子写 JSON 文件。"""
+    """Atomically write JSON, optionally requiring durable file replacement.
+
+    ``durable=False`` preserves the historical best-effort fsync behavior.
+    Audit and recovery records should opt in so an fsync failure is observable.
+    """
     content = json.dumps(data, indent=indent, ensure_ascii=ensure_ascii, sort_keys=False)
-    atomic_write_text(path, content)
+    if durable:
+        atomic_write_bytes(path, content.encode("utf-8"))
+    else:
+        atomic_write_text(path, content)
 
 
 def safe_load_json(

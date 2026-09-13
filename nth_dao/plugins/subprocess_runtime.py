@@ -18,7 +18,6 @@ import queue
 import re
 import secrets
 import shutil
-import signal
 import stat
 import subprocess
 import threading
@@ -27,6 +26,12 @@ from typing import Any, BinaryIO, Callable, Dict, Mapping, Tuple
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.util.io import InterProcessLock
+from nth_dao.util.process_tree import (
+    WINDOWS_CREATE_SUSPENDED,
+    ProcessTreeGuard,
+    attach_process_tree_guard,
+    resume_suspended_process,
+)
 
 from .contracts import PluginManifest
 from .host import (
@@ -69,26 +74,6 @@ _RESERVED_ENV = frozenset(
         "WINDIR",
     }
 )
-
-
-def _windows_taskkill_path() -> Path | None:
-    """Resolve the Windows system directory without trusting environment text."""
-
-    if os.name != "nt":
-        return None
-    try:
-        import ctypes
-
-        buffer = ctypes.create_unicode_buffer(32_768)
-        length = ctypes.windll.kernel32.GetWindowsDirectoryW(  # type: ignore[attr-defined]
-            buffer, len(buffer)
-        )
-    except (AttributeError, OSError):
-        return None
-    if not 0 < length < len(buffer):
-        return None
-    candidate = Path(buffer.value) / "System32" / "taskkill.exe"
-    return candidate if candidate.is_file() else None
 
 
 def _remove_private_tree(directory: Path) -> None:
@@ -691,6 +676,7 @@ class ReviewedSubprocessRuntime:
         self.manifest = manifest
         self.spec = spec
         self._process: subprocess.Popen[bytes] | None = None
+        self._process_tree_guard: ProcessTreeGuard | None = None
         self._stdout: _StdoutReader | None = None
         self._stderr: _StderrReader | None = None
         self._io_lock = threading.RLock()
@@ -746,6 +732,7 @@ class ReviewedSubprocessRuntime:
                 kwargs["creationflags"] = (
                     getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                     | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | WINDOWS_CREATE_SUSPENDED
                 )
             else:
                 kwargs["start_new_session"] = True
@@ -762,7 +749,31 @@ class ReviewedSubprocessRuntime:
             except OSError as exc:
                 self._remove_snapshot()
                 raise SubprocessPluginError("cannot start reviewed subprocess worker") from exc
+            process_tree_guard = None
+            try:
+                process_tree_guard = attach_process_tree_guard(process)
+                if os.name == "nt":
+                    resume_suspended_process(process)
+            except OSError as exc:
+                try:
+                    if process_tree_guard is not None:
+                        process_tree_guard.terminate()
+                    else:
+                        process.kill()
+                    process.wait(timeout=0.5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                if process_tree_guard is not None:
+                    try:
+                        process_tree_guard.close()
+                    except OSError:
+                        pass
+                self._remove_snapshot()
+                raise SubprocessPluginError(
+                    "cannot establish reviewed subprocess containment"
+                ) from exc
             self._process = process
+            self._process_tree_guard = process_tree_guard
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 self._break("subprocess worker pipes are unavailable")
                 raise SubprocessPluginError(self._failure)
@@ -1165,42 +1176,31 @@ class ReviewedSubprocessRuntime:
         process = self._process
         if process is None or process.poll() is not None:
             return
-        try:
-            if os.name == "nt":
-                taskkill = _windows_taskkill_path()
-                if taskkill is not None:
-                    subprocess.run(
-                        [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2.0,
-                        check=False,
-                        shell=False,
-                        env={
-                            "SYSTEMROOT": str(taskkill.parents[1]),
-                            "WINDIR": str(taskkill.parents[1]),
-                        },
-                    )
-                else:
-                    process.kill() if force else process.terminate()
-            else:
-                os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
-        except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+        guard = self._process_tree_guard
+        terminated = guard is not None and guard.terminate(force=force)
+        if not terminated:
             try:
                 process.kill() if force else process.terminate()
             except OSError:
                 pass
         try:
-            process.wait(timeout=2.0)
+            process.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
             try:
                 process.kill()
             except OSError:
                 pass
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
 
     def _close(self) -> None:
         process = self._process
+        guard = self._process_tree_guard
+        if guard is not None:
+            guard.close()
+            self._process_tree_guard = None
         if process is not None:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:

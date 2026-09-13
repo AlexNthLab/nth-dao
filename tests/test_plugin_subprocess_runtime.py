@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -332,6 +333,11 @@ def test_worker_executes_verified_private_snapshot_not_mutable_source(
         snapshot = Path(command[1])
         launched.append(snapshot)
         copied.write_text("raise RuntimeError('mutated source')\n", encoding="utf-8")
+        if os.name == "nt":
+            assert (
+                kwargs["creationflags"]
+                & subprocess_runtime_module.WINDOWS_CREATE_SUSPENDED
+            )
         return real_popen(command, **kwargs)
 
     monkeypatch.setattr(subprocess_runtime_module.subprocess, "Popen", racing_popen)

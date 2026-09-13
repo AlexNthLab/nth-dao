@@ -118,7 +118,7 @@ class TestNostrTransport:
             )
             result = transport.send(private_dm)
             assert not result.accepted
-            assert "broadcast traffic only" in result.error_code
+            assert result.error_code == "invalid-envelope"
         finally:
             transport.stop()
 
@@ -317,4 +317,7 @@ class TestSubscriptionFailureDegradation:
         assert result.accepted, result.error_code
         # poll returns empty (no subscription)
         assert transport.poll() == []
+        health = transport.health()
+        assert health.reachable is True
+        assert health.receive_reachable is False
         transport.stop()

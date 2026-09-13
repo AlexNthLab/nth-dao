@@ -1059,10 +1059,8 @@ def gen_delivery_ack_v1() -> list:
     from copy import deepcopy
 
     from ..delivery.acknowledgement import (
-        DeliveryAck,
         ack_digest,
         sign_ack,
-        validate_ack,
     )
     from ..identity import AgentID, AgentIdentity
 
@@ -1081,6 +1079,14 @@ def gen_delivery_ack_v1() -> list:
         received_at_ms=1_750_000_002_000,
     )
     wire = ack.to_dict()
+    alice_signing_key = SigningKey(bytes.fromhex(ALICE_SEED_HEX))
+    alice_verify_bytes = alice_signing_key.verify_key.encode()
+    alice_identity = AgentIdentity(
+        agent_id=AgentID.from_pubkey(alice_verify_bytes.hex()),
+        label="vector-alice",
+        _signing_key=bytes.fromhex(ALICE_SEED_HEX),
+        _verify_key=alice_verify_bytes,
+    )
     verification_time_ms = 1_750_000_003_000
     vectors = [
         {
@@ -1091,11 +1097,18 @@ def gen_delivery_ack_v1() -> list:
             "expected_valid": True,
             "expected_reason": "ok",
             "expected_canonical_hex": canonical_json(wire).hex(),
+            "expected_signing_body_hex": canonical_json(ack.signing_body()).hex(),
+            "expected_verify_key_hex": verify_bytes.hex(),
             "expected_ack_sha256": ack_digest(ack),
         }
     ]
 
-    def _negative(vector_id: str, description: str, mutate) -> dict:
+    def _negative(
+        vector_id: str,
+        description: str,
+        expected_reason: str,
+        mutate,
+    ) -> dict:
         data = deepcopy(wire)
         mutate(data)
         return {
@@ -1104,16 +1117,14 @@ def gen_delivery_ack_v1() -> list:
             "input": data,
             "verification_time_ms": verification_time_ms,
             "expected_valid": False,
-            "expected_reason": validate_ack(
-                DeliveryAck.from_dict(data),
-                now_ms=verification_time_ms,
-            )[1],
+            "expected_reason": expected_reason,
         }
 
     vectors.append(
         _negative(
             "delivery-ack-002",
             "Tampered envelope digest invalidates the receiver signature",
+            "ack signature verification failed",
             lambda data: data.__setitem__("envelope_sha256", "sha256:" + "3" * 64),
         )
     )
@@ -1121,6 +1132,7 @@ def gen_delivery_ack_v1() -> list:
         _negative(
             "delivery-ack-003",
             "A future-dated ACK outside clock skew fails closed",
+            "ack dated in the future beyond clock skew",
             lambda data: data.__setitem__("received_at_ms", 1_750_001_000_000),
         )
     )
@@ -1128,7 +1140,56 @@ def gen_delivery_ack_v1() -> list:
         _negative(
             "delivery-ack-004",
             "An unknown protocol version fails closed",
+            "unsupported ack version",
             lambda data: data.__setitem__("version", 2),
+        )
+    )
+    vectors.append(
+        _negative(
+            "delivery-ack-005",
+            "Replacing the receiver DID invalidates the receiver signature",
+            "ack signature verification failed",
+            lambda data: data.__setitem__("receiver_did", alice_identity.as_did()),
+        )
+    )
+    vectors.append(
+        _negative(
+            "delivery-ack-006",
+            "A non-canonical short signature encoding fails closed",
+            "ack signature invalid",
+            lambda data: data.__setitem__("signature", "AA"),
+        )
+    )
+    vectors.append(
+        _negative(
+            "delivery-ack-007",
+            "Boolean protocol versions are not integers",
+            "unsupported ack version",
+            lambda data: data.__setitem__("version", True),
+        )
+    )
+    vectors.append(
+        _negative(
+            "delivery-ack-008",
+            "Unknown fields fail the closed wire shape",
+            "ack has missing or unknown fields",
+            lambda data: data.__setitem__("extra", "forbidden"),
+        )
+    )
+    vectors.append(
+        _negative(
+            "delivery-ack-009",
+            "Missing signature field fails the closed wire shape",
+            "ack has missing or unknown fields",
+            lambda data: data.pop("signature"),
+        )
+    )
+    vectors.append(
+        _negative(
+            "delivery-ack-010",
+            "A substituted protocol name fails closed",
+            "wrong ack protocol",
+            lambda data: data.__setitem__("protocol", "other-protocol"),
         )
     )
     return vectors

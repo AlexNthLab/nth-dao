@@ -7,6 +7,7 @@ import json
 import pytest
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.delivery.authorization import AuthorizationDecision
 from nth_dao.delivery.envelope import (
     TransportEnvelope,
     envelope_digest,
@@ -197,6 +198,25 @@ class TestRejects:
 
 
 class TestAuthorization:
+    @pytest.mark.parametrize(
+        "decision",
+        [
+            lambda: AuthorizationDecision(
+                allowed=True,
+                code="unauthorized",
+                reason="contradictory",
+            ),
+            lambda: AuthorizationDecision(
+                allowed=False,
+                code="authorized",
+                reason="contradictory",
+            ),
+        ],
+    )
+    def test_typed_authorization_rejects_contradictory_codes(self, decision):
+        with pytest.raises(ValueError, match="authorized code"):
+            decision()
+
     def test_authorize_deny_rejects_with_reason(self, tmp_path, alice_identity):
         def deny(envelope):
             return False, "not a member"
@@ -215,9 +235,9 @@ class TestAuthorization:
         decision = inbox.accept(_envelope(alice_identity), now_ms=NOW_MS)
         assert decision.accepted
 
-    def test_authorizer_crash_fails_closed(self, tmp_path, alice_identity):
+    def test_authorizer_crash_fails_closed(self, tmp_path, alice_identity, caplog):
         def explode(envelope):
-            raise RuntimeError("membership store offline")
+            raise RuntimeError("sensitive membership store detail")
 
         inbox = DeliveryInbox(
             tmp_path / "delivery", clock=lambda: NOW_MS, authorize=explode
@@ -225,6 +245,106 @@ class TestAuthorization:
         decision = inbox.accept(_envelope(alice_identity), now_ms=NOW_MS)
         assert not decision.accepted
         assert decision.reason == "authorization callback failed"
+        assert decision.code == "authorization-callback-failed"
+        assert decision.retryable is True
+        assert "sensitive membership store detail" not in caplog.text
+
+    def test_authorizer_cannot_mutate_verified_or_persisted_envelope(
+        self, tmp_path, alice_identity
+    ):
+        def mutate_then_allow(envelope):
+            envelope.payload["amount"] = 999_999
+            envelope.recipient = "attacker:queue"
+            envelope.signature = ""
+            return AuthorizationDecision.allow()
+
+        directory = tmp_path / "isolated-authorizer-input"
+        inbox = DeliveryInbox(
+            directory,
+            clock=lambda: NOW_MS,
+            authorize=mutate_then_allow,
+        )
+        envelope = _envelope(
+            alice_identity,
+            payload={"amount": 1},
+        )
+        original = envelope.to_dict()
+
+        decision = inbox.accept(envelope, now_ms=NOW_MS)
+
+        assert decision.accepted is True
+        assert envelope.to_dict() == original
+        assert decision.envelope is not None
+        assert decision.envelope is not envelope
+        assert decision.envelope.to_dict() == original
+        pending = inbox.pending()
+        assert len(pending) == 1
+        assert pending[0].to_dict() == original
+
+    def test_truthy_non_bool_authorization_fails_closed(
+        self, tmp_path, alice_identity
+    ):
+        inbox = DeliveryInbox(
+            tmp_path / "delivery",
+            clock=lambda: NOW_MS,
+            authorize=lambda envelope: ("false", "not a member"),
+        )
+
+        decision = inbox.accept(_envelope(alice_identity), now_ms=NOW_MS)
+
+        assert decision.accepted is False
+        assert decision.code == "authorization-decision-invalid"
+        assert decision.retryable is False
+
+    def test_mutated_typed_authorization_fails_closed(
+        self, tmp_path, alice_identity
+    ):
+        forged = AuthorizationDecision.deny(reason="not a member")
+        object.__setattr__(forged, "allowed", "false")
+        inbox = DeliveryInbox(
+            tmp_path / "delivery",
+            clock=lambda: NOW_MS,
+            authorize=lambda envelope: forged,
+        )
+
+        decision = inbox.accept(_envelope(alice_identity), now_ms=NOW_MS)
+
+        assert decision.accepted is False
+        assert decision.code == "authorization-decision-invalid"
+
+    def test_typed_authorization_preserves_retry_semantics(
+        self, tmp_path, alice_identity
+    ):
+        inbox = DeliveryInbox(
+            tmp_path / "delivery",
+            clock=lambda: NOW_MS,
+            authorize=lambda envelope: AuthorizationDecision.deny(
+                code="membership-store-unavailable",
+                reason="membership data is temporarily unavailable",
+                retryable=True,
+            ),
+        )
+
+        decision = inbox.accept(_envelope(alice_identity), now_ms=NOW_MS)
+
+        assert decision.accepted is False
+        assert decision.code == "membership-store-unavailable"
+        assert decision.retryable is True
+
+    @pytest.mark.parametrize("reason", ["denied\nforged-log", "界" * 200])
+    def test_unbounded_or_controlled_authorization_reason_fails_closed(
+        self, tmp_path, alice_identity, reason
+    ):
+        inbox = DeliveryInbox(
+            tmp_path / "delivery",
+            clock=lambda: NOW_MS,
+            authorize=lambda envelope: (False, reason),
+        )
+
+        decision = inbox.accept(_envelope(alice_identity), now_ms=NOW_MS)
+
+        assert decision.code == "authorization-decision-invalid"
+        assert decision.retryable is False
 
 
 class TestReplayCacheBound:
@@ -500,6 +620,49 @@ class TestRejectionTrimLockAndTmp:
 
 
 class TestCacheJournalAutoCompact:
+    def test_cache_loader_never_uses_unbounded_read_bytes(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        assert inbox.accept(_envelope(alice_identity), now_ms=NOW_MS).accepted
+
+        cache_path = directory / "inbox.cache.jsonl"
+        original_read_bytes = type(directory).read_bytes
+
+        def forbidden_read_bytes(path):
+            if path == cache_path:
+                raise AssertionError("cache loading must use a bounded read")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(type(directory), "read_bytes", forbidden_read_bytes)
+        reloaded = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.accept(
+            _envelope(alice_identity, payload={"n": 2}), now_ms=NOW_MS
+        ).accepted
+
+    def test_hard_size_limit_is_checked_before_read(
+        self, tmp_path, monkeypatch
+    ):
+        import nth_dao.delivery.inbox as inbox_module
+
+        directory = tmp_path / "delivery"
+        directory.mkdir()
+        cache = directory / "inbox.cache.jsonl"
+        cache.write_bytes(b"x" * 2_049)
+        monkeypatch.setattr(inbox_module, "MAX_CACHE_JOURNAL_READ_BYTES", 2_048)
+
+        original_read = type(cache).read_bytes
+
+        def forbidden_read(path):
+            if path == cache:
+                raise AssertionError("oversized cache must not be read into memory")
+            return original_read(path)
+
+        monkeypatch.setattr(type(cache), "read_bytes", forbidden_read)
+        with pytest.raises(DeliveryInboxCacheCorrupt, match="hard read limit"):
+            DeliveryInbox(directory, clock=lambda: NOW_MS)
+
     def test_oversized_cache_compacts_losslessly_instead_of_bricking(
         self, tmp_path, alice_identity, monkeypatch
     ):
@@ -558,3 +721,153 @@ class TestCacheJournalAutoCompact:
         cache.write_bytes(b"\n".join(lines))
         with pytest.raises(DeliveryInboxCacheCorrupt):
             DeliveryInbox(directory, clock=lambda: NOW_MS)
+
+    def test_live_pending_snapshot_cannot_exceed_compaction_budget(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.inbox as inbox_module
+
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        first = _envelope(alice_identity, payload={"body": "x" * 256})
+        assert inbox.accept(first, now_ms=NOW_MS).accepted
+        cache_path = directory / "inbox.cache.jsonl"
+        before = cache_path.read_bytes()
+        monkeypatch.setattr(
+            inbox_module,
+            "MAX_CACHE_LIVE_BYTES",
+            inbox._cache_snapshot_bytes,
+        )
+
+        second = _envelope(alice_identity, payload={"body": "y" * 256})
+        decision = inbox.accept(second, now_ms=NOW_MS + 1)
+
+        assert decision.accepted is False
+        assert decision.code == "inbox-capacity-exhausted"
+        assert decision.retryable is True
+        assert cache_path.read_bytes() == before
+        assert [item.message_id for item in inbox.pending()] == [first.message_id]
+
+    def test_live_byte_budget_evicts_processed_replay_entries_atomically(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.inbox as inbox_module
+
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        first = _envelope(alice_identity, payload={"body": "old"})
+        assert inbox.accept(first, now_ms=NOW_MS).accepted
+        assert inbox.mark_processed(first.message_id)
+        second = _envelope(alice_identity, payload={"body": "z" * 256})
+        second_json = canonical_json(second.to_dict()).decode("utf-8")
+        second_size = inbox._cache_snapshot_line_size(
+            message_id=second.message_id,
+            sender_did=second.sender_did,
+            nonce=second.nonce,
+            envelope_json=second_json,
+        )
+        monkeypatch.setattr(inbox_module, "MAX_CACHE_LIVE_BYTES", second_size)
+
+        decision = inbox.accept(second, now_ms=NOW_MS + 1)
+
+        assert decision.accepted is True
+        assert inbox.seen(first.message_id) is False
+        assert inbox.seen(second.message_id) is True
+        reloaded = DeliveryInbox(directory, clock=lambda: NOW_MS + 1)
+        assert reloaded.seen(first.message_id) is False
+        assert [item.message_id for item in reloaded.pending()] == [second.message_id]
+
+    def test_hard_append_limit_compacts_before_retry(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.inbox as inbox_module
+
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        first = _envelope(alice_identity, payload={"n": 1})
+        assert inbox.accept(first, now_ms=NOW_MS).accepted
+        assert inbox.mark_processed(first.message_id)
+        cache_path = directory / "inbox.cache.jsonl"
+        before_size = cache_path.stat().st_size
+        monkeypatch.setattr(inbox_module, "MAX_CACHE_JOURNAL_BYTES", before_size * 10)
+        second = _envelope(alice_identity, payload={"n": 2})
+        compacted_size = inbox._cache_snapshot_bytes
+        hard_limit = before_size + max(1, (before_size - compacted_size) // 2)
+        monkeypatch.setattr(
+            inbox_module,
+            "MAX_CACHE_JOURNAL_READ_BYTES",
+            hard_limit,
+        )
+        decision = inbox.accept(second, now_ms=NOW_MS + 1)
+
+        assert decision.accepted is True
+        assert cache_path.stat().st_size <= inbox_module.MAX_CACHE_JOURNAL_READ_BYTES
+        reloaded = DeliveryInbox(directory, clock=lambda: NOW_MS + 1)
+        assert reloaded.seen(second.message_id)
+
+
+class TestRejectionJournalBoundedReads:
+    def test_compaction_uses_bounded_tail_read(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.inbox as inbox_module
+
+        monkeypatch.setattr(inbox_module, "REJECTION_LOG_MAX_BYTES", 2_048)
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        rejection_path = directory / "inbox.rejections.jsonl"
+        rejection_path.write_bytes(b"x" * 64_000 + b"\nnew-1\nnew-2\n")
+
+        original_read_bytes = type(rejection_path).read_bytes
+
+        def forbidden_read_bytes(path):
+            if path == rejection_path:
+                raise AssertionError("rejection compaction must use a bounded tail read")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(type(rejection_path), "read_bytes", forbidden_read_bytes)
+        assert inbox.compact_rejections(max_keep=2) == 2
+        assert rejection_path.read_text(encoding="utf-8").splitlines() == [
+            "new-1",
+            "new-2",
+        ]
+        assert rejection_path.stat().st_size <= inbox_module.REJECTION_LOG_MAX_BYTES
+
+    def test_auto_trim_uses_bounded_tail_read(
+        self, tmp_path, alice_identity, monkeypatch
+    ):
+        import nth_dao.delivery.inbox as inbox_module
+
+        monkeypatch.setattr(inbox_module, "REJECTION_LOG_MAX_BYTES", 2_048)
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        rejection_path = directory / "inbox.rejections.jsonl"
+        rejection_path.write_bytes(b"x" * 64_000 + b"\nnew-1\nnew-2\n")
+        original_read_bytes = type(rejection_path).read_bytes
+
+        def forbidden_read_bytes(path):
+            if path == rejection_path:
+                raise AssertionError("rejection trimming must use a bounded tail read")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(type(rejection_path), "read_bytes", forbidden_read_bytes)
+        inbox._trim_rejections_if_large()
+        assert rejection_path.read_text(encoding="utf-8").splitlines() == [
+            "new-1",
+            "new-2",
+        ]
+        assert rejection_path.stat().st_size <= inbox_module.REJECTION_LOG_MAX_BYTES
+
+    @pytest.mark.parametrize("value", [True, 0, -1, 1.5, "2"])
+    def test_compact_rejections_rejects_invalid_max_keep(
+        self, tmp_path, alice_identity, value
+    ):
+        inbox = DeliveryInbox(tmp_path / "delivery", clock=lambda: NOW_MS)
+        with pytest.raises(ValueError, match="positive integer"):
+            inbox.compact_rejections(max_keep=value)
+
+
+@pytest.mark.parametrize("reason", ["hidden\u0085line", "hidden\u2028line"])
+def test_authorization_reason_rejects_unicode_control_text(reason):
+    with pytest.raises(ValueError, match="printable"):
+        AuthorizationDecision.deny(reason=reason)

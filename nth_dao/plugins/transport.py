@@ -21,7 +21,7 @@ from typing import Any, Dict
 
 from nth_dao.canonical_json import canonical_json
 
-from .contracts import CapabilityContract, schema_digest
+from .contracts import CapabilityContract, PluginContractError, schema_digest
 from .host import InvocationAuthority, PluginAuthorizationError, PluginInvocationError
 from .schema import PluginSchemaError, validate_instance
 
@@ -330,7 +330,7 @@ TRANSPORT_OUTPUT_SCHEMA: Dict[str, Any] = {
     ],
 }
 
-_OPERATION_RULES = {
+_OPERATION_RULES: Dict[str, Dict[str, tuple[str, ...]]] = {
     "ack": {
         "allowed": ("batch_sha256", "lease_id", "operation", "receive_id"),
         "required": ("batch_sha256", "lease_id", "operation", "receive_id"),
@@ -374,6 +374,36 @@ TRANSPORT_LOCAL_CONTRACT = CapabilityContract(
     retention="ephemeral",
     failure_semantics="retry-safe",
 )
+
+
+def validate_transport_contract(contract: CapabilityContract) -> None:
+    """Require a provider contract compatible with delivery protocol v1.
+
+    Provider-specific effects may differ (for example, an Internet transport
+    declares network access), but the wire schemas and the semantics relied on
+    by the durable runtime cannot be weakened under the same capability id.
+    """
+
+    if not isinstance(contract, CapabilityContract):
+        raise TypeError("transport contract must be a CapabilityContract")
+    if contract.capability_id != TRANSPORT_CAPABILITY_ID:
+        raise PluginContractError("contract is not the delivery transport capability")
+    if contract.major_version != TRANSPORT_LOCAL_CONTRACT.major_version:
+        raise PluginContractError("transport contract major version is incompatible")
+    if contract.input_schema_digest != TRANSPORT_LOCAL_CONTRACT.input_schema_digest:
+        raise PluginContractError("transport input schema digest is incompatible")
+    if contract.output_schema_digest != TRANSPORT_LOCAL_CONTRACT.output_schema_digest:
+        raise PluginContractError("transport output schema digest is incompatible")
+    if contract.consistency not in {"C2", "C3", "C4"}:
+        raise PluginContractError("transport contract consistency is weaker than C2")
+    if contract.privacy not in {"confidential", "secret"}:
+        raise PluginContractError("transport contract privacy is weaker than confidential")
+    if contract.security == "untrusted-hint":
+        raise PluginContractError("transport contract security is weaker than verified-input")
+    if contract.retention not in {"ephemeral", "durable", "authoritative"}:
+        raise PluginContractError("transport contract does not retain leased deliveries")
+    if contract.failure_semantics != "retry-safe":
+        raise PluginContractError("transport contract must provide retry-safe semantics")
 
 
 def transport_operation_rule(operation: str) -> tuple[frozenset[str], frozenset[str]]:
@@ -469,6 +499,8 @@ def validate_transport_input(value: Mapping[str, Any]) -> None:
     _validate_document_size(value, path="$input")
     validate_instance(value, TRANSPORT_INPUT_SCHEMA, path="$input")
     operation = value.get("operation")
+    if not isinstance(operation, str):
+        raise PluginSchemaError("$input.operation is unsupported")
     try:
         allowed, required = transport_operation_rule(operation)
     except ValueError as exc:
@@ -952,6 +984,7 @@ __all__ = [
     "transport_wire_vectors",
     "validate_transport_identifier",
     "validate_transport_authority",
+    "validate_transport_contract",
     "validate_transport_exchange",
     "validate_transport_error",
     "validate_transport_input",

@@ -34,28 +34,37 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Union
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import (
     DeliveryAck,
     validate_ack,
 )
+from nth_dao.delivery.authorization import (
+    AuthorizationDecision,
+    AuthorizationResult,
+    coerce_authorization_decision,
+)
 from nth_dao.delivery.envelope import (
+    MAX_CLOCK_SKEW_MS,
     MAX_ENVELOPE_BYTES,
+    MAX_SAFE_INTEGER,
     TransportEnvelope,
     TransportEnvelopeRejected,
     envelope_digest,
     validate_envelope,
 )
+from nth_dao.did_key import DIDKeyError, decode_ed25519_did_key
 from nth_dao.util.io import InterProcessLock
 
 logger = logging.getLogger("nth_dao.delivery")
 
 PathLike = Union[str, Path]
-AckAuthorizer = Callable[[DeliveryAck, TransportEnvelope], Tuple[bool, str]]
+AckAuthorizer = Callable[[DeliveryAck, TransportEnvelope], AuthorizationResult]
 
 OUTBOX_STATE_QUEUED = "queued"
 OUTBOX_STATE_DELIVERED = "delivered"
@@ -69,8 +78,10 @@ OUTBOX_ATTEMPT_REJECTED = "rejected"
 OUTBOX_ATTEMPT_OUTCOMES = (OUTBOX_ATTEMPT_SENT, OUTBOX_ATTEMPT_ERROR, OUTBOX_ATTEMPT_REJECTED)
 
 DEFAULT_MAX_PENDING_RECORDS = 4_096
+DEFAULT_MAX_TERMINAL_TOMBSTONES = 65_536
 MAX_ATTEMPTS_PER_RECORD = 256
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+MAX_TOMBSTONE_FILE_BYTES = 32 * 1024 * 1024
 _JOURNAL_EVENTS = ("enqueued", "attempt", "delivered", "rejected", "expired")
 _MESSAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRANSPORT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -93,11 +104,35 @@ _EVENT_FIELDS = {
     ),
     "expired": frozenset({"event", "message_id", "at_ms"}),
 }
+_TOMBSTONE_FIELDS = frozenset(
+    {
+        "message_id",
+        "envelope_sha256",
+        "state",
+        "compacted_at_ms",
+        "delivered_by",
+        "delivered_at_ms",
+        "last_error_code",
+    }
+)
 MAX_ERROR_CODE_LENGTH = 256
 
 
 class DeliveryOutboxError(RuntimeError):
     """Base error for outbox operation failures."""
+
+
+class DeliveryAckAuthorizationError(DeliveryOutboxError):
+    """Structured, fail-closed rejection at the shared-recipient ACK boundary."""
+
+    def __init__(self, decision: AuthorizationDecision) -> None:
+        normalized = coerce_authorization_decision(decision)
+        if normalized.allowed:
+            raise ValueError("ACK authorization errors require a denied decision")
+        self.decision = normalized
+        self.code = normalized.code
+        self.retryable = normalized.retryable
+        super().__init__(normalized.reason)
 
 
 class DeliveryOutboxFull(DeliveryOutboxError):
@@ -144,6 +179,17 @@ class OutboxRecord:
         return self.state in OUTBOX_TERMINAL_STATES
 
 
+@dataclass(frozen=True)
+class _OutboxTombstone:
+    message_id: str
+    envelope_sha256: str
+    state: str
+    compacted_at_ms: int
+    delivered_by: str = ""
+    delivered_at_ms: int = 0
+    last_error_code: str = ""
+
+
 def _validate_transport_name(value: Any) -> str:
     if not isinstance(value, str) or _TRANSPORT_NAME_RE.fullmatch(value) is None:
         raise DeliveryOutboxError("transport name must be a bounded identifier")
@@ -151,16 +197,25 @@ def _validate_transport_name(value: Any) -> str:
 
 
 def _validate_error_code(value: Any) -> str:
-    if not isinstance(value, str) or len(value) > MAX_ERROR_CODE_LENGTH:
+    if (
+        not isinstance(value, str)
+        or len(value.encode("utf-8")) > MAX_ERROR_CODE_LENGTH
+        or (bool(value) and not value.isprintable())
+    ):
         raise DeliveryOutboxError(
-            f"error_code must be a string no longer than {MAX_ERROR_CODE_LENGTH} chars"
+            "error_code must be printable text no longer than "
+            f"{MAX_ERROR_CODE_LENGTH} UTF-8 bytes"
         )
     return value
 
 
 def _validate_operation_time(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise DeliveryOutboxError(f"{name} must be a positive integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 < value <= MAX_SAFE_INTEGER
+    ):
+        raise DeliveryOutboxError(f"{name} must be a positive safe integer")
     return value
 
 
@@ -172,11 +227,13 @@ class DurableOutbox:
         directory: PathLike,
         *,
         max_pending_records: int = DEFAULT_MAX_PENDING_RECORDS,
+        max_terminal_tombstones: int = DEFAULT_MAX_TERMINAL_TOMBSTONES,
         clock: Optional[Callable[[], int]] = None,
         authorize_ack: Optional[AckAuthorizer] = None,
     ) -> None:
         self._dir = Path(directory)
         self._journal_path = self._dir / "outbox.journal.jsonl"
+        self._tombstone_path = self._dir / "outbox.tombstones.jsonl"
         self._lock_path = self._dir / "outbox.lock"
         self._max_pending = max_pending_records
         if (
@@ -185,11 +242,20 @@ class DurableOutbox:
             or max_pending_records < 1
         ):
             raise ValueError("max_pending_records must be a positive integer")
+        if (
+            isinstance(max_terminal_tombstones, bool)
+            or not isinstance(max_terminal_tombstones, int)
+            or max_terminal_tombstones < 1
+        ):
+            raise ValueError("max_terminal_tombstones must be a positive integer")
+        self._max_tombstones = max_terminal_tombstones
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._authorize_ack = authorize_ack
         self._records: Dict[str, OutboxRecord] = {}
+        self._tombstones: "OrderedDict[str, _OutboxTombstone]" = OrderedDict()
         self._thread_lock = threading.RLock()
         self._journal_stat: Optional[tuple] = None
+        self._tombstone_stat: Optional[tuple] = None
         self._dir.mkdir(parents=True, exist_ok=True)
         with InterProcessLock(self._lock_path):
             self._load()
@@ -200,18 +266,24 @@ class DurableOutbox:
         """Fold the journal. Tolerates a torn final line; corrupts loudly."""
 
         records: Dict[str, OutboxRecord] = {}
+        self._load_tombstones()
         if not self._journal_path.exists():
             self._records = records
             self._journal_stat = None
             return
-        if self._journal_path.stat().st_size > MAX_JOURNAL_BYTES:
+        with open(self._journal_path, "rb") as handle:
+            stat = os.fstat(handle.fileno())
+            if stat.st_size > MAX_JOURNAL_BYTES:
+                raise DeliveryOutboxCorrupt(
+                    f"outbox journal exceeds {MAX_JOURNAL_BYTES} bytes; run compact() "
+                    "before loading (fail closed against disk-exhaustion floods)"
+                )
+            raw = handle.read(MAX_JOURNAL_BYTES + 1)
+        if len(raw) > MAX_JOURNAL_BYTES:
             raise DeliveryOutboxCorrupt(
-                f"outbox journal exceeds {MAX_JOURNAL_BYTES} bytes; run compact() "
-                "before loading (fail closed against disk-exhaustion floods)"
+                "outbox journal grew beyond its hard read limit while loading"
             )
-        stat = self._journal_path.stat()
         self._journal_stat = (stat.st_mtime_ns, stat.st_size)
-        raw = self._journal_path.read_bytes()
         lines = raw.split(b"\n")
         torn_tail = bool(raw) and not raw.endswith(b"\n")
         for index, line in enumerate(lines):
@@ -243,16 +315,15 @@ class DurableOutbox:
         compaction correct across processes.
         """
 
-        try:
-            if not self._journal_path.exists():
-                return
-            stat = self._journal_path.stat()
-        except OSError:
-            return
-        current = (stat.st_mtime_ns, stat.st_size)
-        if current != self._journal_stat:
+        journal_stat = _file_stat(self._journal_path)
+        tombstone_stat = _file_stat(self._tombstone_path)
+        if (
+            journal_stat != self._journal_stat
+            or tombstone_stat != self._tombstone_stat
+        ):
             logger.debug("delivery outbox journal changed on disk; re-folding")
             self._records = {}
+            self._tombstones = OrderedDict()
             self._load()
 
     def _append_locked(self, event: Dict[str, Any]) -> None:
@@ -265,6 +336,13 @@ class DurableOutbox:
 
         line = canonical_json(event) + b"\n"
         with open(self._journal_path, "ab") as handle:
+            handle.seek(0, os.SEEK_END)
+            current_size = handle.tell()
+            if current_size + len(line) > MAX_JOURNAL_BYTES:
+                raise DeliveryOutboxFull(
+                    "outbox journal has insufficient space for the next event; "
+                    "run compact() and retry"
+                )
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
@@ -276,6 +354,87 @@ class DurableOutbox:
                 self._journal_stat = (stat.st_mtime_ns, stat.st_size)
             except OSError:  # pragma: no cover - fstat on our own fd
                 pass
+
+    def _load_tombstones(self) -> None:
+        self._tombstones = OrderedDict()
+        if not self._tombstone_path.exists():
+            self._tombstone_stat = None
+            return
+        with open(self._tombstone_path, "rb") as handle:
+            stat = os.fstat(handle.fileno())
+            if stat.st_size > MAX_TOMBSTONE_FILE_BYTES:
+                raise DeliveryOutboxCorrupt(
+                    "outbox tombstone file exceeds its hard size limit"
+                )
+            raw = handle.read(MAX_TOMBSTONE_FILE_BYTES + 1)
+        if len(raw) > MAX_TOMBSTONE_FILE_BYTES:
+            raise DeliveryOutboxCorrupt(
+                "outbox tombstone file grew beyond its hard read limit while loading"
+            )
+        if not raw.endswith(b"\n") and raw:
+            raise DeliveryOutboxCorrupt("outbox tombstone file has a torn tail")
+        for index, line in enumerate(raw.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line.decode("utf-8"))
+                tombstone = _parse_tombstone(event)
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                raise DeliveryOutboxCorrupt(
+                    f"invalid outbox tombstone line {index}: {exc}"
+                ) from exc
+            if tombstone.message_id in self._tombstones:
+                raise DeliveryOutboxCorrupt("duplicate outbox tombstone message_id")
+            self._tombstones[tombstone.message_id] = tombstone
+        if len(self._tombstones) > self._max_tombstones:
+            raise DeliveryOutboxCorrupt("outbox tombstone count exceeds configured limit")
+        self._tombstone_stat = (stat.st_mtime_ns, stat.st_size)
+
+    def _write_tombstones_locked(
+        self, tombstones: "OrderedDict[str, _OutboxTombstone]"
+    ) -> "OrderedDict[str, _OutboxTombstone]":
+        # Keep a contiguous newest-first retention window. Count alone is not
+        # sufficient because UTF-8 metadata sizes vary; writing a file larger
+        # than our own read ceiling would make the next process fail to start.
+        selected_newest: list[tuple[str, _OutboxTombstone, bytes]] = []
+        selected_bytes = 0
+        for message_id, tombstone in reversed(tombstones.items()):
+            try:
+                validated = _parse_tombstone(_tombstone_dict(tombstone))
+                line = canonical_json(_tombstone_dict(validated)) + b"\n"
+            except (TypeError, ValueError) as exc:
+                raise DeliveryOutboxCorrupt(
+                    f"cannot persist invalid outbox tombstone: {exc}"
+                ) from exc
+            if len(line) > MAX_TOMBSTONE_FILE_BYTES:
+                raise DeliveryOutboxCorrupt(
+                    "one outbox tombstone exceeds the hard file size limit"
+                )
+            if len(selected_newest) >= self._max_tombstones:
+                break
+            if selected_bytes + len(line) > MAX_TOMBSTONE_FILE_BYTES:
+                break
+            selected_newest.append((message_id, validated, line))
+            selected_bytes += len(line)
+
+        selected = OrderedDict(
+            (message_id, tombstone)
+            for message_id, tombstone, _line in reversed(selected_newest)
+        )
+        tmp_path = self._tombstone_path.with_suffix(".jsonl.tmp")
+        try:
+            with open(tmp_path, "wb") as handle:
+                for _message_id, _tombstone, line in reversed(selected_newest):
+                    handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self._tombstone_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        stat = self._tombstone_path.stat()
+        self._tombstone_stat = (stat.st_mtime_ns, stat.st_size)
+        return selected
 
     # ─────────────────────── queries ───────────────────────
 
@@ -317,6 +476,7 @@ class DurableOutbox:
                 for record in self._records.values():
                     counts[record.state] = counts.get(record.state, 0) + 1
                 counts["total"] = len(self._records)
+                counts["compacted_terminal"] = len(self._tombstones)
                 return counts
 
     # ─────────────────────── mutations ───────────────────────
@@ -330,29 +490,57 @@ class DurableOutbox:
         being parked as dead records.
         """
 
-        now = _validate_operation_time(
-            self._clock() if now_ms is None else now_ms, "now_ms"
+        if not isinstance(envelope, TransportEnvelope):
+            raise TransportEnvelopeRejected("envelope must be a TransportEnvelope")
+        # Freeze caller-owned mutable payload/routing data before validation so
+        # the bytes validated below are exactly the bytes persisted.
+        stable_envelope = TransportEnvelope.from_dict(
+            TransportEnvelope.to_dict(envelope)
         )
+        clock_now = _validate_operation_time(self._clock(), "now_ms")
+        requested_now = (
+            clock_now
+            if now_ms is None
+            else _validate_operation_time(now_ms, "now_ms")
+        )
+        now = max(clock_now, requested_now)
         ok, reason = validate_envelope(
-            envelope,
+            stable_envelope,
             now_ms=now,
             require_signature=True,
         )
         if not ok:
             raise TransportEnvelopeRejected(reason)
-        envelope_json = canonical_json(envelope.to_dict()).decode("utf-8")
+        envelope_json = canonical_json(stable_envelope.to_dict()).decode("utf-8")
         if len(envelope_json.encode("utf-8")) > MAX_ENVELOPE_BYTES:
             raise TransportEnvelopeRejected("envelope exceeds the wire byte limit")
         with self._thread_lock:
             with InterProcessLock(self._lock_path):
                 self._refold_if_changed()
-                existing = self._records.get(envelope.message_id)
+                existing = self._records.get(stable_envelope.message_id)
                 if existing is not None:
-                    if existing.envelope_sha256 != envelope_digest(envelope):
+                    if existing.envelope_sha256 != envelope_digest(stable_envelope):
                         raise DeliveryOutboxError(
                             "message_id already bound to different envelope bytes"
                         )
                     return _copy_record(existing)
+                tombstone = self._tombstones.get(stable_envelope.message_id)
+                if tombstone is not None:
+                    if tombstone.envelope_sha256 != envelope_digest(stable_envelope):
+                        raise DeliveryOutboxError(
+                            "message_id tombstone is bound to different envelope bytes"
+                        )
+                    return OutboxRecord(
+                        message_id=stable_envelope.message_id,
+                        envelope_json=envelope_json,
+                        envelope_sha256=tombstone.envelope_sha256,
+                        created_at_ms=stable_envelope.created_at_ms,
+                        expires_at_ms=stable_envelope.expires_at_ms,
+                        state=tombstone.state,
+                        delivered_by=tombstone.delivered_by,
+                        delivered_at_ms=tombstone.delivered_at_ms,
+                        last_error_code=tombstone.last_error_code,
+                    )
                 pending_count = sum(
                     1 for record in self._records.values() if not record.is_terminal
                 )
@@ -362,11 +550,11 @@ class DurableOutbox:
                         f"{self._max_pending}"
                     )
                 record = OutboxRecord(
-                    message_id=envelope.message_id,
+                    message_id=stable_envelope.message_id,
                     envelope_json=envelope_json,
-                    envelope_sha256=envelope_digest(envelope),
-                    created_at_ms=envelope.created_at_ms,
-                    expires_at_ms=envelope.expires_at_ms,
+                    envelope_sha256=envelope_digest(stable_envelope),
+                    created_at_ms=stable_envelope.created_at_ms,
+                    expires_at_ms=stable_envelope.expires_at_ms,
                 )
                 self._append_locked(
                     {
@@ -439,78 +627,185 @@ class DurableOutbox:
         hop count legitimately ACKs the same message identity.
         """
 
-        ok, reason = validate_ack(ack, now_ms=now_ms if now_ms is not None else self._clock())
+        clock_now = _validate_operation_time(self._clock(), "now_ms")
+        requested_now = (
+            clock_now
+            if now_ms is None
+            else _validate_operation_time(now_ms, "now_ms")
+        )
+        now = max(clock_now, requested_now)
+        if not isinstance(ack, DeliveryAck):
+            raise TransportEnvelopeRejected(
+                "invalid delivery ack: ack must be a DeliveryAck"
+            )
+        try:
+            stable_ack = DeliveryAck.from_dict(ack.to_dict())
+        except (AttributeError, TypeError, ValueError):
+            raise TransportEnvelopeRejected(
+                "invalid delivery ack: ACK snapshot could not be created"
+            ) from None
+        ok, reason = validate_ack(stable_ack, now_ms=now)
         if not ok:
             raise TransportEnvelopeRejected(f"invalid delivery ack: {reason}")
-        now = _validate_operation_time(
-            self._clock() if now_ms is None else now_ms, "now_ms"
-        )
+
+        authorizer: Optional[AckAuthorizer] = None
+        authorized_envelope_sha256 = ""
+        authorized_recipient = ""
+        callback_envelope: Optional[TransportEnvelope] = None
         with self._thread_lock:
             with InterProcessLock(self._lock_path):
-                self._refold_if_changed()
-                record = self._records.get(ack.message_id)
-                if record is None:
-                    raise DeliveryOutboxError("ack for unknown message_id")
-                envelope = _record_envelope(record)
-                if not _ack_digest_matches_envelope(ack.envelope_sha256, envelope):
-                    raise DeliveryOutboxError(
-                        "ack envelope_sha256 does not match a valid forwarded envelope"
-                    )
-                if record.state == OUTBOX_STATE_DELIVERED:
-                    if ack.receiver_did != record.delivered_by:
-                        raise DeliveryOutboxError(
-                            "ack receiver does not match the recorded delivery"
-                        )
+                record, envelope, already_delivered = self._validated_ack_target_locked(
+                    stable_ack, now
+                )
+                if already_delivered:
                     return _copy_record(record)
-                if record.state != OUTBOX_STATE_QUEUED:
-                    raise DeliveryOutboxError(
-                        f"cannot acknowledge record in state {record.state}"
-                    )
                 if envelope.recipient.startswith("did:key:"):
-                    if ack.receiver_did != envelope.recipient:
+                    if stable_ack.receiver_did != envelope.recipient:
                         raise DeliveryOutboxError(
                             "ack receiver is not the envelope recipient"
                         )
-                elif self._authorize_ack is None:
-                    raise DeliveryOutboxError(
-                        "ack authorization is required for shared recipients"
+                    return self._commit_ack_locked(record, stable_ack, now)
+                authorizer = self._authorize_ack
+                if authorizer is None:
+                    raise DeliveryAckAuthorizationError(
+                        AuthorizationDecision.deny(
+                            code="ack-authorization-required",
+                            reason="ack authorization is required for shared recipients",
+                        )
                     )
-                else:
-                    try:
-                        allowed, authorization_reason = self._authorize_ack(
-                            ack, envelope
-                        )
-                    except Exception as exc:
-                        raise DeliveryOutboxError(
-                            "ack authorization callback failed"
-                        ) from exc
-                    if not allowed:
-                        raise DeliveryOutboxError(
-                            authorization_reason or "ack receiver is not authorized"
-                        )
-                self._append_locked(
-                    {
-                        "event": "delivered",
-                        "message_id": record.message_id,
-                        "at_ms": now,
-                        "ack_json": canonical_json(ack.to_dict()).decode("utf-8"),
-                    }
+                authorized_envelope_sha256 = record.envelope_sha256
+                authorized_recipient = envelope.recipient
+                callback_envelope = TransportEnvelope.from_dict(envelope.to_dict())
+
+        assert authorizer is not None
+        assert callback_envelope is not None
+        callback_ack = DeliveryAck.from_dict(stable_ack.to_dict())
+        try:
+            raw_authorization = authorizer(callback_ack, callback_envelope)
+        except Exception as exc:
+            logger.warning(
+                "delivery outbox ACK authorization callback failed (%s)",
+                type(exc).__name__,
+            )
+            raise DeliveryAckAuthorizationError(
+                AuthorizationDecision.deny(
+                    code="authorization-callback-failed",
+                    reason="ack authorization callback failed",
+                    retryable=True,
                 )
-                record.state = OUTBOX_STATE_DELIVERED
-                record.delivered_by = ack.receiver_did
-                record.delivered_at_ms = ack.received_at_ms
-                return _copy_record(record)
+            ) from None
+        try:
+            authorization = coerce_authorization_decision(
+                raw_authorization,
+                deny_code="ack-receiver-unauthorized",
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "delivery outbox ACK authorization callback returned an invalid "
+                "decision (%s)",
+                type(exc).__name__,
+            )
+            raise DeliveryAckAuthorizationError(
+                AuthorizationDecision.deny(
+                    code="authorization-decision-invalid",
+                    reason="ack authorization callback returned an invalid decision",
+                )
+            ) from None
+        if not authorization.allowed:
+            raise DeliveryAckAuthorizationError(authorization)
+
+        commit_now = max(
+            now,
+            _validate_operation_time(self._clock(), "now_ms"),
+        )
+        ok, reason = validate_ack(stable_ack, now_ms=commit_now)
+        if not ok:
+            raise TransportEnvelopeRejected(f"invalid delivery ack: {reason}")
+
+        with self._thread_lock:
+            with InterProcessLock(self._lock_path):
+                record, envelope, already_delivered = self._validated_ack_target_locked(
+                    stable_ack, commit_now
+                )
+                if already_delivered:
+                    return _copy_record(record)
+                if (
+                    record.envelope_sha256 != authorized_envelope_sha256
+                    or envelope.recipient != authorized_recipient
+                ):
+                    raise DeliveryOutboxCorrupt(
+                        "ACK authorization target changed before commit"
+                    )
+                return self._commit_ack_locked(record, stable_ack, commit_now)
+
+    def _validated_ack_target_locked(
+        self,
+        ack: DeliveryAck,
+        now: int,
+    ) -> tuple[OutboxRecord, TransportEnvelope, bool]:
+        """Return the current ACK target while the caller owns both locks."""
+
+        self._refold_if_changed()
+        record = self._records.get(ack.message_id)
+        if record is None:
+            raise DeliveryOutboxError("ack for unknown message_id")
+        if record.state == OUTBOX_STATE_QUEUED and record.expires_at_ms <= now:
+            self._transition_expired(record, now)
+            raise DeliveryOutboxError("cannot acknowledge expired record")
+        envelope = _record_envelope(record)
+        if ack.received_at_ms > envelope.expires_at_ms:
+            raise DeliveryOutboxError("ack received_at_ms is after envelope expiry")
+        if ack.received_at_ms + MAX_CLOCK_SKEW_MS < envelope.created_at_ms:
+            raise DeliveryOutboxError(
+                "ack received_at_ms predates envelope creation beyond clock skew"
+            )
+        if not _ack_digest_matches_envelope(ack.envelope_sha256, envelope):
+            raise DeliveryOutboxError(
+                "ack envelope_sha256 does not match a valid forwarded envelope"
+            )
+        if record.state == OUTBOX_STATE_DELIVERED:
+            if ack.receiver_did != record.delivered_by:
+                raise DeliveryOutboxError(
+                    "ack receiver does not match the recorded delivery"
+                )
+            return record, envelope, True
+        if record.state != OUTBOX_STATE_QUEUED:
+            raise DeliveryOutboxError(
+                f"cannot acknowledge record in state {record.state}"
+            )
+        return record, envelope, False
+
+    def _commit_ack_locked(
+        self,
+        record: OutboxRecord,
+        ack: DeliveryAck,
+        now: int,
+    ) -> OutboxRecord:
+        """Persist an already-validated ACK while the caller owns both locks."""
+
+        self._append_locked(
+            {
+                "event": "delivered",
+                "message_id": record.message_id,
+                "at_ms": now,
+                "ack_json": canonical_json(ack.to_dict()).decode("utf-8"),
+            }
+        )
+        record.state = OUTBOX_STATE_DELIVERED
+        record.delivered_by = ack.receiver_did
+        record.delivered_at_ms = ack.received_at_ms
+        return _copy_record(record)
 
     def compact(self) -> int:
-        """Rewrite the journal keeping only pending records; return kept count.
+        """Rewrite live records and retain bounded terminal tombstones.
 
-        Terminal records (delivered/rejected/expired) leave the journal. The
-        journal is re-folded from disk first, so records another process
-        appended are never dropped. The rewrite is atomic: write a fresh
-        journal to a temp file, fsync, then replace, under the cross-process
-        lock.
+        Tombstones preserve enqueue idempotency for the most recent
+        ``max_terminal_tombstones`` compacted terminal records. Older entries
+        deliberately age out, so delivery remains bounded at-least-once rather
+        than claiming infinite-history exactly-once semantics.
         """
 
+        now = _validate_operation_time(self._clock(), "now_ms")
         with self._thread_lock:
             # refold must happen INSIDE the cross-process lock: refolding
             # before acquiring it leaves a window where another process
@@ -523,34 +818,55 @@ class DurableOutbox:
                     for record in self._records.values()
                     if not record.is_terminal
                 ]
+                tombstones = OrderedDict(self._tombstones)
+                for record in self._records.values():
+                    if not record.is_terminal:
+                        continue
+                    tombstones.pop(record.message_id, None)
+                    tombstones[record.message_id] = _OutboxTombstone(
+                        message_id=record.message_id,
+                        envelope_sha256=record.envelope_sha256,
+                        state=record.state,
+                        compacted_at_ms=now,
+                        delivered_by=record.delivered_by,
+                        delivered_at_ms=record.delivered_at_ms,
+                        last_error_code=record.last_error_code,
+                    )
+                # Write tombstones first. A crash before the live-journal
+                # replace leaves duplicate terminal evidence, never amnesia.
+                tombstones = self._write_tombstones_locked(tombstones)
                 tmp_path = self._journal_path.with_suffix(".jsonl.tmp")
-                with open(tmp_path, "wb") as handle:
-                    for record in keep:
-                        handle.write(canonical_json(
-                            {
-                                "event": "enqueued",
-                                "message_id": record.message_id,
-                                "envelope_json": record.envelope_json,
-                                "envelope_sha256": record.envelope_sha256,
-                                "created_at_ms": record.created_at_ms,
-                                "expires_at_ms": record.expires_at_ms,
-                                "at_ms": record.created_at_ms,
-                            }
-                        ) + b"\n")
-                        for attempt in record.attempts:
-                            event: Dict[str, Any] = {
-                                "event": "attempt",
-                                "message_id": record.message_id,
-                                "transport": attempt.transport,
-                                "at_ms": attempt.at_ms,
-                                "outcome": attempt.outcome,
-                            }
-                            if attempt.error_code:
-                                event["error_code"] = attempt.error_code
-                            handle.write(canonical_json(event) + b"\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp_path, self._journal_path)
+                try:
+                    with open(tmp_path, "wb") as handle:
+                        for record in keep:
+                            handle.write(canonical_json(
+                                {
+                                    "event": "enqueued",
+                                    "message_id": record.message_id,
+                                    "envelope_json": record.envelope_json,
+                                    "envelope_sha256": record.envelope_sha256,
+                                    "created_at_ms": record.created_at_ms,
+                                    "expires_at_ms": record.expires_at_ms,
+                                    "at_ms": record.created_at_ms,
+                                }
+                            ) + b"\n")
+                            for attempt in record.attempts:
+                                event: Dict[str, Any] = {
+                                    "event": "attempt",
+                                    "message_id": record.message_id,
+                                    "transport": attempt.transport,
+                                    "at_ms": attempt.at_ms,
+                                    "outcome": attempt.outcome,
+                                }
+                                if attempt.error_code:
+                                    event["error_code"] = attempt.error_code
+                                handle.write(canonical_json(event) + b"\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(tmp_path, self._journal_path)
+                except OSError:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
                 # fingerprint captured INSIDE the lock (round-4 bug Q)
                 try:
                     stat = os.stat(self._journal_path)
@@ -558,6 +874,7 @@ class DurableOutbox:
                 except OSError:  # pragma: no cover - stat after our own replace
                     pass
             self._records = {record.message_id: record for record in keep}
+            self._tombstones = tombstones
             return len(keep)
 
     # ─────────────────────── internals ───────────────────────
@@ -710,6 +1027,81 @@ def _fold_event(records: Dict[str, OutboxRecord], event: Dict[str, Any]) -> None
         record.state = OUTBOX_STATE_EXPIRED
         return
     raise DeliveryOutboxCorrupt(f"unhandled journal event: {kind}")  # pragma: no cover
+
+
+def _tombstone_dict(tombstone: _OutboxTombstone) -> Dict[str, Any]:
+    return {
+        "message_id": tombstone.message_id,
+        "envelope_sha256": tombstone.envelope_sha256,
+        "state": tombstone.state,
+        "compacted_at_ms": tombstone.compacted_at_ms,
+        "delivered_by": tombstone.delivered_by,
+        "delivered_at_ms": tombstone.delivered_at_ms,
+        "last_error_code": tombstone.last_error_code,
+    }
+
+
+def _parse_tombstone(value: Any) -> _OutboxTombstone:
+    if not isinstance(value, dict) or frozenset(value) != _TOMBSTONE_FIELDS:
+        raise ValueError("tombstone has missing or unknown fields")
+    for field_name in ("message_id", "envelope_sha256"):
+        if (
+            not isinstance(value[field_name], str)
+            or _MESSAGE_ID_RE.fullmatch(value[field_name]) is None
+        ):
+            raise ValueError(f"tombstone {field_name} is invalid")
+    state = value["state"]
+    if state not in OUTBOX_TERMINAL_STATES:
+        raise ValueError("tombstone state is not terminal")
+    for field_name in ("compacted_at_ms", "delivered_at_ms"):
+        field_value = value[field_name]
+        if (
+            isinstance(field_value, bool)
+            or not isinstance(field_value, int)
+            or field_value < 0
+            or field_value > MAX_SAFE_INTEGER
+        ):
+            raise ValueError(f"tombstone {field_name} is invalid")
+    if value["compacted_at_ms"] < 1:
+        raise ValueError("tombstone compacted_at_ms is invalid")
+    delivered_by = value["delivered_by"]
+    if (
+        not isinstance(delivered_by, str)
+        or len(delivered_by.encode("utf-8")) > 512
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in delivered_by)
+    ):
+        raise ValueError("tombstone delivered_by is invalid")
+    last_error_code = value["last_error_code"]
+    try:
+        _validate_error_code(last_error_code)
+    except DeliveryOutboxError as exc:
+        raise ValueError("tombstone last_error_code is invalid") from exc
+    if state == OUTBOX_STATE_DELIVERED:
+        if not delivered_by or value["delivered_at_ms"] < 1:
+            raise ValueError("delivered tombstone is missing receiver evidence")
+        try:
+            decode_ed25519_did_key(delivered_by)
+        except (DIDKeyError, TypeError, ValueError) as exc:
+            raise ValueError("delivered tombstone receiver DID is invalid") from exc
+    elif delivered_by or value["delivered_at_ms"] != 0:
+        raise ValueError("non-delivered tombstone carries receiver evidence")
+    return _OutboxTombstone(
+        message_id=value["message_id"],
+        envelope_sha256=value["envelope_sha256"],
+        state=state,
+        compacted_at_ms=value["compacted_at_ms"],
+        delivered_by=delivered_by,
+        delivered_at_ms=value["delivered_at_ms"],
+        last_error_code=last_error_code,
+    )
+
+
+def _file_stat(path: Path) -> Optional[tuple[int, int]]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 def _fold_transport(event: Mapping[str, Any]) -> str:

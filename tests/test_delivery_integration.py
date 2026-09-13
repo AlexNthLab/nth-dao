@@ -244,8 +244,7 @@ class TestFileBundlePipeline:
         receiver = FileBundleTransport(
             exchange, bob_identity, state_dir=exchange / ".state-bob", clock=lambda: NOW_MS
         )
-        for polled in receiver.poll():
-            decision = bob_inbox.accept(polled, now_ms=NOW_MS + 3_600_000)
+        for decision in receiver.poll_into(bob_inbox):
             assert decision.accepted, decision.reason
             ack = sign_ack(
                 bob_identity,

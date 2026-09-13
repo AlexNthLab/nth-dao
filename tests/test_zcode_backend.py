@@ -773,6 +773,9 @@ def test_zcode_model_attestation_rejects_invalid_session_id() -> None:
 
 def test_zcode_timeout_terminates_windows_process_tree(monkeypatch, tmp_path: Path) -> None:
     taskkill_calls: list[list[str]] = []
+    guard_closed = False
+    popen_kwargs = {}
+    resumed = False
 
     class Process:
         pid = 4321
@@ -796,13 +799,31 @@ def test_zcode_timeout_terminates_windows_process_tree(monkeypatch, tmp_path: Pa
 
     process = Process()
 
+    class Guard:
+        def close(self) -> None:
+            nonlocal guard_closed
+            guard_closed = True
+
     def fake_run(argv, **_kwargs):
         taskkill_calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0)
 
-    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+    def fake_popen(*_args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return process
+
+    def fake_resume(candidate):
+        nonlocal resumed
+        assert candidate is process
+        resumed = True
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(dummy_agent.sys, "platform", "win32")
+    monkeypatch.setattr(
+        dummy_agent, "attach_process_tree_guard", lambda candidate: Guard()
+    )
+    monkeypatch.setattr(dummy_agent, "resume_suspended_process", fake_resume)
 
     with pytest.raises(subprocess.TimeoutExpired):
         dummy_agent._ZCodeCliAskBackend._run_cli(
@@ -814,6 +835,273 @@ def test_zcode_timeout_terminates_windows_process_tree(monkeypatch, tmp_path: Pa
 
     assert taskkill_calls == [["taskkill", "/PID", "4321", "/T", "/F"]]
     assert process.killed is True
+    assert guard_closed is True
+    assert resumed is True
+    assert (
+        popen_kwargs["creationflags"]
+        & dummy_agent.WINDOWS_CREATE_SUSPENDED
+    )
+
+
+def test_zcode_closes_process_tree_guard_after_success(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        pid = 4321
+        returncode = 0
+
+        @staticmethod
+        def communicate(*, timeout):
+            assert timeout == 1.0
+            return '{"response":"ok"}', ""
+
+    class Guard:
+        def close(self) -> None:
+            events.append("guard-closed")
+
+    process = Process()
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        dummy_agent, "attach_process_tree_guard", lambda candidate: Guard()
+    )
+    monkeypatch.setattr(
+        dummy_agent,
+        "resume_suspended_process",
+        lambda candidate: events.append("resumed"),
+    )
+
+    result = dummy_agent._ZCodeCliAskBackend._run_cli(
+        ["zcode"],
+        timeout=1.0,
+        env={"PATH": "test"},
+        cwd=str(tmp_path),
+        process_started=lambda candidate, guard: events.append("registered"),
+        process_finished=lambda candidate, guard: events.append("unregistered"),
+    )
+
+    assert result.returncode == 0
+    assert events == ["resumed", "registered", "guard-closed", "unregistered"]
+
+
+def test_zcode_unregisters_process_when_guard_close_fails(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        pid = 4321
+        returncode = 0
+
+        @staticmethod
+        def communicate(*, timeout):
+            return '{"response":"ok"}', ""
+
+    class Guard:
+        def close(self) -> None:
+            events.append("guard-close-failed")
+            raise OSError("simulated close failure")
+
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: Process())
+    monkeypatch.setattr(
+        dummy_agent, "attach_process_tree_guard", lambda candidate: Guard()
+    )
+    monkeypatch.setattr(dummy_agent, "resume_suspended_process", lambda candidate: None)
+
+    with pytest.raises(OSError, match="simulated close failure"):
+        dummy_agent._ZCodeCliAskBackend._run_cli(
+            ["zcode"],
+            timeout=1.0,
+            env={"PATH": "test"},
+            cwd=str(tmp_path),
+            process_started=lambda candidate, guard: events.append("registered"),
+            process_finished=lambda candidate, guard: events.append("unregistered"),
+        )
+
+    assert events == ["registered", "guard-close-failed", "unregistered"]
+
+
+def test_zcode_cleanup_failure_does_not_mask_execution_failure(
+    monkeypatch, tmp_path: Path, caplog,
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        pid = 4321
+        returncode = None
+
+        @staticmethod
+        def communicate(*, timeout):
+            raise subprocess.TimeoutExpired("zcode", timeout)
+
+        @staticmethod
+        def poll():
+            return None
+
+    class Guard:
+        def close(self) -> None:
+            events.append("guard-close-failed")
+            raise OSError("simulated close failure")
+
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: Process())
+    monkeypatch.setattr(
+        dummy_agent, "attach_process_tree_guard", lambda candidate: Guard()
+    )
+    monkeypatch.setattr(dummy_agent, "resume_suspended_process", lambda candidate: None)
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_terminate_process_tree",
+        classmethod(lambda cls, candidate: True),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        dummy_agent._ZCodeCliAskBackend._run_cli(
+            ["zcode"],
+            timeout=1.0,
+            env={"PATH": "test"},
+            cwd=str(tmp_path),
+            process_started=lambda candidate, guard: events.append("registered"),
+            process_finished=lambda candidate, guard: events.append("unregistered"),
+        )
+
+    assert events == ["registered", "guard-close-failed", "unregistered"]
+    assert "primary execution failure (OSError)" in caplog.text
+
+
+def test_zcode_reap_pipe_failure_does_not_mask_timeout(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    class Process:
+        pid = 4321
+        returncode = None
+
+        def __init__(self) -> None:
+            self.communicate_calls = 0
+
+        def communicate(self, *, timeout):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired("zcode", timeout)
+            raise OSError("pipe closed during reap")
+
+        @staticmethod
+        def poll():
+            return None
+
+    class Guard:
+        @staticmethod
+        def close() -> None:
+            return None
+
+    process = Process()
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        dummy_agent, "attach_process_tree_guard", lambda candidate: Guard()
+    )
+    monkeypatch.setattr(dummy_agent, "resume_suspended_process", lambda candidate: None)
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_terminate_process_tree",
+        classmethod(lambda cls, candidate: True),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        dummy_agent._ZCodeCliAskBackend._run_cli(
+            ["zcode"], timeout=1.0, env={"PATH": "test"}, cwd=str(tmp_path),
+        )
+
+    assert process.communicate_calls == 2
+
+
+@pytest.mark.parametrize("failure_stage", ["attach", "resume"])
+def test_zcode_containment_setup_failure_is_fail_closed(
+    monkeypatch, tmp_path: Path, failure_stage: str,
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        pid = 4321
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    class Guard:
+        def terminate(self) -> bool:
+            events.append("guard-terminated")
+            return True
+
+        def close(self) -> None:
+            events.append("guard-closed")
+
+    process = Process()
+
+    def fake_attach(candidate):
+        assert candidate is process
+        events.append("attach")
+        if failure_stage == "attach":
+            raise OSError("simulated attach failure")
+        return Guard()
+
+    def fake_resume(candidate):
+        assert candidate is process
+        events.append("resume")
+        raise OSError("simulated resume failure")
+
+    def fake_terminate(_cls, candidate):
+        assert candidate is process
+        events.append("fallback-kill")
+        return True
+
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(dummy_agent.sys, "platform", "win32")
+    monkeypatch.setattr(dummy_agent, "attach_process_tree_guard", fake_attach)
+    monkeypatch.setattr(dummy_agent, "resume_suspended_process", fake_resume)
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_terminate_process_tree",
+        classmethod(fake_terminate),
+    )
+
+    with pytest.raises(RuntimeError, match="containment could not be established"):
+        dummy_agent._ZCodeCliAskBackend._run_cli(
+            ["zcode"], timeout=1.0, env={"PATH": "test"}, cwd=str(tmp_path),
+        )
+
+    if failure_stage == "attach":
+        assert events == ["attach", "fallback-kill"]
+    else:
+        assert events == [
+            "attach", "resume", "guard-terminated", "fallback-kill", "guard-closed",
+        ]
+
+
+def _windows_process_is_running(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+        return int(exit_code.value) == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows process-tree test")
@@ -831,7 +1119,7 @@ def test_zcode_timeout_reaps_real_windows_child_process(tmp_path: Path) -> None:
     with pytest.raises(subprocess.TimeoutExpired):
         dummy_agent._ZCodeCliAskBackend._run_cli(
             [sys.executable, "-c", parent_program],
-            timeout=1.0,
+            timeout=3.0,
             env=dict(os.environ),
             cwd=str(tmp_path),
         )
@@ -840,26 +1128,15 @@ def test_zcode_timeout_reaps_real_windows_child_process(tmp_path: Path) -> None:
         int(value) for value in pid_file.read_text(encoding="utf-8").split()
     )
 
-    def is_running(pid: int) -> bool:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5.0,
-            check=False,
-        )
-        return f'"{pid}"' in result.stdout
-
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and (
-        is_running(parent_pid) or is_running(child_pid)
+        _windows_process_is_running(parent_pid)
+        or _windows_process_is_running(child_pid)
     ):
         time.sleep(0.05)
 
-    assert not is_running(parent_pid)
-    assert not is_running(child_pid)
+    assert not _windows_process_is_running(parent_pid)
+    assert not _windows_process_is_running(child_pid)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows process-tree test")
@@ -879,25 +1156,18 @@ def test_zcode_cancel_confirms_real_windows_child_process_exit(tmp_path: Path) -
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         cwd=str(tmp_path),
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | dummy_agent.WINDOWS_CREATE_SUSPENDED
+        ),
     )
+    process_tree_guard = dummy_agent.attach_process_tree_guard(process)
+    dummy_agent.resume_suspended_process(process)
     backend = dummy_agent._ZCodeCliAskBackend()
     job_id = "f" * 32
 
-    def is_running(pid: int) -> bool:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5.0,
-            check=False,
-        )
-        return f'"{pid}"' in result.stdout
-
     try:
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + 15.0
         while not pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert pid_file.exists()
@@ -908,7 +1178,7 @@ def test_zcode_cancel_confirms_real_windows_child_process_exit(tmp_path: Path) -
             {"prompt": "cancel real tree", "agent_link_job_id": job_id},
             30.0,
         )
-        backend._register_active_process(process)
+        backend._register_active_process(process, process_tree_guard)
 
         outcome = backend.cancel(job_id)
 
@@ -917,18 +1187,79 @@ def test_zcode_cancel_confirms_real_windows_child_process_exit(tmp_path: Path) -
         assert outcome["termination_confirmed"] is True
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline and (
-            is_running(parent_pid) or is_running(child_pid)
+            _windows_process_is_running(parent_pid)
+            or _windows_process_is_running(child_pid)
         ):
             time.sleep(0.05)
-        assert not is_running(parent_pid)
-        assert not is_running(child_pid)
+        assert not _windows_process_is_running(parent_pid)
+        assert not _windows_process_is_running(child_pid)
     finally:
-        backend._clear_active_process(process)
+        backend._clear_active_process(process, process_tree_guard)
+        process_tree_guard.close()
         if process.poll() is None:
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True,
-                timeout=5.0,
+                timeout=15.0,
+                check=False,
+            )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows process-tree test")
+def test_windows_job_reaps_child_when_owner_process_crashes(tmp_path: Path) -> None:
+    pid_file = tmp_path / "crash-owned-child.pid"
+    child_program = (
+        "import os,pathlib,time; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()),encoding='utf-8'); "
+        "time.sleep(60)"
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    owner_program = f"""
+import os
+import subprocess
+import sys
+import time
+sys.path.insert(0, {str(repo_root)!r})
+from nth_dao.util.process_tree import (
+    WINDOWS_CREATE_SUSPENDED,
+    attach_process_tree_guard,
+    resume_suspended_process,
+)
+p = subprocess.Popen(
+    [sys.executable, "-c", {child_program!r}],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    creationflags=WINDOWS_CREATE_SUSPENDED,
+)
+guard = attach_process_tree_guard(p)
+resume_suspended_process(p)
+deadline = time.monotonic() + 5
+while not os.path.exists({str(pid_file)!r}) and time.monotonic() < deadline:
+    time.sleep(0.02)
+os._exit(17 if os.path.exists({str(pid_file)!r}) else 18)
+"""
+
+    owner = subprocess.run(
+        [sys.executable, "-c", owner_program],
+        cwd=str(repo_root),
+        timeout=20.0,
+        check=False,
+    )
+    assert owner.returncode == 17
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and _windows_process_is_running(child_pid):
+            time.sleep(0.05)
+        assert not _windows_process_is_running(child_pid)
+    finally:
+        if _windows_process_is_running(child_pid):
+            subprocess.run(
+                ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15.0,
                 check=False,
             )
 
@@ -1030,7 +1361,51 @@ def test_zcode_failure_redacts_explicit_secret(tmp_path: Path, monkeypatch) -> N
         dummy_agent._ZCodeCliAskBackend().ask({"prompt": "audit"}, 30.0)
 
     assert secret not in str(exc_info.value)
-    assert "[REDACTED]" in str(exc_info.value)
+    assert "inspect local ZCode logs" in str(exc_info.value)
+
+
+def test_zcode_rate_limit_failure_never_exposes_provider_diagnostic(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    local_path = r"C:\Users\operator\private\zcode.cjs"
+    cookie = "private-upstream-cookie"
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = (
+            "Error: Turn execution failed at "
+            f"{local_path}; providerCode: '1310'; type: 'rate_limit_error'; "
+            f"set-cookie: session={cookie}"
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NTH_ZCODE_API_KEY", "configured")
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_resolve_launcher",
+        classmethod(lambda cls: ["zcode"]),
+    )
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_cli_contract_preflight",
+        classmethod(lambda cls, launcher: (True, "", "zcode 0.16.5")),
+    )
+    monkeypatch.setattr(
+        dummy_agent._ZCodeCliAskBackend,
+        "_run_cli",
+        classmethod(lambda cls, *_args, **_kwargs: Result()),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dummy_agent._ZCodeCliAskBackend().ask({"prompt": "audit"}, 30.0)
+
+    public_error = str(exc_info.value)
+    assert "usage limit reached" in public_error
+    assert "Hermes fallback is disabled" in public_error
+    assert local_path not in public_error
+    assert cookie not in public_error
+    assert "set-cookie" not in public_error
 
 
 def test_zcode_json_error_payload_redacts_explicit_secret(monkeypatch) -> None:
@@ -1043,7 +1418,27 @@ def test_zcode_json_error_payload_redacts_explicit_secret(monkeypatch) -> None:
         )
 
     assert secret not in str(exc_info.value)
-    assert "[REDACTED]" in str(exc_info.value)
+    assert "provider turn failed" in str(exc_info.value)
+
+
+def test_zcode_json_failure_never_exposes_untrusted_provider_detail() -> None:
+    local_path = r"C:\Users\operator\private\zcode.cjs"
+    cookie = "private-structured-cookie"
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dummy_agent._ZCodeCliAskBackend._parse_response(json.dumps({
+            "status": "failed",
+            "error": (
+                f"provider failed at {local_path}; "
+                f"set-cookie: session={cookie}"
+            ),
+        }))
+
+    public_error = str(exc_info.value)
+    assert "provider turn failed" in public_error
+    assert local_path not in public_error
+    assert cookie not in public_error
+    assert "set-cookie" not in public_error
 
 
 def test_zcode_diagnostic_redacts_unknown_bearer_json_and_plain_secrets() -> None:

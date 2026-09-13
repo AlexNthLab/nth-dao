@@ -236,10 +236,10 @@ class AgentLinkStore:
                     channel_id=str(channel_id or "")[:200],
                     request_message_id=str(request_message_id or "")[:200],
                 )
+                self._save(job)
                 self._jobs[job.job_id] = job
                 if idempotency_key:
                     self._by_idempotency[lookup] = job.job_id
-                self._save(job)
                 return job
 
     def get(self, job_id: str) -> Optional[LinkJob]:
@@ -325,8 +325,8 @@ class AgentLinkStore:
                     late_result_error=current.late_result_error,
                     late_result_truncated=current.late_result_truncated,
                 )
-                self._jobs[updated.job_id] = updated
                 self._save(updated)
+                self._jobs[updated.job_id] = updated
                 return updated
 
     def _path(self, job_id: str) -> Optional[Path]:
@@ -337,7 +337,7 @@ class AgentLinkStore:
     def _save(self, job: LinkJob) -> None:
         path = self._path(job.job_id)
         if path is not None:
-            atomic_write_json(path, job.to_dict())
+            atomic_write_json(path, job.to_dict(), durable=True)
 
     def _job_from_data(self, data: Any) -> Optional[LinkJob]:
         if not isinstance(data, dict):
@@ -434,8 +434,8 @@ class AgentLinkStore:
                         "provider_cancel_detail": str(detail or "")[:2000],
                     }
                 )
-                self._jobs[updated.job_id] = updated
                 self._save(updated)
+                self._jobs[updated.job_id] = updated
                 return updated
 
     def record_cancelled_late_result(self, job_id: str, outcome: Any) -> LinkJob:
@@ -478,18 +478,22 @@ class AgentLinkStore:
                         self.root / "agent_links" / "quarantine"
                         / f"{safe_id(current.job_id)}.json"
                     )
-                    atomic_write_json(evidence_path, {
-                        "schema_version": 1,
-                        "job_id": current.job_id,
-                        "agent_id": current.agent_id,
-                        "agent_did": current.agent_did,
-                        "recorded_at": recorded_at,
-                        "response": response,
-                        "response_truncated": response_truncated,
-                        "response_sha256": response_sha256,
-                        "receipt_id": receipt_id,
-                        "error": error,
-                    })
+                    atomic_write_json(
+                        evidence_path,
+                        {
+                            "schema_version": 1,
+                            "job_id": current.job_id,
+                            "agent_id": current.agent_id,
+                            "agent_did": current.agent_did,
+                            "recorded_at": recorded_at,
+                            "response": response,
+                            "response_truncated": response_truncated,
+                            "response_sha256": response_sha256,
+                            "receipt_id": receipt_id,
+                            "error": error,
+                        },
+                        durable=True,
+                    )
                 updated = LinkJob(
                     **{
                         **current.to_dict(),
@@ -501,8 +505,8 @@ class AgentLinkStore:
                         "late_result_truncated": response_truncated,
                     }
                 )
-                self._jobs[updated.job_id] = updated
                 self._save(updated)
+                self._jobs[updated.job_id] = updated
                 return updated
 
     def _read_disk_jobs(self) -> Dict[str, LinkJob]:
@@ -567,8 +571,8 @@ class AgentLinkStore:
                         receipt_id="",
                     )
                 for job_id, job in recovered.items():
-                    self._jobs[job_id] = job
                     self._save(job)
+                    self._jobs[job_id] = job
                 self._rebuild_idempotency_index()
 
     def reconcile_completed(
@@ -637,8 +641,8 @@ class AgentLinkStore:
                     response_truncated=response_truncated,
                     receipt_id=str(receipt_id or "")[:200],
                 )
-                self._jobs[updated.job_id] = updated
                 self._save(updated)
+                self._jobs[updated.job_id] = updated
                 return updated
 
 

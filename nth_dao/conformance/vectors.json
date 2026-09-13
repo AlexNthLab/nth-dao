@@ -128,7 +128,9 @@
         "expected_ack_sha256": "sha256:4c5854ce8cd5b484756da69519bfd67bf0754ec2fc2738b004289b9df3e42b55",
         "expected_canonical_hex": "7b22656e76656c6f70655f736861323536223a227368613235363a32323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232222c226b696e64223a2264656c69766572792e61636b222c226d6573736167655f6964223a227368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c2270726f746f636f6c223a226e74682d64656c69766572792d61636b222c2272656365697665645f61745f6d73223a313735303030303030323030302c2272656365697665725f646964223a226469643a6b65793a7a364d6b6e4763336f634873337a6450694a626e616171446935384e476234706b315370395778577566755853647866222c227369676e6174757265223a225f436d6f67796343776a75673435646b4a65524a766563635665666a7041526c33554e596650554e4d6d6f52484e2d7463574c694537337541537963475f6a72545a68475f756c5f6b42745066445770354879464367222c22737461747573223a227265636569766564222c2276657273696f6e223a317d",
         "expected_reason": "ok",
+        "expected_signing_body_hex": "7b22656e76656c6f70655f736861323536223a227368613235363a32323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232222c226b696e64223a2264656c69766572792e61636b222c226d6573736167655f6964223a227368613235363a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c2270726f746f636f6c223a226e74682d64656c69766572792d61636b222c2272656365697665645f61745f6d73223a313735303030303030323030302c2272656365697665725f646964223a226469643a6b65793a7a364d6b6e4763336f634873337a6450694a626e616171446935384e476234706b315370395778577566755853647866222c22737461747573223a227265636569766564222c2276657273696f6e223a317d",
         "expected_valid": true,
+        "expected_verify_key_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
         "id": "delivery-ack-001",
         "input": {
           "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
@@ -194,6 +196,114 @@
           "signature": "_CmogycCwjug45dkJeRJveccVefjpARl3UNYfPUNMmoRHN-tcWLiE73uASycG_jrTZhG_ul_kBtPfDWp5HyFCg",
           "status": "received",
           "version": 2
+        },
+        "verification_time_ms": 1750000003000
+      },
+      {
+        "description": "Replacing the receiver DID invalidates the receiver signature",
+        "expected_reason": "ack signature verification failed",
+        "expected_valid": false,
+        "id": "delivery-ack-005",
+        "input": {
+          "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "kind": "delivery.ack",
+          "message_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "protocol": "nth-delivery-ack",
+          "received_at_ms": 1750000002000,
+          "receiver_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "signature": "_CmogycCwjug45dkJeRJveccVefjpARl3UNYfPUNMmoRHN-tcWLiE73uASycG_jrTZhG_ul_kBtPfDWp5HyFCg",
+          "status": "received",
+          "version": 1
+        },
+        "verification_time_ms": 1750000003000
+      },
+      {
+        "description": "A non-canonical short signature encoding fails closed",
+        "expected_reason": "ack signature invalid",
+        "expected_valid": false,
+        "id": "delivery-ack-006",
+        "input": {
+          "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "kind": "delivery.ack",
+          "message_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "protocol": "nth-delivery-ack",
+          "received_at_ms": 1750000002000,
+          "receiver_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signature": "AA",
+          "status": "received",
+          "version": 1
+        },
+        "verification_time_ms": 1750000003000
+      },
+      {
+        "description": "Boolean protocol versions are not integers",
+        "expected_reason": "unsupported ack version",
+        "expected_valid": false,
+        "id": "delivery-ack-007",
+        "input": {
+          "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "kind": "delivery.ack",
+          "message_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "protocol": "nth-delivery-ack",
+          "received_at_ms": 1750000002000,
+          "receiver_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signature": "_CmogycCwjug45dkJeRJveccVefjpARl3UNYfPUNMmoRHN-tcWLiE73uASycG_jrTZhG_ul_kBtPfDWp5HyFCg",
+          "status": "received",
+          "version": true
+        },
+        "verification_time_ms": 1750000003000
+      },
+      {
+        "description": "Unknown fields fail the closed wire shape",
+        "expected_reason": "ack has missing or unknown fields",
+        "expected_valid": false,
+        "id": "delivery-ack-008",
+        "input": {
+          "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "extra": "forbidden",
+          "kind": "delivery.ack",
+          "message_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "protocol": "nth-delivery-ack",
+          "received_at_ms": 1750000002000,
+          "receiver_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signature": "_CmogycCwjug45dkJeRJveccVefjpARl3UNYfPUNMmoRHN-tcWLiE73uASycG_jrTZhG_ul_kBtPfDWp5HyFCg",
+          "status": "received",
+          "version": 1
+        },
+        "verification_time_ms": 1750000003000
+      },
+      {
+        "description": "Missing signature field fails the closed wire shape",
+        "expected_reason": "ack has missing or unknown fields",
+        "expected_valid": false,
+        "id": "delivery-ack-009",
+        "input": {
+          "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "kind": "delivery.ack",
+          "message_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "protocol": "nth-delivery-ack",
+          "received_at_ms": 1750000002000,
+          "receiver_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "status": "received",
+          "version": 1
+        },
+        "verification_time_ms": 1750000003000
+      },
+      {
+        "description": "A substituted protocol name fails closed",
+        "expected_reason": "wrong ack protocol",
+        "expected_valid": false,
+        "id": "delivery-ack-010",
+        "input": {
+          "envelope_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "kind": "delivery.ack",
+          "message_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "protocol": "other-protocol",
+          "received_at_ms": 1750000002000,
+          "receiver_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signature": "_CmogycCwjug45dkJeRJveccVefjpARl3UNYfPUNMmoRHN-tcWLiE73uASycG_jrTZhG_ul_kBtPfDWp5HyFCg",
+          "status": "received",
+          "version": 1
         },
         "verification_time_ms": 1750000003000
       }

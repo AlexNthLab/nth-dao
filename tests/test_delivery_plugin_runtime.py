@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 import time
 from pathlib import Path
 
@@ -9,6 +11,7 @@ import pytest
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import sign_ack
+from nth_dao.delivery.authorization import AuthorizationDecision
 from nth_dao.delivery.envelope import sign_envelope
 from nth_dao.delivery.inbox import DeliveryInbox
 from nth_dao.delivery.outbox import OUTBOX_STATE_DELIVERED, DurableOutbox
@@ -23,12 +26,14 @@ from nth_dao.plugins.builtin.loopback_transport import (
 )
 from nth_dao.plugins.host import (
     InvocationAuthority,
+    PluginAuthorizationError,
     PluginHost,
     PluginHostPolicy,
     PluginInvocationError,
 )
 from nth_dao.plugins.transport import (
     TRANSPORT_CAPABILITY_ID,
+    TRANSPORT_MAX_SAFE_INTEGER,
     transport_envelope_digest,
 )
 
@@ -133,9 +138,52 @@ def test_plugin_runtime_persists_before_transport_ack_and_applies_signed_ack(
     assert empty.decisions == ()
 
 
+def test_plugin_runtime_sends_exact_persisted_outbox_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, binding = _enabled_binding(tmp_path)
+    alice = AgentIdentity.generate(label="alice")
+    bob = AgentIdentity.generate(label="bob")
+    route = loopback_route_id(bob.as_did())
+    runtime = _runtime(
+        tmp_path,
+        name="stable-send",
+        identity=alice,
+        binding=binding,
+        routes=(route,),
+    )
+    envelope = _envelope(alice, bob.as_did())
+    original_enqueue = runtime.outbox.enqueue
+    captured = {}
+
+    def enqueue_then_mutate(candidate, *, now_ms=None):
+        record = original_enqueue(candidate, now_ms=now_ms)
+        candidate.payload["body"] = "forged-after-persist"
+        return record
+
+    def capture_request(request):
+        captured.update(request)
+        return {"accepted": True}
+
+    monkeypatch.setattr(runtime.outbox, "enqueue", enqueue_then_mutate)
+    monkeypatch.setattr(runtime, "_invoke_transport", capture_request)
+
+    result = runtime.submit(envelope)
+    record = runtime.outbox.get(envelope.message_id)
+
+    assert result.accepted is True
+    assert record is not None
+    assert json.loads(record.envelope_json)["payload"]["body"] == "hello"
+    assert captured["envelope_json"] == record.envelope_json
+    assert captured["envelope_sha256"] == transport_envelope_digest(
+        record.envelope_json
+    )
+
+
 def test_plugin_runtime_recovers_after_crash_window_before_transport_ack(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     host, binding = _enabled_binding(tmp_path)
     alice = AgentIdentity.generate(label="alice")
@@ -160,14 +208,20 @@ def test_plugin_runtime_recovers_after_crash_window_before_transport_ack(
 
     original_invoke = host.invoke
 
+    secret = "provider-secret-token-should-not-leak"
+
     def fail_ack_once(binding_arg, payload, *, authority):
         if payload.get("operation") == "ack":
-            raise PluginInvocationError("simulated crash before provider ack")
+            raise PluginInvocationError(secret)
         return original_invoke(binding_arg, payload, authority=authority)
 
     monkeypatch.setattr(host, "invoke", fail_ack_once)
-    with pytest.raises(PluginDeliveryRuntimeError, match="receive failed"):
+    with pytest.raises(PluginDeliveryRuntimeError, match="receive failed") as caught:
         bob_runtime.receive(receive_id="receive-crash")
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert secret not in caplog.text
+    assert "PluginInvocationError" in caplog.text
     assert bob_runtime.inbox.seen(envelope.message_id) is True
 
     monkeypatch.setattr(host, "invoke", original_invoke)
@@ -219,6 +273,39 @@ def test_plugin_runtime_keeps_lease_for_transient_inbox_failure(
     assert second.decisions[0].accepted is True
 
 
+def test_plugin_runtime_retry_is_not_controlled_by_reason_text(tmp_path: Path) -> None:
+    _, binding = _enabled_binding(tmp_path)
+    alice = AgentIdentity.generate(label="alice")
+    bob = AgentIdentity.generate(label="bob")
+    bob_route = loopback_route_id(bob.as_did())
+    alice_runtime = _runtime(
+        tmp_path,
+        name="alice-reason-text",
+        identity=alice,
+        binding=binding,
+        routes=(bob_route,),
+    )
+    bob_runtime = _runtime(
+        tmp_path,
+        name="bob-reason-text",
+        identity=bob,
+        binding=binding,
+        authorize=lambda _: AuthorizationDecision.deny(
+            code="membership-denied",
+            reason="authorization callback failed",
+            retryable=False,
+        ),
+    )
+    envelope = _envelope(alice, bob.as_did())
+    assert alice_runtime.submit(envelope).accepted is True
+
+    result = bob_runtime.receive(receive_id="receive-nonretryable")
+
+    assert result.decisions[0].accepted is False
+    assert result.decisions[0].retryable is False
+    assert result.transport_acknowledged is True
+
+
 def test_plugin_runtime_rejects_routes_outside_host_authority(tmp_path: Path) -> None:
     _, binding = _enabled_binding(tmp_path)
     alice = AgentIdentity.generate(label="alice")
@@ -237,6 +324,62 @@ def test_plugin_runtime_rejects_routes_outside_host_authority(tmp_path: Path) ->
     record = runtime.outbox.get(envelope.message_id)
     assert record is not None
     assert record.attempts[-1].error_code == "plugin-invocation-failed"
+
+
+def test_plugin_runtime_rejects_same_id_with_weaker_wire_contract(
+    tmp_path: Path,
+) -> None:
+    _, binding = _enabled_binding(tmp_path)
+    substituted = replace(
+        binding,
+        contract=replace(
+            binding.contract,
+            input_schema_digest="sha256:" + "0" * 64,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="input schema digest"):
+        _runtime(
+            tmp_path,
+            name="contract-substitution",
+            identity=AgentIdentity.generate(label="alice"),
+            binding=substituted,
+        )
+
+
+def test_plugin_runtime_enforces_authority_before_host_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _, binding = _enabled_binding(tmp_path)
+    alice = AgentIdentity.generate(label="alice")
+    bob = AgentIdentity.generate(label="bob")
+    bob_route = loopback_route_id(bob.as_did())
+    runtime = _runtime(
+        tmp_path,
+        name="runtime-authority",
+        identity=alice,
+        binding=binding,
+        routes=(bob_route,),
+    )
+
+    secret = "authority-secret-should-not-leak"
+
+    def reject_before_host(request, authority):
+        raise PluginAuthorizationError(secret)
+
+    monkeypatch.setattr(
+        "nth_dao.delivery.plugin_runtime.validate_transport_authority",
+        reject_before_host,
+    )
+
+    with pytest.raises(PluginDeliveryRuntimeError, match="invocation failed") as caught:
+        runtime.submit(_envelope(alice, bob.as_did()))
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert secret not in caplog.text
+    assert "PluginAuthorizationError" in caplog.text
 
 
 def test_plugin_runtime_observes_host_binding_revocation(tmp_path: Path) -> None:
@@ -355,3 +498,30 @@ def test_plugin_runtime_acks_permanently_invalid_transport_items(
     assert result.decisions[0].accepted is False
     assert result.decisions[0].reason.startswith("structure:")
     assert bob_runtime.receive(receive_id="receive-after-invalid").found is False
+
+
+@pytest.mark.parametrize(
+    "clock_value",
+    [True, 0, -1, 1.5, TRANSPORT_MAX_SAFE_INTEGER + 1],
+)
+def test_plugin_runtime_rejects_non_wire_safe_clock_values(
+    tmp_path: Path, clock_value
+) -> None:
+    _, binding = _enabled_binding(tmp_path)
+    alice = AgentIdentity.generate(label="alice")
+    bob = AgentIdentity.generate(label="bob")
+    now_ms = int(time.time() * 1_000)
+    route = loopback_route_id(bob.as_did())
+    runtime = PluginDeliveryRuntime(
+        binding=binding,
+        authority=_authority(alice.as_did(), route),
+        route_resolver=loopback_route_id,
+        outbox=DurableOutbox(tmp_path / "unsafe-clock" / "outbox", clock=lambda: now_ms),
+        inbox=DeliveryInbox(
+            tmp_path / "unsafe-clock" / "inbox", clock=lambda: now_ms
+        ),
+        clock=lambda: clock_value,
+    )
+
+    with pytest.raises(PluginDeliveryRuntimeError, match="safe-integer"):
+        runtime.submit(_envelope(alice, bob.as_did()))

@@ -24,7 +24,7 @@ import threading
 from collections import deque
 from typing import Dict, Iterable, List, Set
 
-from nth_dao.delivery.envelope import TransportEnvelope
+from nth_dao.delivery.envelope import TransportEnvelope, validate_envelope
 from nth_dao.delivery.transports.base import (
     PRIVACY_PEER,
     PRIVACY_PUBLIC_RELAY,
@@ -77,7 +77,7 @@ class LoopbackWire:
                     continue
                 if len(endpoint._inbox) >= MAX_WIRE_QUEUE:
                     continue  # drop on overflow: loopback never blocks
-                endpoint._inbox.append(envelope)
+                endpoint._inbox.append(_snapshot_envelope(envelope))
                 delivered += 1
         return delivered
 
@@ -141,12 +141,24 @@ class LoopbackEndpoint(Transport):
         self._served.add(recipient)
 
     def send(self, envelope: TransportEnvelope) -> SendResult:
+        if not isinstance(envelope, TransportEnvelope):
+            return SendResult(accepted=False, error_code="invalid-envelope")
+        try:
+            stable_envelope = _snapshot_envelope(envelope)
+        except Exception:  # noqa: BLE001 - hostile mutable input fails closed
+            return SendResult(accepted=False, error_code="invalid-envelope")
+        ok, reason = validate_envelope(stable_envelope, require_signature=True)
+        if not ok:
+            return SendResult(
+                accepted=False,
+                error_code=f"invalid-envelope: {reason}",
+            )
         if self.mode == MODE_MESH:
-            delivered = self._wire._fanout_mesh(self.endpoint_id, envelope)
+            delivered = self._wire._fanout_mesh(self.endpoint_id, stable_envelope)
             if delivered == 0:
                 return SendResult(accepted=False, error_code="no-reachable-peer")
             return SendResult(accepted=True)
-        parked = self._wire._park_on_hub(self.endpoint_id, envelope)
+        parked = self._wire._park_on_hub(self.endpoint_id, stable_envelope)
         if not parked:
             return SendResult(accepted=False, error_code="hub-queue-full")
         return SendResult(accepted=True)
@@ -163,6 +175,10 @@ class LoopbackEndpoint(Transport):
     def pending_inbox_depth(self) -> int:
         with self._wire._lock:
             return len(self._inbox)
+
+
+def _snapshot_envelope(envelope: TransportEnvelope) -> TransportEnvelope:
+    return TransportEnvelope.from_dict(TransportEnvelope.to_dict(envelope))
 
 
 __all__ = [
