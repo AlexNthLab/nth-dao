@@ -1134,6 +1134,251 @@ def gen_delivery_ack_v1() -> list:
     return vectors
 
 
+def gen_market_claim_intent_v1() -> list:
+    """ClaimIntent v1: canonical bytes, time gates, schema, and signature."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+    from copy import deepcopy
+
+    from ..identity import AgentID, AgentIdentity
+    from ..market.claim_intent import sign_claim_intent, verify_claim_intent
+
+    signing_key = SigningKey(bytes.fromhex(BOB_SEED_HEX))
+    verify_bytes = signing_key.verify_key.encode()
+    claimant = AgentIdentity(
+        agent_id=AgentID.from_pubkey(verify_bytes.hex()),
+        label="vector-bob",
+        _signing_key=bytes.fromhex(BOB_SEED_HEX),
+        _verify_key=verify_bytes,
+    )
+    created_at_ms = 1_750_000_000_000
+    verification_time_ms = created_at_ms + 1_000
+    intent = sign_claim_intent(
+        claimant,
+        announcement_id="dao:task-vector-001",
+        cap_token={
+            "token_id": "claim-token-vector-001",
+            "subject_did": claimant.as_did(),
+        },
+        created_at_ms=created_at_ms,
+        ttl_ms=60_000,
+        nonce="ClaimIntentVectorNonce0001",
+    )
+    vectors = [{
+        "id": "market-claim-intent-001",
+        "description": "A signed claim intent validates with stable bytes",
+        "input": deepcopy(intent),
+        "verification_time_ms": verification_time_ms,
+        "expected_valid": True,
+        "expected_reason": "ok",
+        "expected_canonical_hex": canonical_json(intent).hex(),
+    }]
+
+    def _negative(vector_id, description, mutate, *, now_ms=verification_time_ms):
+        value = deepcopy(intent)
+        mutate(value)
+        ok, reason = verify_claim_intent(value, now_ms=now_ms)
+        assert not ok, f"vector {vector_id} unexpectedly validates"
+        return {
+            "id": vector_id,
+            "description": description,
+            "input": value,
+            "verification_time_ms": now_ms,
+            "expected_valid": False,
+            "expected_reason": reason,
+        }
+
+    vectors.extend([
+        _negative(
+            "market-claim-intent-002",
+            "Changing the announcement invalidates the signature",
+            lambda value: value.__setitem__(
+                "announcement_id", "dao:task-vector-002"
+            ),
+        ),
+        _negative(
+            "market-claim-intent-003",
+            "An expired intent is rejected",
+            lambda value: None,
+            now_ms=intent["expires_at_ms"],
+        ),
+        _negative(
+            "market-claim-intent-004",
+            "Boolean version is not accepted as integer one",
+            lambda value: value.__setitem__("version", True),
+        ),
+        _negative(
+            "market-claim-intent-005",
+            "An empty capability token identifier fails closed",
+            lambda value: value.__setitem__("cap_token_id", ""),
+        ),
+    ])
+    return vectors
+
+
+def gen_market_mission_completion_v1() -> list:
+    """MissionCompletion v1: claimant, authority, claim, and outcome chain."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+    from copy import deepcopy
+
+    from ..execution_receipt import TimelineEntry, sign_receipt
+    from ..identity import AgentID, AgentIdentity
+    from ..market.announcement import (
+        announcement_federation_key,
+        sign_announcement,
+    )
+    from ..market.claim_ack import sign_authority_claim_ack
+    from ..market.mission_completion import (
+        receipt_digest,
+        sign_mission_completion,
+        verify_mission_completion,
+    )
+
+    def _identity(seed_hex, label):
+        signing_key = SigningKey(bytes.fromhex(seed_hex))
+        verify_bytes = signing_key.verify_key.encode()
+        return AgentIdentity(
+            agent_id=AgentID.from_pubkey(verify_bytes.hex()),
+            label=label,
+            _signing_key=bytes.fromhex(seed_hex),
+            _verify_key=verify_bytes,
+        )
+
+    authority = _identity(ALICE_SEED_HEX, "vector-alice")
+    claimant = _identity(BOB_SEED_HEX, "vector-bob")
+    announcement_id = "dao:task-vector-001"
+    mission_id = "mission-vector-001"
+    published_at_ms = 1_750_000_000_000
+    claim_time_ms = published_at_ms + 1_000
+    completion_time_ms = published_at_ms + 3_000
+    verification_time_ms = published_at_ms + 4_000
+    announcement = sign_announcement(
+        publisher=authority,
+        authority_did=authority.as_did(),
+        title="Conformance task",
+        capability_set=["code_review"],
+        announcement_id=announcement_id,
+        published_at_ms=published_at_ms,
+        not_after=published_at_ms + 86_400_000,
+    )
+    claim_receipt = sign_receipt(
+        [TimelineEntry(
+            timestamp=claim_time_ms,
+            type="nth.task_claimed",
+            payload={
+                "announcement_id": announcement_id,
+                "claimant_did": claimant.as_did(),
+            },
+        )],
+        claimant,
+        goal_id=f"market:claim:{announcement_id}",
+        receipt_id="claim-receipt-vector-001",
+    )
+    # This display-only field is outside the receipt signature. Pin it so
+    # vector regeneration is byte-identical across dates and machines.
+    claim_receipt["issued_at"] = "2025-06-15T15:06:41+00:00"
+    claim_record = {
+        "claimant_did": claimant.as_did(),
+        "claimed_at_ms": claim_time_ms,
+        "receipt_id": claim_receipt["receipt_id"],
+        "receipt": claim_receipt,
+    }
+    authority_ack = sign_authority_claim_ack(
+        authority=authority,
+        announcement=announcement,
+        claim_record=claim_record,
+    )
+    execution_receipt = sign_receipt(
+        [TimelineEntry(
+            timestamp=published_at_ms + 2_000,
+            type="nth.task_completed",
+            payload={"mission_id": mission_id, "result": "ok"},
+        )],
+        claimant,
+        goal_id=f"mission:{mission_id}",
+        receipt_id="execution-receipt-vector-001",
+    )
+    execution_receipt["issued_at"] = "2025-06-15T15:06:42+00:00"
+    record = sign_mission_completion(
+        claimant,
+        announcement_id=announcement_id,
+        mission_id=mission_id,
+        claim_receipt=claim_receipt,
+        authority_ack=authority_ack,
+        execution_receipt=execution_receipt,
+        completed_at_ms=completion_time_ms,
+    )
+    base = {
+        "record": record,
+        "claim_receipt": claim_receipt,
+        "authority_ack": authority_ack,
+        "execution_receipt": execution_receipt,
+        "expected_authority_did": authority.as_did(),
+        "expected_federation_key": announcement_federation_key(announcement),
+        "verification_time_ms": verification_time_ms,
+    }
+    vectors = [{
+        "id": "market-mission-completion-001",
+        "description": "Completion binds claim, authority ACK, and execution",
+        **deepcopy(base),
+        "expected_valid": True,
+        "expected_reason": "ok",
+        "expected_canonical_hex": canonical_json(record).hex(),
+        "expected_record_sha256": receipt_digest(record),
+    }]
+
+    def _negative(vector_id, description, mutate):
+        value = deepcopy(base)
+        mutate(value)
+        ok, reason = verify_mission_completion(
+            value["record"],
+            claim_receipt=value.get("claim_receipt"),
+            authority_ack=value.get("authority_ack"),
+            execution_receipt=value.get("execution_receipt"),
+            expected_authority_did=value["expected_authority_did"],
+            expected_federation_key=value["expected_federation_key"],
+            now_ms=value["verification_time_ms"],
+        )
+        assert not ok, f"vector {vector_id} unexpectedly validates"
+        return {
+            "id": vector_id,
+            "description": description,
+            **value,
+            "expected_valid": False,
+            "expected_reason": reason,
+        }
+
+    def _tamper_execution(value):
+        value["execution_receipt"]["timeline"][0]["payload"]["result"] = "evil"
+
+    vectors.extend([
+        _negative(
+            "market-mission-completion-002",
+            "A different execution receipt cannot satisfy the digest",
+            _tamper_execution,
+        ),
+        _negative(
+            "market-mission-completion-003",
+            "The ACK must come from the expected announcement authority",
+            lambda value: value.__setitem__(
+                "expected_authority_did",
+                _identity(CAROL_SEED_HEX, "vector-carol").as_did(),
+            ),
+        ),
+        _negative(
+            "market-mission-completion-004",
+            "Verification-grade mode rejects partial evidence",
+            lambda value: value.__setitem__("authority_ack", None),
+        ),
+    ])
+    return vectors
+
+
 def regenerate(path: Path = VECTORS_PATH) -> None:
     vectors: Dict[str, Any] = {
         "format": "nth-dao-conformance-v1",
@@ -1159,6 +1404,8 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             "trade_offer_head_proof_v1":   gen_trade_offer_head_proof_v1(),
             "delivery_envelope_v1":        gen_delivery_envelope_v1(),
             "delivery_ack_v1":             gen_delivery_ack_v1(),
+            "market_claim_intent_v1":      gen_market_claim_intent_v1(),
+            "market_mission_completion_v1": gen_market_mission_completion_v1(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

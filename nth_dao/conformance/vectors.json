@@ -918,6 +918,410 @@
         }
       }
     ],
+    "market_claim_intent_v1": [
+      {
+        "description": "A signed claim intent validates with stable bytes",
+        "expected_canonical_hex": "7b22616e6e6f756e63656d656e745f6964223a2264616f3a7461736b2d766563746f722d303031222c226361705f746f6b656e5f6964223a22636c61696d2d746f6b656e2d766563746f722d303031222c22636c61696d616e745f646964223a226469643a6b65793a7a364d6b6e4763336f634873337a6450694a626e616171446935384e476234706b315370395778577566755853647866222c22637265617465645f61745f6d73223a313735303030303030303030302c22657870697265735f61745f6d73223a313735303030303036303030302c226b696e64223a226e74682d6d61726b65742d636c61696d2d696e74656e74222c226e6f6e6365223a22436c61696d496e74656e74566563746f724e6f6e636530303031222c227369676e6174757265223a22584655616e565a757a5f727a464b7a483059587447315046786d53484a31726c376832485152576f6254546668447132394c717a54656c3253715a5776556b6c4968665257336756566b4b54774768706a4e5a334441222c2276657273696f6e223a317d",
+        "expected_reason": "ok",
+        "expected_valid": true,
+        "id": "market-claim-intent-001",
+        "input": {
+          "announcement_id": "dao:task-vector-001",
+          "cap_token_id": "claim-token-vector-001",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "nth-market-claim-intent",
+          "nonce": "ClaimIntentVectorNonce0001",
+          "signature": "XFUanVZuz_rzFKzH0YXtG1PFxmSHJ1rl7h2HQRWobTTfhDq29LqzTel2SqZWvUklIhfRW3gVVkKTwGhpjNZ3DA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "Changing the announcement invalidates the signature",
+        "expected_reason": "intent-signature-invalid",
+        "expected_valid": false,
+        "id": "market-claim-intent-002",
+        "input": {
+          "announcement_id": "dao:task-vector-002",
+          "cap_token_id": "claim-token-vector-001",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "nth-market-claim-intent",
+          "nonce": "ClaimIntentVectorNonce0001",
+          "signature": "XFUanVZuz_rzFKzH0YXtG1PFxmSHJ1rl7h2HQRWobTTfhDq29LqzTel2SqZWvUklIhfRW3gVVkKTwGhpjNZ3DA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "An expired intent is rejected",
+        "expected_reason": "intent-expired",
+        "expected_valid": false,
+        "id": "market-claim-intent-003",
+        "input": {
+          "announcement_id": "dao:task-vector-001",
+          "cap_token_id": "claim-token-vector-001",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "nth-market-claim-intent",
+          "nonce": "ClaimIntentVectorNonce0001",
+          "signature": "XFUanVZuz_rzFKzH0YXtG1PFxmSHJ1rl7h2HQRWobTTfhDq29LqzTel2SqZWvUklIhfRW3gVVkKTwGhpjNZ3DA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000060000
+      },
+      {
+        "description": "Boolean version is not accepted as integer one",
+        "expected_reason": "intent-malformed",
+        "expected_valid": false,
+        "id": "market-claim-intent-004",
+        "input": {
+          "announcement_id": "dao:task-vector-001",
+          "cap_token_id": "claim-token-vector-001",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "nth-market-claim-intent",
+          "nonce": "ClaimIntentVectorNonce0001",
+          "signature": "XFUanVZuz_rzFKzH0YXtG1PFxmSHJ1rl7h2HQRWobTTfhDq29LqzTel2SqZWvUklIhfRW3gVVkKTwGhpjNZ3DA",
+          "version": true
+        },
+        "verification_time_ms": 1750000001000
+      },
+      {
+        "description": "An empty capability token identifier fails closed",
+        "expected_reason": "intent-malformed",
+        "expected_valid": false,
+        "id": "market-claim-intent-005",
+        "input": {
+          "announcement_id": "dao:task-vector-001",
+          "cap_token_id": "",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "created_at_ms": 1750000000000,
+          "expires_at_ms": 1750000060000,
+          "kind": "nth-market-claim-intent",
+          "nonce": "ClaimIntentVectorNonce0001",
+          "signature": "XFUanVZuz_rzFKzH0YXtG1PFxmSHJ1rl7h2HQRWobTTfhDq29LqzTel2SqZWvUklIhfRW3gVVkKTwGhpjNZ3DA",
+          "version": 1
+        },
+        "verification_time_ms": 1750000001000
+      }
+    ],
+    "market_mission_completion_v1": [
+      {
+        "authority_ack": {
+          "accepted_at_ms": 1750000001000,
+          "ack_id": "8320d98eda86ac03625bd13b045c86c2afc7b6a1733aeb17c5b6d271735e4f44",
+          "announcement_id": "dao:task-vector-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "authority_sig": "LcvMrQMUR8l0GOuU1Wjgt5Pnwf-QBugL9aJHI5kyBMTo7lb6rAwB9PHzOzpURj0RFVNrBO-a6NNBBFDTbEjcDQ",
+          "claim_receipt_hash": "1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claim_receipt_id": "claim-receipt-vector-001",
+          "claim_record_hash": "91e0e506a92b6b7000a69f4da1b16602f8af796363e87297a405e95c177a6ede",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+          "kind": "nth-authority-claim-ack-v1",
+          "outcome": "claimed"
+        },
+        "claim_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "38d65c639505b1940aa2b4c8468bb0220a9c02d1b0900a994112dcfde215ede9",
+          "goal_id": "market:claim:dao:task-vector-001",
+          "issued_at": "2025-06-15T15:06:41+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "claim-receipt-vector-001",
+          "sig": "WL0A3me1PIwoenRPsd8D7fAbLmwra2UE2wPSXGLRc4N9d7XmoDjiXys9AFKlGYPEfxZBpsdUXEuFLMkIuvw7Cg",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "announcement_id": "dao:task-vector-001",
+                "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf"
+              },
+              "timestamp": 1750000001000,
+              "type": "nth.task_claimed"
+            }
+          ]
+        },
+        "description": "Completion binds claim, authority ACK, and execution",
+        "execution_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "9f49910c4977755d9a87cbb83bcf38b19bb72a047e008d4294e719db9eee4bd4",
+          "goal_id": "mission:mission-vector-001",
+          "issued_at": "2025-06-15T15:06:42+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "execution-receipt-vector-001",
+          "sig": "JJMbFoliYleWqtfv1jzYVhzxM-a1cdXgmHIdttN0BIQX3tQQym3YFqZs-X37fKQmStqmrXyZ97oyG_K8B4OvBQ",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "mission_id": "mission-vector-001",
+                "result": "ok"
+              },
+              "timestamp": 1750000002000,
+              "type": "nth.task_completed"
+            }
+          ]
+        },
+        "expected_authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+        "expected_canonical_hex": "7b22616e6e6f756e63656d656e745f6964223a2264616f3a7461736b2d766563746f722d303031222c22617574686f726974795f61636b5f646967657374223a227368613235363a32383261636464626138313639613633306239646666646362393633663136636230366537623038393563323663653331333039666165323162333330323238222c22636c61696d5f726563656970745f646967657374223a227368613235363a31633635393637333963313466393830346233663966313265613434373830623630323962356637333038663865616533653133643930613862356636356333222c22636c61696d616e745f646964223a226469643a6b65793a7a364d6b6e4763336f634873337a6450694a626e616171446935384e476234706b315370395778577566755853647866222c22636f6d706c657465645f61745f6d73223a313735303030303030333030302c22657865637574696f6e5f726563656970745f646967657374223a227368613235363a32666465623139303533316339666130313763306337636562393934303833353335343635353334626635333332333636353461666236303764633930653839222c226b696e64223a226e74682d6d61726b65742d6d697373696f6e2d636f6d706c6574696f6e222c226d697373696f6e5f6964223a226d697373696f6e2d766563746f722d303031222c226f7574636f6d65223a22737563636565646564222c227369676e6174757265223a22303153634c67424e33524d4e6334515233356e437a4343564d777a514e6576637451467a7a494151704b383462616f6c4170775353616d5f6d6157443473636c34323848735171427a67596233495a6d483877624351222c2276657273696f6e223a317d",
+        "expected_federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+        "expected_reason": "ok",
+        "expected_record_sha256": "sha256:78aab32899983fe9a31036d0f8b118034588e82d9fe8858890afd4d2e5fbc4d5",
+        "expected_valid": true,
+        "id": "market-mission-completion-001",
+        "record": {
+          "announcement_id": "dao:task-vector-001",
+          "authority_ack_digest": "sha256:282acddba8169a630b9dffdcb963f16cb06e7b0895c26ce31309fae21b330228",
+          "claim_receipt_digest": "sha256:1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "completed_at_ms": 1750000003000,
+          "execution_receipt_digest": "sha256:2fdeb190531c9fa017c0c7ceb994083535465534bf533236654afb607dc90e89",
+          "kind": "nth-market-mission-completion",
+          "mission_id": "mission-vector-001",
+          "outcome": "succeeded",
+          "signature": "01ScLgBN3RMNc4QR35nCzCCVMwzQNevctQFzzIAQpK84baolApwSSam_maWD4scl428HsQqBzgYb3IZmH8wbCQ",
+          "version": 1
+        },
+        "verification_time_ms": 1750000004000
+      },
+      {
+        "authority_ack": {
+          "accepted_at_ms": 1750000001000,
+          "ack_id": "8320d98eda86ac03625bd13b045c86c2afc7b6a1733aeb17c5b6d271735e4f44",
+          "announcement_id": "dao:task-vector-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "authority_sig": "LcvMrQMUR8l0GOuU1Wjgt5Pnwf-QBugL9aJHI5kyBMTo7lb6rAwB9PHzOzpURj0RFVNrBO-a6NNBBFDTbEjcDQ",
+          "claim_receipt_hash": "1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claim_receipt_id": "claim-receipt-vector-001",
+          "claim_record_hash": "91e0e506a92b6b7000a69f4da1b16602f8af796363e87297a405e95c177a6ede",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+          "kind": "nth-authority-claim-ack-v1",
+          "outcome": "claimed"
+        },
+        "claim_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "38d65c639505b1940aa2b4c8468bb0220a9c02d1b0900a994112dcfde215ede9",
+          "goal_id": "market:claim:dao:task-vector-001",
+          "issued_at": "2025-06-15T15:06:41+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "claim-receipt-vector-001",
+          "sig": "WL0A3me1PIwoenRPsd8D7fAbLmwra2UE2wPSXGLRc4N9d7XmoDjiXys9AFKlGYPEfxZBpsdUXEuFLMkIuvw7Cg",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "announcement_id": "dao:task-vector-001",
+                "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf"
+              },
+              "timestamp": 1750000001000,
+              "type": "nth.task_claimed"
+            }
+          ]
+        },
+        "description": "A different execution receipt cannot satisfy the digest",
+        "execution_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "9f49910c4977755d9a87cbb83bcf38b19bb72a047e008d4294e719db9eee4bd4",
+          "goal_id": "mission:mission-vector-001",
+          "issued_at": "2025-06-15T15:06:42+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "execution-receipt-vector-001",
+          "sig": "JJMbFoliYleWqtfv1jzYVhzxM-a1cdXgmHIdttN0BIQX3tQQym3YFqZs-X37fKQmStqmrXyZ97oyG_K8B4OvBQ",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "mission_id": "mission-vector-001",
+                "result": "evil"
+              },
+              "timestamp": 1750000002000,
+              "type": "nth.task_completed"
+            }
+          ]
+        },
+        "expected_authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+        "expected_federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+        "expected_reason": "execution receipt digest does not match the record",
+        "expected_valid": false,
+        "id": "market-mission-completion-002",
+        "record": {
+          "announcement_id": "dao:task-vector-001",
+          "authority_ack_digest": "sha256:282acddba8169a630b9dffdcb963f16cb06e7b0895c26ce31309fae21b330228",
+          "claim_receipt_digest": "sha256:1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "completed_at_ms": 1750000003000,
+          "execution_receipt_digest": "sha256:2fdeb190531c9fa017c0c7ceb994083535465534bf533236654afb607dc90e89",
+          "kind": "nth-market-mission-completion",
+          "mission_id": "mission-vector-001",
+          "outcome": "succeeded",
+          "signature": "01ScLgBN3RMNc4QR35nCzCCVMwzQNevctQFzzIAQpK84baolApwSSam_maWD4scl428HsQqBzgYb3IZmH8wbCQ",
+          "version": 1
+        },
+        "verification_time_ms": 1750000004000
+      },
+      {
+        "authority_ack": {
+          "accepted_at_ms": 1750000001000,
+          "ack_id": "8320d98eda86ac03625bd13b045c86c2afc7b6a1733aeb17c5b6d271735e4f44",
+          "announcement_id": "dao:task-vector-001",
+          "authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+          "authority_sig": "LcvMrQMUR8l0GOuU1Wjgt5Pnwf-QBugL9aJHI5kyBMTo7lb6rAwB9PHzOzpURj0RFVNrBO-a6NNBBFDTbEjcDQ",
+          "claim_receipt_hash": "1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claim_receipt_id": "claim-receipt-vector-001",
+          "claim_record_hash": "91e0e506a92b6b7000a69f4da1b16602f8af796363e87297a405e95c177a6ede",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+          "kind": "nth-authority-claim-ack-v1",
+          "outcome": "claimed"
+        },
+        "claim_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "38d65c639505b1940aa2b4c8468bb0220a9c02d1b0900a994112dcfde215ede9",
+          "goal_id": "market:claim:dao:task-vector-001",
+          "issued_at": "2025-06-15T15:06:41+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "claim-receipt-vector-001",
+          "sig": "WL0A3me1PIwoenRPsd8D7fAbLmwra2UE2wPSXGLRc4N9d7XmoDjiXys9AFKlGYPEfxZBpsdUXEuFLMkIuvw7Cg",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "announcement_id": "dao:task-vector-001",
+                "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf"
+              },
+              "timestamp": 1750000001000,
+              "type": "nth.task_claimed"
+            }
+          ]
+        },
+        "description": "The ACK must come from the expected announcement authority",
+        "execution_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "9f49910c4977755d9a87cbb83bcf38b19bb72a047e008d4294e719db9eee4bd4",
+          "goal_id": "mission:mission-vector-001",
+          "issued_at": "2025-06-15T15:06:42+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "execution-receipt-vector-001",
+          "sig": "JJMbFoliYleWqtfv1jzYVhzxM-a1cdXgmHIdttN0BIQX3tQQym3YFqZs-X37fKQmStqmrXyZ97oyG_K8B4OvBQ",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "mission_id": "mission-vector-001",
+                "result": "ok"
+              },
+              "timestamp": 1750000002000,
+              "type": "nth.task_completed"
+            }
+          ]
+        },
+        "expected_authority_did": "did:key:z6MkvqoYXQfDDJRv8L4wKzxYeuKyVZBfi9Qo6Ro8MiLH3kDQ",
+        "expected_federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+        "expected_reason": "authority claim acknowledgement is invalid: claim ack authority does not match the source",
+        "expected_valid": false,
+        "id": "market-mission-completion-003",
+        "record": {
+          "announcement_id": "dao:task-vector-001",
+          "authority_ack_digest": "sha256:282acddba8169a630b9dffdcb963f16cb06e7b0895c26ce31309fae21b330228",
+          "claim_receipt_digest": "sha256:1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "completed_at_ms": 1750000003000,
+          "execution_receipt_digest": "sha256:2fdeb190531c9fa017c0c7ceb994083535465534bf533236654afb607dc90e89",
+          "kind": "nth-market-mission-completion",
+          "mission_id": "mission-vector-001",
+          "outcome": "succeeded",
+          "signature": "01ScLgBN3RMNc4QR35nCzCCVMwzQNevctQFzzIAQpK84baolApwSSam_maWD4scl428HsQqBzgYb3IZmH8wbCQ",
+          "version": 1
+        },
+        "verification_time_ms": 1750000004000
+      },
+      {
+        "authority_ack": null,
+        "claim_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "38d65c639505b1940aa2b4c8468bb0220a9c02d1b0900a994112dcfde215ede9",
+          "goal_id": "market:claim:dao:task-vector-001",
+          "issued_at": "2025-06-15T15:06:41+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "claim-receipt-vector-001",
+          "sig": "WL0A3me1PIwoenRPsd8D7fAbLmwra2UE2wPSXGLRc4N9d7XmoDjiXys9AFKlGYPEfxZBpsdUXEuFLMkIuvw7Cg",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "announcement_id": "dao:task-vector-001",
+                "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf"
+              },
+              "timestamp": 1750000001000,
+              "type": "nth.task_claimed"
+            }
+          ]
+        },
+        "description": "Verification-grade mode rejects partial evidence",
+        "execution_receipt": {
+          "compatible_with": "motebit/execution-ledger@1.0",
+          "content_hash": "9f49910c4977755d9a87cbb83bcf38b19bb72a047e008d4294e719db9eee4bd4",
+          "goal_id": "mission:mission-vector-001",
+          "issued_at": "2025-06-15T15:06:42+00:00",
+          "kind": "nth-execution-receipt-v1",
+          "receipt_id": "execution-receipt-vector-001",
+          "sig": "JJMbFoliYleWqtfv1jzYVhzxM-a1cdXgmHIdttN0BIQX3tQQym3YFqZs-X37fKQmStqmrXyZ97oyG_K8B4OvBQ",
+          "signer_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "signer_pubkey_hex": "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+          "spec": "nth-dao/execution-receipt@1.0",
+          "timeline": [
+            {
+              "payload": {
+                "mission_id": "mission-vector-001",
+                "result": "ok"
+              },
+              "timestamp": 1750000002000,
+              "type": "nth.task_completed"
+            }
+          ]
+        },
+        "expected_authority_did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+        "expected_federation_key": "nth-ann-sha256:324ecbe7330db0fd8d4189efaaac8cdd054bce469af0ed71eaf59585bd82d4d2",
+        "expected_reason": "verification-grade mode requires all three evidence objects",
+        "expected_valid": false,
+        "id": "market-mission-completion-004",
+        "record": {
+          "announcement_id": "dao:task-vector-001",
+          "authority_ack_digest": "sha256:282acddba8169a630b9dffdcb963f16cb06e7b0895c26ce31309fae21b330228",
+          "claim_receipt_digest": "sha256:1c6596739c14f9804b3f9f12ea44780b6029b5f7308f8eae3e13d90a8b5f65c3",
+          "claimant_did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+          "completed_at_ms": 1750000003000,
+          "execution_receipt_digest": "sha256:2fdeb190531c9fa017c0c7ceb994083535465534bf533236654afb607dc90e89",
+          "kind": "nth-market-mission-completion",
+          "mission_id": "mission-vector-001",
+          "outcome": "succeeded",
+          "signature": "01ScLgBN3RMNc4QR35nCzCCVMwzQNevctQFzzIAQpK84baolApwSSam_maWD4scl428HsQqBzgYb3IZmH8wbCQ",
+          "version": 1
+        },
+        "verification_time_ms": 1750000004000
+      }
+    ],
     "replay_window": [
       {
         "description": "Message timestamp = now → accepted",

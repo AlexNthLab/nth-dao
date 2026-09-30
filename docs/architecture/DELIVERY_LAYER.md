@@ -235,6 +235,27 @@ closed the remaining persistence and boundary gaps:
 | LL-8 | a core-only install reached absent PyNaCl classes and failed with an opaque `NoneType` call | every courier cryptographic entry point now fails with an actionable `nth-dao[crypto]` dependency error |
 | LL-9 | retrying handover after carrier deletion failed signed a fresh ACK envelope each time, allowing one stuck carrier to fill the durable outbox; a short ACK TTL could also expire while the original courier remained valid | the inbox durably retains first acceptance time, ACK envelopes use a deterministic nonce, and their TTL covers the maximum inbound lifetime, making delayed, concurrent, and restarted retries content-address idempotent |
 
+Round 25 (self-review during Phase-5 development, before any commit) —
+two fixes already folded into the initial implementation: the naive
+deep-copy cost probe showed 3.4ms/100KB (acceptable), and the completion
+record's signer binding initially looked at timeline entries (execution
+receipts carry the signer at the top level, not per-entry) — corrected
+before tests were written against the wrong shape.
+
+Round 26 (independent adversarial review of Phase 5) replaced the initial
+happy-path implementation with a portable and verification-grade protocol:
+
+| # | Defect | Fix |
+|---|---|---|
+| MM-1 | `IntentTracker` copied the POSIX-only `fcntl` lock and could not run on Windows | use the repository `InterProcessLock` abstraction and test stale cross-instance readers/writers |
+| MM-2 | the tracker trusted stale memory, accepted illegal journal transitions, left torn tails in place before later appends, and had no durable size/count bound | re-fold under the process lock, validate strict event schemas and legal transitions, truncate crash-torn bytes before appending, and fail closed on corruption or capacity exhaustion; same-state terminal retries are idempotent while conflicting terminal states are rejected |
+| MM-3 | Claim Intent accepted weak integer/signature shapes and its announcement-id alphabet was narrower than the announcement protocol | reject bool integers and non-canonical signatures; require a non-empty token id; align with the 256-character announcement ID contract |
+| MM-4 | a completion record only compared digests, so malformed or unrelated claim/execution receipts could be presented as evidence | verify both receipt signatures and bind claimant, announcement, mission, event type, and outcome |
+| MM-5 | the source DAO's claim decision was not in the completion chain | require and digest a signed authority claim ACK |
+| MM-6 | verification without evidence returned `ok`, and evidence verification could omit the trusted source authority context | require all evidence plus expected authority DID and federation key by default; statement-only projection is explicit and documented as authorship-only |
+| MM-7 | completion history silently expired after a local one-year policy window | cryptographic verification has no implicit age expiry; callers may explicitly supply a retention policy |
+| MM-8 | Phase-5 APIs were absent from the market facade and had no cross-implementation fixtures | export the supported surface and add deterministic Claim Intent and Mission Completion conformance vectors |
+
 Round 23 (adversarial review of the Courier seal + store — the two
 commits that had only been tested, not reviewed; process-gap fix) found
 and fixed 1 real bug plus 1 hardening:
