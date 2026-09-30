@@ -15,12 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (announcement binding, claimant DID, cap-token id, nonce, TTL) that
   reserves NOTHING and expires on its own clock; `admit_claim_intent`
   verifies the intent, cross-binds it to the accompanying pre-signed
-  receipt (same announcement, same claimant, and — round-24 — the intent
-  must cite the submitted cap_token), then delegates to the existing
+  receipt (same announcement, same claimant, and the intent must cite the
+  submitted cap_token), then delegates to the existing
   `record_foreign_claim` CAS (accepted → ClaimOutcome; race lost →
   ClaimConflict). `IntentTracker` gives hosts the mandated UI distinction
-  (pending vs confirmed/rejected/expired) with a crash-safe journal and
-  TTL sweep. 23 tests.
+  (pending vs confirmed/rejected/expired) with a bounded, cross-process,
+  fail-closed journal and TTL sweep. Legal announcement identifiers use the
+  same 256-character alphabet as the announcement protocol. Torn journal
+  tails are repaired before future appends, and conflicting terminal
+  transitions fail instead of masquerading as idempotent retries. 34 tests.
 
 - Courier envelope (Phase 4): `nth_dao/delivery/courier.py` seals a signed
   delivery envelope to the recipient's X25519 public key (libsodium RFC 7748
@@ -101,12 +104,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   actually applied — deterministic event ids are pinned by tests).
 - Mission completion records (Phase 5): `nth_dao/market/mission_completion.py`
   — a signed binding of announcement + mission + claim-receipt digest +
-  execution-receipt digest + outcome (succeeded/failed — honest failures
-  are recorded, not hidden). Sign-time sanity: the execution receipt's
-  signer must be the claimant, so a completion record cannot cite someone
-  else's work. Verify-time: signature, shape, age window, and — when the
-  receipts are supplied — re-derived digests must match (proves the
-  claimant holds the claimed chain). 8 tests.
+  source-authority ACK digest + execution-receipt digest + outcome
+  (succeeded/failed — honest failures are recorded, not hidden). Signing
+  validates all three signed evidence objects and their claimant, mission,
+  announcement, and outcome bindings. Verification is fail-closed by
+  default: the complete evidence set plus the trusted announcement authority
+  DID and federation key are required. Statement-only projection is explicit
+  and proves authorship, not completion. 18 tests.
+- Cross-implementation fixtures now cover `market_claim_intent_v1` and
+  `market_mission_completion_v1`: nine deterministic positive and negative
+  vectors pin canonical bytes, signatures, TTL/schema gates, authority
+  identity, federation binding, and the complete receipt chain.
 - Nostr relay client (Phase 2 N2) and delivery transport (N3):
   `NostrRelayClient` wraps the borrowed async `nostr_sdk.Client` on a
   background loop thread (same bridge as the gossip adapter) with publish

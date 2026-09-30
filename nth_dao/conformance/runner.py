@@ -725,6 +725,93 @@ def check_delivery_ack_v1(vectors: List[dict]) -> List[ConformanceFailure]:
     return failures
 
 
+def check_market_claim_intent_v1(vectors: List[dict]) -> List[ConformanceFailure]:
+    """Verify ClaimIntent v1 validation and canonical bytes."""
+    from ..market.claim_intent import verify_claim_intent
+
+    failures: List[ConformanceFailure] = []
+    for vector in vectors:
+        ok, reason = verify_claim_intent(
+            vector.get("input"), now_ms=vector.get("verification_time_ms")
+        )
+        expected = (vector["expected_valid"], vector.get("expected_reason"))
+        actual = (ok, reason)
+        if actual != expected:
+            failures.append(ConformanceFailure(
+                vector_id=vector.get("id", "market-claim-intent:invalid"),
+                category="market_claim_intent_v1",
+                description="validation result",
+                expected=expected,
+                actual=actual,
+            ))
+            continue
+        expected_canonical = vector.get("expected_canonical_hex")
+        if expected_canonical is not None:
+            actual_canonical = canonical_json(vector["input"]).hex()
+            if actual_canonical != expected_canonical:
+                failures.append(ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="market_claim_intent_v1",
+                    description="canonical intent bytes",
+                    expected=expected_canonical,
+                    actual=actual_canonical,
+                ))
+    return failures
+
+
+def check_market_mission_completion_v1(
+    vectors: List[dict],
+) -> List[ConformanceFailure]:
+    """Verify MissionCompletion v1 evidence chain and canonical bytes."""
+    from ..market.mission_completion import receipt_digest, verify_mission_completion
+
+    failures: List[ConformanceFailure] = []
+    for vector in vectors:
+        ok, reason = verify_mission_completion(
+            vector.get("record"),
+            claim_receipt=vector.get("claim_receipt"),
+            authority_ack=vector.get("authority_ack"),
+            execution_receipt=vector.get("execution_receipt"),
+            expected_authority_did=vector.get("expected_authority_did", ""),
+            expected_federation_key=vector.get("expected_federation_key", ""),
+            now_ms=vector.get("verification_time_ms"),
+        )
+        expected = (vector["expected_valid"], vector.get("expected_reason"))
+        actual = (ok, reason)
+        if actual != expected:
+            failures.append(ConformanceFailure(
+                vector_id=vector.get("id", "market-mission-completion:invalid"),
+                category="market_mission_completion_v1",
+                description="validation result",
+                expected=expected,
+                actual=actual,
+            ))
+            continue
+        expected_canonical = vector.get("expected_canonical_hex")
+        if expected_canonical is not None:
+            actual_canonical = canonical_json(vector["record"]).hex()
+            if actual_canonical != expected_canonical:
+                failures.append(ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="market_mission_completion_v1",
+                    description="canonical completion bytes",
+                    expected=expected_canonical,
+                    actual=actual_canonical,
+                ))
+        expected_digest = vector.get("expected_record_sha256")
+        if expected_digest is not None:
+            actual_digest = receipt_digest(vector["record"])
+            if actual_digest != expected_digest:
+                failures.append(ConformanceFailure(
+                    vector_id=vector["id"],
+                    category="market_mission_completion_v1",
+                    description="completion record digest",
+                    expected=expected_digest,
+                    actual=actual_digest,
+                ))
+    return failures
+
+
 _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "canonical_json":              check_canonical_json,
     "fingerprint":                 check_fingerprint,
@@ -749,6 +836,8 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "trade_offer_head_proof_v1":   check_trade_offer_head_proof_v1,
     "delivery_envelope_v1":        check_delivery_envelope_v1,
     "delivery_ack_v1":             check_delivery_ack_v1,
+    "market_claim_intent_v1":      check_market_claim_intent_v1,
+    "market_mission_completion_v1": check_market_mission_completion_v1,
 }
 
 

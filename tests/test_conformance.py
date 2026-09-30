@@ -52,6 +52,8 @@ def test_each_category_has_at_least_one_vector():
         "trade_offer_head_proof_v1",
         "delivery_envelope_v1",
         "delivery_ack_v1",
+        "market_claim_intent_v1",
+        "market_mission_completion_v1",
     }
     data = load_vectors()
     present = set(data["vectors"].keys())
@@ -79,11 +81,27 @@ def test_main_regenerator_preserves_documented_categories(tmp_path):
         "trade_offer_head_proof_v1",
         "delivery_envelope_v1",
         "delivery_ack_v1",
+        "market_claim_intent_v1",
+        "market_mission_completion_v1",
     } <= present
 
 
 def test_delivery_ack_vectors_cover_binding_time_and_version_failures():
     cases = load_vectors()["vectors"].get("delivery_ack_v1", [])
+    assert len(cases) == 4
+    assert cases[0]["expected_valid"] is True
+    assert all(case["expected_valid"] is False for case in cases[1:])
+
+
+def test_market_claim_intent_vectors_cover_signature_time_and_shape():
+    cases = load_vectors()["vectors"].get("market_claim_intent_v1", [])
+    assert len(cases) == 5
+    assert cases[0]["expected_valid"] is True
+    assert all(case["expected_valid"] is False for case in cases[1:])
+
+
+def test_market_mission_completion_vectors_require_full_authority_chain():
+    cases = load_vectors()["vectors"].get("market_mission_completion_v1", [])
     assert len(cases) == 4
     assert cases[0]["expected_valid"] is True
     assert all(case["expected_valid"] is False for case in cases[1:])

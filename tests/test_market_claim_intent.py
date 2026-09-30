@@ -14,6 +14,8 @@ import pytest
 
 pytest.importorskip("nacl")
 
+from nth_dao.b64u import b64u_encode
+from nth_dao.canonical_json import canonical_json
 from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
 from nth_dao.identity import AgentIdentity
 from nth_dao.market import (
@@ -33,6 +35,8 @@ from nth_dao.market.claim_intent import (
     REJECT_INTENT_SIGNATURE,
     ClaimIntentRejected,
     IntentTracker,
+    IntentTrackerCorrupt,
+    IntentTrackerFull,
     admit_claim_intent,
     sign_claim_intent,
     verify_claim_intent,
@@ -41,9 +45,19 @@ from nth_dao.market.claim_intent import (
 NOW_MS = int(time.time() * 1000)
 
 
+def _resign_intent(intent, signer):
+    intent["signature"] = b64u_encode(
+        signer.sign(
+            canonical_json({k: v for k, v in intent.items() if k != "signature"})
+        )
+    )
+    return intent
+
+
 def _selfissue(agent, caps):
     return sign_cap_token(
-        issuer=agent, subject_did=agent.as_did(),
+        issuer=agent,
+        subject_did=agent.as_did(),
         capabilities=[*caps, CAP_NTH_RECEIPT_SIGN],
     )
 
@@ -54,7 +68,10 @@ def _setup(tmp_path, caps=("code_review",)):
     pub = AgentIdentity.generate(label="pub")
     agent = AgentIdentity.generate(label="agent")
     ann = sign_announcement(
-        publisher=pub, title="task", capability_set=list(caps), reward_minor=5,
+        publisher=pub,
+        title="task",
+        capability_set=list(caps),
+        reward_minor=5,
     )
     feed.publish(ann)
     return feed, store, pub, agent, ann
@@ -73,11 +90,27 @@ class TestSignAndVerify:
         ok, reason = verify_claim_intent(intent, now_ms=NOW_MS + 1_000)
         assert ok, reason
 
+    def test_accepts_full_announcement_id_alphabet_and_length(self, tmp_path):
+        _, _, _, agent, _ = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        announcement_id = "dao:" + "a" * 252
+        intent = sign_claim_intent(
+            agent,
+            announcement_id=announcement_id,
+            cap_token=token,
+            created_at_ms=NOW_MS,
+        )
+
+        assert len(announcement_id) == 256
+        assert verify_claim_intent(intent, now_ms=NOW_MS + 1_000) == (True, "ok")
+
     def test_tampered_field_breaks_signature(self, tmp_path):
         _, _, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         intent["announcement_id"] = "other-task"
@@ -88,8 +121,11 @@ class TestSignAndVerify:
         _, _, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
-            created_at_ms=NOW_MS, ttl_ms=1_000,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
+            created_at_ms=NOW_MS,
+            ttl_ms=1_000,
         )
         ok, reason = verify_claim_intent(intent, now_ms=NOW_MS + 2_000)
         assert not ok and reason == REJECT_INTENT_EXPIRED
@@ -98,7 +134,9 @@ class TestSignAndVerify:
         _, _, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS + 10 * 60 * 1000,  # 10 min future
         )
         ok, reason = verify_claim_intent(intent, now_ms=NOW_MS)
@@ -108,7 +146,9 @@ class TestSignAndVerify:
         _, _, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         mallory = AgentIdentity.generate(label="mallory")
@@ -120,7 +160,9 @@ class TestSignAndVerify:
         _, _, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         hostile = dict(intent)
@@ -134,7 +176,9 @@ class TestSignAndVerify:
         token = _selfissue(other, ["code_review"])  # subject is `other`
         with pytest.raises(ClaimIntentRejected, match="subject"):
             sign_claim_intent(
-                agent, announcement_id=ann.announcement_id, cap_token=token,
+                agent,
+                announcement_id=ann.announcement_id,
+                cap_token=token,
             )
 
     def test_ttl_bounds_enforced(self, tmp_path):
@@ -142,8 +186,79 @@ class TestSignAndVerify:
         token = _selfissue(agent, ["code_review"])
         with pytest.raises(ClaimIntentRejected):
             sign_claim_intent(
-                agent, announcement_id=ann.announcement_id, cap_token=token,
+                agent,
+                announcement_id=ann.announcement_id,
+                cap_token=token,
                 ttl_ms=MAX_INTENT_TTL_MS + 1,
+            )
+
+    def test_empty_cap_token_id_is_never_an_unbound_wildcard(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        invalid_token = dict(token)
+        invalid_token["token_id"] = ""
+        with pytest.raises(ClaimIntentRejected, match="token_id"):
+            sign_claim_intent(
+                agent, announcement_id=ann.announcement_id, cap_token=invalid_token
+            )
+
+        intent = sign_claim_intent(
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
+            created_at_ms=NOW_MS,
+        )
+        intent["cap_token_id"] = ""
+        _resign_intent(intent, agent)
+        assert verify_claim_intent(intent, now_ms=NOW_MS) == (
+            False,
+            REJECT_INTENT_MALFORMED,
+        )
+
+    def test_bool_version_and_clock_are_not_integers(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = sign_claim_intent(
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
+            created_at_ms=NOW_MS,
+        )
+        intent["version"] = True
+        _resign_intent(intent, agent)
+        assert verify_claim_intent(intent, now_ms=NOW_MS)[0] is False
+        assert verify_claim_intent(
+            sign_claim_intent(
+                agent,
+                announcement_id=ann.announcement_id,
+                cap_token=token,
+                created_at_ms=NOW_MS,
+            ),
+            now_ms=True,
+        ) == (False, REJECT_INTENT_MALFORMED)
+
+    def test_noncanonical_signature_encoding_is_rejected(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = sign_claim_intent(
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
+            created_at_ms=NOW_MS,
+        )
+        intent["signature"] += "="
+        assert verify_claim_intent(intent, now_ms=NOW_MS) == (
+            False,
+            REJECT_INTENT_SIGNATURE,
+        )
+
+    def test_non_object_cap_token_has_protocol_error(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        with pytest.raises(ClaimIntentRejected, match="must be an object"):
+            sign_claim_intent(
+                agent,
+                announcement_id=ann.announcement_id,
+                cap_token=None,
             )
 
 
@@ -152,12 +267,18 @@ class TestAdmit:
         feed, store, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         receipt = sign_claim_receipt(ann, agent, token)
         out = admit_claim_intent(
-            feed, store, intent, receipt, cap_token=token,
+            feed,
+            store,
+            intent,
+            receipt,
+            cap_token=token,
             now_ms_override=int(time.time() * 1000),
         )
         assert out.claim_record["claimant_did"] == agent.as_did()
@@ -168,20 +289,28 @@ class TestAdmit:
         # a second announcement on the same feed
         pub2 = AgentIdentity.generate(label="pub2")
         ann2 = sign_announcement(
-            publisher=pub2, title="other", capability_set=["code_review"],
+            publisher=pub2,
+            title="other",
+            capability_set=["code_review"],
             reward_minor=1,
         )
         feed.publish(ann2)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         # receipt binds ann2 while the intent binds ann
         receipt = sign_claim_receipt(ann2, agent, token)
         with pytest.raises(ClaimIntentRejected, match=REJECT_INTENT_BINDING):
             admit_claim_intent(
-                feed, store, intent, receipt, cap_token=token,
+                feed,
+                store,
+                intent,
+                receipt,
+                cap_token=token,
                 now_ms_override=int(time.time() * 1000),
             )
 
@@ -189,7 +318,9 @@ class TestAdmit:
         feed, store, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         # receipt signed by a different agent
@@ -198,7 +329,11 @@ class TestAdmit:
         receipt = sign_claim_receipt(ann, mallory, mallory_token)
         with pytest.raises(ClaimIntentRejected, match=REJECT_INTENT_BINDING):
             admit_claim_intent(
-                feed, store, intent, receipt, cap_token=token,
+                feed,
+                store,
+                intent,
+                receipt,
+                cap_token=token,
                 now_ms_override=int(time.time() * 1000),
             )
 
@@ -206,13 +341,20 @@ class TestAdmit:
         feed, store, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
-            created_at_ms=NOW_MS, ttl_ms=1_000,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
+            created_at_ms=NOW_MS,
+            ttl_ms=1_000,
         )
         receipt = sign_claim_receipt(ann, agent, token)
         with pytest.raises(ClaimIntentRejected, match=REJECT_INTENT_EXPIRED):
             admit_claim_intent(
-                feed, store, intent, receipt, cap_token=token,
+                feed,
+                store,
+                intent,
+                receipt,
+                cap_token=token,
                 now_ms_override=NOW_MS + 2_000,
             )
         assert not store.is_claimed(ann.announcement_id)  # CAS untouched
@@ -227,33 +369,76 @@ class TestAdmit:
         tokenA = _selfissue(agentA, ["code_review"])
         tokenB = _selfissue(agentB, ["code_review"])
         intentA = sign_claim_intent(
-            agentA, announcement_id=ann.announcement_id, cap_token=tokenA,
+            agentA,
+            announcement_id=ann.announcement_id,
+            cap_token=tokenA,
             created_at_ms=NOW_MS,
         )
         intentB = sign_claim_intent(
-            agentB, announcement_id=ann.announcement_id, cap_token=tokenB,
+            agentB,
+            announcement_id=ann.announcement_id,
+            cap_token=tokenB,
             created_at_ms=NOW_MS,
         )
         receiptA = sign_claim_receipt(ann, agentA, tokenA)
         receiptB = sign_claim_receipt(ann, agentB, tokenB)
         admit_claim_intent(
-            feed, store, intentA, receiptA, cap_token=tokenA,
+            feed,
+            store,
+            intentA,
+            receiptA,
+            cap_token=tokenA,
             now_ms_override=int(time.time() * 1000),
         )
         with pytest.raises(ClaimConflict):
             admit_claim_intent(
-                feed, store, intentB, receiptB, cap_token=tokenB,
+                feed,
+                store,
+                intentB,
+                receiptB,
+                cap_token=tokenB,
                 now_ms_override=int(time.time() * 1000),
             )
         assert store.is_claimed(ann.announcement_id)
 
+    def test_invalid_authority_clock_fails_before_cas(self, tmp_path):
+        feed, store, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = sign_claim_intent(
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
+        )
+        receipt = sign_claim_receipt(ann, agent, token)
+        with pytest.raises(ClaimIntentRejected, match="authority clock"):
+            admit_claim_intent(
+                feed,
+                store,
+                intent,
+                receipt,
+                cap_token=token,
+                now_ms_override=True,
+            )
+        assert not store.is_claimed(ann.announcement_id)
+
 
 class TestIntentTracker:
-    def _intent(self, agent, announcement_id, token, nonce=None, ttl=DEFAULT_INTENT_TTL_MS, created_at_ms=None):
+    def _intent(
+        self,
+        agent,
+        announcement_id,
+        token,
+        nonce=None,
+        ttl=DEFAULT_INTENT_TTL_MS,
+        created_at_ms=None,
+    ):
         return sign_claim_intent(
-            agent, announcement_id=announcement_id, cap_token=token,
+            agent,
+            announcement_id=announcement_id,
+            cap_token=token,
             created_at_ms=created_at_ms if created_at_ms is not None else NOW_MS,
-            ttl_ms=ttl, nonce=nonce,
+            ttl_ms=ttl,
+            nonce=nonce,
         )
 
     def test_pending_then_confirmed(self, tmp_path):
@@ -276,7 +461,11 @@ class TestIntentTracker:
         token = _selfissue(agent, ["code_review"])
         now = int(time.time() * 1000)
         intent = self._intent(
-            agent, ann.announcement_id, token, nonce="b" * 16, ttl=1_000,
+            agent,
+            ann.announcement_id,
+            token,
+            nonce="b" * 16,
+            ttl=1_000,
             created_at_ms=now,
         )
         tracker = IntentTracker(tmp_path / "tracker")
@@ -303,6 +492,19 @@ class TestIntentTracker:
         tracker.record_sent(intent)  # no double count
         assert len(tracker.pending(now_ms=NOW_MS + 1)) == 1
 
+    def test_terminal_replay_is_idempotent_but_conflict_is_rejected(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="m" * 16)
+        tracker = IntentTracker(tmp_path / "tracker")
+        tracker.record_sent(intent)
+        tracker.mark(intent, "confirmed")
+        tracker.mark(intent, "confirmed")
+
+        with pytest.raises(ClaimIntentRejected, match="already terminal as confirmed"):
+            tracker.mark(intent, "rejected")
+        assert tracker.stats() == {"confirmed": 1}
+
     def test_invalid_intent_refused(self, tmp_path):
         tracker = IntentTracker(tmp_path / "tracker")
         with pytest.raises(ClaimIntentRejected):
@@ -319,6 +521,12 @@ class TestIntentTracker:
             handle.write(b'{"event":"sen')
         reloaded = IntentTracker(tmp_path / "tracker")
         assert reloaded.stats()["pending"] == 1
+        second = self._intent(agent, ann.announcement_id, token, nonce="l" * 16)
+        reloaded.record_sent(second)
+
+        restarted = IntentTracker(tmp_path / "tracker")
+        assert restarted.pending(now_ms=NOW_MS + 1) == [intent, second]
+        assert journal.read_bytes().endswith(b"\n")
 
     def test_corruption_fails_closed(self, tmp_path):
         _, _, _, agent, ann = _setup(tmp_path)
@@ -333,6 +541,61 @@ class TestIntentTracker:
         with pytest.raises(RuntimeError, match="corrupt"):
             IntentTracker(tmp_path / "tracker")
 
+    def test_stale_instances_refresh_before_read_and_write(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="g" * 16)
+        directory = tmp_path / "tracker"
+        first = IntentTracker(directory)
+        stale = IntentTracker(directory)
+
+        first.record_sent(intent)
+        assert stale.pending(now_ms=NOW_MS + 1) == [intent]
+        stale.mark(intent, "confirmed")
+        assert first.stats() == {"confirmed": 1}
+
+    def test_nonce_collision_cannot_rebind_existing_intent(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        first_token = _selfissue(agent, ["code_review"])
+        second_token = _selfissue(agent, ["code_review"])
+        first = self._intent(agent, ann.announcement_id, first_token, nonce="h" * 16)
+        collision = self._intent(
+            agent, ann.announcement_id, second_token, nonce="h" * 16
+        )
+        tracker = IntentTracker(tmp_path / "tracker")
+        tracker.record_sent(first)
+
+        with pytest.raises(ClaimIntentRejected, match="different intent"):
+            tracker.record_sent(collision)
+        assert tracker.pending(now_ms=NOW_MS + 1) == [first]
+
+    def test_capacity_fails_closed_without_growing_journal(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        tracker = IntentTracker(tmp_path / "tracker", max_intents=1)
+        tracker.record_sent(
+            self._intent(agent, ann.announcement_id, token, nonce="i" * 16)
+        )
+        before = (tmp_path / "tracker" / "claim-intents.jsonl").read_bytes()
+
+        with pytest.raises(IntentTrackerFull, match="capacity"):
+            tracker.record_sent(
+                self._intent(agent, ann.announcement_id, token, nonce="j" * 16)
+            )
+        assert (tmp_path / "tracker" / "claim-intents.jsonl").read_bytes() == before
+
+    def test_unknown_terminal_transition_fails_closed(self, tmp_path):
+        directory = tmp_path / "tracker"
+        directory.mkdir()
+        journal = directory / "claim-intents.jsonl"
+        journal.write_text(
+            '{"event":"confirmed","nonce":"kkkkkkkkkkkkkkkk"}\n',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(IntentTrackerCorrupt, match="unknown intent"):
+            IntentTracker(directory)
+
 
 class TestOfflineStory:
     def test_full_offline_flow(self, tmp_path):
@@ -344,7 +607,9 @@ class TestOfflineStory:
         # offline: sign both, track as pending
         now = int(time.time() * 1000)  # real clock: tracker self-verifies
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=now,
         )
         receipt = sign_claim_receipt(ann, agent, token)
@@ -354,7 +619,11 @@ class TestOfflineStory:
 
         # later, at the authority (any transport carried the pair)
         out = admit_claim_intent(
-            feed, store, intent, receipt, cap_token=token,
+            feed,
+            store,
+            intent,
+            receipt,
+            cap_token=token,
             now_ms_override=now + 60_000,
         )
         assert out.claim_record["claimant_did"] == agent.as_did()
@@ -378,13 +647,19 @@ class TestCapTokenBinding:
         other_token = _selfissue(agent, ["code_review"])  # different token_id
         assert cited_token["token_id"] != other_token["token_id"]
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=cited_token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=cited_token,
             created_at_ms=NOW_MS,
         )
         receipt = sign_claim_receipt(ann, agent, other_token)
         with pytest.raises(ClaimIntentRejected, match="different cap_token"):
             admit_claim_intent(
-                feed, store, intent, receipt, cap_token=other_token,
+                feed,
+                store,
+                intent,
+                receipt,
+                cap_token=other_token,
                 now_ms_override=int(time.time() * 1000),
             )
         assert not store.is_claimed(ann.announcement_id)
@@ -393,12 +668,18 @@ class TestCapTokenBinding:
         feed, store, _, agent, ann = _setup(tmp_path)
         token = _selfissue(agent, ["code_review"])
         intent = sign_claim_intent(
-            agent, announcement_id=ann.announcement_id, cap_token=token,
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=token,
             created_at_ms=NOW_MS,
         )
         receipt = sign_claim_receipt(ann, agent, token)
         out = admit_claim_intent(
-            feed, store, intent, receipt, cap_token=token,
+            feed,
+            store,
+            intent,
+            receipt,
+            cap_token=token,
             now_ms_override=int(time.time() * 1000),
         )
         assert out.claim_record["claimant_did"] == agent.as_did()
