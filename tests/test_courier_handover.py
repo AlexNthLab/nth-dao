@@ -79,14 +79,14 @@ def ack_outbox(tmp_path):
     return DurableOutbox(tmp_path / "ack-outbox", clock=lambda: NOW_MS + 2_000)
 
 
-def _envelope(alice, payload=None, recipient="dao:core"):
+def _envelope(alice, payload=None, recipient="dao:core", ttl_ms=3_600_000):
     return sign_envelope(
         alice,
         kind="channel.message",
         recipient=recipient,
         payload={"body": "carry me"} if payload is None else payload,
         created_at_ms=NOW_MS,
-        expires_at_ms=NOW_MS + 3_600_000,
+        expires_at_ms=NOW_MS + ttl_ms,
     )
 
 
@@ -149,7 +149,9 @@ class TestFullFlowWithRealKeys:
         self, tmp_path, alice, carrier, bob_inbox, ack_outbox, monkeypatch
     ):
         recipient, signing, did = _make_recipient()
-        courier = seal_courier_envelope(_envelope(alice), recipient_did=did)
+        courier = seal_courier_envelope(
+            _envelope(alice, ttl_ms=3 * 3_600_000), recipient_did=did
+        )
         carrier.seal_into(courier)
 
         def fail_handover(_courier):
@@ -165,8 +167,17 @@ class TestFullFlowWithRealKeys:
                 ack_outbox=ack_outbox,
                 now_ms=NOW_MS + 2_000,
             )
+        with pytest.raises(OSError, match="simulated carrier failure"):
+            process_handover(
+                carrier,
+                recipient=recipient,
+                identity_private=signing,
+                inbox=bob_inbox,
+                ack_outbox=ack_outbox,
+                now_ms=NOW_MS + 2 * 3_600_000,
+            )
 
-        assert len(ack_outbox.pending(now_ms=NOW_MS + 3_000)) == 1
+        assert len(ack_outbox.pending(now_ms=NOW_MS + 2 * 3_600_000 + 1)) == 1
         assert carrier.stats()["envelopes"] == 1
 
     def test_handover_rejects_non_positive_batch_size(

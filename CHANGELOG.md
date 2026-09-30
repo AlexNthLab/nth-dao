@@ -65,6 +65,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   inline under the held lock and rotation runs after release (the naive
   fix deadlocked). courier_id refuses control characters at seal time.
   +2 regression tests.
+- Courier dependency and retry hardening: courier encryption now fails with
+  an actionable `nth-dao[crypto]` error when PyNaCl is unavailable instead
+  of dereferencing an absent optional import. Inbox journals preserve the
+  first acceptance timestamp, and handover derives a deterministic signed
+  ACK envelope from that durable receipt. Repeating handover after a carrier
+  deletion failure therefore reuses one outbox record instead of generating
+  an unbounded stream of ACKs. Its transport TTL covers the delivery
+  protocol's maximum inbound lifetime, so delayed retries cannot strand a
+  still-fresh courier behind an already-expired ACK.
 
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the

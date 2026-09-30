@@ -232,6 +232,8 @@ closed the remaining persistence and boundary gaps:
 | LL-5 | handover removed the carrier copy before the ACK had durable ownership | a required `DurableOutbox` enqueue precedes carrier removal; crash injection pins the ordering |
 | LL-6 | store/spray journals trusted weakly typed events and spray history grew without compaction | strict event schemas/content binding, bounded reads, pending/history quotas, cross-process refresh, and atomic compaction |
 | LL-7 | the Phase-4 API was not reachable from the package facade | supported courier types and operations are exported from `nth_dao.delivery` |
+| LL-8 | a core-only install reached absent PyNaCl classes and failed with an opaque `NoneType` call | every courier cryptographic entry point now fails with an actionable `nth-dao[crypto]` dependency error |
+| LL-9 | retrying handover after carrier deletion failed signed a fresh ACK envelope each time, allowing one stuck carrier to fill the durable outbox; a short ACK TTL could also expire while the original courier remained valid | the inbox durably retains first acceptance time, ACK envelopes use a deterministic nonce, and their TTL covers the maximum inbound lifetime, making delayed, concurrent, and restarted retries content-address idempotent |
 
 Round 23 (adversarial review of the Courier seal + store — the two
 commits that had only been tested, not reviewed; process-gap fix) found

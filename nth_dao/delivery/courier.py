@@ -73,6 +73,13 @@ class CourierEnvelopeRejected(ValueError):
     """Raised when a courier envelope cannot be sealed or opened."""
 
 
+def _require_crypto() -> None:
+    if not _NACL_PUBLIC_AVAILABLE:
+        raise CourierEnvelopeRejected(
+            "courier encryption requires the optional nth-dao[crypto] dependency"
+        )
+
+
 def _validate_courier_id(courier_id: Any) -> str:
     if not isinstance(courier_id, str):
         raise CourierEnvelopeRejected("courier_id must be a string")
@@ -133,6 +140,7 @@ def x25519_public_from_did(did: str) -> bytes:
     """Derive the X25519 public key from an Ed25519 did:key using the
     libsodium RFC 7748 conversion (crypto_sign_ed25519_pk_to_curve25519)."""
 
+    _require_crypto()
     if not is_did_key(did):
         raise CourierEnvelopeRejected("recipient DID is not a did:key")
     try:
@@ -151,6 +159,7 @@ def x25519_private_from_ed25519(ed25519_secret: bytes) -> bytes:
     crypto_sign_ed25519_sk_to_curve25519 requires the 64-byte form:
     seed || pubkey)."""
 
+    _require_crypto()
     from nacl.bindings import crypto_sign_ed25519_sk_to_curve25519
     from nacl.signing import SigningKey
 
@@ -171,6 +180,7 @@ def seal_courier_envelope(
 ) -> dict[str, Any]:
     """Seal one signed envelope for a recipient. Anonymous sender by design."""
 
+    _require_crypto()
     ok, reason = validate_envelope(envelope, require_signature=True)
     if not ok:
         raise TransportEnvelopeRejected(reason)
@@ -207,6 +217,7 @@ def open_courier_envelope(
     all delivery-layer checks before it is returned.
     """
 
+    _require_crypto()
     ciphertext = validate_courier_wire(courier, recipient_did=recipient_did)
     recipient_x25519 = x25519_public_from_did(recipient_did)
     # identity_private: the NTH Ed25519 signing key (nacl.signing.SigningKey

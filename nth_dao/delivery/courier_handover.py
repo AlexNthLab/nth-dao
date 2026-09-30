@@ -20,10 +20,12 @@ the recipient's inbox.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import Any
 
+from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import DeliveryAck, sign_ack
 from nth_dao.delivery.courier import (
     CourierEnvelopeRejected,
@@ -31,6 +33,7 @@ from nth_dao.delivery.courier import (
 )
 from nth_dao.delivery.courier_store import CourierStore
 from nth_dao.delivery.envelope import (
+    MAX_TTL_MS,
     envelope_digest,
 )
 from nth_dao.delivery.inbox import DeliveryInbox
@@ -38,7 +41,10 @@ from nth_dao.delivery.outbox import DurableOutbox
 from nth_dao.identity import AgentIdentity
 
 logger = logging.getLogger("nth_dao.courier")
-ACK_ENVELOPE_TTL_MS = 3_600_000
+# A retry can only reopen the carrier while the original envelope remains
+# fresh. Matching the protocol's maximum envelope lifetime guarantees the
+# deterministic ACK remains enqueueable throughout that entire window.
+ACK_ENVELOPE_TTL_MS = MAX_TTL_MS
 
 
 class CourierHandoverError(RuntimeError):
@@ -100,7 +106,11 @@ def process_handover(
 
         decision = inbox.accept(envelope, now_ms=now)
         if decision.accepted or decision.duplicate:
-            received_ms = now if now is not None else envelope.created_at_ms
+            received_ms = inbox.accepted_at(envelope.message_id)
+            if received_ms is None:
+                # Legacy compacted inbox records did not retain at_ms. The
+                # signed envelope timestamp is stable across every retry.
+                received_ms = envelope.created_at_ms
             ack = sign_ack(
                 recipient,
                 message_id=envelope.message_id,
@@ -114,7 +124,7 @@ def process_handover(
                 ack,
                 recipient=recipient,
                 sender_did=envelope.sender_did,
-                now_ms=now,
+                now_ms=received_ms,
             )
             ack_outbox.enqueue(ack_envelope, now_ms=now)
             carrier_store.hand_over(courier)
@@ -177,13 +187,16 @@ def _ack_envelope(
 ) -> Any:
     from nth_dao.delivery.envelope import sign_envelope
 
+    ack_payload = {"ack": ack.to_dict()}
+    deterministic_nonce = "ack" + hashlib.sha256(canonical_json(ack_payload)).hexdigest()
     return sign_envelope(
         recipient,
         kind="delivery.ack",
         recipient=sender_did,
-        payload={"ack": ack.to_dict()},
+        payload=ack_payload,
         created_at_ms=now_ms,
         expires_at_ms=now_ms + ACK_ENVELOPE_TTL_MS,
+        nonce=deterministic_nonce,
     )
 
 

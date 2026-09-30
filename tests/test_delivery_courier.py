@@ -102,6 +102,17 @@ class TestSeal:
                 _envelope(alice), recipient_did="dao:core"
             )
 
+    def test_missing_crypto_dependency_fails_with_actionable_error(
+        self, alice, bob, monkeypatch
+    ):
+        import nth_dao.delivery.courier as courier_module
+
+        monkeypatch.setattr(courier_module, "_NACL_PUBLIC_AVAILABLE", False)
+        with pytest.raises(CourierEnvelopeRejected, match=r"nth-dao\[crypto\]"):
+            seal_courier_envelope(
+                _envelope(alice), recipient_did=bob.as_did()
+            )
+
 
 class TestOpen:
     def test_roundtrip_via_dedicated_signing_key(self, alice):
