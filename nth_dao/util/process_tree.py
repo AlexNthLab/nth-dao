@@ -48,11 +48,15 @@ class ProcessTreeGuard:
                     return True
             elif os.name != "nt":
                 try:
-                    os.killpg(
-                        self._process.pid,
-                        signal.SIGKILL if force else signal.SIGTERM,
+                    kill_process_group = getattr(os, "killpg", None)
+                    signal_number = (
+                        getattr(signal, "SIGKILL", signal.SIGTERM)
+                        if force
+                        else signal.SIGTERM
                     )
-                    return True
+                    if callable(kill_process_group):
+                        kill_process_group(self._process.pid, signal_number)
+                        return True
                 except (OSError, ProcessLookupError):
                     pass
             if self._process.poll() is not None:
@@ -80,7 +84,12 @@ class ProcessTreeGuard:
                 return
             if os.name != "nt":
                 try:
-                    os.killpg(self._process.pid, signal.SIGKILL)
+                    kill_process_group = getattr(os, "killpg", None)
+                    if callable(kill_process_group):
+                        kill_process_group(
+                            self._process.pid,
+                            getattr(signal, "SIGKILL", signal.SIGTERM),
+                        )
                 except (OSError, ProcessLookupError):
                     pass
             self._closed = True

@@ -16,20 +16,20 @@ import logging
 import math
 import threading
 from collections import deque
-from typing import Any, Callable, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 from nth_dao.nostr import NostrAdapterUnavailable
 
 try:  # pragma: no cover - importorskip in tests
     import nostr_sdk as _ns  # type: ignore[import-untyped]
-
     from nostr_sdk import Client as _Client
     from nostr_sdk import Filter as _Filter
     from nostr_sdk import Kind as _Kind
     from nostr_sdk import PublicKey as _PublicKey
     from nostr_sdk import SingleLetterTag as _SingleLetterTag
     _NOSTR_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except (ImportError, OSError):  # pragma: no cover
     _ns = None
     _Client = None
     _Filter = None
@@ -71,9 +71,7 @@ def _validate_relay_url(value: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise ValueError("relay url has an invalid port") from exc
-    if parsed.scheme == "wss":
-        pass
-    elif parsed.scheme == "ws" and hostname in {"localhost", "127.0.0.1", "::1"}:
+    if parsed.scheme == "wss" or parsed.scheme == "ws" and hostname in {"localhost", "127.0.0.1", "::1"}:
         pass
     else:
         raise ValueError("relay url must be wss (ws only for loopback)")
@@ -106,13 +104,14 @@ class NostrRelayClient:
         self,
         keys: Any,
         *,
-        relay_urls: List[str],
+        relay_urls: list[str],
         name: str = "nostr-relay",
         publish_timeout: float = _DEFAULT_PUBLISH_TIMEOUT,
     ) -> None:
         if not _NOSTR_AVAILABLE:
             raise NostrAdapterUnavailable(
-                "nostr support requires the optional extra: pip install nth-dao[nostr]"
+                "nostr support requires an importable optional native binding: "
+                "pip install nth-dao[nostr] with a supported Python/platform build"
             )
         if (
             not isinstance(relay_urls, list)
@@ -129,17 +128,17 @@ class NostrRelayClient:
         )
         self.capabilities_name = name
         self._client = _Client()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
         self._started = threading.Event()
-        self._start_error: Optional[str] = None
+        self._start_error: str | None = None
         self._running = False
         self._lifecycle_lock = threading.RLock()
         self._queue: deque = deque(maxlen=MAX_EVENT_QUEUE)
         self._queue_lock = threading.Lock()
         self._dropped_events = 0
-        self._stream_task: Optional[asyncio.Task[None]] = None
-        self._subscription_id: Optional[str] = None
+        self._stream_task: asyncio.Task[None] | None = None
+        self._subscription_id: str | None = None
         self._subscription_active = threading.Event()
 
     # ─────────────────────── lifecycle ───────────────────────
@@ -192,8 +191,12 @@ class NostrRelayClient:
             boot.cancel()
             try:
                 loop.run_until_complete(boot)
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                logger.debug("nostr relay boot task cancelled during cleanup")
+            except Exception:
+                logger.debug(
+                    "nostr relay boot task failed during cleanup", exc_info=True
+                )
             pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
             for task in pending:
                 task.cancel()
@@ -248,7 +251,7 @@ class NostrRelayClient:
 
     # ─────────────────────── public API ───────────────────────
 
-    def publish(self, event: Any, *, timeout_s: Optional[float] = None) -> bool:
+    def publish(self, event: Any, *, timeout_s: float | None = None) -> bool:
         """Send one signed event; return True when at least one relay OKs it."""
 
         if not self._running or self._loop is None:
@@ -274,10 +277,10 @@ class NostrRelayClient:
     def subscribe_events(
         self,
         *,
-        kinds: List[int],
-        authors: Optional[List[str]] = None,
-        namespace: Optional[str] = None,
-        callback: Optional[Callable[[Any], None]] = None,
+        kinds: list[int],
+        authors: list[str] | None = None,
+        namespace: str | None = None,
+        callback: Callable[[Any], None] | None = None,
     ) -> None:
         """Subscribe to a kinds filter; events are queued and callback'd."""
 
@@ -339,7 +342,7 @@ class NostrRelayClient:
             fut.cancel()
             raise NostrRelayError("nostr subscription timed out after 15s") from None
 
-    async def _subscribe_async(self, filter_obj: Any, callback: Optional[Callable]) -> None:
+    async def _subscribe_async(self, filter_obj: Any, callback: Callable | None) -> None:
         from nostr_sdk import ReqTarget as _ReqTarget
 
         target = _ReqTarget.auto([filter_obj])
@@ -390,11 +393,11 @@ class NostrRelayClient:
                     if callback is not None:
                         try:
                             callback(event)
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             logger.exception("nostr subscription callback raised")
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - stream errors end the pump
+            except Exception:
                 logger.exception("nostr event stream ended with error")
             finally:
                 self._subscription_active.clear()
@@ -440,18 +443,18 @@ class NostrRelayClient:
         return None
 
     @staticmethod
-    def _event_id(event: Any) -> Optional[str]:
+    def _event_id(event: Any) -> str | None:
         try:
             return event.id().to_hex()
         except (AttributeError, TypeError, ValueError):
             return None
 
-    def poll_events(self, *, max_items: int = 64) -> List[Any]:
+    def poll_events(self, *, max_items: int = 64) -> list[Any]:
         if isinstance(max_items, bool) or not isinstance(max_items, int):
             raise TypeError("max_items must be an integer")
         if max_items <= 0 or max_items > MAX_EVENT_QUEUE:
             raise ValueError(f"max_items must be within [1, {MAX_EVENT_QUEUE}]")
-        items: List[Any] = []
+        items: list[Any] = []
         with self._queue_lock:
             while self._queue and len(items) < max_items:
                 items.append(self._queue.popleft())
@@ -466,9 +469,7 @@ class NostrRelayClient:
 
         try:
             succeeded = getattr(output, "success", None)
-            if isinstance(succeeded, list) and len(succeeded) > 0:
-                return True
-            return False
+            return isinstance(succeeded, list) and len(succeeded) > 0
         except Exception:  # noqa: BLE001 - introspection must not crash
             return False
 

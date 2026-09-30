@@ -42,13 +42,17 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from nth_dao.canonical_json import canonical_json
-from nth_dao.util.process_tree import attach_process_tree_guard
 from nth_dao.trade_rules.execution_adapter import (
     MAX_ADAPTER_ARTIFACT_BYTES,
     TradeExecutionAdapter,
+)
+from nth_dao.util.process_tree import (
+    WINDOWS_CREATE_SUSPENDED,
+    attach_process_tree_guard,
+    resume_suspended_process,
 )
 
 logger = logging.getLogger("nth_dao.trade_rules")
@@ -295,7 +299,7 @@ class SubprocessAdapterRunner:
         hook_version: str,
         rule_id: str,
         input_payload: bytes,
-        timeout_s: Optional[float] = None,
+        timeout_s: float | None = None,
     ) -> AdapterHookOutcome:
         """Run only after the host explicitly accepts local-code authority."""
 
@@ -331,7 +335,7 @@ class SubprocessAdapterRunner:
         hook_version: str,
         rule_id: str,
         input_payload: bytes,
-        timeout_s: Optional[float] = None,
+        timeout_s: float | None = None,
     ) -> AdapterHookOutcome:
         """Execute one hook and return the content-addressed outcome.
 
@@ -384,7 +388,7 @@ class SubprocessAdapterRunner:
             )
             with os.fdopen(artifact_fd, "wb") as handle:
                 handle.write(artifact_bytes)
-            stdout, stderr, returncode = self._communicate(
+            stdout, _stderr, _returncode = self._communicate(
                 [self._python, "-I", "-c", _ADAPTER_BOOTSTRAP, artifact_path],
                 _ADAPTER_START_MARKER + stdin_payload,
                 timeout=timeout,
@@ -497,7 +501,7 @@ class SubprocessAdapterRunner:
             "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
         }
         try:
-            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            process = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -506,7 +510,13 @@ class SubprocessAdapterRunner:
                 env=minimal_env,
                 start_new_session=os.name != "nt",
                 creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                    (
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                        | WINDOWS_CREATE_SUSPENDED
+                    )
+                    if os.name == "nt"
+                    else 0
                 ),
             )
         except OSError as exc:
@@ -515,14 +525,28 @@ class SubprocessAdapterRunner:
             raise AdapterHookRejected(
                 f"adapter process could not be started: {exc}", retryable=True
             ) from exc
+        process_tree_guard = None
         try:
             process_tree_guard = attach_process_tree_guard(process)
+            if os.name == "nt":
+                resume_suspended_process(process)
         except OSError as exc:
             try:
-                process.kill()
+                if process_tree_guard is not None:
+                    process_tree_guard.terminate()
+                else:
+                    process.kill()
                 process.wait(timeout=5.0)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+            if process_tree_guard is not None:
+                try:
+                    process_tree_guard.close()
+                except OSError as close_exc:
+                    logger.error(
+                        "adapter containment cleanup failed after startup error: %s",
+                        close_exc,
+                    )
             for pipe in (process.stdin, process.stdout, process.stderr):
                 try:
                     if pipe is not None:
@@ -535,7 +559,7 @@ class SubprocessAdapterRunner:
             ) from exc
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
-        exceeded_stream: Optional[str] = None
+        exceeded_stream: str | None = None
         kill_in_progress = False
         state_lock = threading.Lock()
 
@@ -605,7 +629,7 @@ class SubprocessAdapterRunner:
         ]
         for pump in pumps:
             pump.start()
-        primary_error: Optional[AdapterHookRejected] = None
+        primary_error: AdapterHookRejected | None = None
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -630,7 +654,20 @@ class SubprocessAdapterRunner:
                     )
         # Closing the guard also terminates descendants after the direct child
         # has already exited.
-        process_tree_guard.close()
+        guard_close_error: OSError | None = None
+        try:
+            process_tree_guard.close()
+        except OSError as exc:
+            _kill_tree()
+            try:
+                process_tree_guard.close()
+            except OSError as retry_exc:
+                guard_close_error = retry_exc
+                logger.error(
+                    "adapter process-tree guard close failed twice: %s / %s",
+                    exc,
+                    retry_exc,
+                )
         for pump in pumps:
             pump.join(timeout=5.0)
         if any(pump.is_alive() for pump in pumps):
@@ -653,6 +690,11 @@ class SubprocessAdapterRunner:
                     pipe.close()
             except OSError:
                 pass
+        if guard_close_error is not None and primary_error is None:
+            primary_error = AdapterHookRejected(
+                "adapter process containment cleanup failed",
+                retryable=True,
+            )
         if primary_error is not None:
             raise primary_error
         if exceeded_stream is not None:
@@ -672,15 +714,15 @@ class SubprocessAdapterRunner:
 __all__ = [
     "ADAPTER_RPC_PROTOCOL",
     "ADAPTER_RPC_VERSION",
-    "AdapterHookFailed",
-    "AdapterHookOutcome",
-    "AdapterHookRejected",
     "MAX_CONCURRENT_RUNS",
     "MAX_CONFIGURED_IO_BYTES",
     "MAX_INPUT_BYTES",
     "MAX_RESULT_BYTES",
     "OUTCOME_FAILED",
     "OUTCOME_SUCCEEDED",
+    "AdapterHookFailed",
+    "AdapterHookOutcome",
+    "AdapterHookRejected",
     "SubprocessAdapterRunner",
     "content_descriptor",
     "encode_handshake",

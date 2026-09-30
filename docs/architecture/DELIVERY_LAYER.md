@@ -167,11 +167,13 @@ plugin transport wire limit), `MAX_PAYLOAD_DEPTH=16`, `MAX_TTL_MS=7 days`,
     is folded as bounded JSONL records with exact event shapes; stale orphan
     leases are removed during compaction.
 11. **Adapter descendants are one-shot.** POSIX adapters run in a dedicated
-    process group. Windows adapters are attached to a kill-on-close Job Object
-    before a trusted bootstrap gate releases the artifact. A failed containment
-    setup therefore refuses the invocation before artifact code executes, and
-    descendants cannot outlive a normally exiting parent. This is resource
-    containment only, not a filesystem, network, or capability sandbox.
+    process group. Windows adapters start suspended, enter a kill-on-close Job
+    Object, and only then resume into a trusted bootstrap that still requires a
+    one-byte release marker before running the artifact. A failed containment
+    setup therefore refuses the invocation before interpreter or artifact code
+    can escape process-tree ownership, and descendants cannot outlive a normally
+    exiting parent. This is resource containment only, not a filesystem,
+    network, or capability sandbox.
 
 ## Threat Coverage Mapping (design doc §10 → mechanism)
 
@@ -269,7 +271,7 @@ stage. Each defect has a focused negative regression test:
 | HH-12 | `TransportCapabilities` accepted truthy integers and malformed names as security declarations | exact bool/int/enum validation plus printable UTF-8-bounded transport names |
 | HH-13 | outbox append could cross its loader's hard byte ceiling and brick the next restart | descriptor-local pre-write size check raises `DeliveryOutboxFull` without changing the journal |
 | HH-14 | inbox count-only eviction allowed serialized live state to exceed its durable read budget | exact live-byte accounting, atomic multi-eviction of processed entries, compact-before-append hard limit |
-| HH-15 | Windows cleanup lost descendants after the direct adapter process exited, and containment setup happened after artifact execution began | Job Object ownership plus a bootstrap start gate; failure is retryable and fail-closed before artifact code |
+| HH-15 | Windows cleanup lost descendants after the direct adapter process exited, and containment setup happened after artifact execution began | suspended creation, Job Object ownership, and a bootstrap start gate; failure is retryable and fail-closed before interpreter or artifact code |
 
 Round 20 (adversarial review of every remaining commit: Phase 1 6182f4c,
 Slice B bf28c9a, Phase 2 N1 ac92d5a, N2/N3 d104bf9, fix commits

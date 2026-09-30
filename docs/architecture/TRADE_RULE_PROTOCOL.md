@@ -939,8 +939,10 @@ Boundaries that are deliberate:
   permission scoping, and schema validation stay in
   `TradeExecutionCoordinator.issue`; the runner adds an administrative process
   boundary, concurrency gate, wall-clock termination, bounded stdio, a fresh
-  cwd, `python -I`, a minimal environment, and artifact digest verification
-  before every spawn.
+  cwd, `python -I`, a minimal environment, artifact digest verification before
+  every spawn, and process-tree lifetime containment. Windows starts the
+  interpreter suspended, assigns it to a kill-on-close Job Object, resumes it,
+  and retains the bootstrap marker as a second gate before artifact execution.
 * None of those controls is an OS or capability sandbox. An enabled artifact
   can read user files, use the network, start subprocesses, and consume CPU or
   memory with the NTH DAO process's authority. Permission tokens declare intent

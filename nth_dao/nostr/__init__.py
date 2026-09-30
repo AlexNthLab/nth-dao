@@ -37,7 +37,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.envelope import (
@@ -55,7 +55,7 @@ try:  # pragma: no cover - exercised via importorskip in tests
     from nostr_sdk import Kind as _Kind
     from nostr_sdk import Tag as _Tag
     _NOSTR_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except (ImportError, OSError):  # pragma: no cover
     _nostr_sdk = None
     _Event = None
     _EventBuilder = None
@@ -72,7 +72,7 @@ _ENVELOPE_EVENT_D_TAG = "d"
 
 
 class NostrAdapterUnavailable(RuntimeError):
-    """Raised when the ``nostr`` extra is not installed."""
+    """Raised when the optional ``nostr`` native binding is unavailable."""
 
 
 logger = logging.getLogger("nth_dao.nostr")
@@ -81,7 +81,8 @@ logger = logging.getLogger("nth_dao.nostr")
 def _require_nostr() -> None:
     if not _NOSTR_AVAILABLE:
         raise NostrAdapterUnavailable(
-            "nostr support requires the optional extra: pip install nth-dao[nostr]"
+            "nostr support requires an importable optional native binding: "
+            "pip install nth-dao[nostr] with a supported Python/platform build"
         )
 
 
@@ -93,20 +94,21 @@ class NostrKeys:
         self._keys = keys
 
     @classmethod
-    def generate(cls) -> "NostrKeys":
+    def generate(cls) -> NostrKeys:
         _require_nostr()
         return cls(_Keys.generate())
 
     @classmethod
-    def parse(cls, secret_key_hex: str) -> "NostrKeys":
+    def parse(cls, secret_key_hex: str) -> NostrKeys:
         """Import a secret key from 64-char hex (deterministic tests, import)."""
 
         _require_nostr()
         if not isinstance(secret_key_hex, str):
-            raise ValueError("secret key must be hex text")
+            # Public v1 API historically normalizes parse failures to ValueError.
+            raise ValueError("secret key must be hex text")  # noqa: TRY004
         try:
             return cls(_Keys.parse(secret_key_hex))
-        except Exception as exc:  # noqa: BLE001 - rust errors are opaque
+        except Exception as exc:
             raise ValueError(f"invalid nostr secret key: {exc}") from exc
 
     @property
@@ -129,7 +131,7 @@ class NostrKeyBinding:
     created_at_ms: int
     signature: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "kind": BINDING_KIND,
             "nth_did": self.nth_did,
@@ -138,7 +140,7 @@ class NostrKeyBinding:
             "signature": self.signature,
         }
 
-    def signing_body(self) -> Dict[str, Any]:
+    def signing_body(self) -> dict[str, Any]:
         return {
             key: value for key, value in self.to_dict().items() if key != "signature"
         }
@@ -257,7 +259,7 @@ def envelope_event(
     nostr_keys: NostrKeys,
     *,
     created_at_seconds: int,
-    binding: "NostrKeyBinding | None" = None,
+    binding: NostrKeyBinding | None = None,
 ) -> Any:
     """Wrap one signed envelope as a kind-30078 Nostr event (content = canonical
     envelope JSON, ``d`` tag = message_id). The envelope must already carry its
@@ -393,7 +395,7 @@ def envelope_from_event(event: Any) -> TransportEnvelope:
     return envelope
 
 
-def _extract_d_tag(event: Any) -> "str | None":
+def _extract_d_tag(event: Any) -> str | None:
     """Return the event's first ``d`` tag value, or None when absent."""
 
     try:
@@ -433,7 +435,7 @@ __all__ = [
     "verify_key_binding_standalone",
 ]
 
-from nth_dao.nostr.relay_client import (  # noqa: E402 - re-export
+from nth_dao.nostr.relay_client import (
     NostrRelayClient,
     NostrRelayError,
 )

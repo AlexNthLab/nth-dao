@@ -300,11 +300,14 @@ declared failure semantics. An input that the RPC subset cannot represent, or
 that exceeds a worker's configured frame, is rejected before pipe I/O and does
 not revoke the worker. A timeout, crash, idle process exit, malformed or non-canonical JSON,
 unsolicited output, oversized output, or binding mismatch terminates the
-supervised process, attempts descendant cleanup, atomically removes its
+supervised process, terminates its owned process tree, atomically removes its
 complete provider generation, records `plugin.runtime.failed`, and fails
 closed. `disable()` can interrupt a blocked call rather than waiting for its
-normal RPC timeout. A platform job/container boundary is still needed to make
-descendant containment authoritative.
+normal RPC timeout. POSIX workers run in a dedicated process group. Windows
+workers start suspended, enter a kill-on-close Job Object, and only then resume,
+so reviewed artifact code cannot race process-tree ownership. Containment setup
+failure refuses startup, and handle-close failures remain explicit lifecycle
+errors after bounded cleanup retries.
 
 Stderr content is never copied into Host errors or audit records. The Host
 retains only a bounded byte count and a process-local keyed fingerprint for
@@ -319,10 +322,12 @@ This boundary contains observed process crashes, invocation hangs, idle exits,
 and protocol pollution. It does **not**
 prevent a malicious child running as the same operating-system user from
 opening files, using the network, spawning another process, or inspecting
-other user-readable resources. It also does not impose CPU or memory quotas;
-an idle but resource-hungry child requires a Windows Job Object, cgroup,
-container, or WASI boundary. Therefore it does not yet authorize arbitrary
-third-party plugins or any irreversible capability.
+other user-readable resources. Spawned descendants share the worker lifetime,
+but the current Job Object/process-group guard imposes no CPU or memory quota.
+Resource governance still requires configured Job Object limits, cgroups,
+containers, or a WASI boundary. Therefore this is lifecycle containment, not a
+sandbox, and it does not yet authorize arbitrary third-party plugins or any
+irreversible capability.
 
 ## Irreversible Effects
 

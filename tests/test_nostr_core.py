@@ -14,7 +14,10 @@ import pytest
 
 from nth_dao.delivery.envelope import TransportEnvelopeRejected
 
-pytest.importorskip("nostr_sdk")
+try:
+    import nostr_sdk as _nostr_sdk  # noqa: F401
+except (ImportError, OSError):
+    pytest.skip("nostr-sdk native binding is unavailable", allow_module_level=True)
 pytest.importorskip("nacl")
 
 NOW_MS = 1_750_000_000_000

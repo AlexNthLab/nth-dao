@@ -9,20 +9,23 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("nostr_sdk")
+try:
+    import nostr_sdk as _nostr_sdk  # noqa: F401
+except (ImportError, OSError):
+    pytest.skip("nostr-sdk native binding is unavailable", allow_module_level=True)
 pytest.importorskip("nacl")
 pytest.importorskip("websockets")
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fake_nostr_relay import FakeNostrRelay  # noqa: E402
+from fake_nostr_relay import FakeNostrRelay
 
-from nth_dao.delivery.envelope import sign_envelope  # noqa: E402
-from nth_dao.delivery.transports.base import (  # noqa: E402
+from nth_dao.delivery.envelope import sign_envelope
+from nth_dao.delivery.transports.base import (
     PRIVACY_PUBLIC_RELAY,
 )
-from nth_dao.delivery.transports.nostr import NostrTransport  # noqa: E402
-from nth_dao.identity import AgentIdentity  # noqa: E402
-from nth_dao.nostr import NostrKeyBinding, NostrKeys, sign_key_binding  # noqa: E402
+from nth_dao.delivery.transports.nostr import NostrTransport
+from nth_dao.identity import AgentIdentity
+from nth_dao.nostr import NostrKeyBinding, NostrKeys, sign_key_binding
 
 
 def _wait_until(predicate, timeout=10.0, interval=0.05):

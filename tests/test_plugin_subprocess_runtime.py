@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -35,7 +35,6 @@ from nth_dao.plugins import (
     subprocess_rpc_protocol_document,
     subprocess_rpc_wire_vectors,
 )
-
 
 WORKER = Path(__file__).parent / "fixtures" / "plugin_rpc_worker.py"
 VECTOR = (
@@ -606,6 +605,75 @@ def test_bad_handshake_never_publishes_capability(tmp_path: Path, mode: str) -> 
     assert host.status(manifest.plugin_id).state == "failed"
 
 
+def test_process_guard_close_failure_uses_plugin_contract(tmp_path: Path) -> None:
+    runtime = subprocess_runtime_module.ReviewedSubprocessRuntime(
+        make_manifest(), make_spec(tmp_path)
+    )
+
+    class BrokenGuard:
+        @staticmethod
+        def terminate(*, force=True):
+            return False
+
+        @staticmethod
+        def close():
+            raise OSError("simulated guard close failure")
+
+    runtime._process_tree_guard = BrokenGuard()
+
+    with pytest.raises(SubprocessPluginError, match="process-tree guard"):
+        runtime._close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object startup failure")
+def test_windows_resume_failure_closes_guard_before_capability_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_attach = subprocess_runtime_module.attach_process_tree_guard
+    closed: list[bool] = []
+
+    class TrackingGuard:
+        def __init__(self, guard):
+            self._guard = guard
+
+        def terminate(self, *, force=True):
+            return self._guard.terminate(force=force)
+
+        def close(self):
+            try:
+                self._guard.close()
+            finally:
+                closed.append(True)
+
+    def tracking_attach(process):
+        return TrackingGuard(real_attach(process))
+
+    def reject_resume(process):
+        raise OSError("simulated resume failure")
+
+    monkeypatch.setattr(
+        subprocess_runtime_module, "attach_process_tree_guard", tracking_attach
+    )
+    monkeypatch.setattr(
+        subprocess_runtime_module, "resume_suspended_process", reject_resume
+    )
+    manifest = make_manifest()
+    host = PluginHost(workspace_root=tmp_path)
+    host.register_reviewed_subprocess(
+        manifest,
+        make_spec(tmp_path),
+        schemas={CAPABILITY_ID: CapabilitySchemas(INPUT_SCHEMA, OUTPUT_SCHEMA)},
+    )
+
+    with pytest.raises(PluginLifecycleError):
+        host.enable(manifest.plugin_id)
+
+    assert closed == [True]
+    assert host.resolve(CAPABILITY_ID) == ()
+    assert host.status(manifest.plugin_id).state == "failed"
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -740,7 +808,7 @@ def test_stderr_content_is_never_reflected_into_host_diagnostics(tmp_path: Path)
 
 
 def test_runtime_failure_projection_remains_disabled_after_restart(tmp_path: Path) -> None:
-    host, manifest, binding, authority = register_and_enable(tmp_path, "wrong-id")
+    _host, manifest, binding, authority = register_and_enable(tmp_path, "wrong-id")
     with pytest.raises(PluginInvocationError):
         binding.invoke({"value": "hello"}, authority=authority)
 

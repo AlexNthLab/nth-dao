@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import textwrap
 import time
@@ -349,7 +350,7 @@ class TestRunnerHostility:
         artifact = (
             "from pathlib import Path\n"
             f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
-        ).encode("utf-8")
+        ).encode()
         adapter_desc = build_execution_adapter(
             adapter_id="org.nthdao.test/containment-failure",
             adapter_version="1.0.0",
@@ -367,6 +368,103 @@ class TestRunnerHostility:
             _run(_unsafe_runner(), adapter_desc, artifact)
 
         assert info.value.retryable is True
+        assert not marker.exists()
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object startup ordering")
+    def test_windows_process_is_contained_before_adapter_resumes(
+        self, adapter, monkeypatch
+    ):
+        import nth_dao.trade_rules.adapter_runtime as runtime_module
+
+        real_popen = runtime_module.subprocess.Popen
+        real_attach = runtime_module.attach_process_tree_guard
+        real_resume = runtime_module.resume_suspended_process
+        lifecycle: list[str] = []
+
+        def suspended_popen(argv, **kwargs):
+            assert kwargs["creationflags"] & runtime_module.WINDOWS_CREATE_SUSPENDED
+            lifecycle.append("spawn-suspended")
+            return real_popen(argv, **kwargs)
+
+        def recording_attach(process):
+            lifecycle.append("attach")
+            return real_attach(process)
+
+        def recording_resume(process):
+            lifecycle.append("resume")
+            return real_resume(process)
+
+        monkeypatch.setattr(runtime_module.subprocess, "Popen", suspended_popen)
+        monkeypatch.setattr(
+            runtime_module, "attach_process_tree_guard", recording_attach
+        )
+        monkeypatch.setattr(
+            runtime_module, "resume_suspended_process", recording_resume
+        )
+
+        adapter_desc, artifact = adapter
+        outcome = _run(_unsafe_runner(), adapter_desc, artifact)
+
+        assert outcome.outcome == "succeeded"
+        assert lifecycle == ["spawn-suspended", "attach", "resume"]
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object startup failure")
+    def test_windows_resume_failure_closes_containment_guard(
+        self, tmp_path, monkeypatch
+    ):
+        import nth_dao.trade_rules.adapter_runtime as runtime_module
+
+        real_attach = runtime_module.attach_process_tree_guard
+        closed: list[bool] = []
+
+        class TrackingGuard:
+            def __init__(self, guard):
+                self._guard = guard
+
+            def terminate(self, *, force=True):
+                return self._guard.terminate(force=force)
+
+            def close(self):
+                try:
+                    self._guard.close()
+                finally:
+                    closed.append(True)
+
+        def tracking_attach(process):
+            return TrackingGuard(real_attach(process))
+
+        def reject_resume(process):
+            raise OSError("simulated resume failure")
+
+        monkeypatch.setattr(
+            runtime_module, "attach_process_tree_guard", tracking_attach
+        )
+        monkeypatch.setattr(
+            runtime_module, "resume_suspended_process", reject_resume
+        )
+        marker = tmp_path / "adapter-executed"
+        artifact = (
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+        ).encode()
+        adapter_desc = build_execution_adapter(
+            adapter_id="org.nthdao.test/resume-failure",
+            adapter_version="1.0.0",
+            artifact_digest="sha256:" + hashlib.sha256(artifact).hexdigest(),
+            execution_modes=["adapter"],
+            hooks=[{
+                "rule_id": "org.nthdao.test.delivery",
+                "hook_name": "fulfillment.deliver",
+                "hook_version": "1",
+            }],
+            permissions=[],
+        )
+
+        with pytest.raises(AdapterHookRejected, match="containment") as info:
+            _run(_unsafe_runner(), adapter_desc, artifact)
+
+        assert info.value.retryable is True
+        assert closed == [True]
         assert not marker.exists()
 
     def test_output_flood_bounded(self, adapter):
@@ -476,7 +574,7 @@ class TestEndToEndWithCoordinator:
         Receipt binding the content-addressed result."""
 
         sys.path.insert(0, str(Path(__file__).parent))
-        from test_trade_rule_agreement import (  # noqa: E402
+        from test_trade_rule_agreement import (
             _AdapterResolver,
             _digest,
             _execution_receipt,
@@ -704,7 +802,7 @@ class TestRetryabilitySemantics:
         assert info.value.retryable is True
 
     def test_timeout_is_retryable(self, adapter):
-        adapter_desc, _ = adapter
+        _adapter_desc, _ = adapter
         hang = b"import time; time.sleep(30)"
         hanging = build_execution_adapter(
             adapter_id="org.nthdao.test/hang2",
@@ -755,6 +853,42 @@ class TestScratchCleanup:
         adapter_desc, artifact = adapter
         with pytest.raises(AdapterHookRejected, match="scratch cleanup failed") as info:
             _run(_unsafe_runner(), adapter_desc, artifact)
+        assert info.value.retryable is True
+
+    def test_process_guard_close_failure_uses_adapter_contract(
+        self, monkeypatch, adapter
+    ):
+        import nth_dao.trade_rules.adapter_runtime as runtime_module
+
+        real_attach = runtime_module.attach_process_tree_guard
+
+        def attach_with_broken_close(process):
+            real_guard = real_attach(process)
+
+            class BrokenCloseGuard:
+                @staticmethod
+                def terminate(*, force=True):
+                    return real_guard.terminate(force=force)
+
+                @staticmethod
+                def close():
+                    # Release the real OS handle before simulating the caller-
+                    # visible failure; the negative test must not leak.
+                    real_guard.close()
+                    raise OSError("simulated guard close failure")
+
+            return BrokenCloseGuard()
+
+        monkeypatch.setattr(
+            runtime_module, "attach_process_tree_guard", attach_with_broken_close
+        )
+        adapter_desc, artifact = adapter
+
+        with pytest.raises(
+            AdapterHookRejected, match="containment cleanup"
+        ) as info:
+            _run(_unsafe_runner(), adapter_desc, artifact)
+
         assert info.value.retryable is True
 
     def test_cleanup_failure_does_not_mask_execution_timeout(

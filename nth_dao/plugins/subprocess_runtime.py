@@ -8,12 +8,11 @@ operating-system authority of the NTH DAO user account.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
 import hmac
 import json
+import logging
 import os
-from pathlib import Path
 import queue
 import re
 import secrets
@@ -22,7 +21,10 @@ import stat
 import subprocess
 import threading
 import time
-from typing import Any, BinaryIO, Callable, Dict, Mapping, Tuple
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, BinaryIO, cast
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.util.io import InterProcessLock
@@ -42,6 +44,7 @@ from .host import (
     PluginProviderUnavailable,
 )
 
+logger = logging.getLogger(__name__)
 
 SUBPROCESS_RPC_PROTOCOL = "nth-dao-plugin-rpc"
 SUBPROCESS_RPC_VERSION = 1
@@ -188,7 +191,7 @@ class SubprocessRemoteError(PluginInvocationError):
         self.retryable = retryable
 
 
-def subprocess_canonical_json(document: Dict[str, Any]) -> bytes:
+def subprocess_canonical_json(document: dict[str, Any]) -> bytes:
     """Encode the RPC JSON subset with RFC 8785-compatible key ordering."""
 
     if not isinstance(document, dict):
@@ -335,8 +338,8 @@ class ReviewedSubprocessSpec:
     launcher: Path
     artifact: Path
     working_directory: Path
-    arguments: Tuple[str, ...] = ()
-    environment: Tuple[Tuple[str, str], ...] = ()
+    arguments: tuple[str, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
     startup_timeout_s: float = 3.0
     invocation_timeout_s: float = 30.0
     shutdown_timeout_s: float = 2.0
@@ -398,7 +401,7 @@ class ReviewedSubprocessSpec:
         keys = tuple(item[0] for item in environment if isinstance(item, tuple) and len(item) == 2)
         if len(keys) != len(environment) or keys != tuple(sorted(set(keys))):
             raise SubprocessPluginError("subprocess environment must be sorted and unique")
-        for key, value in environment:
+        for key, environment_value in environment:
             if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
                 raise SubprocessPluginError("subprocess environment key is invalid")
             if key in _RESERVED_ENV or key.startswith("PYTHON"):
@@ -406,28 +409,33 @@ class ReviewedSubprocessSpec:
                     f"subprocess environment key {key!r} is host-reserved"
                 )
             if (
-                not isinstance(value, str)
-                or "\x00" in value
-                or len(value.encode("utf-8")) > 4096
-                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+                not isinstance(environment_value, str)
+                or "\x00" in environment_value
+                or len(environment_value.encode("utf-8")) > 4096
+                or any(
+                    ord(char) < 0x20 or ord(char) == 0x7F
+                    for char in environment_value
+                )
             ):
                 raise SubprocessPluginError("subprocess environment value is invalid")
         if sum(len(key) + len(value.encode("utf-8")) for key, value in environment) > 32 * 1024:
             raise SubprocessPluginError("subprocess environment exceeds 32 KiB")
         object.__setattr__(self, "environment", environment)
 
-        for label, value, minimum, maximum in (
+        for label, timeout_value, minimum, maximum in (
             ("startup_timeout_s", self.startup_timeout_s, 0.1, 30.0),
             ("invocation_timeout_s", self.invocation_timeout_s, 0.1, 300.0),
             ("shutdown_timeout_s", self.shutdown_timeout_s, 0.1, 10.0),
         ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(timeout_value, bool) or not isinstance(
+                timeout_value, (int, float)
+            ):
                 raise SubprocessPluginError(f"{label} must be numeric")
-            if not minimum <= float(value) <= maximum:
+            if not minimum <= float(timeout_value) <= maximum:
                 raise SubprocessPluginError(
                     f"{label} must be between {minimum} and {maximum} seconds"
                 )
-            object.__setattr__(self, label, float(value))
+            object.__setattr__(self, label, float(timeout_value))
         if type(self.max_frame_bytes) is not int or not 1024 <= self.max_frame_bytes <= SUBPROCESS_MAX_FRAME_BYTES:
             raise SubprocessPluginError("max_frame_bytes must be between 1 KiB and 2 MiB")
         if type(self.max_stderr_bytes) is not int or not 0 <= self.max_stderr_bytes <= SUBPROCESS_MAX_STDERR_BYTES:
@@ -561,13 +569,13 @@ class ReviewedSubprocessSpec:
         return "sha256:" + hashlib.sha256(canonical_json(document)).hexdigest()
 
     @property
-    def command(self) -> Tuple[str, ...]:
-        prefix = (str(self.launcher),)
+    def command(self) -> tuple[str, ...]:
+        prefix: tuple[str, ...] = (str(self.launcher),)
         if self.launcher != self.artifact:
             prefix += (str(self.artifact),)
         return prefix + self.arguments
 
-    def command_for_snapshot(self, snapshot: Path) -> Tuple[str, ...]:
+    def command_for_snapshot(self, snapshot: Path) -> tuple[str, ...]:
         if self.launcher == self.artifact:
             return (str(snapshot),) + self.arguments
         return (str(self.launcher), str(snapshot)) + self.arguments
@@ -653,7 +661,7 @@ class _StderrReader:
 
 
 class _SubprocessCapabilityProvider(CapabilityProvider):
-    def __init__(self, runtime: "ReviewedSubprocessRuntime", capability_id: str) -> None:
+    def __init__(self, runtime: ReviewedSubprocessRuntime, capability_id: str) -> None:
         self.runtime = runtime
         self.capability_id = capability_id
 
@@ -717,7 +725,7 @@ class ReviewedSubprocessRuntime:
             self._snapshot_lease = snapshot_lease
             self._snapshot_root = snapshot_root
             environment = self._environment()
-            kwargs: Dict[str, Any] = {
+            kwargs: dict[str, Any] = {
                 "stdin": subprocess.PIPE,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
@@ -742,7 +750,7 @@ class ReviewedSubprocessRuntime:
                 self._remove_snapshot()
                 raise
             try:
-                process = subprocess.Popen(
+                process: subprocess.Popen[bytes] = subprocess.Popen(
                     list(self.spec.command_for_snapshot(snapshot_artifact)),
                     **kwargs,
                 )
@@ -766,8 +774,17 @@ class ReviewedSubprocessRuntime:
                 if process_tree_guard is not None:
                     try:
                         process_tree_guard.close()
-                    except OSError:
-                        pass
+                    except OSError as close_exc:
+                        try:
+                            process_tree_guard.terminate(force=True)
+                            process_tree_guard.close()
+                        except OSError as retry_exc:
+                            logger.error(
+                                "subprocess containment cleanup failed after "
+                                "startup error: %s / %s",
+                                close_exc,
+                                retry_exc,
+                            )
                 self._remove_snapshot()
                 raise SubprocessPluginError(
                     "cannot establish reviewed subprocess containment"
@@ -777,8 +794,14 @@ class ReviewedSubprocessRuntime:
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 self._break("subprocess worker pipes are unavailable")
                 raise SubprocessPluginError(self._failure)
-            self._stdout = _StdoutReader(process.stdout, maximum=self.spec.max_frame_bytes)
-            self._stderr = _StderrReader(process.stderr, maximum=self.spec.max_stderr_bytes)
+            self._stdout = _StdoutReader(
+                cast(BinaryIO, process.stdout),
+                maximum=self.spec.max_frame_bytes,
+            )
+            self._stderr = _StderrReader(
+                cast(BinaryIO, process.stderr),
+                maximum=self.spec.max_stderr_bytes,
+            )
             self._stdout.start()
             self._stderr.start()
             nonce = secrets.token_hex(16)
@@ -913,7 +936,9 @@ class ReviewedSubprocessRuntime:
                         "request_id": request_id,
                     }:
                         raise SubprocessPluginError("invalid shutdown acknowledgement")
-                except Exception:
+                # Shutdown is best effort: every protocol/pipe failure must
+                # still fall through to forced process-tree termination.
+                except Exception:  # noqa: BLE001
                     self._terminate_tree(force=True)
             if process.poll() is None:
                 try:
@@ -985,8 +1010,8 @@ class ReviewedSubprocessRuntime:
         if handler is not None and error is not None:
             handler(error)
 
-    def _environment(self) -> Dict[str, str]:
-        environment: Dict[str, str] = {}
+    def _environment(self) -> dict[str, str]:
+        environment: dict[str, str] = {}
         if os.name == "nt":
             for key in ("SYSTEMROOT", "WINDIR", "COMSPEC"):
                 value = os.environ.get(key)
@@ -1007,7 +1032,7 @@ class ReviewedSubprocessRuntime:
         environment.update(dict(self.spec.environment))
         return environment
 
-    def _send(self, document: Dict[str, Any]) -> None:
+    def _send(self, document: dict[str, Any]) -> None:
         process = self._process
         if process is None or process.stdin is None or process.poll() is not None:
             raise EOFError("subprocess worker is not writable")
@@ -1020,7 +1045,7 @@ class ReviewedSubprocessRuntime:
         except (BrokenPipeError, OSError, ValueError) as exc:
             raise EOFError("subprocess worker pipe closed") from exc
 
-    def _exchange(self, document: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
+    def _exchange(self, document: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         with self._state_lock:
             if self._awaiting_response:
                 raise SubprocessPluginError(
@@ -1034,7 +1059,7 @@ class ReviewedSubprocessRuntime:
             with self._state_lock:
                 self._awaiting_response = False
 
-    def _receive(self, timeout_s: float) -> Dict[str, Any]:
+    def _receive(self, timeout_s: float) -> dict[str, Any]:
         reader = self._stdout
         process = self._process
         if reader is None or process is None:
@@ -1088,7 +1113,7 @@ class ReviewedSubprocessRuntime:
         return document
 
     @staticmethod
-    def _validate_ready(response: Dict[str, Any], request: Dict[str, Any]) -> None:
+    def _validate_ready(response: dict[str, Any], request: dict[str, Any]) -> None:
         expected_fields = {
             "protocol",
             "version",
@@ -1106,7 +1131,7 @@ class ReviewedSubprocessRuntime:
 
     def _validate_result(
         self,
-        response: Dict[str, Any],
+        response: dict[str, Any],
         invocation_id: str,
         capability_id: str,
     ) -> Mapping[str, Any]:
@@ -1167,7 +1192,7 @@ class ReviewedSubprocessRuntime:
             try:
                 self._close()
             except SubprocessPluginError:
-                self._failure = f"{self._failure}; snapshot cleanup failed"[:1000]
+                self._failure = f"{self._failure}; resource cleanup failed"[:1000]
 
     def _stderr_summary(self) -> str:
         return self._stderr.summary() if self._stderr is not None else "stderr-unavailable"
@@ -1196,11 +1221,22 @@ class ReviewedSubprocessRuntime:
                 pass
 
     def _close(self) -> None:
+        cleanup_errors: list[str] = []
         process = self._process
         guard = self._process_tree_guard
         if guard is not None:
-            guard.close()
-            self._process_tree_guard = None
+            try:
+                guard.close()
+            except OSError:
+                try:
+                    guard.terminate(force=True)
+                    guard.close()
+                except OSError:
+                    cleanup_errors.append("process-tree guard close failed")
+            else:
+                self._process_tree_guard = None
+            if not cleanup_errors:
+                self._process_tree_guard = None
         if process is not None:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
@@ -1215,7 +1251,12 @@ class ReviewedSubprocessRuntime:
         if monitor is not None and monitor is not threading.current_thread():
             monitor.join(timeout=0.2)
         self._started = False
-        self._remove_snapshot()
+        try:
+            self._remove_snapshot()
+        except SubprocessPluginError:
+            cleanup_errors.append("snapshot cleanup failed")
+        if cleanup_errors:
+            raise SubprocessPluginError("; ".join(cleanup_errors))
 
     def _remove_snapshot(self) -> None:
         directory = self._snapshot_directory
@@ -1243,7 +1284,7 @@ class ReviewedSubprocessRuntime:
         self._snapshot_root = None
 
 
-def subprocess_rpc_protocol_document() -> Dict[str, Any]:
+def subprocess_rpc_protocol_document() -> dict[str, Any]:
     """Return the language-neutral RPC v1 contract for other host runtimes."""
 
     return {
@@ -1336,7 +1377,7 @@ def subprocess_rpc_protocol_digest() -> str:
     ).hexdigest()
 
 
-def subprocess_rpc_wire_vectors() -> Dict[str, Any]:
+def subprocess_rpc_wire_vectors() -> dict[str, Any]:
     """Return deterministic handshake and invocation examples for ports."""
 
     manifest_digest = "sha256:" + "a" * 64
@@ -1452,18 +1493,18 @@ def subprocess_rpc_wire_vectors() -> Dict[str, Any]:
 
 
 __all__ = [
-    "ReviewedSubprocessRuntime",
-    "ReviewedSubprocessSpec",
     "SUBPROCESS_MAX_ARTIFACT_BYTES",
     "SUBPROCESS_MAX_FRAME_BYTES",
-    "SUBPROCESS_MAX_STDERR_BYTES",
     "SUBPROCESS_MAX_SAFE_INTEGER",
+    "SUBPROCESS_MAX_STDERR_BYTES",
     "SUBPROCESS_RPC_PROTOCOL",
     "SUBPROCESS_RPC_VERSION",
+    "ReviewedSubprocessRuntime",
+    "ReviewedSubprocessSpec",
     "SubprocessPluginError",
     "SubprocessRemoteError",
-    "subprocess_canonical_json",
     "subprocess_artifact_digest",
+    "subprocess_canonical_json",
     "subprocess_rpc_protocol_digest",
     "subprocess_rpc_protocol_document",
     "subprocess_rpc_wire_vectors",
