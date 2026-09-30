@@ -21,8 +21,11 @@ Wire contract (v1):
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
-from typing import Any, Dict
+import re
+import time
+from typing import Any
 
 from nth_dao.b64u import b64u_decode, b64u_encode
 from nth_dao.canonical_json import canonical_json
@@ -47,6 +50,11 @@ COURIER_FIELDS = (
     "integrity",
 )
 COURIER_ID_MAX = 128
+SEALED_BOX_OVERHEAD_BYTES = 48
+MAX_COURIER_CIPHERTEXT_BYTES = MAX_ENVELOPE_BYTES + SEALED_BOX_OVERHEAD_BYTES
+MAX_COURIER_CIPHERTEXT_CHARS = ((MAX_COURIER_CIPHERTEXT_BYTES + 2) // 3) * 4
+_B64U_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+_INTEGRITY_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 
 try:  # pragma: no cover - exercised via importorskip in tests
     from nacl.public import PrivateKey as _PrivateKey
@@ -55,14 +63,70 @@ try:  # pragma: no cover - exercised via importorskip in tests
 
     _NACL_PUBLIC_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    _PrivateKey = None
-    _PublicKey = None
-    _SealedBox = None
+    _PrivateKey = None  # type: ignore[assignment,misc]
+    _PublicKey = None  # type: ignore[assignment,misc]
+    _SealedBox = None  # type: ignore[assignment,misc]
     _NACL_PUBLIC_AVAILABLE = False
 
 
 class CourierEnvelopeRejected(ValueError):
     """Raised when a courier envelope cannot be sealed or opened."""
+
+
+def _validate_courier_id(courier_id: Any) -> str:
+    if not isinstance(courier_id, str):
+        raise CourierEnvelopeRejected("courier_id must be a string")
+    if len(courier_id) > COURIER_ID_MAX:
+        raise CourierEnvelopeRejected("courier_id exceeds 128 chars")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in courier_id):
+        raise CourierEnvelopeRejected("courier_id must not contain control characters")
+    return courier_id
+
+
+def validate_courier_wire(
+    courier: Any,
+    *,
+    recipient_did: str | None = None,
+) -> bytes:
+    """Validate one courier wire object and return decoded ciphertext.
+
+    This is deliberately usable by an untrusted carrier before storage; it
+    performs no decryption and exposes no recipient secret.
+    """
+
+    if not isinstance(courier, dict) or frozenset(courier) != frozenset(COURIER_FIELDS):
+        raise CourierEnvelopeRejected("courier envelope has missing or unknown fields")
+    if courier.get("protocol") != COURIER_PROTOCOL:
+        raise CourierEnvelopeRejected("wrong courier protocol")
+    version = courier.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != COURIER_VERSION:
+        raise CourierEnvelopeRejected("unsupported courier version")
+    claimed_recipient = courier.get("recipient_did")
+    if not isinstance(claimed_recipient, str) or not is_did_key(claimed_recipient):
+        raise CourierEnvelopeRejected("recipient_did must be a did:key")
+    if recipient_did is not None and claimed_recipient != recipient_did:
+        raise CourierEnvelopeRejected("courier claims a different recipient")
+    _validate_courier_id(courier.get("courier_id"))
+    encoded_ciphertext = courier.get("ciphertext")
+    if not isinstance(encoded_ciphertext, str) or not encoded_ciphertext:
+        raise CourierEnvelopeRejected("ciphertext must be non-empty base64url text")
+    if len(encoded_ciphertext) > MAX_COURIER_CIPHERTEXT_CHARS:
+        raise CourierEnvelopeRejected("ciphertext exceeds the wire limit")
+    if _B64U_RE.fullmatch(encoded_ciphertext) is None:
+        raise CourierEnvelopeRejected("ciphertext is not canonical base64url")
+    integrity = courier.get("integrity")
+    if not isinstance(integrity, str) or _INTEGRITY_RE.fullmatch(integrity) is None:
+        raise CourierEnvelopeRejected("integrity must be a sha256 digest")
+    try:
+        ciphertext = b64u_decode(encoded_ciphertext)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise CourierEnvelopeRejected("ciphertext is not canonical base64url") from exc
+    if len(ciphertext) > MAX_COURIER_CIPHERTEXT_BYTES:
+        raise CourierEnvelopeRejected("decoded ciphertext exceeds the wire limit")
+    expected_integrity = "sha256:" + hashlib.sha256(ciphertext).hexdigest()
+    if not hmac.compare_digest(integrity, expected_integrity):
+        raise CourierEnvelopeRejected("ciphertext integrity check failed")
+    return ciphertext
 
 
 def x25519_public_from_did(did: str) -> bytes:
@@ -104,7 +168,7 @@ def seal_courier_envelope(
     *,
     recipient_did: str,
     courier_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Seal one signed envelope for a recipient. Anonymous sender by design."""
 
     ok, reason = validate_envelope(envelope, require_signature=True)
@@ -112,13 +176,7 @@ def seal_courier_envelope(
         raise TransportEnvelopeRejected(reason)
     if not is_did_key(recipient_did):
         raise CourierEnvelopeRejected("recipient_did must be a did:key")
-    if len(courier_id) > COURIER_ID_MAX:
-        raise CourierEnvelopeRejected("courier_id exceeds 128 chars")
-    # round-23 KK-2 hardening: control characters (newline, NUL, ...) in the
-    # carrier label are refused — JSON escaping already neutralizes journal
-    # injection, but labels are also rendered by hosts and copied into logs
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in courier_id):
-        raise CourierEnvelopeRejected("courier_id must not contain control characters")
+    _validate_courier_id(courier_id)
     content = canonical_json(envelope.to_dict())
     if len(content) > MAX_ENVELOPE_BYTES:
         raise TransportEnvelopeRejected("envelope exceeds the wire byte limit")
@@ -135,11 +193,11 @@ def seal_courier_envelope(
 
 
 def open_courier_envelope(
-    courier: Dict[str, Any],
+    courier: dict[str, Any],
     *,
     recipient_did: str,
     identity_private: Any,
-    now_ms: int = 0,
+    now_ms: int | None = None,
 ) -> TransportEnvelope:
     """Open one courier envelope as the named recipient (fail closed).
 
@@ -149,18 +207,7 @@ def open_courier_envelope(
     all delivery-layer checks before it is returned.
     """
 
-    if not isinstance(courier, dict) or frozenset(courier) != frozenset(COURIER_FIELDS):
-        raise CourierEnvelopeRejected("courier envelope has missing or unknown fields")
-    if courier.get("protocol") != COURIER_PROTOCOL:
-        raise CourierEnvelopeRejected("wrong courier protocol")
-    if courier.get("version") != COURIER_VERSION:
-        raise CourierEnvelopeRejected("unsupported courier version")
-    if courier.get("recipient_did") != recipient_did:
-        raise CourierEnvelopeRejected("courier claims a different recipient")
-    ciphertext = b64u_decode(courier.get("ciphertext", ""))
-    expected_integrity = "sha256:" + hashlib.sha256(ciphertext).hexdigest()
-    if courier.get("integrity") != expected_integrity:
-        raise CourierEnvelopeRejected("ciphertext integrity check failed")
+    ciphertext = validate_courier_wire(courier, recipient_did=recipient_did)
     recipient_x25519 = x25519_public_from_did(recipient_did)
     # identity_private: the NTH Ed25519 signing key (nacl.signing.SigningKey
     # or its raw 32-byte seed). The X25519 decryption key is derived via the
@@ -187,11 +234,11 @@ def open_courier_envelope(
             )
     except CourierEnvelopeRejected:
         raise
-    except Exception as exc:  # noqa: BLE001 - key derivation failure
+    except Exception as exc:
         raise CourierEnvelopeRejected(f"key derivation failed: {exc}") from exc
     try:
         content = _SealedBox(x25519_key).decrypt(ciphertext)
-    except Exception as exc:  # noqa: BLE001 - wrong key or tampered box
+    except Exception as exc:
         raise CourierEnvelopeRejected(f"decryption failed: {exc}") from exc
     try:
         import json
@@ -206,13 +253,14 @@ def open_courier_envelope(
         TransportEnvelopeRejected,
     ) as exc:
         raise CourierEnvelopeRejected(f"decrypted content is not an envelope: {exc}") from exc
-    ok, reason = validate_envelope(envelope, now_ms=now_ms or None)
+    validation_time = int(time.time() * 1000) if now_ms is None else now_ms
+    ok, reason = validate_envelope(envelope, now_ms=validation_time)
     if not ok:
         raise CourierEnvelopeRejected(f"decrypted envelope invalid: {reason}")
     return envelope
 
 
-def courier_envelope_digest(courier: Dict[str, Any]) -> str:
+def courier_envelope_digest(courier: dict[str, Any]) -> str:
     """Content digest over the courier envelope's canonical bytes."""
 
     return "sha256:" + hashlib.sha256(canonical_json(courier)).hexdigest()
@@ -226,5 +274,6 @@ __all__ = [
     "courier_envelope_digest",
     "open_courier_envelope",
     "seal_courier_envelope",
+    "validate_courier_wire",
     "x25519_public_from_did",
 ]

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Optional
+from typing import Any
 
 from nth_dao.delivery.acknowledgement import DeliveryAck, sign_ack
 from nth_dao.delivery.courier import (
@@ -34,9 +34,11 @@ from nth_dao.delivery.envelope import (
     envelope_digest,
 )
 from nth_dao.delivery.inbox import DeliveryInbox
+from nth_dao.delivery.outbox import DurableOutbox
 from nth_dao.identity import AgentIdentity
 
 logger = logging.getLogger("nth_dao.courier")
+ACK_ENVELOPE_TTL_MS = 3_600_000
 
 
 class CourierHandoverError(RuntimeError):
@@ -49,9 +51,10 @@ def process_handover(
     recipient: AgentIdentity,
     identity_private: Any,
     inbox: DeliveryInbox,
-    now_ms: Optional[int] = None,
+    ack_outbox: DurableOutbox,
+    now_ms: int | None = None,
     max_items: int = 64,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Drain the carrier for this recipient and admit everything valid.
 
     Returns a report:
@@ -66,14 +69,17 @@ def process_handover(
     """
 
     recipient_did = recipient.as_did()
+    if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
+        raise ValueError("max_items must be a positive integer")
     # a missing clock defaults to the wall clock, never to a skipped TTL
     # check (round-21 bug HH-1: now_ms=0 made open_courier_envelope's
     # expiry gate a no-op, so stale envelopes could be admitted whenever
     # the host inbox also lacked a clock)
     now = now_ms if now_ms is not None else int(time.time() * 1000)
-    accepted_acks: List[DeliveryAck] = []
-    opened_envelopes: List[Any] = []
-    rejected: List[Dict[str, str]] = []
+    accepted_acks: list[DeliveryAck] = []
+    ack_envelopes: list[Any] = []
+    opened_envelopes: list[Any] = []
+    rejected: list[dict[str, str]] = []
 
     envelopes = carrier_store.drain_for(recipient_did, max_items=max_items)
     for courier in envelopes:
@@ -101,8 +107,19 @@ def process_handover(
                 envelope_sha256=envelope_digest(envelope),
                 received_at_ms=received_ms,
             )
+            # The ACK must be durable before the carrier copy is removed.
+            # A crash before this enqueue leaves the courier for retry; a
+            # crash after it leaves a replayable ACK in the outbox.
+            ack_envelope = _ack_envelope(
+                ack,
+                recipient=recipient,
+                sender_did=envelope.sender_did,
+                now_ms=now,
+            )
+            ack_outbox.enqueue(ack_envelope, now_ms=now)
             carrier_store.hand_over(courier)
             accepted_acks.append(ack)
+            ack_envelopes.append(ack_envelope)
             opened_envelopes.append(envelope)
         else:
             # inbox refused (replay/authorization/etc.) — keep on carrier,
@@ -113,37 +130,61 @@ def process_handover(
 
     return {
         "accepted": accepted_acks,
+        "ack_envelopes": ack_envelopes,
         "rejected": rejected,
         "opened": opened_envelopes,
     }
 
 
 def ack_envelopes_from_report(
-    report: Dict[str, Any],
+    report: dict[str, Any],
     *,
     recipient: AgentIdentity,
     sender_did: str,
     now_ms: int,
-) -> List[Any]:
+) -> list[Any]:
     """Wrap the report's ACKs as signed delivery.ack envelopes addressed to
     the sender, ready for any outbound transport (design doc: the ACK
     travels back "by any transport")."""
 
-    from nth_dao.delivery.envelope import sign_envelope
+    persisted = report.get("ack_envelopes")
+    if isinstance(persisted, list):
+        if any(envelope.recipient != sender_did for envelope in persisted):
+            raise CourierHandoverError(
+                "persisted ACK envelope recipient does not match sender_did"
+            )
+        return list(persisted)
 
-    envelopes: List[Any] = []
+    envelopes: list[Any] = []
     for ack in report.get("accepted", []):
         envelopes.append(
-            sign_envelope(
-                recipient,
-                kind="delivery.ack",
-                recipient=sender_did,
-                payload={"ack": ack.to_dict()},
-                created_at_ms=now_ms,
-                expires_at_ms=now_ms + 3_600_000,
+            _ack_envelope(
+                ack,
+                recipient=recipient,
+                sender_did=sender_did,
+                now_ms=now_ms,
             )
         )
     return envelopes
+
+
+def _ack_envelope(
+    ack: DeliveryAck,
+    *,
+    recipient: AgentIdentity,
+    sender_did: str,
+    now_ms: int,
+) -> Any:
+    from nth_dao.delivery.envelope import sign_envelope
+
+    return sign_envelope(
+        recipient,
+        kind="delivery.ack",
+        recipient=sender_did,
+        payload={"ack": ack.to_dict()},
+        created_at_ms=now_ms,
+        expires_at_ms=now_ms + ACK_ENVELOPE_TTL_MS,
+    )
 
 
 __all__ = [

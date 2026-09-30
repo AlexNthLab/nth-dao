@@ -19,33 +19,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the key-to-DID match, and the full delivery-layer envelope validation
   (including TTL against the carrier-delivery clock) — a hostile or careless
   courier can drop, duplicate, or corrupt, but cannot read, tamper, or
-  forge. 9 tests.
+  forge. Oversized or malformed wire data is rejected before Base64 decode,
+  and a missing validation clock uses wall time rather than skipping TTL.
+  14 tests.
 - Courier store (Phase 4): `nth_dao/delivery/courier_store.py` — a
   quota-bounded JSONL-journal pool of sealed envelopes on one carrier.
   Fail-closed quotas (total bytes, envelope count, per-recipient),
   idempotent re-seal, hand-over removal after successful open, crash-safe
   journal (fsync, torn-tail tolerated, size-cap rotation), recipient-
-  isolated drain. TTL enforcement stays at open time (the courier cannot
-  be trusted with the wall clock). 12 tests.
+  isolated drain, cross-process refresh, strict journal schema/content-digest
+  verification, and idempotent digest deletion for restarted spray workers.
+  TTL enforcement stays at open time (the courier cannot be trusted with the
+  wall clock). 22 tests.
 - Courier handover (Phase 4): `nth_dao/delivery/courier_handover.py` —
   the recipient-side protocol that drains the carrier, opens and
   validates each sealed envelope (integrity, TTL, author signature),
   admits it to the delivery inbox, signs a DeliveryAck per accepted
-  envelope, and removes it from the carrier only after success.
+  envelope, durably enqueues the signed ACK envelope, and only then removes
+  the carrier copy. A crash therefore leaves either a retryable courier or a
+  replayable ACK, never an accepted message with no return path.
   Per-envelope isolation: one hostile or expired envelope is rejected
   and retained for inspection without poisoning the batch; duplicates
   are re-ACKed idempotently while the inbox stays single-count.
   `ack_envelopes_from_report` wraps ACKs as delivery.ack envelopes for
-  the return leg. 6 tests.
+  the return leg. 8 tests.
 - Courier spray-and-wait (Phase 4): `nth_dao/delivery/courier_spray.py` —
   restart-surviving bookkeeping for replicating one logical message to at
   most N carriers (each carrier gets its own ephemeral seal, so carriers
   cannot correlate copies); when ANY carrier delivers, cancel_siblings
   hands the copies back from every other store and completes the spray.
   The journal persists DIGESTS only, never ciphertexts (no sensitive-
-  material multiplication on disk); after a restart, cancellations are
-  recorded from the journal's carrier names even without in-memory
-  ciphertexts. 14 tests.
+  material multiplication on disk); persisted carrier-to-digest bindings let
+  a restarted worker remove the exact sibling copy. Unreachable stores remain
+  pending rather than being falsely marked cancelled. Pending/history quotas,
+  strict event schemas, cross-process refresh, bounded reads, and atomic
+  compaction prevent unbounded journal growth. 24 tests.
+- Courier API integration and hardening: the supported courier surface is
+  exported from `nth_dao.delivery`; carriers and recipients share one strict
+  wire validator; public integrity is checked before persistence; spray and
+  store journals fail closed on malformed or content-mismatched events; and
+  recent completed spray tombstones are retained under a bounded history cap.
 - Courier store hardening (round-23 review): seal_into re-parses the
   journal under the file lock so cross-process quota enforcement holds
   (two processes previously both passed the same quota); the append is

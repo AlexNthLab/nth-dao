@@ -16,6 +16,32 @@ Boundary rules (never violated by this layer):
   ``message_id`` and their replay cache survives process restarts.
 """
 
+from nth_dao.delivery.acknowledgement import (
+    DeliveryAck,
+    DeliveryAckRejected,
+    sign_ack,
+    validate_ack,
+)
+from nth_dao.delivery.courier import (
+    COURIER_PROTOCOL,
+    COURIER_VERSION,
+    CourierEnvelopeRejected,
+    courier_envelope_digest,
+    open_courier_envelope,
+    seal_courier_envelope,
+    validate_courier_wire,
+)
+from nth_dao.delivery.courier_handover import (
+    CourierHandoverError,
+    ack_envelopes_from_report,
+    process_handover,
+)
+from nth_dao.delivery.courier_spray import CourierSpray, CourierSprayError
+from nth_dao.delivery.courier_store import (
+    CourierStore,
+    CourierStoreError,
+    CourierStoreFull,
+)
 from nth_dao.delivery.envelope import (
     DEFAULT_HOP_LIMIT,
     ENVELOPE_PROTOCOL,
@@ -33,14 +59,13 @@ from nth_dao.delivery.envelope import (
     sign_envelope,
     validate_envelope,
 )
-from nth_dao.delivery.acknowledgement import (
-    DeliveryAck,
-    DeliveryAckRejected,
-    sign_ack,
-    validate_ack,
-)
 from nth_dao.delivery.inbox import DeliveryInbox, InboxDecision
 from nth_dao.delivery.outbox import DurableOutbox, OutboxRecord
+from nth_dao.delivery.plugin_runtime import (
+    PluginDeliveryRuntime,
+    PluginDeliveryRuntimeError,
+    PluginReceiveResult,
+)
 from nth_dao.delivery.policy import (
     CENTRALIZED_POLICY,
     DECENTRALIZED_POLICY,
@@ -54,14 +79,11 @@ from nth_dao.delivery.router import (
     RouteAttempt,
     RoutingResult,
 )
-from nth_dao.delivery.plugin_runtime import (
-    PluginDeliveryRuntime,
-    PluginDeliveryRuntimeError,
-    PluginReceiveResult,
-)
 
 __all__ = [
     "CENTRALIZED_POLICY",
+    "COURIER_PROTOCOL",
+    "COURIER_VERSION",
     "DECENTRALIZED_POLICY",
     "DEFAULT_HOP_LIMIT",
     "ENVELOPE_PROTOCOL",
@@ -72,6 +94,13 @@ __all__ = [
     "MAX_PAYLOAD_DEPTH",
     "MAX_TTL_MS",
     "OFFLINE_POLICY",
+    "CourierEnvelopeRejected",
+    "CourierHandoverError",
+    "CourierSpray",
+    "CourierSprayError",
+    "CourierStore",
+    "CourierStoreError",
+    "CourierStoreFull",
     "DeliveryAck",
     "DeliveryAckRejected",
     "DeliveryInbox",
@@ -89,11 +118,17 @@ __all__ = [
     "RoutingResult",
     "TransportEnvelope",
     "TransportEnvelopeRejected",
+    "ack_envelopes_from_report",
+    "courier_envelope_digest",
     "envelope_digest",
     "forward_envelope",
     "new_nonce",
+    "open_courier_envelope",
+    "process_handover",
+    "seal_courier_envelope",
     "sign_ack",
     "sign_envelope",
     "validate_ack",
+    "validate_courier_wire",
     "validate_envelope",
 ]

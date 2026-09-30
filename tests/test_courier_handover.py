@@ -13,19 +13,20 @@ import pytest
 
 pytest.importorskip("nacl")
 
-from nacl.signing import SigningKey  # noqa: E402
+from nacl.signing import SigningKey
 
-from nth_dao.delivery.acknowledgement import validate_ack  # noqa: E402
-from nth_dao.delivery.courier import seal_courier_envelope  # noqa: E402
-from nth_dao.delivery.courier_handover import (  # noqa: E402
+from nth_dao.delivery.acknowledgement import validate_ack
+from nth_dao.delivery.courier import seal_courier_envelope
+from nth_dao.delivery.courier_handover import (
     ack_envelopes_from_report,
     process_handover,
 )
-from nth_dao.delivery.courier_store import CourierStore  # noqa: E402
-from nth_dao.delivery.envelope import sign_envelope  # noqa: E402
-from nth_dao.delivery.inbox import DeliveryInbox  # noqa: E402
-from nth_dao.did_key import encode_ed25519_did_key  # noqa: E402
-from nth_dao.identity import AgentIdentity  # noqa: E402
+from nth_dao.delivery.courier_store import CourierStore
+from nth_dao.delivery.envelope import sign_envelope
+from nth_dao.delivery.inbox import DeliveryInbox
+from nth_dao.delivery.outbox import DurableOutbox
+from nth_dao.did_key import encode_ed25519_did_key
+from nth_dao.identity import AgentIdentity
 
 NOW_MS = int(time.time() * 1000)
 
@@ -73,6 +74,11 @@ def bob_inbox(tmp_path):
     return DeliveryInbox(tmp_path / "bob-inbox", clock=lambda: NOW_MS + 1_000)
 
 
+@pytest.fixture()
+def ack_outbox(tmp_path):
+    return DurableOutbox(tmp_path / "ack-outbox", clock=lambda: NOW_MS + 2_000)
+
+
 def _envelope(alice, payload=None, recipient="dao:core"):
     return sign_envelope(
         alice,
@@ -87,7 +93,9 @@ def _envelope(alice, payload=None, recipient="dao:core"):
 class TestFullFlowWithRealKeys:
     """The complete flow using controllable recipient keys."""
 
-    def test_seal_carry_open_inbox_ack(self, tmp_path, alice, carrier, bob_inbox):
+    def test_seal_carry_open_inbox_ack(
+        self, tmp_path, alice, carrier, bob_inbox, ack_outbox
+    ):
         recipient, signing, did = _make_recipient()
         envelope = _envelope(alice, payload={"mission": "sealed delivery"})
         courier = seal_courier_envelope(envelope, recipient_did=did)
@@ -98,6 +106,7 @@ class TestFullFlowWithRealKeys:
             recipient=recipient,
             identity_private=signing,
             inbox=bob_inbox,
+            ack_outbox=ack_outbox,
             now_ms=NOW_MS + 2_000,
         )
 
@@ -113,15 +122,18 @@ class TestFullFlowWithRealKeys:
         ack = report["accepted"][0]
         ok, reason = validate_ack(ack, now_ms=NOW_MS + 3_000)
         assert ok, reason
+        assert len(ack_outbox.pending(now_ms=NOW_MS + 3_000)) == 1
 
-    def test_ack_envelopes_addressed_to_sender(self, tmp_path, alice, carrier, bob_inbox):
+    def test_ack_envelopes_addressed_to_sender(
+        self, tmp_path, alice, carrier, bob_inbox, ack_outbox
+    ):
         recipient, signing, did = _make_recipient()
         envelope = _envelope(alice)
         courier = seal_courier_envelope(envelope, recipient_did=did)
         carrier.seal_into(courier)
         report = process_handover(
             carrier, recipient=recipient, identity_private=signing,
-            inbox=bob_inbox, now_ms=NOW_MS + 2_000,
+            inbox=bob_inbox, ack_outbox=ack_outbox, now_ms=NOW_MS + 2_000,
         )
         ack_envelopes = ack_envelopes_from_report(
             report, recipient=recipient, sender_did=alice.as_did(),
@@ -133,10 +145,48 @@ class TestFullFlowWithRealKeys:
         assert ack_env.kind == "delivery.ack"
         assert ack_env.payload["ack"]["message_id"] == envelope.message_id
 
+    def test_ack_is_durable_before_carrier_removal(
+        self, tmp_path, alice, carrier, bob_inbox, ack_outbox, monkeypatch
+    ):
+        recipient, signing, did = _make_recipient()
+        courier = seal_courier_envelope(_envelope(alice), recipient_did=did)
+        carrier.seal_into(courier)
+
+        def fail_handover(_courier):
+            raise OSError("simulated carrier failure")
+
+        monkeypatch.setattr(carrier, "hand_over", fail_handover)
+        with pytest.raises(OSError, match="simulated carrier failure"):
+            process_handover(
+                carrier,
+                recipient=recipient,
+                identity_private=signing,
+                inbox=bob_inbox,
+                ack_outbox=ack_outbox,
+                now_ms=NOW_MS + 2_000,
+            )
+
+        assert len(ack_outbox.pending(now_ms=NOW_MS + 3_000)) == 1
+        assert carrier.stats()["envelopes"] == 1
+
+    def test_handover_rejects_non_positive_batch_size(
+        self, carrier, bob_inbox, ack_outbox
+    ):
+        recipient, signing, _did = _make_recipient()
+        with pytest.raises(ValueError, match="max_items"):
+            process_handover(
+                carrier,
+                recipient=recipient,
+                identity_private=signing,
+                inbox=bob_inbox,
+                ack_outbox=ack_outbox,
+                max_items=0,
+            )
+
 
 class TestHostileCarrier:
     def test_hostile_envelope_rejected_but_batch_survives(
-        self, tmp_path, alice, carrier, bob_inbox
+        self, tmp_path, alice, carrier, bob_inbox, ack_outbox
     ):
         """One hostile envelope in a multi-envelope batch must not poison
         the rest — per-envelope isolation."""
@@ -145,26 +195,30 @@ class TestHostileCarrier:
         good = seal_courier_envelope(
             _envelope(alice, payload={"n": 1}), recipient_did=did
         )
-        # hostile: a tampered ciphertext (integrity fails)
+        # Hostile but wire-valid: ciphertext was sealed to another key while
+        # the plaintext routing DID claims Bob. Public integrity still
+        # passes at the carrier; Bob must isolate the decryption failure.
+        mallory_signing = SigningKey(b"\x09" * 32)
+        mallory_did = encode_ed25519_did_key(mallory_signing.verify_key.encode())
         bad = seal_courier_envelope(
-            _envelope(alice, payload={"n": 2}), recipient_did=did
+            _envelope(alice, payload={"n": 2}), recipient_did=mallory_did
         )
-        bad["ciphertext"] = bad["ciphertext"][:-4] + "AAAA"
+        bad["recipient_did"] = did
         carrier.seal_into(good)
         carrier.seal_into(bad)
 
         report = process_handover(
             carrier, recipient=recipient, identity_private=signing,
-            inbox=bob_inbox, now_ms=NOW_MS + 2_000,
+            inbox=bob_inbox, ack_outbox=ack_outbox, now_ms=NOW_MS + 2_000,
         )
         assert len(report["accepted"]) == 1
         assert len(report["rejected"]) == 1
-        assert "integrity" in report["rejected"][0]["reason"]
+        assert "decryption" in report["rejected"][0]["reason"]
         # the rejected one stays on the carrier for host inspection
         assert carrier.stats()["envelopes"] == 1
 
     def test_expired_envelope_rejected_and_retained(
-        self, tmp_path, alice, carrier, bob_inbox
+        self, tmp_path, alice, carrier, bob_inbox, ack_outbox
     ):
         from nth_dao.delivery.envelope import sign_envelope as _sign
 
@@ -181,7 +235,7 @@ class TestHostileCarrier:
         carrier.seal_into(courier)
         report = process_handover(
             carrier, recipient=recipient, identity_private=signing,
-            inbox=bob_inbox, now_ms=NOW_MS + 2_000,
+            inbox=bob_inbox, ack_outbox=ack_outbox, now_ms=NOW_MS + 2_000,
         )
         assert report["accepted"] == []
         assert len(report["rejected"]) == 1
@@ -189,7 +243,7 @@ class TestHostileCarrier:
         assert carrier.stats()["envelopes"] == 1  # retained for inspection
 
     def test_duplicate_envelope_is_ack_but_not_double_accepted(
-        self, tmp_path, alice, carrier, bob_inbox
+        self, tmp_path, alice, carrier, bob_inbox, ack_outbox
     ):
         """A courier re-delivering an already-accepted envelope still gets
         its ACK (idempotent) — but the inbox only counts it once."""
@@ -200,21 +254,23 @@ class TestHostileCarrier:
         carrier.seal_into(courier)
         first = process_handover(
             carrier, recipient=recipient, identity_private=signing,
-            inbox=bob_inbox, now_ms=NOW_MS + 2_000,
+            inbox=bob_inbox, ack_outbox=ack_outbox, now_ms=NOW_MS + 2_000,
         )
         assert len(first["accepted"]) == 1
         # same envelope carried again (a second carrier copy)
         carrier.seal_into(courier)
         second = process_handover(
             carrier, recipient=recipient, identity_private=signing,
-            inbox=bob_inbox, now_ms=NOW_MS + 3_000,
+            inbox=bob_inbox, ack_outbox=ack_outbox, now_ms=NOW_MS + 3_000,
         )
         assert len(second["accepted"]) == 1  # still ACKed (duplicate)
         assert second["accepted"][0].message_id == envelope.message_id
         # inbox entry count stays 1
         assert bob_inbox.entry_count() == 1
 
-    def test_unauthorized_sender_rejected_and_retained(self, tmp_path, alice, bob_inbox):
+    def test_unauthorized_sender_rejected_and_retained(
+        self, tmp_path, alice, bob_inbox, ack_outbox
+    ):
         """The inbox authorize hook rejects a sender that is not allowlisted;
         the envelope stays on the carrier for host inspection."""
 
@@ -242,7 +298,7 @@ class TestHostileCarrier:
         )
         report = process_handover(
             store, recipient=recipient, identity_private=signing,
-            inbox=strict_inbox, now_ms=NOW_MS + 2_000,
+            inbox=strict_inbox, ack_outbox=ack_outbox, now_ms=NOW_MS + 2_000,
         )
         assert report["accepted"] == []
         assert len(report["rejected"]) == 1
@@ -254,15 +310,17 @@ class TestHostileCarrier:
 
 
 class TestClockDefault:
-    def test_no_now_ms_defaults_to_wall_clock_not_skipped(self, tmp_path, alice):
+    def test_no_now_ms_defaults_to_wall_clock_not_skipped(
+        self, tmp_path, alice, ack_outbox
+    ):
         """Bug HH-1: process_handover without now_ms must default to the
         wall clock — a skipped TTL check let stale envelopes through when
         the host inbox also lacked a clock."""
 
         from nth_dao.delivery.courier import seal_courier_envelope
         from nth_dao.delivery.courier_store import CourierStore
-        from nth_dao.delivery.inbox import DeliveryInbox
         from nth_dao.delivery.envelope import sign_envelope as _sign
+        from nth_dao.delivery.inbox import DeliveryInbox
 
         recipient, signing, did = _make_recipient()
         stale = _sign(
@@ -281,6 +339,7 @@ class TestClockDefault:
         inbox = DeliveryInbox(tmp_path / "inbox")
         report = process_handover(
             store, recipient=recipient, identity_private=signing, inbox=inbox,
+            ack_outbox=ack_outbox,
             now_ms=None,
         )
         assert report["accepted"] == []

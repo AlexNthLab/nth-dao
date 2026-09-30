@@ -8,18 +8,36 @@ import pytest
 
 pytest.importorskip("nacl")
 
-from nacl.signing import SigningKey  # noqa: E402
+from nacl.signing import SigningKey
 
-from nth_dao.delivery.courier import (  # noqa: E402
+from nth_dao.delivery.courier import (
     CourierEnvelopeRejected,
     courier_envelope_digest,
     open_courier_envelope,
     seal_courier_envelope,
 )
-from nth_dao.delivery.envelope import sign_envelope  # noqa: E402
-from nth_dao.identity import AgentIdentity  # noqa: E402
+from nth_dao.delivery.envelope import sign_envelope
+from nth_dao.identity import AgentIdentity
 
 NOW_MS = int(time.time() * 1000)
+
+
+def test_delivery_facade_exports_courier_api():
+    from nth_dao import delivery
+
+    for name in (
+        "CourierEnvelopeRejected",
+        "CourierHandoverError",
+        "CourierSpray",
+        "CourierStore",
+        "CourierStoreError",
+        "CourierStoreFull",
+        "open_courier_envelope",
+        "process_handover",
+        "seal_courier_envelope",
+        "validate_courier_wire",
+    ):
+        assert getattr(delivery, name) is not None
 
 
 @pytest.fixture()
@@ -198,6 +216,71 @@ class TestOpen:
                 now_ms=NOW_MS + 2_000,
             )
 
+    def test_expiration_uses_wall_clock_by_default(self, alice):
+        from nth_dao.did_key import encode_ed25519_did_key
+
+        recipient = SigningKey(b"\x01" * 32)
+        recipient_did = encode_ed25519_did_key(recipient.verify_key.encode())
+        now = int(time.time() * 1000)
+        envelope = sign_envelope(
+            alice,
+            kind="channel.message",
+            recipient="dao:core",
+            payload={"n": 1},
+            created_at_ms=now - 2_000,
+            expires_at_ms=now - 1_000,
+        )
+        courier = seal_courier_envelope(envelope, recipient_did=recipient_did)
+
+        with pytest.raises(CourierEnvelopeRejected, match="expired"):
+            open_courier_envelope(
+                courier,
+                recipient_did=recipient_did,
+                identity_private=recipient,
+            )
+
+    def test_oversized_ciphertext_rejected_before_decode(
+        self, alice, monkeypatch
+    ):
+        import nth_dao.delivery.courier as courier_module
+        from nth_dao.did_key import encode_ed25519_did_key
+
+        recipient = SigningKey(b"\x01" * 32)
+        recipient_did = encode_ed25519_did_key(recipient.verify_key.encode())
+        courier = seal_courier_envelope(
+            _envelope(alice), recipient_did=recipient_did
+        )
+        courier["ciphertext"] = "A" * (2 * 1024 * 1024)
+        monkeypatch.setattr(
+            courier_module,
+            "b64u_decode",
+            lambda _value: pytest.fail("oversized ciphertext was decoded"),
+        )
+
+        with pytest.raises(CourierEnvelopeRejected, match="ciphertext.*limit"):
+            open_courier_envelope(
+                courier,
+                recipient_did=recipient_did,
+                identity_private=recipient,
+            )
+
+    def test_malformed_base64_has_protocol_error(self, alice):
+        from nth_dao.did_key import encode_ed25519_did_key
+
+        recipient = SigningKey(b"\x01" * 32)
+        recipient_did = encode_ed25519_did_key(recipient.verify_key.encode())
+        courier = seal_courier_envelope(
+            _envelope(alice), recipient_did=recipient_did
+        )
+        courier["ciphertext"] = "not base64!"
+
+        with pytest.raises(CourierEnvelopeRejected, match="base64url"):
+            open_courier_envelope(
+                courier,
+                recipient_did=recipient_did,
+                identity_private=recipient,
+            )
+
 
 class TestCourierIdCharset:
     def test_control_characters_rejected(self, alice):
@@ -205,11 +288,12 @@ class TestCourierIdCharset:
         seal time (defense in depth on top of JSON escaping)."""
 
         from nacl.signing import SigningKey
-        from nth_dao.did_key import encode_ed25519_did_key
+
         from nth_dao.delivery.courier import (
             CourierEnvelopeRejected,
             seal_courier_envelope,
         )
+        from nth_dao.did_key import encode_ed25519_did_key
 
         recipient = SigningKey(b"\x01" * 32)
         did = encode_ed25519_did_key(recipient.verify_key.encode())
