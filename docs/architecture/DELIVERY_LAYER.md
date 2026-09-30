@@ -220,6 +220,53 @@ asymmetry (65KB diagnostic headroom by design), poll chaining (bounded per
 call, remainder queued), HTTPError fp-None handling, binding-less sends
 (already logged), NIP-40 expiration arithmetic (int-typed by validation).
 
+Round 24 (independent adversarial review of the complete Phase-4 Courier)
+closed the remaining persistence and boundary gaps:
+
+| # | Defect | Fix |
+|---|---|---|
+| LL-1 | Windows could not import the POSIX-only `fcntl` locks duplicated by the new store and spray modules | both modules use the repository `InterProcessLock` abstraction |
+| LL-2 | store rotation could erase live entries from an empty/stale in-memory view, and long-lived instances missed other-process writes | rotation and all public operations re-fold current disk state under the process lock; regression tests cover stale readers and writers |
+| LL-3 | spray cancellation marked missing/failed stores cancelled and completed, orphaning live copies; restart discarded carrier digests | carrier-to-digest bindings persist, exact digest deletion is idempotent, and unreachable copies remain pending |
+| LL-4 | courier input was Base64-decoded before a size bound, malformed Base64 leaked raw errors, and direct open without a clock skipped TTL | one shared bounded wire validator runs before storage/open; errors are protocol errors; missing clocks use wall time |
+| LL-5 | handover removed the carrier copy before the ACK had durable ownership | a required `DurableOutbox` enqueue precedes carrier removal; crash injection pins the ordering |
+| LL-6 | store/spray journals trusted weakly typed events and spray history grew without compaction | strict event schemas/content binding, bounded reads, pending/history quotas, cross-process refresh, and atomic compaction |
+| LL-7 | the Phase-4 API was not reachable from the package facade | supported courier types and operations are exported from `nth_dao.delivery` |
+| LL-8 | a core-only install reached absent PyNaCl classes and failed with an opaque `NoneType` call | every courier cryptographic entry point now fails with an actionable `nth-dao[crypto]` dependency error |
+| LL-9 | retrying handover after carrier deletion failed signed a fresh ACK envelope each time, allowing one stuck carrier to fill the durable outbox; a short ACK TTL could also expire while the original courier remained valid | the inbox durably retains first acceptance time, ACK envelopes use a deterministic nonce, and their TTL covers the maximum inbound lifetime, making delayed, concurrent, and restarted retries content-address idempotent |
+
+Round 23 (adversarial review of the Courier seal + store — the two
+commits that had only been tested, not reviewed; process-gap fix) found
+and fixed 1 real bug plus 1 hardening:
+
+| # | Defect | Fix |
+|---|---|---|
+| KK-9 | cross-process quota bypass: two processes sealing into the same carrier directory each saw only their own memory state and BOTH passed the quota (probe: quota=1, journal got 2) | seal_into re-parses the journal under the file lock (pure parse — the naive `_load` fix deadlocked via rotation re-locking, and the `_append` call re-locked too; the write is now inline under the held lock, rotation runs after release) |
+| KK-2 | courier_id accepted control characters (newline/NUL) | refused at seal time (JSON escaping already neutralized journal injection; this is defense in depth for host-rendered labels) |
+
+Cleared by probe: oversized DIDs (format-checked), b64url decode of
+hostile inputs, empty ciphertext (SealedBox length gate), byte-estimation
+accuracy, newline journal injection (JSON-escaped, single line), O(n)
+per-recipient scan at the 512-envelope cap (negligible).
+
+Round 22 (adversarial review of the spray module) found and fixed 2:
+
+| # | Defect | Fix |
+|---|---|---|
+| JJ-1 | the spray journal persisted full courier ciphertexts — sensitive-material multiplication on the sender's disk for no operational need | journal holds DIGESTS only; ciphertexts stay in the carrier stores |
+| JJ-2 | after a restart cancel_siblings had no carrier names (memory lost) and silently cancelled nothing | journal persists carrier-to-digest bindings so restart can delete exact copies |
+
+Round 21 (adversarial review of the Phase-4 Courier) found and fixed 1
+security bug:
+
+| # | Defect | Fix |
+|---|---|---|
+| HH-1 | `process_handover(now_ms=None)` passed `now_ms=0` to `open_courier_envelope`, silently skipping the TTL gate — stale envelopes could be admitted whenever the host inbox also lacked a clock | default to the wall clock, never to a skipped check |
+
+Also probed and cleared: carrier journal torn-tail/corruption (fail
+closed), idempotent re-seal, per-recipient drain isolation, batch
+poisoning (per-envelope isolation holds), unauthorized sender retention.
+
 Round 19 (adversarial review of the Phase-0 core as shipped in 64d92a1)
 found and fixed 1 contract hole; 10 further hypotheses probed and cleared:
 

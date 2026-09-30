@@ -1162,7 +1162,9 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    # Conformance artifacts are byte contracts. Pin LF on every platform so
+    # Windows regeneration is identical to the shipped repository bytes.
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(vectors, f, indent=2, ensure_ascii=False, sort_keys=True)
     counts = {k: len(v) for k, v in vectors["vectors"].items()}
     print(f"wrote {path}")

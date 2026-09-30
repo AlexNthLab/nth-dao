@@ -107,6 +107,7 @@ class DeliveryInbox:
         self._dir.mkdir(parents=True, exist_ok=True)
         # message_id -> (sender_did, nonce); insertion order = eviction order
         self._by_message_id: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
+        self._accepted_at_ms: Dict[str, int] = {}
         self._nonces: Dict[Tuple[str, str], str] = {}
         self._pending_json: "OrderedDict[str, str]" = OrderedDict()
         self._cache_stat: Optional[Tuple[int, int]] = None
@@ -207,6 +208,24 @@ class DeliveryInbox:
             with InterProcessLock(self._lock_path):
                 self._refold_if_changed_locked()
                 return message_id in self._by_message_id
+
+    def accepted_at(self, message_id: str) -> Optional[int]:
+        """Return the durable first-acceptance time for one message.
+
+        Legacy compacted records may not contain ``at_ms`` and return
+        ``None``. Callers must use a deterministic fallback in that case.
+        """
+
+        if (
+            not isinstance(message_id, str)
+            or _MESSAGE_ID_RE.fullmatch(message_id) is None
+        ):
+            raise ValueError("message_id is not a content address")
+        with self._thread_lock:
+            with InterProcessLock(self._lock_path):
+                self._refold_if_changed_locked()
+                accepted_at_ms = self._accepted_at_ms.get(message_id, 0)
+                return accepted_at_ms or None
 
     def entry_count(self) -> int:
         with self._thread_lock:
@@ -436,10 +455,12 @@ class DeliveryInbox:
         self._append_cache_locked(event)
 
         self._by_message_id[message_id] = nonce_key
+        self._accepted_at_ms[message_id] = now_ms
         self._nonces[nonce_key] = message_id
         self._pending_json[message_id] = envelope_json
         if evicted_key is not None and evicted_id is not None:
             self._by_message_id.pop(evicted_id, None)
+            self._accepted_at_ms.pop(evicted_id, None)
             self._nonces.pop(evicted_key, None)
             self._pending_json.pop(evicted_id, None)
         self._compact_if_oversized_locked()
@@ -481,6 +502,9 @@ class DeliveryInbox:
                         "sender_did": sender_did,
                         "nonce": nonce,
                     }
+                    accepted_at_ms = self._accepted_at_ms.get(message_id, 0)
+                    if accepted_at_ms:
+                        event["at_ms"] = accepted_at_ms
                     envelope_json = self._pending_json.get(message_id)
                     if envelope_json is not None:
                         event["envelope_json"] = envelope_json
@@ -510,6 +534,7 @@ class DeliveryInbox:
         if current != self._cache_stat:
             logger.debug("delivery inbox cache changed on disk; re-folding")
             self._by_message_id.clear()
+            self._accepted_at_ms.clear()
             self._nonces.clear()
             self._pending_json.clear()
             self._load_cache_locked()
@@ -569,6 +594,7 @@ class DeliveryInbox:
                     raise DeliveryInboxCacheCorrupt(
                         "evicted cache event references an unknown message"
                     )
+                self._accepted_at_ms.pop(message_id, None)
                 self._nonces.pop(existing, None)
                 self._pending_json.pop(message_id, None)
                 continue
@@ -649,9 +675,11 @@ class DeliveryInbox:
                 self._pending_json[message_id] = envelope_json
             if evicted_message_id is not None:
                 evicted_nonce = self._by_message_id.pop(evicted_message_id)
+                self._accepted_at_ms.pop(evicted_message_id, None)
                 self._nonces.pop(evicted_nonce, None)
                 self._pending_json.pop(evicted_message_id, None)
             self._by_message_id[message_id] = nonce_key
+            self._accepted_at_ms[message_id] = at_ms or 0
             self._nonces[nonce_key] = message_id
 
 

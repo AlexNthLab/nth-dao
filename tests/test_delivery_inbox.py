@@ -117,6 +117,7 @@ class TestAccept:
 
         reloaded = DeliveryInbox(directory, clock=lambda: NOW_MS + 2_000)
         assert reloaded.seen(envelope.message_id)
+        assert reloaded.accepted_at(envelope.message_id) == NOW_MS + 1_000
         again = reloaded.accept(_wire(envelope), now_ms=NOW_MS + 2_000)
         assert not again.accepted and again.duplicate
 
@@ -531,9 +532,10 @@ class TestCacheJournalAutoCompact:
         reloaded = DeliveryInbox(
             directory, clock=lambda: NOW_MS, max_replay_entries=8
         )
-        for envelope in envelopes[-8:]:
+        for index, envelope in enumerate(envelopes[-8:], start=92):
             decision = reloaded.accept(envelope, now_ms=NOW_MS + 1_000)
             assert decision.duplicate, envelope.message_id
+            assert reloaded.accepted_at(envelope.message_id) == NOW_MS + index
         for envelope in envelopes[:8]:
             assert not reloaded.seen(envelope.message_id)  # evicted long ago
         # and fresh content is still accepted

@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Courier envelope (Phase 4): `nth_dao/delivery/courier.py` seals a signed
+  delivery envelope to the recipient's X25519 public key (libsodium RFC 7748
+  conversion from the Ed25519 did:key — one key pair per identity) using
+  PyNaCl SealedBox (anonymous sender by design; the inner envelope carries
+  the author signature). Wire contract: claimed recipient DID (plaintext for
+  routing), carrier ID, base64url ciphertext, SHA-256 integrity over the
+  ciphertext. Opening verifies the claimed recipient, the integrity digest,
+  the key-to-DID match, and the full delivery-layer envelope validation
+  (including TTL against the carrier-delivery clock) — a hostile or careless
+  courier can drop, duplicate, or corrupt, but cannot read, tamper, or
+  forge. Oversized or malformed wire data is rejected before Base64 decode,
+  and a missing validation clock uses wall time rather than skipping TTL.
+  14 tests.
+- Courier store (Phase 4): `nth_dao/delivery/courier_store.py` — a
+  quota-bounded JSONL-journal pool of sealed envelopes on one carrier.
+  Fail-closed quotas (total bytes, envelope count, per-recipient),
+  idempotent re-seal, hand-over removal after successful open, crash-safe
+  journal (fsync, torn-tail tolerated, size-cap rotation), recipient-
+  isolated drain, cross-process refresh, strict journal schema/content-digest
+  verification, and idempotent digest deletion for restarted spray workers.
+  TTL enforcement stays at open time (the courier cannot be trusted with the
+  wall clock). 22 tests.
+- Courier handover (Phase 4): `nth_dao/delivery/courier_handover.py` —
+  the recipient-side protocol that drains the carrier, opens and
+  validates each sealed envelope (integrity, TTL, author signature),
+  admits it to the delivery inbox, signs a DeliveryAck per accepted
+  envelope, durably enqueues the signed ACK envelope, and only then removes
+  the carrier copy. A crash therefore leaves either a retryable courier or a
+  replayable ACK, never an accepted message with no return path.
+  Per-envelope isolation: one hostile or expired envelope is rejected
+  and retained for inspection without poisoning the batch; duplicates
+  are re-ACKed idempotently while the inbox stays single-count.
+  `ack_envelopes_from_report` wraps ACKs as delivery.ack envelopes for
+  the return leg. 8 tests.
+- Courier spray-and-wait (Phase 4): `nth_dao/delivery/courier_spray.py` —
+  restart-surviving bookkeeping for replicating one logical message to at
+  most N carriers (each carrier gets its own ephemeral seal, so carriers
+  cannot correlate copies); when ANY carrier delivers, cancel_siblings
+  hands the copies back from every other store and completes the spray.
+  The journal persists DIGESTS only, never ciphertexts (no sensitive-
+  material multiplication on disk); persisted carrier-to-digest bindings let
+  a restarted worker remove the exact sibling copy. Unreachable stores remain
+  pending rather than being falsely marked cancelled. Pending/history quotas,
+  strict event schemas, cross-process refresh, bounded reads, and atomic
+  compaction prevent unbounded journal growth. 24 tests.
+- Courier API integration and hardening: the supported courier surface is
+  exported from `nth_dao.delivery`; carriers and recipients share one strict
+  wire validator; public integrity is checked before persistence; spray and
+  store journals fail closed on malformed or content-mismatched events; and
+  recent completed spray tombstones are retained under a bounded history cap.
+- Courier store hardening (round-23 review): seal_into re-parses the
+  journal under the file lock so cross-process quota enforcement holds
+  (two processes previously both passed the same quota); the append is
+  inline under the held lock and rotation runs after release (the naive
+  fix deadlocked). courier_id refuses control characters at seal time.
+  +2 regression tests.
+- Courier dependency and retry hardening: courier encryption now fails with
+  an actionable `nth-dao[crypto]` error when PyNaCl is unavailable instead
+  of dereferencing an absent optional import. Inbox journals preserve the
+  first acceptance timestamp, and handover derives a deterministic signed
+  ACK envelope from that durable receipt. Repeating handover after a carrier
+  deletion failure therefore reuses one outbox record instead of generating
+  an unbounded stream of ACKs. Its transport TTL covers the delivery
+  protocol's maximum inbound lifetime, so delayed retries cannot strand a
+  still-fresh courier behind an already-expired ACK.
+
 - Nostr adapter core (Phase 2, segment N1): `nth_dao/nostr/` wraps the
   maintained `nostr-sdk` binding (optional extra `nth-dao[nostr]`) for the
   internet relay tier. NTH Ed25519 identities sign NostrKeyBinding documents
