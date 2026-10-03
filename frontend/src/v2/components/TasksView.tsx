@@ -7,7 +7,7 @@
  *
  * 自取数(import api),不经 App 状态,保持视图自洽。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   claimFederatedTask, claimTask, fetchAgents, listClaimIntents, listOpenTasks,
   listTaskCategories, reconcileClaimIntent,
@@ -18,6 +18,7 @@ import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
 import type {
   AgentEntry,
+  ClaimIntentPage,
   ClaimIntentRecord,
   TaskAnnouncement,
   TaskCategory,
@@ -38,6 +39,12 @@ function visibilityWarningLabel(
       }
       return t("执行视图写入异常", "Execution view persistence warning");
   }
+}
+
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 interface TasksViewProps {
@@ -69,9 +76,16 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const [claimAgent, setClaimAgent] = useState("");
   const [claimingId, setClaimingId] = useState("");
   const [claimIntents, setClaimIntents] = useState<ClaimIntentRecord[]>([]);
+  const [claimNextCursor, setClaimNextCursor] = useState<string | null>(null);
+  const [claimLoadingMore, setClaimLoadingMore] = useState(false);
+  const [claimPageError, setClaimPageError] = useState("");
+  const claimMoreController = useRef<AbortController | null>(null);
+  const [receiptStorage, setReceiptStorage] = useState<ClaimIntentPage["receipt_storage"]>();
   const [claimIntentError, setClaimIntentError] = useState("");
+  const [claimIntentLoading, setClaimIntentLoading] = useState(true);
   const [claimIntentVersion, setClaimIntentVersion] = useState(0);
   const [reconcilingNonce, setReconcilingNonce] = useState("");
+  const [retryEligibleNonce, setRetryEligibleNonce] = useState("");
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -137,18 +151,77 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
 
   useEffect(() => {
     const ac = new AbortController();
+    claimMoreController.current?.abort();
+    claimMoreController.current = null;
+    setClaimIntentLoading(true);
+    setClaimIntentError("");
+    setRetryEligibleNonce("");
+    setClaimPageError("");
+    setClaimNextCursor(null);
+    setClaimLoadingMore(false);
     listClaimIntents(100, ac.signal)
       .then((page) => {
+        if (ac.signal.aborted) return;
         setClaimIntents(page.items);
-        setClaimIntentError("");
+        setClaimNextCursor(page.next_cursor ?? null);
+        setReceiptStorage(page.receipt_storage);
+        setClaimIntentLoading(false);
       })
       .catch((error) => {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          setClaimIntentError(error instanceof Error ? error.message : String(error));
+        if (!ac.signal.aborted) {
+          setReceiptStorage(undefined);
+          setClaimIntentError(
+            error instanceof Error || error instanceof DOMException
+              ? error.message : String(error),
+          );
+          setClaimIntentLoading(false);
         }
       });
-    return () => ac.abort();
+    return () => {
+      ac.abort();
+      claimMoreController.current?.abort();
+    };
   }, [claimIntentVersion]);
+
+  async function loadOlderClaims() {
+    if (!claimNextCursor || claimLoadingMore || claimIntentLoading || claimIntentError) return;
+    const cursor = claimNextCursor;
+    const ac = new AbortController();
+    claimMoreController.current = ac;
+    setClaimLoadingMore(true);
+    setClaimPageError("");
+    try {
+      const page = await listClaimIntents(100, ac.signal, cursor);
+      if (ac.signal.aborted) return;
+      setClaimIntents((current) => {
+        const seen = new Set(current.map((record) => record.intent.nonce));
+        return [...current, ...page.items.filter((record) => !seen.has(record.intent.nonce))];
+      });
+      setClaimNextCursor(page.next_cursor ?? null);
+    } catch (error) {
+      if (!ac.signal.aborted) {
+        setClaimPageError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (!ac.signal.aborted) setClaimLoadingMore(false);
+      if (claimMoreController.current === ac) claimMoreController.current = null;
+    }
+  }
+
+  const validReceiptStorage = receiptStorage
+    && [receiptStorage.files, receiptStorage.used_bytes,
+      receiptStorage.max_files, receiptStorage.max_bytes].every(Number.isFinite)
+    && receiptStorage.files >= 0 && receiptStorage.used_bytes >= 0
+    && receiptStorage.max_files > 0 && receiptStorage.max_bytes > 0
+    ? receiptStorage : undefined;
+  const receiptStorageFull = Boolean(validReceiptStorage && (
+    validReceiptStorage.files >= validReceiptStorage.max_files
+    || validReceiptStorage.used_bytes >= validReceiptStorage.max_bytes
+  ));
+  const receiptStorageNearLimit = !receiptStorageFull && Boolean(validReceiptStorage && (
+    validReceiptStorage.files / validReceiptStorage.max_files >= 0.8
+    || validReceiptStorage.used_bytes / validReceiptStorage.max_bytes >= 0.8
+  ));
 
   // 可认领身份:拉可驱动的 supervised agent(supervised+alive+有 a2a_port)。
   useEffect(() => {
@@ -168,7 +241,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
-  async function handleClaim(task: TaskAnnouncement) {
+  async function handleClaim(task: TaskAnnouncement, agentDid = claimAgent) {
     if ((task.listing_type || "task") !== "task" || task.claimable === false) {
       toast.push(
         "This entry is not a claimable Task. Open it from Market instead.",
@@ -177,12 +250,12 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
       return;
     }
     const annId = task.announcement_id;
-    if (!claimAgent || claimingId) return;
+    if (!agentDid || claimingId) return;
     setClaimingId(annId);
     const doClaim = () =>
       task.federated
-        ? claimFederatedTask(annId, claimAgent, task.federation_key || "")
-        : claimTask(annId, claimAgent);
+        ? claimFederatedTask(annId, agentDid, task.federation_key || "")
+        : claimTask(annId, agentDid);
     try {
       let r = await doClaim();
       // 刚 spawn 的 agent 头一两秒还没轮询载入自己的 cap_token,认领会 401
@@ -277,6 +350,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
         );
         setClaimIntentVersion((version) => version + 1);
       } else if (result.status === 200 && result.body.state !== "confirmed") {
+        if (result.body.claimed === false) setRetryEligibleNonce(nonce);
         toast.push(
           t(
             "来源 DAO 未返回可验证的认领确认,本地状态保持不变。",
@@ -395,7 +469,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             <p className="main-eyebrow">
               Task work queue
             </p>
-            <h1 className="main-title">Tasks {loading ? "…" : `(${tab === "claims" ? claimIntents.length : shown.length})`}</h1>
+            <h1 className="main-title">Tasks {loading ? "…" : `(${tab === "claims" ? (claimIntentError || claimIntentLoading ? "?" : `${claimIntents.length}${claimNextCursor ? "+" : ""}`) : shown.length})`}</h1>
             <p className="main-subtitle">
               {t(
                 "查看和承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
@@ -437,7 +511,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
               style={{ fontSize: 12 }}
               onClick={() => setTab("claims")}
             >
-              {t("我的认领", "My claims")} ({claimIntents.length})
+              {t("我的认领", "My claims")} ({claimIntentError || claimIntentLoading ? "?" : `${claimIntents.length}${claimNextCursor ? "+" : ""}`})
             </button>
             <span style={{ flex: 1 }} />
             {tab !== "claims" && <label
@@ -457,24 +531,58 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
 
           {tab === "claims" ? (
             <div className="stack" style={{ gap: 10 }} aria-label="Claim intent status">
-              <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-                {t(
-                  "待确认只表示认领意图已签名并保存，不表示来源 DAO 已确认占位。",
-                  "Pending means the claim intent is signed and saved, not that the source DAO confirmed the claim.",
-                )}
-              </p>
-              {claimIntentError && (
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <p className="muted" style={{ fontSize: 12, margin: 0, flex: 1 }}>
+                  {t(
+                    "待确认只表示认领意图已签名并保存，不表示来源 DAO 已确认占位。",
+                    "Pending means the claim intent is signed and saved, not that the source DAO confirmed the claim.",
+                  )}
+                </p>
+                <button className="btn btn-ghost" type="button"
+                  onClick={() => setClaimIntentVersion((version) => version + 1)}>
+                  {t("刷新", "Refresh")}
+                </button>
+              </div>
+              {claimIntentLoading && (
+                <p role="status" className="muted" style={{ fontSize: 12, margin: 0 }}>
+                  {t("认领状态刷新中…", "Refreshing claim status…")}
+                </p>
+              )}
+              {!claimIntentLoading && claimIntentError && (
                 <p role="alert" className="danger-text">
                   {t("认领状态暂不可用", "Claim status unavailable")}: {claimIntentError}
                 </p>
               )}
-              {!claimIntentError && claimIntents.length === 0 && (
+              {!claimIntentLoading && !claimIntentError && validReceiptStorage && (
+                <p role="status" className={receiptStorageNearLimit || receiptStorageFull ? "danger-text" : "muted"}
+                  style={{ fontSize: 12, margin: 0 }}>
+                  {t("认领回执磁盘占用（非完整性校验）", "Claim receipt disk usage (not an integrity check)")}: {formatStorageBytes(validReceiptStorage.used_bytes)}
+                  {" / "}{formatStorageBytes(validReceiptStorage.max_bytes)}
+                  {" · "}{validReceiptStorage.files} / {validReceiptStorage.max_files} {t("文件", "files")}
+                  {receiptStorageFull && (
+                    <> · {t("容量已满，新认领将失败。", "Capacity full; new claims will fail.")}</>
+                  )}
+                  {receiptStorageNearLimit && (
+                    <> · {t("接近容量上限，新认领可能失败。", "Near capacity; new claims may fail.")}</>
+                  )}
+                </p>
+              )}
+              {!claimIntentLoading && !claimIntentError && claimIntents.length === 0 && (
                 <div className="main-empty" style={{ minHeight: 180 }}>
                   <p>{t("暂无跨 DAO 认领记录。", "No cross-DAO claim records yet.")}</p>
                 </div>
               )}
-              {claimIntents.map((record) => {
+              {!claimIntentLoading && !claimIntentError && claimIntents.map((record) => {
                 const { state, intent } = record;
+                const freshListing = tasks.find((task) => (
+                  task.federated === true
+                  && task.claimable !== false
+                  && task.federation_stale !== true
+                  && task.announcement_id === intent.announcement_id
+                  && task.federation_key === record.federation_key
+                  && task.source_peer === record.source_peer
+                ));
+                const sameAgentOnline = agents.some((agent) => agent.did === intent.claimant_did);
                 const isRecoverable = (
                   (state === "pending" || state === "expired")
                   && Boolean(record.source_peer && record.source_did && record.federation_key && record.receipt_id)
@@ -515,11 +623,38 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                           )}
                         </span>
                       )}
+                      {retryEligibleNonce === intent.nonce && (
+                        freshListing && sameAgentOnline ? (
+                          <button className="btn btn-ghost" type="button"
+                            disabled={Boolean(claimingId || reconcilingNonce)}
+                            onClick={() => void handleClaim(freshListing, intent.claimant_did)}>
+                            {t("重新签名认领", "Sign a fresh claim")}
+                          </button>
+                        ) : (
+                          <span className="muted" style={{ fontSize: 11 }}>
+                            {t(
+                              "要重新认领，请先刷新来源公告并确保原 Agent 在线。旧记录仍待确认。",
+                              "For a fresh claim, refresh the source listing and bring the original Agent online. The old record remains unconfirmed.",
+                            )}
+                          </span>
+                        )
+                      )}
                     </div>
                   )}
                 </article>
                 );
               })}
+              {!claimIntentLoading && !claimIntentError && claimNextCursor && (
+                <button className="btn btn-ghost" type="button"
+                  disabled={claimLoadingMore} onClick={() => void loadOlderClaims()}>
+                  {claimLoadingMore ? t("加载中…", "Loading…") : t("加载更早认领", "Load older claims")}
+                </button>
+              )}
+              {!claimIntentLoading && !claimIntentError && claimPageError && (
+                <p role="alert" className="danger-text">
+                  {t("更早认领加载失败", "Older claims unavailable")}: {claimPageError}
+                </p>
+              )}
             </div>
           ) : shown.length === 0 ? (
             <div className="main-empty" style={{ minHeight: 200 }}>

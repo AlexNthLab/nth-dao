@@ -464,6 +464,15 @@ export interface ClaimIntentRecord {
 export interface ClaimIntentPage {
   items: ClaimIntentRecord[];
   stats: Partial<Record<ClaimIntentState, number>>;
+  /** Keyset cursor for older active records; null when the list is exhausted. */
+  next_cursor?: string | null;
+  /** Optional while older local servers are still in use. */
+  receipt_storage?: {
+    files: number;
+    used_bytes: number;
+    max_files: number;
+    max_bytes: number;
+  };
 }
 
 export type MarketSearchCategory =

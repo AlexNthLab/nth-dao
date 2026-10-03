@@ -23311,10 +23311,20 @@ def register_v2_routes(app: FastAPI) -> None:
     def v2_market_claim_intents(
         request: Request,
         limit: int = Query(default=100, ge=1, le=500),
+        cursor: str = Query(default="", max_length=96),
     ) -> Dict[str, Any]:
         """Read the local claimant-side lifecycle projection."""
 
+        import re
+
         from nth_dao.market.claim_intent import IntentTracker, IntentTrackerCorrupt
+
+        before: tuple[int, str] | None = None
+        if cursor:
+            match = re.fullmatch(r"([1-9][0-9]{0,15}):([A-Za-z0-9]{16,64})", cursor)
+            if match is None or int(match.group(1)) > (1 << 53) - 1:
+                raise HTTPException(status_code=422, detail="invalid claim cursor")
+            before = (int(match.group(1)), match.group(2))
 
         ws = _state_workspace(request)
         if ws is None:
@@ -23333,10 +23343,24 @@ def register_v2_routes(app: FastAPI) -> None:
         for record in all_records:
             state = record["state"]
             stats[state] = stats.get(state, 0) + 1
+        if before is not None:
+            all_records = [
+                record for record in all_records
+                if (
+                    record["intent"]["created_at_ms"],
+                    record["intent"]["nonce"],
+                ) < before
+            ]
+        page = all_records[:limit]
+        next_cursor = None
+        if len(all_records) > limit:
+            last = page[-1]["intent"]
+            next_cursor = f'{last["created_at_ms"]}:{last["nonce"]}'
         return {
-            "items": all_records[:limit],
+            "items": page,
             "stats": stats,
             "receipt_storage": receipt_storage,
+            "next_cursor": next_cursor,
         }
 
     @app.post("/api/v2/market/claim-intents/{nonce}/reconcile")

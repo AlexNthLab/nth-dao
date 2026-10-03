@@ -44,6 +44,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_fresh_claim_attempt_re_signs_nonce_and_receipt() -> None:
+    from nth_dao.web.dummy_agent import _sign_foreign_claim_artifacts
+
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    announcement = sign_announcement(
+        publisher=publisher,
+        authority_did=publisher.as_did(),
+        title="fresh attempt",
+    )
+    first = _sign_foreign_claim_artifacts(announcement.to_dict(), claimant)
+    second = _sign_foreign_claim_artifacts(announcement.to_dict(), claimant)
+    assert first["intent"]["nonce"] != second["intent"]["nonce"]
+    assert first["receipt"]["receipt_id"] != second["receipt"]["receipt_id"]
+    assert first["intent"]["claimant_did"] == second["intent"]["claimant_did"]
+
+
 def _free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))

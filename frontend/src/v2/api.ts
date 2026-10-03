@@ -3258,9 +3258,10 @@ export async function claimFederatedTask(
 export async function listClaimIntents(
   limit = 100,
   signal?: AbortSignal,
+  cursor?: string,
 ): Promise<ClaimIntentPage> {
   return getJson<ClaimIntentPage>(
-    `/market/claim-intents?limit=${encodeURIComponent(String(limit))}`,
+    `/market/claim-intents?limit=${encodeURIComponent(String(limit))}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
     signal,
   );
 }

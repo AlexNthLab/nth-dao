@@ -86,6 +86,198 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
+  it("loads older recoverable claims through the cursor and keeps earlier cards", async () => {
+    const makeRecord = (nonce: string, name: string) => ({
+      state: "pending" as const, receipt_id: `receipt-${name}`,
+      source_peer: "https://source.example", source_did: "did:key:zSource",
+      federation_key: `nth-ann-sha256:${name}`,
+      intent: {
+        kind: "nth-market-claim-intent" as const, version: 1,
+        announcement_id: name, claimant_did: "did:key:zClaimant",
+        cap_token_id: "token-1", nonce, created_at_ms: 1_700_000_000_000,
+        expires_at_ms: 1_700_001_800_000, signature: "signature",
+      },
+    });
+    vi.mocked(listClaimIntents)
+      .mockResolvedValueOnce({
+        items: [makeRecord("b".repeat(24), "newer-task")],
+        stats: { pending: 2 }, next_cursor: `1700000000000:${"b".repeat(24)}`,
+      })
+      .mockResolvedValueOnce({
+        items: [makeRecord("a".repeat(24), "older-task")],
+        stats: { pending: 2 }, next_cursor: null,
+      });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByText("newer-task")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load older claims" }));
+    expect(await screen.findByText("older-task")).toBeTruthy();
+    expect(screen.getByText("newer-task")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load older claims" })).toBeNull();
+    expect(listClaimIntents).toHaveBeenNthCalledWith(
+      2, 100, expect.any(AbortSignal), `1700000000000:${"b".repeat(24)}`,
+    );
+  });
+
+  it("shows receipt capacity, warns near the limit, and refreshes without implying completion", async () => {
+    vi.mocked(listClaimIntents)
+      .mockResolvedValueOnce({
+        items: [], stats: { confirmed: 1 },
+        receipt_storage: {
+          files: 4, used_bytes: 2048, max_files: 5, max_bytes: 4096,
+        },
+      })
+      .mockResolvedValueOnce({
+        items: [], stats: { confirmed: 1 },
+        receipt_storage: {
+          files: 4, used_bytes: 3072, max_files: 5, max_bytes: 4096,
+        },
+      });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByText(/Claim receipt disk usage \(not an integrity check\): 2.0 KiB \/ 4.0 KiB/)).toBeTruthy();
+    expect(screen.getByText(/Near capacity; new claims may fail/)).toBeTruthy();
+    expect(screen.queryByText(/Mission completed/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText(/Claim receipt disk usage.*3.0 KiB \/ 4.0 KiB/)).toBeTruthy();
+    expect(listClaimIntents).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { files: 5, used_bytes: 1000, max_files: 5, max_bytes: 4096 },
+    { files: 1, used_bytes: 4096, max_files: 5, max_bytes: 4096 },
+  ])("distinguishes full receipt storage from near-capacity usage: %o", async (receipt_storage) => {
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [], stats: {}, receipt_storage,
+    });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByText(/Capacity full; new claims will fail/)).toBeTruthy();
+    expect(screen.queryByText(/Near capacity; new claims may fail/)).toBeNull();
+  });
+
+  it("tolerates an older server without receipt storage status", async () => {
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    await waitFor(() => expect(listClaimIntents).toHaveBeenCalled());
+    expect(screen.queryByText(/Claim receipt disk usage/)).toBeNull();
+  });
+
+  it("does not let an aborted status request overwrite a newer refresh", async () => {
+    let resolveOld!: (page: Awaited<ReturnType<typeof listClaimIntents>>) => void;
+    vi.mocked(listClaimIntents)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({
+        items: [], stats: {},
+        receipt_storage: { files: 2, used_bytes: 2048, max_files: 5, max_bytes: 4096 },
+      });
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    await waitFor(() => expect(listClaimIntents).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText(/Claim receipt disk usage.*2.0 KiB/)).toBeTruthy();
+
+    await act(async () => {
+      resolveOld({
+        items: [], stats: {},
+        receipt_storage: { files: 5, used_bytes: 4096, max_files: 5, max_bytes: 4096 },
+      });
+    });
+    expect(screen.getByText(/Claim receipt disk usage.*2.0 KiB/)).toBeTruthy();
+    expect(screen.queryByText(/Near capacity/)).toBeNull();
+  });
+
+  it("does not present old receipt usage as current during a slow refresh", async () => {
+    let resolveRefresh!: (page: Awaited<ReturnType<typeof listClaimIntents>>) => void;
+    vi.mocked(listClaimIntents)
+      .mockResolvedValueOnce({
+        items: [], stats: {},
+        receipt_storage: { files: 1, used_bytes: 1024, max_files: 5, max_bytes: 4096 },
+      })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByText(/Claim receipt disk usage.*1.0 KiB/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(screen.getByText("Refreshing claim status…")).toBeTruthy();
+    expect(screen.queryByText(/Claim receipt disk usage/)).toBeNull();
+    expect(screen.getByRole("button", { name: "My claims (?)" })).toBeTruthy();
+
+    await act(async () => {
+      resolveRefresh({
+        items: [], stats: {},
+        receipt_storage: { files: 2, used_bytes: 2048, max_files: 5, max_bytes: 4096 },
+      });
+    });
+    expect(screen.getByText(/Claim receipt disk usage.*2.0 KiB/)).toBeTruthy();
+  });
+
+  it("hides stale claim data when a refresh fails", async () => {
+    vi.mocked(listClaimIntents)
+      .mockResolvedValueOnce({
+        items: [{
+          state: "confirmed", receipt_id: "receipt-1",
+          intent: {
+            kind: "nth-market-claim-intent", version: 1,
+            announcement_id: "old-task", claimant_did: "did:key:zClaimant",
+            cap_token_id: "token-1", nonce: "d".repeat(24),
+            created_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_001_800_000, signature: "signature",
+          },
+        }],
+        stats: { confirmed: 1 },
+        receipt_storage: { files: 1, used_bytes: 2048, max_files: 5, max_bytes: 4096 },
+      })
+      .mockRejectedValueOnce(new Error("tracker unavailable"));
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByText("old-task")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Claim status unavailable: tracker unavailable");
+    expect(screen.getByRole("button", { name: "My claims (?)" })).toBeTruthy();
+    expect(screen.queryByText("old-task")).toBeNull();
+    expect(screen.queryByText(/Claim receipt disk usage/)).toBeNull();
+  });
+
+  it("exits loading when an active request fails with AbortError", async () => {
+    vi.mocked(listClaimIntents).mockRejectedValueOnce(
+      new DOMException("request timed out", "AbortError"),
+    );
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent", "Claim status unavailable: request timed out",
+    );
+    expect(screen.queryByText("Refreshing claim status…")).toBeNull();
+  });
+
   it("labels pending signed claim intents as unconfirmed", async () => {
     vi.mocked(listClaimIntents).mockResolvedValueOnce({
       items: [{
@@ -209,7 +401,53 @@ describe("TasksView", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Reconcile with source DAO/ }));
 
     expect(await screen.findByText(/no verifiable claim confirmation/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sign a fresh claim" })).toBeNull();
     expect(listClaimIntents).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a fresh signed attempt only after reconciliation and binds the original Agent", async () => {
+    const nonce = "e".repeat(24);
+    const agentDid = "did:key:zClaimant";
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "remote-task-retry", publisher_did: "did:key:zPublisher",
+      title: "Retry task", listing_type: "task", description: "",
+      capability_set: [], context: "", reward_minor: 0, reward_asset: "",
+      published_at_ms: Date.now(), claimed: false, federated: true,
+      federation_key: "nth-ann-sha256:retry", source_peer: "https://source.example",
+    }]);
+    vi.mocked(fetchAgents).mockResolvedValueOnce([
+      { did: "did:key:zOther", supervised: true, alive: true, a2a_port: 8200 },
+      { did: agentDid, supervised: true, alive: true, a2a_port: 8199 },
+    ] as Awaited<ReturnType<typeof fetchAgents>>);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "pending", receipt_id: "old-receipt",
+        source_peer: "https://source.example", source_did: "did:key:zSource",
+        federation_key: "nth-ann-sha256:retry",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "remote-task-retry", claimant_did: agentDid,
+          cap_token_id: "old-token", nonce,
+          created_at_ms: 1_700_000_000_000, expires_at_ms: 1_700_001_800_000,
+          signature: "old-signature",
+        },
+      }], stats: { pending: 1 },
+    });
+    vi.mocked(reconcileClaimIntent).mockResolvedValueOnce({
+      status: 200, body: { state: "pending", claimed: false },
+    });
+    vi.mocked(claimFederatedTask).mockResolvedValueOnce({
+      status: 502, body: { claim_intent_state: "pending", error: { message: "source unavailable" } },
+    });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    expect(await screen.findByText("remote-task-retry")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sign a fresh claim" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reconcile with source DAO" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign a fresh claim" }));
+    await waitFor(() => expect(claimFederatedTask).toHaveBeenCalledWith(
+      "remote-task-retry", agentDid, "nth-ann-sha256:retry",
+    ));
   });
 
   it("runs bounded federation discovery when the Market panel opens", async () => {

@@ -45,6 +45,18 @@ describe("v2 agent discovery API wiring", () => {
     );
   });
 
+  it("encodes the claim cursor when requesting older records", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      items: [], stats: {}, next_cursor: null,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await listClaimIntents(100, undefined, `1700000000000:${"a".repeat(24)}`);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/market/claim-intents?limit=100&cursor=1700000000000%3A${"a".repeat(24)}`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
   it("posts a durable claim intent reconciliation request", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       state: "confirmed",

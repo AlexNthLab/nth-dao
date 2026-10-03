@@ -553,3 +553,73 @@ def test_claim_intent_projection_fails_closed_on_corrupt_journal(
         "claim intent state is temporarily unavailable"
     )
     assert "corrupt" not in response.text
+
+
+def test_claim_intent_projection_pages_older_records_without_losing_ties(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from nth_dao.market.claim_intent import IntentTracker
+
+    nonces = [f"claimnonce{i:016d}" for i in range(5)]
+    records = [
+        {
+            "state": "pending" if i == 0 else "confirmed",
+            "intent": {"created_at_ms": 1_700_000_000_000 + i // 2, "nonce": nonce},
+        }
+        for i, nonce in enumerate(nonces)
+    ]
+    records.reverse()
+    monkeypatch.setattr(IntentTracker, "records", lambda self, **kwargs: records)
+    monkeypatch.setattr(IntentTracker, "receipt_storage_status", lambda self: {
+        "files": 0, "used_bytes": 0, "max_files": 10, "max_bytes": 1000,
+    })
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    cursor = ""
+    seen = []
+    while True:
+        response = client.get(
+            "/api/v2/market/claim-intents",
+            params={"limit": 2, "cursor": cursor},
+        )
+        assert response.status_code == 200
+        page = response.json()
+        assert page["stats"] == {"pending": 1, "confirmed": 4}
+        seen.extend(item["intent"]["nonce"] for item in page["items"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == list(reversed(nonces))
+    assert client.get(
+        "/api/v2/market/claim-intents", params={"cursor": "1:bad"},
+    ).status_code == 422
+
+
+def test_old_pending_claim_is_reachable_after_first_hundred(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from nth_dao.market.claim_intent import IntentTracker
+
+    records = [
+        {
+            "state": "pending" if i == 0 else "confirmed",
+            "intent": {
+                "created_at_ms": 1_700_000_000_000 + i,
+                "nonce": f"claimnonce{i:016d}",
+            },
+        }
+        for i in reversed(range(101))
+    ]
+    monkeypatch.setattr(IntentTracker, "records", lambda self, **kwargs: records)
+    monkeypatch.setattr(IntentTracker, "receipt_storage_status", lambda self: {
+        "files": 0, "used_bytes": 0, "max_files": 10, "max_bytes": 1000,
+    })
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    first = client.get("/api/v2/market/claim-intents").json()
+    assert len(first["items"]) == 100
+    assert first["next_cursor"]
+    second = client.get(
+        "/api/v2/market/claim-intents", params={"cursor": first["next_cursor"]},
+    ).json()
+    assert len(second["items"]) == 1
+    assert second["items"][0]["state"] == "pending"
+    assert second["next_cursor"] is None
