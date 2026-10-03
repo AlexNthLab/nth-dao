@@ -23,7 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   fail-closed journal and TTL sweep. Legal announcement identifiers use the
   same 256-character alphabet as the announcement protocol. Torn journal
   tails are repaired before future appends, and conflicting terminal
-  transitions fail instead of masquerading as idempotent retries. 34 tests.
+  transitions fail instead of masquerading as idempotent retries.
+- Federated task claims now use the Claim Intent lifecycle end to end. The
+  supervised Agent signs the capability token, receipt, and intent without
+  exporting its private key; the claimant journals pending before transport;
+  the source authority admits the intent before CAS; and only a verified,
+  durably retained authority ACK confirms it. Receipt ID/hash bindings allow a
+  later signed ACK to reconcile a prior response-loss window without treating
+  a new intent as accepted. Legacy v1 listings fail closed and require a
+  current publisher signature. Tasks exposes an explicit My claims projection
+  whose pending state is labelled as unconfirmed. Recoverable records retain
+  their verified source and Receipt bindings, allowing a user to retrieve a
+  lost authority ACK after the discovery cache has expired. Unsigned negative
+  status responses never drive a terminal local transition. Local tracking
+  verifies the full signed Receipt and its exact token binding, archives old
+  terminal events without releasing nonce/Receipt replay protection, and
+  preserves pending records under capacity pressure. Reconciliation tries
+  bounded, validated peer addresses under one deadline, stopping on identity
+  mismatch. A rebuildable SQLite replay index avoids loading all archived
+  bindings on startup; full archive and index integrity can be checked on
+  demand. Compaction preserves original events for retained intents and
+  archives cross-boundary reconciliation evidence. Windows spawn-process tests
+  cover concurrent ACK and retry races.
 
 - Courier envelope (Phase 4): `nth_dao/delivery/courier.py` seals a signed
   delivery envelope to the recipient's X25519 public key (libsodium RFC 7748

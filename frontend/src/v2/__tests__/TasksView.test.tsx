@@ -60,6 +60,8 @@ vi.mock("../api", () => ({
     discovery_errors: [],
   }),
   fetchAgents: vi.fn().mockResolvedValue([]),
+  listClaimIntents: vi.fn().mockResolvedValue({ items: [], stats: {} }),
+  reconcileClaimIntent: vi.fn(),
   claimTask: vi.fn(),
   claimFederatedTask: vi.fn(),
 }));
@@ -69,7 +71,9 @@ import {
   claimTask,
   discoverFederationPeers,
   fetchAgents,
+  listClaimIntents,
   listOpenTasks,
+  reconcileClaimIntent,
   refreshFederation,
   updateFederationPeer,
 } from "../api";
@@ -82,6 +86,132 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
+  it("labels pending signed claim intents as unconfirmed", async () => {
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "pending",
+        receipt_id: "receipt-1",
+        intent: {
+          kind: "nth-market-claim-intent",
+          version: 1,
+          announcement_id: "remote-task-1",
+          claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1",
+          nonce: "a".repeat(24),
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000,
+          signature: "signature",
+        },
+      }],
+      stats: { pending: 1 },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+
+    expect(await screen.findByText("remote-task-1")).toBeTruthy();
+    expect(screen.getByText("pending")).toBeTruthy();
+    expect(screen.getByText(/not that the source DAO confirmed/)).toBeTruthy();
+    expect(screen.getByText(/legacy record lacks source bindings/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Reconcile with source DAO/ })).toBeNull();
+  });
+
+  it("reconciles a recoverable pending claim with its source DAO", async () => {
+    vi.mocked(listClaimIntents)
+      .mockResolvedValueOnce({
+        items: [{
+          state: "pending",
+          receipt_id: "receipt-1",
+          source_peer: "https://source.example",
+          source_did: "did:key:zSource",
+          federation_key: "nth-ann-sha256:claim-1",
+          intent: {
+            kind: "nth-market-claim-intent",
+            version: 1,
+            announcement_id: "remote-task-1",
+            claimant_did: "did:key:zClaimant",
+            cap_token_id: "token-1",
+            nonce: "b".repeat(24),
+            created_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_001_800_000,
+            signature: "signature",
+          },
+        }],
+        stats: { pending: 1 },
+      })
+      .mockResolvedValueOnce({
+        items: [],
+        stats: { confirmed: 1 },
+      });
+    vi.mocked(reconcileClaimIntent).mockResolvedValueOnce({
+      status: 200,
+      body: {
+        state: "confirmed",
+        claimed: true,
+        authority_ack_id: "ack-1",
+      },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Reconcile with source DAO/ }));
+
+    await waitFor(() => expect(reconcileClaimIntent).toHaveBeenCalledWith("b".repeat(24)));
+    expect(await screen.findByText(/source DAO confirmed this claim/)).toBeTruthy();
+    await waitFor(() => expect(listClaimIntents).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps a claim unconfirmed when the source returns no signed ACK", async () => {
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "pending",
+        receipt_id: "receipt-2",
+        source_peer: "http://192.168.1.8:8080",
+        source_did: "did:key:zSource",
+        federation_key: "nth-ann-sha256:claim-2",
+        intent: {
+          kind: "nth-market-claim-intent",
+          version: 1,
+          announcement_id: "remote-task-2",
+          claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-2",
+          nonce: "c".repeat(24),
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000,
+          signature: "signature",
+        },
+      }],
+      stats: { pending: 1 },
+    });
+    vi.mocked(reconcileClaimIntent).mockResolvedValueOnce({
+      status: 200,
+      body: {
+        state: "pending",
+        claimed: true,
+        claimant_matches: false,
+      },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Reconcile with source DAO/ }));
+
+    expect(await screen.findByText(/no verifiable claim confirmation/)).toBeTruthy();
+    expect(listClaimIntents).toHaveBeenCalledTimes(1);
+  });
+
   it("runs bounded federation discovery when the Market panel opens", async () => {
     render(
       <LangProvider>
@@ -367,6 +497,152 @@ describe("TasksView", () => {
       "did:key:zWorker",
       "nth-ann-sha256:abc123",
     ));
+  });
+
+  it("reports a persisted federated claim as pending instead of failed", async () => {
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "remote-pending",
+      federation_key: "nth-ann-sha256:pending",
+      publisher_did: "did:key:zRemote",
+      title: "remote pending task",
+      capability_set: [],
+      context: "general",
+      reward_minor: 0,
+      reward_asset: "credit",
+      claimed: false,
+      federated: true,
+      source_peer: "https://remote.example",
+    }]);
+    vi.mocked(fetchAgents).mockResolvedValueOnce([{
+      did: "did:key:zWorker",
+      code: "WORKER",
+      label: "worker",
+      source: "local",
+      capabilities: [],
+      has_active_cap: true,
+      supervised: true,
+      alive: true,
+      a2a_port: 18081,
+    }]);
+    vi.mocked(claimFederatedTask).mockResolvedValueOnce({
+      status: 502,
+      body: {
+        error: {
+          code: "claim-ack-invalid",
+          message: "source acknowledgement was not received",
+        },
+        claim_intent_nonce: "a".repeat(24),
+        claim_intent_state: "pending",
+      },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    await screen.findByText("remote pending task");
+    fireEvent.click(screen.getByText("claim (cross-DAO)"));
+
+    expect(await screen.findByText(/Claim intent saved; source confirmation is pending/)).toBeTruthy();
+    expect(screen.queryByText(/Claim failed/)).toBeNull();
+  });
+
+  it("explains when a retry reconciles a prior pending claim", async () => {
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "remote-reconciled",
+      federation_key: "nth-ann-sha256:reconciled",
+      publisher_did: "did:key:zRemote",
+      title: "remote reconciled task",
+      capability_set: [],
+      context: "general",
+      reward_minor: 0,
+      reward_asset: "credit",
+      claimed: false,
+      federated: true,
+      source_peer: "https://remote.example",
+    }]);
+    vi.mocked(fetchAgents).mockResolvedValueOnce([{
+      did: "did:key:zWorker",
+      code: "WORKER",
+      label: "worker",
+      source: "local",
+      capabilities: [],
+      has_active_cap: true,
+      supervised: true,
+      alive: true,
+      a2a_port: 18081,
+    }]);
+    vi.mocked(claimFederatedTask).mockResolvedValueOnce({
+      status: 200,
+      body: {
+        claimed: true,
+        receipt_id: "receipt-original",
+        claim_intent_state: "rejected",
+        reconciled_intent_nonce: "b".repeat(24),
+      },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    await screen.findByText("remote reconciled task");
+    fireEvent.click(screen.getByText("claim (cross-DAO)"));
+
+    expect(await screen.findByText(
+      /A prior pending claim was confirmed by the source DAO; this retry intent was not accepted/,
+    )).toBeTruthy();
+  });
+
+  it("distinguishes an already-confirmed duplicate from reconciliation", async () => {
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([{
+      announcement_id: "remote-already-confirmed",
+      federation_key: "nth-ann-sha256:already-confirmed",
+      publisher_did: "did:key:zRemote",
+      title: "already confirmed task",
+      capability_set: [],
+      context: "general",
+      reward_minor: 0,
+      reward_asset: "credit",
+      claimed: false,
+      federated: true,
+      source_peer: "https://remote.example",
+    }]);
+    vi.mocked(fetchAgents).mockResolvedValueOnce([{
+      did: "did:key:zWorker",
+      code: "WORKER",
+      label: "worker",
+      source: "local",
+      capabilities: [],
+      has_active_cap: true,
+      supervised: true,
+      alive: true,
+      a2a_port: 18081,
+    }]);
+    vi.mocked(claimFederatedTask).mockResolvedValueOnce({
+      status: 200,
+      body: {
+        claimed: true,
+        receipt_id: "receipt-original",
+        claim_intent_state: "rejected",
+        already_confirmed_intent_nonce: "c".repeat(24),
+      },
+    });
+
+    render(
+      <LangProvider>
+        <ToastProvider><TasksView /></ToastProvider>
+      </LangProvider>,
+    );
+    await screen.findByText("already confirmed task");
+    fireEvent.click(screen.getByText("claim (cross-DAO)"));
+
+    expect(await screen.findByText(
+      /This Agent already holds the claim; the duplicate intent was not accepted/,
+    )).toBeTruthy();
+    expect(screen.queryByText(/A prior pending claim was confirmed/)).toBeNull();
   });
 
   it("allows adding a federation seed peer from Market", async () => {

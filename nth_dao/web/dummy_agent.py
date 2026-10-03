@@ -73,7 +73,20 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, ClassVar, Dict, FrozenSet, Iterator, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    FrozenSet,
+    Iterator,
+    Optional,
+    Tuple,
+)
+
+if TYPE_CHECKING:
+    from nth_dao.identity import AgentIdentity
 
 
 _STOP = False
@@ -377,7 +390,8 @@ def _verify_a2a_auth(
     # the child shouldn't pay for if no A2A request ever arrives.
     try:
         from nth_dao.cap_token import (
-            decode_authorization_value, verify_cap_token,
+            decode_authorization_value,
+            verify_cap_token,
         )
     except ImportError:
         return False, "crypto-unavailable", None
@@ -3428,6 +3442,42 @@ def _build_a2a_ask_receipt(
     return receipt, ""
 
 
+def _sign_foreign_claim_artifacts(
+    announcement: dict[str, Any],
+    signer: AgentIdentity,
+) -> dict[str, dict[str, Any]]:
+    """Build public signed artifacts for one federated claim.
+
+    The supervised agent owns the private key, so the hub receives only the
+    capability token, claim receipt, and offline claim intent.  Keeping this
+    operation inside the agent process preserves that key boundary while
+    making every cross-artifact binding independently testable.
+    """
+
+    from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
+    from nth_dao.market.announcement import TaskAnnouncement
+    from nth_dao.market.claim import sign_claim_receipt
+    from nth_dao.market.claim_intent import sign_claim_intent
+
+    ann = TaskAnnouncement.from_dict(announcement)
+    cap_token = sign_cap_token(
+        issuer=signer,
+        subject_did=signer.as_did(),
+        capabilities=[*ann.capability_set, CAP_NTH_RECEIPT_SIGN],
+        scope_task_id=f"market:claim:{ann.announcement_id}",
+        ttl_ms=300_000,
+    )
+    return {
+        "cap_token": cap_token,
+        "receipt": sign_claim_receipt(ann, signer, cap_token),
+        "intent": sign_claim_intent(
+            signer,
+            announcement_id=ann.announcement_id,
+            cap_token=cap_token,
+        ),
+    }
+
+
 def _check_token_model_scope(
     token: Dict[str, Any], params: Dict[str, Any],
 ) -> Tuple[bool, str, str]:
@@ -4133,7 +4183,9 @@ def _start_a2a_server(
                     return
                 try:
                     from nth_dao.market.claim import (
-                        ClaimConflict, ClaimRejected, ClaimStore,
+                        ClaimConflict,
+                        ClaimRejected,
+                        ClaimStore,
                         claim_announcement,
                     )
                     from nth_dao.market.feed import MarketFeed
@@ -4191,22 +4243,7 @@ def _start_a2a_server(
                     )
                     return
                 try:
-                    from nth_dao.cap_token import (
-                        CAP_NTH_RECEIPT_SIGN, sign_cap_token,
-                    )
-                    from nth_dao.market.announcement import TaskAnnouncement
-                    from nth_dao.market.claim import sign_claim_receipt
-
-                    ann = TaskAnnouncement.from_dict(ann_dict)
-                    cap = sign_cap_token(
-                        issuer=signer, subject_did=signer.as_did(),
-                        capabilities=[
-                            *ann.capability_set, CAP_NTH_RECEIPT_SIGN,
-                        ],
-                        scope_task_id=f"market:claim:{ann.announcement_id}",
-                        ttl_ms=300_000,
-                    )
-                    receipt = sign_claim_receipt(ann, signer, cap)
+                    artifacts = _sign_foreign_claim_artifacts(ann_dict, signer)
                 except Exception as exc:  # noqa: BLE001
                     self._json_error(
                         502, "claim-sign-failed",
@@ -4214,9 +4251,8 @@ def _start_a2a_server(
                     )
                     return
                 response = {"result": {
-                    "cap_token": cap,
-                    "receipt": receipt,
-                    "announcement_id": ann.announcement_id,
+                    **artifacts,
+                    "announcement_id": ann_dict["announcement_id"],
                     "claimant_did": signer.as_did(),
                 }}
             else:

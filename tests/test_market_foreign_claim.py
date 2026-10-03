@@ -15,15 +15,15 @@ from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
 from nth_dao.execution_receipt import sign_receipt, verify_receipt
 from nth_dao.identity import AgentIdentity
 from nth_dao.market import (
-    ClaimConflict,
-    ClaimRejected,
-    ClaimStore,
-    MarketFeed,
     REJECT_ANN_EXPIRED,
     REJECT_RECEIPT_BINDING,
     REJECT_RECEIPT_INVALID,
     REJECT_SKILL_INSUFFICIENT,
     REJECT_SUBJECT_MISMATCH,
+    ClaimConflict,
+    ClaimRejected,
+    ClaimStore,
+    MarketFeed,
     record_foreign_claim,
     sign_announcement,
     sign_claim_receipt,
@@ -74,6 +74,30 @@ def test_idempotent_same_agent(tmp_path) -> None:
     out1 = record_foreign_claim(feed, store, ann.announcement_id, token, receipt)
     out2 = record_foreign_claim(feed, store, ann.announcement_id, token, receipt)
     assert out1.claim_record["receipt_id"] == out2.claim_record["receipt_id"]
+
+
+def test_same_agent_with_new_signed_evidence_conflicts(tmp_path) -> None:
+    feed, store, _pub, agent, ann = _setup(tmp_path)
+    first_token = _selfissue(agent, ["code_review"])
+    first_receipt = sign_claim_receipt(ann, agent, first_token)
+    record_foreign_claim(
+        feed,
+        store,
+        ann.announcement_id,
+        first_token,
+        first_receipt,
+    )
+    second_token = _selfissue(agent, ["code_review"])
+    second_receipt = sign_claim_receipt(ann, agent, second_token)
+
+    with pytest.raises(ClaimConflict, match="different signed evidence"):
+        record_foreign_claim(
+            feed,
+            store,
+            ann.announcement_id,
+            second_token,
+            second_receipt,
+        )
 
 
 def test_conflict_different_agent(tmp_path) -> None:
@@ -149,6 +173,35 @@ def test_record_rejects_receipt_token_mismatch(tmp_path) -> None:
     with pytest.raises(ClaimRejected) as e:
         record_foreign_claim(feed, store, ann.announcement_id, token_b, receipt)
     assert e.value.reason == REJECT_RECEIPT_BINDING
+
+
+def test_record_rejects_same_token_id_with_different_signed_body(tmp_path) -> None:
+    feed, store, pub, agent, ann = _setup(tmp_path)
+    shared_id = "shared-token-id"
+    token_a = sign_cap_token(
+        issuer=agent,
+        subject_did=agent.as_did(),
+        capabilities=["code_review", CAP_NTH_RECEIPT_SIGN],
+        token_id=shared_id,
+    )
+    receipt = sign_claim_receipt(ann, agent, token_a)
+    token_b = sign_cap_token(
+        issuer=agent,
+        subject_did=agent.as_did(),
+        capabilities=["code_review", "extra_skill", CAP_NTH_RECEIPT_SIGN],
+        token_id=shared_id,
+    )
+
+    with pytest.raises(ClaimRejected) as exc_info:
+        record_foreign_claim(
+            feed,
+            store,
+            ann.announcement_id,
+            token_b,
+            receipt,
+        )
+
+    assert exc_info.value.reason == REJECT_RECEIPT_BINDING
 
 
 def test_record_rejects_valid_signature_over_false_announcement_terms(

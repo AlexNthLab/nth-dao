@@ -9,7 +9,8 @@
  */
 import { useEffect, useState } from "react";
 import {
-  claimFederatedTask, claimTask, fetchAgents, listOpenTasks, listTaskCategories,
+  claimFederatedTask, claimTask, fetchAgents, listClaimIntents, listOpenTasks,
+  listTaskCategories, reconcileClaimIntent,
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { useToast } from "./Toast";
@@ -17,6 +18,7 @@ import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
 import type {
   AgentEntry,
+  ClaimIntentRecord,
   TaskAnnouncement,
   TaskCategory,
 } from "../types-v2";
@@ -56,7 +58,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const [q, setQ] = useState("");
 
   // 市场化分区 + 排序。market=可承接的活(本节点+联邦);mine=我发布的。
-  const [tab, setTab] = useState<"market" | "mine">("market");
+  const [tab, setTab] = useState<"market" | "mine" | "claims">("market");
   const [sort, setSort] = useState<"recent" | "reward">("recent");
 
   // 认领后 bump,触发任务 + agent 列表一起刷新。
@@ -66,6 +68,10 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [claimAgent, setClaimAgent] = useState("");
   const [claimingId, setClaimingId] = useState("");
+  const [claimIntents, setClaimIntents] = useState<ClaimIntentRecord[]>([]);
+  const [claimIntentError, setClaimIntentError] = useState("");
+  const [claimIntentVersion, setClaimIntentVersion] = useState(0);
+  const [reconcilingNonce, setReconcilingNonce] = useState("");
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -129,6 +135,21 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
+  useEffect(() => {
+    const ac = new AbortController();
+    listClaimIntents(100, ac.signal)
+      .then((page) => {
+        setClaimIntents(page.items);
+        setClaimIntentError("");
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setClaimIntentError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    return () => ac.abort();
+  }, [claimIntentVersion]);
+
   // 可认领身份:拉可驱动的 supervised agent(supervised+alive+有 a2a_port)。
   useEffect(() => {
     const ac = new AbortController();
@@ -179,6 +200,8 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
       const result =
         (r.body.result as Record<string, unknown>) || r.body;
       if (r.status === 200 && result.claimed) {
+        const reconciled = Boolean(result.reconciled_intent_nonce);
+        const alreadyConfirmed = Boolean(result.already_confirmed_intent_nonce);
         const missionHint = result.mission_id
           ? ` · ${t("已进入 Missions", "now in Missions")} ${String(result.mission_id).slice(0, 12)}…`
           : "";
@@ -190,7 +213,23 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
           .map((warning) => visibilityWarningLabel(warning, t))
           .join(" · ");
         const receiptText = `${t("已认领 · 收据", "Claimed · receipt")} ${String(result.receipt_id || "").slice(0, 12)}…${missionHint}`;
-        if (visibilityStatus === "ok") {
+        if (reconciled) {
+          toast.push(
+            t(
+              "之前待确认的认领已获来源 DAO 确认;本次重试意图未被接受。",
+              "A prior pending claim was confirmed by the source DAO; this retry intent was not accepted.",
+            ),
+            "success",
+          );
+        } else if (alreadyConfirmed) {
+          toast.push(
+            t(
+              "该 Agent 已持有此认领;本次重复意图未被接受。",
+              "This Agent already holds the claim; the duplicate intent was not accepted.",
+            ),
+            "info",
+          );
+        } else if (visibilityStatus === "ok") {
           toast.push(receiptText, "success");
         } else {
           toast.push(
@@ -199,6 +238,12 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
           );
         }
         setReloadKey((k) => k + 1); // 任务离开广场
+      } else if (result.claim_intent_state === "pending") {
+        const err = (r.body.error as Record<string, unknown>) || {};
+        toast.push(
+          `${t("认领意图已保存,等待来源 DAO 确认", "Claim intent saved; source confirmation is pending")}: ${String(err.message || `HTTP ${r.status}`)}`,
+          "warn",
+        );
       } else {
         const err = (r.body.error as Record<string, unknown>) || {};
         const msg =
@@ -212,6 +257,48 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
       );
     } finally {
       setClaimingId("");
+      if (task.federated) setClaimIntentVersion((version) => version + 1);
+    }
+  }
+
+  async function handleReconcile(record: ClaimIntentRecord) {
+    const nonce = record.intent.nonce;
+    if (reconcilingNonce) return;
+    setReconcilingNonce(nonce);
+    try {
+      const result = await reconcileClaimIntent(nonce);
+      if (result.status === 200 && result.body.state === "confirmed") {
+        toast.push(
+          t(
+            "来源 DAO 已确认该认领,权威回执已保存。",
+            "The source DAO confirmed this claim and its authority ACK was saved.",
+          ),
+          "success",
+        );
+        setClaimIntentVersion((version) => version + 1);
+      } else if (result.status === 200 && result.body.state !== "confirmed") {
+        toast.push(
+          t(
+            "来源 DAO 未返回可验证的认领确认,本地状态保持不变。",
+            "The source DAO returned no verifiable claim confirmation; local state is unchanged.",
+          ),
+          "warn",
+        );
+      } else {
+        const error = result.body.error as Record<string, unknown> | undefined;
+        const message = error?.message || result.body.detail || `HTTP ${result.status}`;
+        toast.push(
+          `${t("恢复认领状态失败", "Claim reconciliation failed")}: ${String(message)}`,
+          "error",
+        );
+      }
+    } catch (error) {
+      toast.push(
+        `${t("恢复认领状态失败", "Claim reconciliation failed")}: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    } finally {
+      setReconcilingNonce("");
     }
   }
 
@@ -308,7 +395,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             <p className="main-eyebrow">
               Task work queue
             </p>
-            <h1 className="main-title">Tasks {loading ? "…" : `(${shown.length})`}</h1>
+            <h1 className="main-title">Tasks {loading ? "…" : `(${tab === "claims" ? claimIntents.length : shown.length})`}</h1>
             <p className="main-subtitle">
               {t(
                 "查看和承接外部工作。认领成功后会进入 Missions 执行,并在 Blackboard 显示状态。",
@@ -345,8 +432,15 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             >
               {t("我发布的", "My published")} ({myTasks.length})
             </button>
+            <button
+              className={`btn ${tab === "claims" ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize: 12 }}
+              onClick={() => setTab("claims")}
+            >
+              {t("我的认领", "My claims")} ({claimIntents.length})
+            </button>
             <span style={{ flex: 1 }} />
-            <label
+            {tab !== "claims" && <label
               className="muted"
               style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}
             >
@@ -358,10 +452,76 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                 <option value="recent">{t("最新", "Newest")}</option>
                 <option value="reward">{t("赏金高→低", "Reward ↓")}</option>
               </select>
-            </label>
+            </label>}
           </div>
 
-          {shown.length === 0 ? (
+          {tab === "claims" ? (
+            <div className="stack" style={{ gap: 10 }} aria-label="Claim intent status">
+              <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                {t(
+                  "待确认只表示认领意图已签名并保存，不表示来源 DAO 已确认占位。",
+                  "Pending means the claim intent is signed and saved, not that the source DAO confirmed the claim.",
+                )}
+              </p>
+              {claimIntentError && (
+                <p role="alert" className="danger-text">
+                  {t("认领状态暂不可用", "Claim status unavailable")}: {claimIntentError}
+                </p>
+              )}
+              {!claimIntentError && claimIntents.length === 0 && (
+                <div className="main-empty" style={{ minHeight: 180 }}>
+                  <p>{t("暂无跨 DAO 认领记录。", "No cross-DAO claim records yet.")}</p>
+                </div>
+              )}
+              {claimIntents.map((record) => {
+                const { state, intent } = record;
+                const isRecoverable = (
+                  (state === "pending" || state === "expired")
+                  && Boolean(record.source_peer && record.source_did && record.federation_key && record.receipt_id)
+                );
+                return (
+                <article
+                  key={intent.nonce}
+                  className="task-claim-intent"
+                  data-state={state}
+                >
+                  <div className="task-claim-intent-head">
+                    <strong>{intent.announcement_id}</strong>
+                    <span className={`pill claim-intent-${state}`}>{state}</span>
+                  </div>
+                  <div className="task-claim-intent-meta">
+                    <span>{t("认领者", "Claimant")}: <code title={intent.claimant_did}>{intent.claimant_did.slice(0, 22)}…</code></span>
+                    <span>{t("签署时间", "Signed")}: {new Date(intent.created_at_ms).toLocaleString()}</span>
+                    <span>{t("有效期至", "Expires")}: {new Date(intent.expires_at_ms).toLocaleString()}</span>
+                  </div>
+                  {(state === "pending" || state === "expired") && (
+                    <div className="task-claim-intent-actions">
+                      {isRecoverable ? (
+                        <button
+                          className="btn btn-ghost"
+                          type="button"
+                          disabled={Boolean(reconcilingNonce)}
+                          onClick={() => void handleReconcile(record)}
+                        >
+                          {reconcilingNonce === intent.nonce
+                            ? t("恢复中…", "Reconciling…")
+                            : t("向来源 DAO 核验", "Reconcile with source DAO")}
+                        </button>
+                      ) : (
+                        <span className="muted" style={{ fontSize: 11 }}>
+                          {t(
+                            "旧版记录缺少来源绑定,无法自动恢复。",
+                            "This legacy record lacks source bindings and cannot be reconciled automatically.",
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </article>
+                );
+              })}
+            </div>
+          ) : shown.length === 0 ? (
             <div className="main-empty" style={{ minHeight: 200 }}>
               <div className="main-empty-icon">
                 <IconBriefcase size={36} />

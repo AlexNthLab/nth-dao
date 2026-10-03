@@ -27,6 +27,7 @@ import type {
   CapTokenSummary,
   Channel,
   ChannelMessage,
+  ClaimIntentPage,
   ChatMessage,
   Conversation,
   ConversationSummary,
@@ -3242,6 +3243,38 @@ export async function claimFederatedTask(
         federation_key: federationKey,
         agent_did: agentDid,
       }),
+    },
+  );
+  let body: Record<string, unknown>;
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  return { status: res.status, body };
+}
+
+/** Local durable lifecycle for signed cross-DAO claim intents. */
+export async function listClaimIntents(
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<ClaimIntentPage> {
+  return getJson<ClaimIntentPage>(
+    `/market/claim-intents?limit=${encodeURIComponent(String(limit))}`,
+    signal,
+  );
+}
+
+/** Ask the original DAO authority to recover a lost signed claim ACK. */
+export async function reconcileClaimIntent(
+  nonce: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(
+    `${BASE}/market/claim-intents/${encodeURIComponent(nonce)}/reconcile`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json", ...authHeader() },
     },
   );
   let body: Record<string, unknown>;

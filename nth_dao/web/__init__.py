@@ -183,8 +183,13 @@ class _FederationBodyLimitMiddleware:
         is_foreign_claim = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
-            and path.startswith("/api/v2/market/")
-            and path.endswith("/claim-foreign")
+            and (
+                (
+                    path.startswith("/api/v2/market/")
+                    and path.endswith("/claim-foreign")
+                )
+                or path == "/api/v2/market/federation/claim-status"
+            )
         )
         is_federation_hello = (
             scope.get("type") == "http"
@@ -2249,8 +2254,13 @@ def create_app(
         # deputy:端点只是把自授权的认领落 CAS,不驱动本地 agent/网络)。
         if (
             request.method == "POST"
-            and request.url.path.startswith("/api/v2/market/")
-            and request.url.path.endswith("/claim-foreign")
+            and (
+                (
+                    request.url.path.startswith("/api/v2/market/")
+                    and request.url.path.endswith("/claim-foreign")
+                )
+                or request.url.path == "/api/v2/market/federation/claim-status"
+            )
         ):
             request.state.nth_principal = {"type": "anonymous"}
             return await call_next(request)

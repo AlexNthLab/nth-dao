@@ -110,7 +110,7 @@ def test_undelegated_v1_is_readable_but_reported_for_resign(
     }
 
 
-def test_foreign_claim_by_key_supports_legacy_id(tmp_path: Path) -> None:
+def test_foreign_claim_by_key_requires_legacy_listing_resign(tmp_path: Path) -> None:
     app = create_app(tmp_path, require_console_auth=True)
     client = TestClient(app)
     authority = app.state.nth.node_identity
@@ -130,12 +130,13 @@ def test_foreign_claim_by_key_supports_legacy_id(tmp_path: Path) -> None:
             "federation_key": announcement_federation_key(announcement),
             "cap_token": token,
             "receipt": receipt,
+            "intent": {},
         },
     )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["announcement_id"] == announcement.announcement_id
-    assert ClaimStore(tmp_path).is_claimed(announcement.announcement_id)
+    assert response.status_code == 409, response.text
+    assert "must re-sign" in response.text
+    assert not ClaimStore(tmp_path).is_claimed(announcement.announcement_id)
 
 
 def test_claim_store_hash_paths_do_not_alias_valid_ids(tmp_path: Path) -> None:

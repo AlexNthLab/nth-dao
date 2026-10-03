@@ -6,8 +6,9 @@
 """
 from __future__ import annotations
 
-from pathlib import Path
 import asyncio
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,22 +21,54 @@ from fastapi.testclient import TestClient
 from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
 from nth_dao.identity import AgentIdentity
 from nth_dao.market import MarketFeed, sign_announcement
-from nth_dao.market.announcement import TaskAnnouncement
+from nth_dao.market.announcement import TaskAnnouncement, announcement_federation_key
 from nth_dao.market.claim import sign_claim_receipt
 from nth_dao.market.claim_ack import verify_authority_claim_ack
-from nth_dao.web import create_app
-from nth_dao.web import _FederationBodyLimitMiddleware
+from nth_dao.market.claim_intent import sign_claim_intent, verify_claim_intent
+from nth_dao.web import _FederationBodyLimitMiddleware, create_app
+from nth_dao.web.dummy_agent import _sign_foreign_claim_artifacts
 
 
 def _sign_foreign(ann_dict, caps=("code_review",)):
-    """模拟外部 agent:自签 cap_token + ClaimReceipt。"""
+    """模拟外部 agent:自签 cap_token + ClaimReceipt + ClaimIntent。"""
     agent = AgentIdentity.generate(label="foreign-agent")
     ann = TaskAnnouncement.from_dict(ann_dict)
     cap = sign_cap_token(
         issuer=agent, subject_did=agent.as_did(),
         capabilities=[*caps, CAP_NTH_RECEIPT_SIGN],
     )
-    return agent, cap, sign_claim_receipt(ann, agent, cap)
+    return (
+        agent,
+        cap,
+        sign_claim_receipt(ann, agent, cap),
+        sign_claim_intent(
+            agent,
+            announcement_id=ann.announcement_id,
+            cap_token=cap,
+        ),
+    )
+
+
+def test_agent_signs_cross_bound_claim_artifacts() -> None:
+    publisher = AgentIdentity.generate(label="publisher")
+    claimant = AgentIdentity.generate(label="claimant")
+    announcement = sign_announcement(
+        publisher=publisher,
+        authority_did=publisher.as_did(),
+        title="signed claim artifacts",
+        capability_set=["code_review"],
+    )
+
+    artifacts = _sign_foreign_claim_artifacts(announcement.to_dict(), claimant)
+
+    assert set(artifacts) == {"cap_token", "receipt", "intent"}
+    intent = artifacts["intent"]
+    assert verify_claim_intent(intent) == (True, "ok")
+    assert intent["announcement_id"] == announcement.announcement_id
+    assert intent["claimant_did"] == claimant.as_did()
+    assert intent["cap_token_id"] == artifacts["cap_token"]["token_id"]
+    assert artifacts["receipt"]["signer_did"] == claimant.as_did()
+    assert "private_key" not in str(artifacts).lower()
 
 
 def test_claim_foreign_records(tmp_path: Path) -> None:
@@ -45,11 +78,11 @@ def test_claim_foreign_records(tmp_path: Path) -> None:
         json={"title": "t", "capability_set": ["code_review"], "reward_minor": 5},
     ).json()
     aid = ann["announcement_id"]
-    agent, cap, receipt = _sign_foreign(ann)
+    agent, cap, receipt, intent = _sign_foreign(ann)
 
     r = c.post(
         f"/api/v2/market/{aid}/claim-foreign",
-        json={"cap_token": cap, "receipt": receipt},
+        json={"cap_token": cap, "receipt": receipt, "intent": intent},
     )
     assert r.status_code == 200, r.text
     assert r.json()["claimed"] is True
@@ -82,13 +115,58 @@ def test_claim_foreign_anonymous_when_auth_on(tmp_path: Path) -> None:
         reward_minor=5,
     )
     MarketFeed(tmp_path).publish(ann)
-    _, cap, receipt = _sign_foreign(ann.to_dict())
+    _, cap, receipt, intent = _sign_foreign(ann.to_dict())
     # 不带任何 Authorization → 仍应 200(中间件对本路径豁免)。
     r = c.post(
         f"/api/v2/market/{ann.announcement_id}/claim-foreign",
-        json={"cap_token": cap, "receipt": receipt},
+        json={"cap_token": cap, "receipt": receipt, "intent": intent},
     )
     assert r.status_code == 200, r.text
+
+
+def test_claim_status_is_crypto_authorized_when_console_auth_is_on(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path, require_console_auth=True)
+    client = TestClient(app)
+    publisher = AgentIdentity.generate(label="publisher")
+    announcement = sign_announcement(
+        publisher=publisher,
+        authority_did=app.state.nth.node_identity.as_did(),
+        title="recover a lost authority acknowledgement",
+        capability_set=["code_review"],
+    )
+    MarketFeed(tmp_path).publish(announcement)
+    _agent, cap_token, receipt, intent = _sign_foreign(
+        announcement.to_dict(),
+    )
+    claim = client.post(
+        f"/api/v2/market/{announcement.announcement_id}/claim-foreign",
+        json={
+            "cap_token": cap_token,
+            "receipt": receipt,
+            "intent": intent,
+        },
+    )
+    assert claim.status_code == 200, claim.text
+
+    federation_key = announcement_federation_key(announcement)
+    recovered = client.post(
+        "/api/v2/market/federation/claim-status",
+        json={"intent": intent, "federation_key": federation_key},
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["claimant_matches"] is True
+    assert recovered.json()["authority_ack_id"] == claim.json()["authority_ack_id"]
+
+    tampered = dict(intent)
+    tampered["nonce"] = "A" * 24
+    rejected = client.post(
+        "/api/v2/market/federation/claim-status",
+        json={"intent": tampered, "federation_key": federation_key},
+    )
+    assert rejected.status_code == 403, rejected.text
+    assert "intent-signature-invalid" in rejected.text
 
 
 def test_claim_foreign_rejects_valid_but_undelegated_mirror_feed(
@@ -103,11 +181,11 @@ def test_claim_foreign_rejects_valid_but_undelegated_mirror_feed(
         capability_set=["code_review"],
     )
     MarketFeed(tmp_path).publish(announcement)
-    _, cap_token, receipt = _sign_foreign(announcement.to_dict())
+    _, cap_token, receipt, intent = _sign_foreign(announcement.to_dict())
 
     response = client.post(
         f"/api/v2/market/{announcement.announcement_id}/claim-foreign",
-        json={"cap_token": cap_token, "receipt": receipt},
+        json={"cap_token": cap_token, "receipt": receipt, "intent": intent},
     )
 
     assert response.status_code == 409
@@ -120,13 +198,101 @@ def test_claim_foreign_rejects_forged(tmp_path: Path) -> None:
         "/api/v2/market/announce",
         json={"title": "t", "capability_set": ["code_review"]},
     ).json()
-    _, cap, receipt = _sign_foreign(ann)
+    _, cap, receipt, intent = _sign_foreign(ann)
     receipt["timeline"][0]["payload"]["reward_minor"] = 999_999  # 篡改签名体
     r = c.post(
         f"/api/v2/market/{ann['announcement_id']}/claim-foreign",
-        json={"cap_token": cap, "receipt": receipt},
+        json={"cap_token": cap, "receipt": receipt, "intent": intent},
     )
     assert r.status_code == 403, r.text
+
+
+def test_claim_foreign_requires_intent(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    announcement = client.post(
+        "/api/v2/market/announce",
+        json={"title": "requires intent", "capability_set": ["code_review"]},
+    ).json()
+    _, cap_token, receipt, _intent = _sign_foreign(announcement)
+
+    response = client.post(
+        f"/api/v2/market/{announcement['announcement_id']}/claim-foreign",
+        json={"cap_token": cap_token, "receipt": receipt},
+    )
+
+    assert response.status_code == 422
+
+
+def test_claim_foreign_rejects_tampered_intent(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    announcement = client.post(
+        "/api/v2/market/announce",
+        json={"title": "tampered intent", "capability_set": ["code_review"]},
+    ).json()
+    _, cap_token, receipt, intent = _sign_foreign(announcement)
+    intent["nonce"] = "A" * 24
+
+    response = client.post(
+        f"/api/v2/market/{announcement['announcement_id']}/claim-foreign",
+        json={"cap_token": cap_token, "receipt": receipt, "intent": intent},
+    )
+
+    assert response.status_code == 403
+    assert "intent-signature-invalid" in response.text
+
+
+def test_claim_foreign_rejects_intent_cap_token_swap(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    announcement = client.post(
+        "/api/v2/market/announce",
+        json={"title": "token swap", "capability_set": ["code_review"]},
+    ).json()
+    claimant, first_token, receipt, intent = _sign_foreign(announcement)
+    replacement = sign_cap_token(
+        issuer=claimant,
+        subject_did=claimant.as_did(),
+        capabilities=["code_review", CAP_NTH_RECEIPT_SIGN],
+    )
+    assert replacement["token_id"] != first_token["token_id"]
+
+    response = client.post(
+        f"/api/v2/market/{announcement['announcement_id']}/claim-foreign",
+        json={"cap_token": replacement, "receipt": receipt, "intent": intent},
+    )
+
+    assert response.status_code == 403
+    assert "intent-binding-mismatch" in response.text
+
+
+def test_claim_foreign_rejects_expired_intent(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    announcement = client.post(
+        "/api/v2/market/announce",
+        json={"title": "expired intent", "capability_set": ["code_review"]},
+    ).json()
+    claimant = AgentIdentity.generate(label="expired-claimant")
+    parsed = TaskAnnouncement.from_dict(announcement)
+    cap_token = sign_cap_token(
+        issuer=claimant,
+        subject_did=claimant.as_did(),
+        capabilities=["code_review", CAP_NTH_RECEIPT_SIGN],
+    )
+    receipt = sign_claim_receipt(parsed, claimant, cap_token)
+    intent = sign_claim_intent(
+        claimant,
+        announcement_id=parsed.announcement_id,
+        cap_token=cap_token,
+        created_at_ms=int(time.time() * 1000) - 10_000,
+        ttl_ms=1,
+    )
+
+    response = client.post(
+        f"/api/v2/market/{parsed.announcement_id}/claim-foreign",
+        json={"cap_token": cap_token, "receipt": receipt, "intent": intent},
+    )
+
+    assert response.status_code == 403
+    assert "intent-expired" in response.text
 
 
 def test_claim_foreign_conflict(tmp_path: Path) -> None:
@@ -136,17 +302,83 @@ def test_claim_foreign_conflict(tmp_path: Path) -> None:
         json={"title": "t", "capability_set": ["code_review"]},
     ).json()
     aid = ann["announcement_id"]
-    _, capA, recA = _sign_foreign(ann)
+    _, capA, recA, intentA = _sign_foreign(ann)
     assert c.post(
         f"/api/v2/market/{aid}/claim-foreign",
-        json={"cap_token": capA, "receipt": recA},
+        json={"cap_token": capA, "receipt": recA, "intent": intentA},
     ).status_code == 200
-    _, capB, recB = _sign_foreign(ann)  # 不同 agent
+    _, capB, recB, intentB = _sign_foreign(ann)  # 不同 agent
     r = c.post(
         f"/api/v2/market/{aid}/claim-foreign",
-        json={"cap_token": capB, "receipt": recB},
+        json={"cap_token": capB, "receipt": recB, "intent": intentB},
     )
     assert r.status_code == 409, r.text
+
+
+def test_claim_foreign_exact_replay_is_idempotent(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    announcement = client.post(
+        "/api/v2/market/announce",
+        json={"title": "exact replay", "capability_set": ["code_review"]},
+    ).json()
+    _, cap_token, receipt, intent = _sign_foreign(announcement)
+    payload = {"cap_token": cap_token, "receipt": receipt, "intent": intent}
+    path = f"/api/v2/market/{announcement['announcement_id']}/claim-foreign"
+
+    first = client.post(path, json=payload)
+    replay = client.post(path, json=payload)
+
+    assert first.status_code == replay.status_code == 200
+    assert replay.json()["submitted_intent_accepted"] is True
+    assert replay.json()["authority_ack"] == first.json()["authority_ack"]
+
+
+def test_claim_foreign_same_did_returns_original_authority_ack(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    announcement_dict = client.post(
+        "/api/v2/market/announce",
+        json={"title": "reconcile", "capability_set": ["code_review"]},
+    ).json()
+    announcement = TaskAnnouncement.from_dict(announcement_dict)
+    claimant = AgentIdentity.generate(label="reconnecting-claimant")
+
+    def artifacts():
+        token = sign_cap_token(
+            issuer=claimant,
+            subject_did=claimant.as_did(),
+            capabilities=["code_review", CAP_NTH_RECEIPT_SIGN],
+        )
+        claim_receipt = sign_claim_receipt(announcement, claimant, token)
+        claim_intent = sign_claim_intent(
+            claimant,
+            announcement_id=announcement.announcement_id,
+            cap_token=token,
+        )
+        return token, claim_receipt, claim_intent
+
+    first_token, first_receipt, first_intent = artifacts()
+    path = f"/api/v2/market/{announcement.announcement_id}/claim-foreign"
+    first = client.post(path, json={
+        "cap_token": first_token,
+        "receipt": first_receipt,
+        "intent": first_intent,
+    })
+    second_token, second_receipt, second_intent = artifacts()
+    second = client.post(path, json={
+        "cap_token": second_token,
+        "receipt": second_receipt,
+        "intent": second_intent,
+    })
+
+    assert first.status_code == second.status_code == 200
+    assert second.json()["already_claimed"] is True
+    assert second.json()["submitted_intent_accepted"] is False
+    assert second.json()["receipt_id"] == first_receipt["receipt_id"]
+    assert verify_authority_claim_ack(
+        second.json()["authority_ack"],
+        expected_claimant_did=claimant.as_did(),
+        expected_claim_receipt=first_receipt,
+    ) == (True, "ok")
 
 
 def test_claim_foreign_rejects_oversized_body_before_json_parsing(
@@ -157,6 +389,22 @@ def test_claim_foreign_rejects_oversized_body_before_json_parsing(
 
     response = client.post(
         "/api/v2/market/missing/claim-foreign",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert "256 KiB" in response.text
+
+
+def test_claim_status_rejects_oversized_body_before_json_parsing(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(tmp_path, require_console_auth=True))
+    body = b'{"intent":{"padding":"' + (b"x" * (257 * 1024)) + b'"}}'
+
+    response = client.post(
+        "/api/v2/market/federation/claim-status",
         content=body,
         headers={"Content-Type": "application/json"},
     )
@@ -247,7 +495,7 @@ def test_claim_foreign_has_per_source_and_global_rate_limit(tmp_path: Path) -> N
 
     response = TestClient(app).post(
         "/api/v2/market/missing/claim-foreign",
-        json={"cap_token": {}, "receipt": {}},
+        json={"cap_token": {}, "receipt": {}, "intent": {}},
     )
 
     assert response.status_code == 429
@@ -271,7 +519,7 @@ def test_claim_foreign_global_denial_short_circuits_per_source_limiter(
 
     response = TestClient(app).post(
         "/api/v2/market/missing/claim-foreign",
-        json={"cap_token": {}, "receipt": {}},
+        json={"cap_token": {}, "receipt": {}, "intent": {}},
     )
 
     assert response.status_code == 429
@@ -281,7 +529,27 @@ def test_claim_foreign_global_denial_short_circuits_per_source_limiter(
 def test_claim_foreign_rejects_unknown_request_fields(tmp_path: Path) -> None:
     response = TestClient(create_app(tmp_path, require_console_auth=False)).post(
         "/api/v2/market/missing/claim-foreign",
-        json={"cap_token": {}, "receipt": {}, "unexpected": True},
+        json={"cap_token": {}, "receipt": {}, "intent": {}, "unexpected": True},
     )
 
     assert response.status_code == 422
+
+
+def test_claim_intent_projection_fails_closed_on_corrupt_journal(
+    tmp_path: Path,
+) -> None:
+    journal_dir = tmp_path / "federation" / "claim_intents"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "claim-intents.jsonl").write_text(
+        "{corrupt}\n",
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+
+    response = client.get("/api/v2/market/claim-intents")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "claim intent state is temporarily unavailable"
+    )
+    assert "corrupt" not in response.text

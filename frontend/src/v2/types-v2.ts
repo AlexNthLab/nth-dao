@@ -439,6 +439,33 @@ export interface TaskAnnouncement {
   claimable?: boolean;
 }
 
+export type ClaimIntentState = "pending" | "confirmed" | "rejected" | "expired";
+
+export interface ClaimIntentRecord {
+  state: ClaimIntentState;
+  receipt_id: string;
+  /** Persisted authority routing added by claim-intent journal v3. */
+  source_peer?: string;
+  source_did?: string;
+  federation_key?: string;
+  intent: {
+    kind: "nth-market-claim-intent";
+    version: number;
+    announcement_id: string;
+    claimant_did: string;
+    cap_token_id: string;
+    nonce: string;
+    created_at_ms: number;
+    expires_at_ms: number;
+    signature: string;
+  };
+}
+
+export interface ClaimIntentPage {
+  items: ClaimIntentRecord[];
+  stats: Partial<Record<ClaimIntentState, number>>;
+}
+
 export type MarketSearchCategory =
   | "tasks"
   | "products"

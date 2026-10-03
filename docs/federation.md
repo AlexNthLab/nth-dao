@@ -146,6 +146,36 @@ Remote records are not copied into the local authoritative feed and therefore
 are not re-announced as local work. Claims return to the announcement's source
 DAO, which remains the single CAS authority for that listing.
 
+### Federated Claim Lifecycle
+
+A federated claim carries three claimant-signed public artifacts: a scoped
+capability token, a Claim Receipt, and a short-lived Claim Intent. The local
+hub persists the Intent as `pending` before transport. The source DAO verifies
+the Intent and its exact claimant, announcement, token, and Receipt bindings
+before running the authoritative claim CAS. A pending Intent reserves nothing.
+
+The claimant changes the local state to `confirmed` only after verifying and
+persisting the source authority's signed Claim ACK. Deterministic source
+rejections become `rejected`; transport failures and malformed or missing ACKs
+remain `pending`. If the source committed the claim but the first response was
+lost, a later request by the same claimant returns a signed ACK for the original
+durable claim. The claimant reconciles that ACK only when its signed Receipt ID
+and canonical hash match exactly one locally retained Intent binding. The new
+Intent is rejected rather than being misreported as accepted.
+
+The claimant also persists the verified source URL, source DID, federation key,
+and Receipt binding before transport. A user can therefore ask the original
+authority for the ACK even after the task has disappeared from the local
+discovery cache. The recovery request re-resolves and pins the peer address,
+re-verifies its signed identity card, and accepts only an ACK signed by that
+pinned DID. Unsigned negative status responses are informational only: they do
+not reject or otherwise mutate a local Intent.
+
+Legacy v1 announcement identifiers are readable for migration but cannot bind
+the current strict Claim Intent wire format. They must be re-signed by the
+publisher before federated claim. The protocol does not weaken current ID
+syntax to preserve legacy writes.
+
 Trade Offer announcements are deliberately non-claimable. They advertise an
 exact signed proposal for exchange; they do not create an Agreement, reserve
 inventory or assets, prove current availability, or authorize settlement.
@@ -180,6 +210,11 @@ complete view.
 | `POST /api/v2/market/federation/peers` | Add or remove operator seeds | Console write |
 | `POST /api/v2/market/federation/discover` | Import verified LAN/mDNS peers | Member/console write |
 | `POST /api/v2/market/federation/refresh` | Run one synchronous pull | Console write |
+| `POST /api/v2/market/federation/claim-foreign` | Verify claimant token, Receipt, and Intent; run source-authority CAS | Public crypto-authorized write, rate-limited |
+| `POST /api/v2/market/federation/claim-status` | Recover a signed ACK for a matching durable source claim | Public crypto-authorized read-by-proof, rate-limited |
+| `POST /api/v2/market/federated/claim` | Sign locally, journal pending, route to the pinned source, and verify its ACK | Console write |
+| `GET /api/v2/market/claim-intents` | Bounded local pending/confirmed/rejected/expired projection | Console read |
+| `POST /api/v2/market/claim-intents/{nonce}/reconcile` | Re-verify the retained source and recover a lost signed ACK | Console write |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 | `GET /api/v2/trade/federation/offers/{digest}/head-proof` | Bounded complete disclosed revision chain for a live publisher head claim | Public read |
@@ -189,6 +224,20 @@ complete view.
 | `POST /api/v2/trade/federation/cached-offers/{digest}/import` | Reverify and durably retain the complete disclosed signed revision chain as a non-authoritative claim | Console write; Bearer always required |
 | `POST /api/v2/trade/federation/orders/{order_digest}/execution-receipts/{execution_id}/reviews/{review_id}/dispute-statements/fetch` | Return one exact retained Statement under a short-lived bilateral signed Fetch Request | Public transport; DID-signed, rate-limited, replay-journaled |
 | `POST /api/v2/trade/orders/{order_digest}/execution-receipts/{execution_id}/reviews/{review_id}/dispute-statements/fetch` | Sign a Fetch Request, pin and authenticate the peer, and return the independently verified Response without importing it | Console write; Bearer required when console auth is enabled |
+
+The local Claim Intent tracker keeps pending records in its active journal.
+When terminal history reaches the configured capacity, it archives the oldest
+terminal events in immutable, SHA-256-named segments before atomically
+compacting the active journal. A rebuildable SQLite index keeps archived
+nonce and Receipt replay checks on disk instead of loading all historical
+bindings into memory. The index is committed before active-journal rows are
+removed, so a crash can be recovered from the archive segments. On startup,
+unchanged segments are checked by name and file metadata; operators can call
+`IntentTracker.verify_archive_integrity()` to rehash every segment and
+compare all bindings to the index. Archived nonces and Receipt bindings remain
+reserved against replay. `GET /api/v2/market/claim-intents` and its `stats`
+field describe the active window, not all historical claims; the archive is
+retained locally for audit and is not exposed by this endpoint.
 
 ## Security Boundaries
 

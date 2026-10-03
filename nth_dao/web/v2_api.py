@@ -7731,7 +7731,17 @@ class ForeignClaimBody(BaseModel):
 
     cap_token: Dict[str, Any]
     receipt: Dict[str, Any]
+    intent: Dict[str, Any]
     model_config = {"extra": "forbid"}
+
+
+class ForeignClaimStatusBody(BaseModel):
+    intent: Dict[str, Any]
+    federation_key: str = Field(min_length=1, max_length=256)
+    model_config = {"extra": "forbid"}
+
+
+_MAX_CLAIM_STATUS_RESPONSE_BYTES = 256 * 1024
 
 
 class ForeignClaimByKeyBody(ForeignClaimBody):
@@ -21968,9 +21978,9 @@ def register_v2_routes(app: FastAPI) -> None:
         的节点签好收据后 POST 到这里落地。匿名(crypto-authorized):授权全靠
         验签,不吃本节点 console token(外部节点没有)。中间件已对本路径放行。
         """
-        from nth_dao.market.claim import (
-            ClaimConflict, ClaimRejected, ClaimStore, record_foreign_claim,
-        )
+        from nth_dao.market.announcement import NTH_ANNOUNCEMENT_KIND_V1
+        from nth_dao.market.claim import ClaimConflict, ClaimRejected, ClaimStore
+        from nth_dao.market.claim_intent import admit_claim_intent
         from nth_dao.market.feed import MarketFeed
 
         try:
@@ -22022,26 +22032,55 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=409,
                 detail="this node is not the signed authority for the announcement",
             )
+        if announcement.kind == NTH_ANNOUNCEMENT_KIND_V1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "legacy v1 announcements cannot bind a current claim intent; "
+                    "the publisher must re-sign the listing using the current format"
+                ),
+            )
+        claim_store = ClaimStore(ws)
+        submitted_intent_accepted = True
         try:
-            outcome = record_foreign_claim(
-                feed, ClaimStore(ws), announcement_id,
-                body.cap_token, body.receipt,
+            outcome = admit_claim_intent(
+                feed,
+                claim_store,
+                body.intent,
+                body.receipt,
+                cap_token=body.cap_token,
                 # Phase 2c:跨 DAO 认领发生在本 hub 进程 → 影子双写 market.claim
                 # 进 hub 的 spine 单例(缺失则只 CAS,不阻断)。
                 spine=_state_spine(request),
             )
         except ClaimConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            existing = claim_store.get(
+                announcement_id,
+                announcement=announcement,
+            )
+            if (
+                not isinstance(existing, dict)
+                or existing.get("claimant_did") != body.intent.get("claimant_did")
+            ):
+                raise HTTPException(status_code=409, detail=str(exc))
+            # The same DID already won with different signed evidence. Return
+            # a fresh authority ACK over the original durable record so a
+            # claimant that lost the first HTTP response can reconcile its
+            # exact pending receipt. This does NOT accept the new intent.
+            claim_record = existing
+            submitted_intent_accepted = False
         except ClaimRejected as exc:
             raise HTTPException(
                 status_code=403, detail=f"{exc.reason}: {exc.detail}")
+        else:
+            claim_record = outcome.claim_record
         from nth_dao.market.claim_ack import sign_authority_claim_ack
 
         try:
             authority_ack = sign_authority_claim_ack(
                 authority=identity,
                 announcement=announcement,
-                claim_record=outcome.claim_record,
+                claim_record=claim_record,
             )
         except (TypeError, ValueError) as exc:
             logger.error("failed to sign authority claim acknowledgement: %s", exc)
@@ -22052,9 +22091,11 @@ def register_v2_routes(app: FastAPI) -> None:
         return {
             "claimed": True,
             "announcement_id": announcement_id,
-            "claimant_did": outcome.claim_record.get("claimant_did", ""),
-            "receipt_id": outcome.claim_record.get("receipt_id", ""),
+            "claimant_did": claim_record.get("claimant_did", ""),
+            "receipt_id": claim_record.get("receipt_id", ""),
             "foreign": True,
+            "already_claimed": not submitted_intent_accepted,
+            "submitted_intent_accepted": submitted_intent_accepted,
             "authority_ack_id": authority_ack["ack_id"],
             "authority_ack": authority_ack,
         }
@@ -22079,7 +22120,11 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="announcement not found")
         return _v2_market_claim_foreign(
             announcement.announcement_id,
-            ForeignClaimBody(cap_token=body.cap_token, receipt=body.receipt),
+            ForeignClaimBody(
+                cap_token=body.cap_token,
+                receipt=body.receipt,
+                intent=body.intent,
+            ),
             request,
         )
 
@@ -22089,6 +22134,107 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Dict[str, Any]:
         """Legacy transport-safe ID route; content-key route is canonical."""
         return _v2_market_claim_foreign(announcement_id, body, request)
+
+    @app.post("/api/v2/market/federation/claim-status")
+    def v2_market_foreign_claim_status(
+        body: ForeignClaimStatusBody,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Return a signed ACK for an already durable claimant-owned claim.
+
+        The original signed Intent is proof of the claimant DID. Its TTL is
+        intentionally evaluated at signing time because this endpoint grants
+        no new claim; it only recovers public evidence of an earlier CAS.
+        """
+
+        from nth_dao.market.announcement import announcement_federation_key
+        from nth_dao.market.claim import ClaimStore
+        from nth_dao.market.claim_ack import sign_authority_claim_ack
+        from nth_dao.market.claim_intent import verify_claim_intent
+        from nth_dao.market.feed import MarketFeed
+
+        try:
+            global_decision = _foreign_claim_global_limiter(request).check(
+                "all-clients",
+            )
+            decisions = (global_decision,)
+            if global_decision.allowed:
+                decisions += (
+                    _foreign_claim_limiter(request).check(
+                        _federation_hello_client_key(request),
+                    ),
+                )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.warning("claim status limiter unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim status verification is temporarily unavailable",
+            )
+        denied = [decision for decision in decisions if not decision.allowed]
+        if denied:
+            retry_after = max(item.retry_after_seconds for item in denied)
+            raise HTTPException(
+                status_code=429,
+                detail="claim status rate limit exceeded",
+                headers={"Retry-After": str(max(1, int(retry_after)))},
+            )
+
+        intent = body.intent
+        created_at_ms = intent.get("created_at_ms") if isinstance(intent, dict) else 0
+        ok, reason = verify_claim_intent(intent, now_ms=created_at_ms)
+        if not ok:
+            raise HTTPException(
+                status_code=403,
+                detail=f"claim intent proof is invalid: {reason}",
+            )
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        if ws is None or identity is None or not identity.can_sign:
+            raise HTTPException(status_code=503, detail="claim authority unavailable")
+        announcement = MarketFeed(ws).get_by_federation_key(
+            body.federation_key,
+            include_expired=True,
+        )
+        if announcement is None:
+            raise HTTPException(status_code=404, detail="announcement not found")
+        if intent["announcement_id"] != announcement.announcement_id:
+            raise HTTPException(
+                status_code=409,
+                detail="claim intent does not bind the requested announcement",
+            )
+        if body.federation_key != announcement_federation_key(announcement):
+            raise HTTPException(status_code=409, detail="federation key mismatch")
+        if announcement.effective_authority_did() != identity.as_did():
+            raise HTTPException(
+                status_code=409,
+                detail="this node is not the signed claim authority",
+            )
+        claim_record = ClaimStore(ws).get(
+            announcement.announcement_id,
+            announcement=announcement,
+        )
+        if claim_record is None:
+            return {"claimed": False, "claimant_matches": False}
+        if claim_record.get("claimant_did") != intent["claimant_did"]:
+            return {"claimed": True, "claimant_matches": False}
+        try:
+            authority_ack = sign_authority_claim_ack(
+                authority=identity,
+                announcement=announcement,
+                claim_record=claim_record,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.error("failed to sign claim status acknowledgement: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim acknowledgement is temporarily unavailable",
+            )
+        return {
+            "claimed": True,
+            "claimant_matches": True,
+            "authority_ack_id": authority_ack["ack_id"],
+            "authority_ack": authority_ack,
+        }
 
     # ── 争议 / 审计 / 治理(Phase 4c:把 spine 投影接进 HTTP)──────────────
     # 写:接受当事方**预签**的争议声明,record_dispute 落 hub spine。走正常鉴权
@@ -22730,8 +22876,10 @@ def register_v2_routes(app: FastAPI) -> None:
     ) -> Any:
         """跨 DAO 认领·本地 hub 编排(XDAO-3):把 XDAO-1/2 串成一键。
 
-        联邦发现的外部任务 → 本地 agent ``claim-sign`` 自签 cap_token+收据 →
-        转投到公告**主 DAO** 的 ``/claim-foreign`` 落 CAS → 回传结果。
+        联邦发现的外部任务 → 本地 agent ``claim-sign`` 自签
+        cap_token+收据+intent → intent 先落本地 pending journal → 转投到
+        公告**主 DAO** 的 ``/claim-foreign`` 落 CAS → 持久化权威 ACK →
+        intent 标记 confirmed。
         来源取自本节点**联邦缓存**(已配置 peer,SSRF-safe),不信请求体。
         """
         import asyncio
@@ -22801,6 +22949,16 @@ def register_v2_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=409,
                 detail="federation_key does not match announcement_id",
+            )
+        from nth_dao.market.announcement import NTH_ANNOUNCEMENT_KIND_V1
+
+        if ann.kind == NTH_ANNOUNCEMENT_KIND_V1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "legacy v1 announcements cannot bind a current claim intent; "
+                    "the publisher must re-sign the listing using the current format"
+                ),
             )
         source_peer = str(entry.get("source") or "").rstrip("/")
         source_did = str(entry.get("source_did") or "")
@@ -22897,10 +23055,62 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=s_status if s_status >= 400 else 502, content=s_content
             )
         result = s_content.get("result") or {}
-        cap_token, receipt = result.get("cap_token"), result.get("receipt")
-        if not isinstance(cap_token, dict) or not isinstance(receipt, dict):
+        cap_token = result.get("cap_token")
+        receipt = result.get("receipt")
+        intent = result.get("intent")
+        if not all(isinstance(item, dict) for item in (cap_token, receipt, intent)):
             raise HTTPException(
-                status_code=502, detail="agent claim-sign returned no cap_token/receipt"
+                status_code=502,
+                detail="agent claim-sign returned incomplete claim artifacts",
+            )
+
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(
+                status_code=503,
+                detail="workspace unavailable; cannot persist claim intent",
+            )
+        from nth_dao.market.announcement import announcement_federation_key
+        from nth_dao.market.claim_intent import (
+            ClaimIntentRejected,
+            IntentTracker,
+            IntentTrackerCorrupt,
+            IntentTrackerFull,
+        )
+
+        try:
+            intent_tracker = IntentTracker(ws / "federation" / "claim_intents")
+            intent_tracker.record_sent(
+                intent,
+                receipt=receipt,
+                source_peer=source_peer,
+                source_did=source_did,
+                federation_key=announcement_federation_key(ann),
+            )
+        except ClaimIntentRejected as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"agent claim intent is invalid: {exc.reason}",
+            )
+        except (IntentTrackerCorrupt, IntentTrackerFull, OSError) as exc:
+            logger.warning("cannot persist pending claim intent: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim intent could not be persisted before forwarding",
+            )
+
+        def _pending_claim_response(
+            status_code: int,
+            code: str,
+            message: str,
+        ) -> JSONResponse:
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "error": {"code": code, "message": message},
+                    "claim_intent_nonce": intent["nonce"],
+                    "claim_intent_state": "pending",
+                },
             )
 
         # 2) Address the source claim by signed-body hash. Legacy IDs may
@@ -22913,6 +23123,7 @@ def register_v2_routes(app: FastAPI) -> None:
                 "federation_key": announcement_federation_key(ann),
                 "cap_token": cap_token,
                 "receipt": receipt,
+                "intent": intent,
             }
             if source_resolved_ip:
                 from .market_federation_poll import _urllib_post_json_pinned_raw
@@ -22936,53 +23147,372 @@ def register_v2_routes(app: FastAPI) -> None:
             ValueError,
             A2AResponseTooLarge,
         ) as exc:
-            raise HTTPException(
-                status_code=502, detail=f"forward to source peer failed: {exc}"
+            return _pending_claim_response(
+                502,
+                "claim-forward-unknown",
+                f"forward to source peer failed: {exc}",
             )
         foreign_content = _decode_or_passthrough(f_body)
         if 200 <= f_status < 300:
             if not isinstance(foreign_content, dict) or foreign_content.get(
                 "claimed"
             ) is not True:
-                raise HTTPException(
-                    status_code=502,
-                    detail="source peer returned an invalid claim result",
+                return _pending_claim_response(
+                    502,
+                    "claim-result-invalid",
+                    "source peer returned an invalid claim result",
                 )
             authority_ack = foreign_content.get("authority_ack")
+            from nth_dao.canonical_json import canonical_json
+            from nth_dao.market.announcement import announcement_federation_key
             from nth_dao.market.claim_ack import (
                 AuthorityClaimAckStore,
                 verify_authority_claim_ack,
             )
-            from nth_dao.market.announcement import announcement_federation_key
 
+            if not isinstance(authority_ack, dict):
+                return _pending_claim_response(
+                    502,
+                    "claim-ack-invalid",
+                    "source authority claim acknowledgement is invalid: schema",
+                )
+            current_receipt_hash = hashlib.sha256(
+                canonical_json(receipt),
+            ).hexdigest()
+            submitted_intent_accepted = (
+                authority_ack.get("claim_receipt_id") == receipt.get("receipt_id")
+                and authority_ack.get("claim_receipt_hash") == current_receipt_hash
+            )
+            verify_kwargs: Dict[str, Any] = {
+                "expected_authority_did": source_did,
+                "expected_federation_key": announcement_federation_key(ann),
+                "expected_claimant_did": body.agent_did,
+            }
+            if submitted_intent_accepted:
+                verify_kwargs["expected_claim_receipt"] = receipt
             ok, reason = verify_authority_claim_ack(
                 authority_ack,
-                expected_authority_did=source_did,
-                expected_federation_key=announcement_federation_key(ann),
-                expected_claimant_did=body.agent_did,
-                expected_claim_receipt=receipt,
+                **verify_kwargs,
             )
             if not ok:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"source authority claim acknowledgement is invalid: {reason}",
-                )
-            ws = _state_workspace(request)
-            if ws is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="workspace unavailable; cannot persist source claim acknowledgement",
+                return _pending_claim_response(
+                    502,
+                    "claim-ack-invalid",
+                    f"source authority claim acknowledgement is invalid: {reason}",
                 )
             try:
                 AuthorityClaimAckStore(ws).save(authority_ack)
             except (OSError, TimeoutError, ValueError) as exc:
                 logger.warning("cannot persist source authority claim ack: %s", exc)
-                raise HTTPException(
-                    status_code=503,
-                    detail="source claim acknowledgement could not be persisted",
+                return _pending_claim_response(
+                    503,
+                    "claim-ack-persist-failed",
+                    "source claim acknowledgement could not be persisted",
+                )
+            try:
+                reconciled_nonce = ""
+                already_confirmed_nonce = ""
+                if submitted_intent_accepted:
+                    intent_tracker.mark(intent, "confirmed")
+                else:
+                    reconciliation = intent_tracker.reconcile_retry(
+                        intent,
+                        authority_ack["claim_receipt_id"],
+                        authority_ack["claim_receipt_hash"],
+                    )
+                    if reconciliation is None:
+                        raise ClaimIntentRejected(
+                            "intent-reconciliation-missing",
+                            "authority ACK does not match a local prior intent",
+                        )
+                    prior_nonce, newly_confirmed = reconciliation
+                    if newly_confirmed:
+                        reconciled_nonce = prior_nonce
+                    else:
+                        already_confirmed_nonce = prior_nonce
+            except (
+                ClaimIntentRejected,
+                IntentTrackerCorrupt,
+                IntentTrackerFull,
+                KeyError,
+                OSError,
+            ) as exc:
+                logger.error(
+                    "source claim ack persisted but intent confirmation failed: %s",
+                    exc,
+                )
+                return _pending_claim_response(
+                    503,
+                    "claim-intent-confirm-failed",
+                    (
+                        "source claim succeeded but local intent confirmation "
+                        "could not be persisted"
+                    ),
                 )
             foreign_content["authority_ack_id"] = authority_ack["ack_id"]
+            foreign_content["claim_intent_nonce"] = intent["nonce"]
+            foreign_content["claim_intent_state"] = (
+                "confirmed" if submitted_intent_accepted else "rejected"
+            )
+            if reconciled_nonce:
+                foreign_content["reconciled_intent_nonce"] = reconciled_nonce
+            if already_confirmed_nonce:
+                foreign_content["already_confirmed_intent_nonce"] = (
+                    already_confirmed_nonce
+                )
+        elif f_status in {400, 403, 404, 409, 410, 422}:
+            try:
+                intent_tracker.mark(intent, "rejected")
+            except (
+                ClaimIntentRejected,
+                IntentTrackerCorrupt,
+                IntentTrackerFull,
+                KeyError,
+                OSError,
+            ) as exc:
+                logger.error("cannot persist rejected claim intent: %s", exc)
+                return _pending_claim_response(
+                    503,
+                    "claim-rejection-persist-failed",
+                    (
+                        "source rejected the claim but local intent state "
+                        "could not be persisted"
+                    ),
+                )
+        else:
+            message = (
+                str(foreign_content.get("detail") or "source claim is unavailable")
+                if isinstance(foreign_content, dict)
+                else "source claim is unavailable"
+            )
+            return _pending_claim_response(
+                f_status if f_status >= 400 else 502,
+                "claim-source-unavailable",
+                message,
+            )
         return JSONResponse(status_code=f_status, content=foreign_content)
+
+    @app.get("/api/v2/market/claim-intents")
+    def v2_market_claim_intents(
+        request: Request,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> Dict[str, Any]:
+        """Read the local claimant-side lifecycle projection."""
+
+        from nth_dao.market.claim_intent import IntentTracker, IntentTrackerCorrupt
+
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            tracker = IntentTracker(ws / "federation" / "claim_intents")
+            all_records = tracker.records(limit=4_096)
+        except (IntentTrackerCorrupt, OSError, ValueError) as exc:
+            logger.warning("cannot read claim intent projection: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim intent state is temporarily unavailable",
+            )
+        stats: Dict[str, int] = {}
+        for record in all_records:
+            state = record["state"]
+            stats[state] = stats.get(state, 0) + 1
+        return {"items": all_records[:limit], "stats": stats}
+
+    @app.post("/api/v2/market/claim-intents/{nonce}/reconcile")
+    async def v2_market_reconcile_claim_intent(
+        nonce: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Recover a source ACK without relying on the discovery listing."""
+
+        import asyncio
+
+        from nth_dao.market.claim_ack import (
+            AuthorityClaimAckStore,
+            verify_authority_claim_ack,
+        )
+        from nth_dao.market.claim_intent import (
+            IntentTracker,
+            IntentTrackerCorrupt,
+        )
+        from nth_dao.web.market_federation_poll import (
+            _urllib_post_json_pinned_raw,
+        )
+
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            tracker = IntentTracker(ws / "federation" / "claim_intents")
+            tracked = tracker.record(nonce)
+        except (IntentTrackerCorrupt, OSError, ValueError) as exc:
+            logger.warning("cannot load claim intent for reconciliation: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim intent state is temporarily unavailable",
+            )
+        if tracked is None:
+            raise HTTPException(status_code=404, detail="claim intent not found")
+        if tracked["state"] == "confirmed":
+            return {"state": "confirmed", "already_confirmed": True, "nonce": nonce}
+        if tracked["state"] == "rejected":
+            raise HTTPException(status_code=409, detail="claim intent is rejected")
+        source_peer = str(tracked.get("source_peer") or "")
+        source_did = str(tracked.get("source_did") or "")
+        federation_key = str(tracked.get("federation_key") or "")
+        receipt_id = str(tracked.get("receipt_id") or "")
+        receipt_hash = str(tracked.get("receipt_hash") or "")
+        if not all((source_peer, source_did, federation_key, receipt_id, receipt_hash)):
+            raise HTTPException(
+                status_code=409,
+                detail="claim intent predates recoverable source/receipt bindings",
+            )
+        try:
+            source_peer = _normalize_configured_fed_peer(source_peer)
+        except ValueError as exc:
+            logger.warning("claim reconciliation source check failed: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail="claim source is unavailable or no longer trusted",
+            ) from exc
+        status_url = f"{source_peer}/api/v2/market/federation/claim-status"
+        identity_timeout = _env_float(
+            "NTH_FED_IDENTITY_TIMEOUT_S", 2.0, minimum=0.5, maximum=3.0,
+        )
+        claim_timeout = _env_float(
+            "NTH_FED_CLAIM_TIMEOUT_S", 5.0, minimum=1.0, maximum=30.0,
+        )
+
+        def verify_and_query(resolved_ip: str, remaining_s: float) -> tuple[int, bytes]:
+            started = time.monotonic()
+            card_url = f"{source_peer}/.well-known/nth-dao/identity.json"
+            try:
+                raw_card = _open_federation_identity_card(
+                    card_url, min(identity_timeout, remaining_s), resolved_ip,
+                )
+            except urllib.error.HTTPError as exc:
+                raise ValueError("claim source identity endpoint rejected the request") from exc
+
+            def reject_duplicate_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                document: dict[str, Any] = {}
+                for key, value in pairs:
+                    if key in document:
+                        raise ValueError("claim source identity card repeats a field")
+                    document[key] = value
+                return document
+
+            try:
+                card = json.loads(
+                    raw_card.decode("utf-8"),
+                    object_pairs_hook=reject_duplicate_fields,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("claim source identity card is invalid JSON") from exc
+            fresh_metadata, fresh_error = _verify_federation_identity_card(
+                source_peer, card,
+            )
+            if fresh_metadata is None:
+                raise ValueError(f"claim source identity rejected: {fresh_error}")
+            if not hmac.compare_digest(
+                str(fresh_metadata.get("did") or ""), source_did,
+            ):
+                raise ValueError("claim source identity DID changed")
+            post_timeout = remaining_s - (time.monotonic() - started)
+            if post_timeout <= 0:
+                raise TimeoutError("claim reconciliation deadline exceeded")
+            return _urllib_post_json_pinned_raw(
+                status_url,
+                resolved_ip,
+                {
+                    "intent": tracked["intent"],
+                    "federation_key": federation_key,
+                },
+                timeout_s=min(claim_timeout, post_timeout),
+                max_bytes=_MAX_CLAIM_STATUS_RESPONSE_BYTES,
+            )
+
+        try:
+            status_code, raw_body = await asyncio.to_thread(
+                _call_operator_trade_peer_with_fallback,
+                source_peer,
+                verify_and_query,
+                timeout_seconds=identity_timeout + claim_timeout,
+            )
+        except ValueError as exc:
+            logger.warning("claim reconciliation source identity rejected: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail="claim source identity changed",
+            ) from exc
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            A2AResponseTooLarge,
+        ) as exc:
+            logger.warning("claim status request failed: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="claim source status is temporarily unavailable",
+            )
+        content = _decode_or_passthrough(raw_body)
+        if status_code != 200 or not isinstance(content, dict):
+            return JSONResponse(
+                status_code=status_code if status_code >= 400 else 502,
+                content=content,
+            )
+        if content.get("claimed") is not True:
+            return {"state": tracked["state"], "claimed": False, "nonce": nonce}
+        if content.get("claimant_matches") is not True:
+            # A negative status response carries no authority signature. It
+            # is useful operational information, but must not drive an
+            # irreversible local transition (especially for permitted HTTP
+            # LAN peers where an on-path actor could forge the JSON body).
+            # Only the signed ACK below can establish a terminal fact.
+            return {
+                "state": tracked["state"],
+                "claimed": True,
+                "claimant_matches": False,
+                "nonce": nonce,
+            }
+        authority_ack = content.get("authority_ack")
+        ok, reason = verify_authority_claim_ack(
+            authority_ack,
+            expected_authority_did=source_did,
+            expected_federation_key=federation_key,
+            expected_claimant_did=tracked["intent"]["claimant_did"],
+        )
+        if (
+            not ok
+            or authority_ack.get("claim_receipt_id") != receipt_id
+            or authority_ack.get("claim_receipt_hash") != receipt_hash
+        ):
+            logger.warning("claim reconciliation ACK rejected: %s", reason)
+            raise HTTPException(
+                status_code=502,
+                detail="claim source acknowledgement is invalid",
+            )
+        try:
+            AuthorityClaimAckStore(ws).save(authority_ack)
+            confirmed_nonce = tracker.confirm_by_receipt(receipt_id, receipt_hash)
+        except (IntentTrackerCorrupt, OSError, TimeoutError, ValueError) as exc:
+            logger.error("cannot persist reconciled claim acknowledgement: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="claim acknowledgement could not be persisted",
+            )
+        if confirmed_nonce != nonce:
+            raise HTTPException(
+                status_code=503,
+                detail="claim acknowledgement does not bind this intent",
+            )
+        return {
+            "state": "confirmed",
+            "claimed": True,
+            "nonce": nonce,
+            "authority_ack_id": authority_ack["ack_id"],
+        }
 
     @app.post("/api/v2/market/{announcement_id}/claim")
     async def v2_market_claim(

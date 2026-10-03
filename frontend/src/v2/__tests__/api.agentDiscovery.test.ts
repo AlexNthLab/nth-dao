@@ -7,6 +7,8 @@ import {
   getFederationStatus,
   announceTask,
   claimFederatedTask,
+  listClaimIntents,
+  reconcileClaimIntent,
   listOpenTasks,
   publishMarketOffer,
   searchMarket,
@@ -27,6 +29,39 @@ afterEach(() => {
 });
 
 describe("v2 agent discovery API wiring", () => {
+  it("loads the durable cross-DAO claim intent projection", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      items: [],
+      stats: { pending: 0 },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await listClaimIntents(25);
+
+    expect(page.items).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/market/claim-intents?limit=25",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("posts a durable claim intent reconciliation request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      state: "confirmed",
+      authority_ack_id: "ack-1",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reconcileClaimIntent("a".repeat(24));
+
+    expect(result.status).toBe(200);
+    expect(result.body.state).toBe("confirmed");
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/market/claim-intents/${"a".repeat(24)}/reconcile`,
+      expect.objectContaining({ method: "POST", credentials: "same-origin" }),
+    );
+  });
+
   it("adds a pasted DID through the hardened legacy add endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       ok: true,

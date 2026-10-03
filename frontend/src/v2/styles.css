@@ -1466,6 +1466,17 @@ select option {
 .market-federation-panel .ok-text { color: var(--accent); }
 .market-federation-panel .warn-text { color: var(--warning); }
 .market-federation-panel .danger-text { color: var(--danger); }
+.task-claim-intent { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-panel); }
+.task-claim-intent-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.task-claim-intent-head strong { overflow-wrap: anywhere; font-size: 13px; }
+.task-claim-intent-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--fg-tertiary); font-size: 11px; }
+.task-claim-intent-meta code { overflow-wrap: anywhere; }
+.task-claim-intent-actions { display: flex; align-items: center; justify-content: flex-end; min-height: 30px; }
+.task-claim-intent-actions .btn { font-size: 11px; }
+.claim-intent-pending { color: var(--warning); border-color: var(--warning); }
+.claim-intent-confirmed { color: var(--accent); border-color: var(--accent); }
+.claim-intent-rejected { color: var(--danger); border-color: var(--danger); }
+.claim-intent-expired { color: var(--fg-tertiary); }
 .commerce-offer-row { display: grid; gap: 4px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .commerce-offer-row strong { font-size: 13px; overflow-wrap: anywhere; }
 .commerce-offer-row span, .commerce-offer-row code { font-size: 11px; color: var(--fg-tertiary); }

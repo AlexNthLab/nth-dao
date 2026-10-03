@@ -45,11 +45,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
 
+from nth_dao.canonical_json import canonical_json
 from nth_dao.cap_token import verify_cap_token
-from nth_dao.execution_receipt import (
-    TimelineEntry, now_ms, sign_receipt, verify_receipt,
-)
 from nth_dao.did_key import is_did_key
+from nth_dao.execution_receipt import (
+    TimelineEntry,
+    now_ms,
+    sign_receipt,
+    verify_receipt,
+)
 from nth_dao.market.announcement import TaskAnnouncement
 from nth_dao.market.projection import EVENT_MARKET_CLAIM
 from nth_dao.market.vocabulary import normalize_capability
@@ -61,6 +65,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("nth_dao.market.claim")
 
 PathLike = Union[str, Path]
+
+
+def _token_hash(cap_token: Dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(cap_token)).hexdigest()
 
 
 # ── reject reasons ──
@@ -78,6 +86,7 @@ _CLAIM_RECORD_FIELDS = frozenset({
     "announcement_id", "status", "claimant_did", "publisher_did",
     "cap_token_id", "claimed_at_ms", "receipt_id", "receipt",
 })
+_CLAIM_RECORD_FIELDS_V2 = _CLAIM_RECORD_FIELDS | {"cap_token_hash"}
 _CLAIM_TIMELINE_PAYLOAD_FIELDS = frozenset({
     "announcement_id", "claimant_did", "publisher_did", "cap_token_id",
     "capability_set", "reward_minor", "reward_asset", "mission_id",
@@ -399,6 +408,7 @@ def claim_announcement(
             "claimant_did": claimant_did,
             "publisher_did": ann.publisher_did,
             "cap_token_id": str(cap_token.get("token_id", "")),
+            "cap_token_hash": _token_hash(cap_token),
             "claimed_at_ms": int(claimed_at),
             "receipt_id": receipt.get("receipt_id", ""),
             # 收据全文嵌入，便于幂等返回 + 离线审计（收据自带签名，
@@ -529,6 +539,11 @@ def record_foreign_claim(
             REJECT_SUBJECT_MISMATCH,
             f"token subject={cap_token.get('subject_did')!r} != claimant={claimant_did!r}",
         )
+    if receipt.get("authorizing_cap_token") != cap_token:
+        raise ClaimRejected(
+            REJECT_RECEIPT_BINDING,
+            "receipt does not bind the submitted capability token",
+        )
 
     # 4. 验 cap_token
     ok, reason = verify_cap_token(
@@ -611,8 +626,31 @@ def record_foreign_claim(
         existing = claim_store.get(announcement_id, announcement=ann)
         if existing is not None:
             if existing.get("claimant_did") == claimant_did:
-                return ClaimOutcome(
-                    claim_record=existing, receipt=existing.get("receipt", {}))
+                submitted_token_hash = _token_hash(cap_token)
+                existing_token_hash = existing.get("cap_token_hash")
+                if not existing_token_hash:
+                    existing_receipt = existing.get("receipt", {})
+                    existing_token = (
+                        existing_receipt.get("authorizing_cap_token", {})
+                        if isinstance(existing_receipt, dict)
+                        else {}
+                    )
+                    if isinstance(existing_token, dict) and existing_token:
+                        existing_token_hash = _token_hash(existing_token)
+                if (
+                    existing.get("cap_token_id") == cap_token.get("token_id")
+                    and existing_token_hash == submitted_token_hash
+                    and existing.get("receipt_id") == receipt.get("receipt_id")
+                    and existing.get("receipt") == receipt
+                ):
+                    return ClaimOutcome(
+                        claim_record=existing,
+                        receipt=existing.get("receipt", {}),
+                    )
+                raise ClaimConflict(
+                    f"announcement {announcement_id} is already claimed by "
+                    "this claimant using different signed evidence"
+                )
             raise ClaimConflict(
                 f"announcement {announcement_id} already claimed by "
                 f"{existing.get('claimant_did')}")
@@ -626,6 +664,7 @@ def record_foreign_claim(
             "claimant_did": claimant_did,
             "publisher_did": ann.publisher_did,
             "cap_token_id": str(cap_token.get("token_id", "")),
+            "cap_token_hash": _token_hash(cap_token),
             "claimed_at_ms": int(signed_claimed_at),
             "receipt_id": receipt.get("receipt_id", ""),
             "receipt": receipt,   # 外部预签收据，原样落盘（自带签名，篡改即失效）
@@ -648,7 +687,10 @@ def verify_claim_record(
     allowed_fields = set(_CLAIM_RECORD_FIELDS)
     if record.get("foreign") is True:
         allowed_fields.add("foreign")
-    if set(record) != allowed_fields:
+    allowed_fields_v2 = set(_CLAIM_RECORD_FIELDS_V2)
+    if record.get("foreign") is True:
+        allowed_fields_v2.add("foreign")
+    if set(record) not in (allowed_fields, allowed_fields_v2):
         return False, "claim record has missing or unknown fields"
     if record.get("status") != CLAIM_STATUS_CLAIMED:
         return False, "claim status is invalid"
@@ -657,6 +699,7 @@ def verify_claim_record(
     claimant_did = record.get("claimant_did")
     publisher_did = record.get("publisher_did")
     cap_token_id = record.get("cap_token_id")
+    cap_token_hash = record.get("cap_token_hash", "")
     claimed_at_ms = record.get("claimed_at_ms")
     receipt_id = record.get("receipt_id")
     if not isinstance(announcement_id, str) or not announcement_id:
@@ -667,6 +710,12 @@ def verify_claim_record(
         return False, "claim publisher_did is invalid"
     if not isinstance(cap_token_id, str) or not cap_token_id:
         return False, "claim cap_token_id is invalid"
+    if cap_token_hash and (
+        not isinstance(cap_token_hash, str)
+        or len(cap_token_hash) != 64
+        or any(ch not in "0123456789abcdef" for ch in cap_token_hash)
+    ):
+        return False, "claim cap_token_hash is invalid"
     if type(claimed_at_ms) is not int or claimed_at_ms <= 0:
         return False, "claim timestamp is invalid"
     if not isinstance(receipt_id, str) or not receipt_id:
@@ -684,6 +733,8 @@ def verify_claim_record(
     cap_token = receipt.get("authorizing_cap_token")
     if not isinstance(cap_token, dict) or cap_token.get("token_id") != cap_token_id:
         return False, "claim capability token mismatch"
+    if cap_token_hash and _token_hash(cap_token) != cap_token_hash:
+        return False, "claim capability token hash mismatch"
 
     timeline = receipt.get("timeline")
     if not isinstance(timeline, list) or len(timeline) != 1:
