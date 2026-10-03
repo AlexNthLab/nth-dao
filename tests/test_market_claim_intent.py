@@ -24,7 +24,9 @@ pytest.importorskip("nacl")
 from nth_dao.b64u import b64u_encode
 from nth_dao.canonical_json import canonical_json
 from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
+from nth_dao.execution_receipt import TimelineEntry, sign_receipt
 from nth_dao.identity import AgentIdentity
+from nth_dao.market.announcement import announcement_federation_key
 from nth_dao.market import (
     ClaimConflict,
     ClaimStore,
@@ -747,7 +749,7 @@ class TestIntentTracker:
             )
             if index == 0:
                 first_receipt = sign_claim_receipt(ann, agent, token)
-                tracker.record_sent(intent, receipt=first_receipt)
+                tracker.record_sent(intent, receipt=first_receipt, announcement=ann)
             else:
                 tracker.record_sent(intent)
             tracker.mark(intent, "confirmed")
@@ -781,6 +783,7 @@ class TestIntentTracker:
             restarted.record_sent(
                 self._intent(agent, ann.announcement_id, token, nonce="x" * 16),
                 receipt=first_receipt,
+                announcement=ann,
             )
         assert restarted.verify_archive_integrity() == archived_count
 
@@ -861,7 +864,7 @@ class TestIntentTracker:
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
         tracker.record_sent(old)
         tracker.mark(old, "rejected")
-        tracker.record_sent(current, receipt=receipt)
+        tracker.record_sent(current, receipt=receipt, announcement=ann)
 
         from nth_dao.market import claim_intent as claim_intent_module
 
@@ -891,7 +894,7 @@ class TestIntentTracker:
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
         tracker.record_sent(intents[0])
         tracker.mark(intents[0], "rejected")
-        tracker.record_sent(intents[1], receipt=receipt)
+        tracker.record_sent(intents[1], receipt=receipt, announcement=ann)
         tracker.record_sent(intents[2])
         tracker.reconcile_retry(intents[2], receipt["receipt_id"], receipt_hash)
         tracker.record_sent(intents[3])
@@ -934,7 +937,7 @@ class TestIntentTracker:
         )
         receipt = sign_claim_receipt(ann, agent, token)
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
-        tracker.record_sent(prior, receipt=receipt)
+        tracker.record_sent(prior, receipt=receipt, announcement=ann)
         tracker.record_sent(retry)
         tracker.reconcile_retry(retry, receipt["receipt_id"], receipt_hash)
         tracker.record_sent(pending)
@@ -1014,7 +1017,7 @@ class TestIntentTracker:
         second = self._intent(agent, ann.announcement_id, token, nonce="q" * 16)
         receipt = sign_claim_receipt(ann, agent, token)
         tracker = IntentTracker(tmp_path / "tracker")
-        tracker.record_sent(first, receipt=receipt)
+        tracker.record_sent(first, receipt=receipt, announcement=ann)
         tracker.record_sent(second)
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
 
@@ -1037,7 +1040,7 @@ class TestIntentTracker:
         receipt = sign_claim_receipt(ann, agent, token)
         directory = tmp_path / "tracker"
         tracker = IntentTracker(directory)
-        tracker.record_sent(intent, receipt=receipt)
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
         tracker.sweep_expired(now_ms=now + 2_000)
         assert tracker.stats() == {"expired": 1}
 
@@ -1057,7 +1060,7 @@ class TestIntentTracker:
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
         directory = tmp_path / "tracker"
         tracker = IntentTracker(directory)
-        tracker.record_sent(prior, receipt=receipt)
+        tracker.record_sent(prior, receipt=receipt, announcement=ann)
         tracker.record_sent(retry)
 
         assert tracker.reconcile_retry(retry, "missing", receipt_hash) is None
@@ -1079,7 +1082,7 @@ class TestIntentTracker:
         receipt = sign_claim_receipt(ann, agent, token)
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
         tracker = IntentTracker(tmp_path / "tracker")
-        tracker.record_sent(prior, receipt=receipt)
+        tracker.record_sent(prior, receipt=receipt, announcement=ann)
         tracker.confirm_by_receipt(receipt["receipt_id"], receipt_hash)
         tracker.record_sent(retry)
 
@@ -1097,7 +1100,7 @@ class TestIntentTracker:
         receipt = sign_claim_receipt(ann, agent, token)
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
         directory = tmp_path / "tracker"
-        IntentTracker(directory).record_sent(intent, receipt=receipt)
+        IntentTracker(directory).record_sent(intent, receipt=receipt, announcement=ann)
 
         ctx = mp.get_context("spawn")
         start = ctx.Event()
@@ -1133,7 +1136,7 @@ class TestIntentTracker:
         receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
         directory = tmp_path / "tracker"
         tracker = IntentTracker(directory)
-        tracker.record_sent(prior, receipt=receipt)
+        tracker.record_sent(prior, receipt=receipt, announcement=ann)
         tracker.record_sent(retry)
 
         ctx = mp.get_context("spawn")
@@ -1169,11 +1172,13 @@ class TestIntentTracker:
         intent = self._intent(agent, ann.announcement_id, token, nonce="r" * 16)
         receipt = sign_claim_receipt(ann, agent, token)
         directory = tmp_path / "tracker"
-        IntentTracker(directory).record_sent(intent, receipt=receipt)
+        IntentTracker(directory).record_sent(intent, receipt=receipt, announcement=ann)
         reloaded = IntentTracker(directory)
 
         record = reloaded.records(now_ms=NOW_MS + 1)[0]
         assert record["receipt_id"] == receipt["receipt_id"]
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        assert reloaded.load_receipt_by_hash(receipt_hash) == receipt
         assert reloaded.confirm_by_receipt(receipt["receipt_id"], "0" * 64) is None
 
         wrong_agent = AgentIdentity.generate(label="wrong")
@@ -1183,7 +1188,329 @@ class TestIntentTracker:
             IntentTracker(tmp_path / "other").record_sent(
                 intent,
                 receipt=wrong_receipt,
+                announcement=ann,
             )
+
+    def test_receipt_evidence_survives_compaction(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory, max_intents=1)
+        old = self._intent(agent, ann.announcement_id, token, nonce="r" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        tracker.record_sent(old, receipt=receipt, announcement=ann)
+        tracker.mark(old, "confirmed")
+        tracker.record_sent(self._intent(
+            agent, ann.announcement_id, token, nonce="s" * 16,
+        ))
+
+        reloaded = IntentTracker(directory, max_intents=1)
+        assert reloaded.record(old["nonce"]) is None
+        assert reloaded.load_receipt_by_hash(
+            hashlib.sha256(canonical_json(receipt)).hexdigest()
+        ) == receipt
+
+    def test_receipt_store_quota_counts_archived_evidence(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        directory = tmp_path / "tracker"
+        first = self._intent(agent, ann.announcement_id, token, nonce="l" * 16)
+        first_receipt = sign_claim_receipt(ann, agent, token)
+        limit = len(canonical_json(first_receipt)) + 1
+        tracker = IntentTracker(
+            directory, max_intents=1, max_receipt_store_bytes=limit,
+        )
+        tracker.record_sent(first, receipt=first_receipt, announcement=ann)
+        tracker.mark(first, "rejected")
+
+        second = self._intent(agent, ann.announcement_id, token, nonce="k" * 16)
+        second_receipt = sign_claim_receipt(ann, agent, token)
+        with pytest.raises(IntentTrackerFull, match="receipt storage capacity"):
+            tracker.record_sent(second, receipt=second_receipt, announcement=ann)
+        assert tracker.record(second["nonce"]) is None
+        assert len(list((directory / "claim-receipts").iterdir())) == 1
+        assert tracker.load_receipt_by_hash(
+            hashlib.sha256(canonical_json(first_receipt)).hexdigest()
+        ) == first_receipt
+
+    def test_receipt_storage_status_counts_orphans_and_audits_retained_evidence(
+        self, tmp_path,
+    ):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory, max_intents=1)
+        intent = self._intent(agent, ann.announcement_id, token, nonce="q" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        storage = tracker.receipt_storage_status()
+        assert storage == {
+            "files": 1,
+            "used_bytes": len(canonical_json(receipt)),
+            "max_files": 4096,
+            "max_bytes": 64 * 1024 * 1024,
+        }
+        assert tracker.verify_receipt_storage() == 1
+
+        blob = directory / "claim-receipts" / f"{receipt_hash}.json"
+        blob.unlink()
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            tracker.verify_receipt_storage()
+        blob.write_bytes(canonical_json(receipt))
+
+        tracker.mark(intent, "rejected")
+        tracker.record_sent(self._intent(
+            agent, ann.announcement_id, token, nonce="p" * 16,
+        ))
+        assert tracker.verify_receipt_storage() == 1
+
+        orphan = directory / "claim-receipts" / "abandoned.tmp"
+        orphan.write_bytes(b"crash")
+        assert tracker.receipt_storage_status()["files"] == 2
+        assert tracker.receipt_storage_status()["used_bytes"] == (
+            len(canonical_json(receipt)) + len(b"crash")
+        )
+        assert tracker.verify_receipt_storage() == 1
+
+        blob.write_bytes(b"tampered")
+        with pytest.raises(IntentTrackerCorrupt, match="hash is invalid"):
+            tracker.verify_receipt_storage()
+        blob.unlink()
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            tracker.verify_receipt_storage()
+
+    def test_receipt_store_quota_rejects_first_oversized_blob(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="h" * 16)
+        tracker = IntentTracker(tmp_path / "tracker", max_receipt_store_bytes=1)
+
+        with pytest.raises(IntentTrackerFull, match="receipt storage capacity"):
+            tracker.record_sent(
+                intent, receipt=sign_claim_receipt(ann, agent, token),
+                announcement=ann,
+            )
+        assert tracker.record(intent["nonce"]) is None
+
+    def test_receipt_store_quota_counts_orphan_after_append_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        first = self._intent(agent, ann.announcement_id, token, nonce="i" * 16)
+        first_receipt = sign_claim_receipt(ann, agent, token)
+        tracker = IntentTracker(
+            tmp_path / "tracker",
+            max_receipt_store_bytes=len(canonical_json(first_receipt)) + 1,
+        )
+        def fail_append(*_args, **_kwargs):
+            raise OSError("append failed")
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(tracker, "_append_events_locked", fail_append)
+            with pytest.raises(OSError, match="append failed"):
+                tracker.record_sent(first, receipt=first_receipt, announcement=ann)
+
+        second = self._intent(agent, ann.announcement_id, token, nonce="j" * 16)
+        with pytest.raises(IntentTrackerFull, match="receipt storage capacity"):
+            tracker.record_sent(
+                second, receipt=sign_claim_receipt(ann, agent, token),
+                announcement=ann,
+            )
+        assert tracker.record(second["nonce"]) is None
+
+    def test_receipt_blob_tamper_fails_closed(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="t" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory)
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        path = directory / "claim-receipts" / f"{receipt_hash}.json"
+        path.write_bytes(b"{}")
+
+        with pytest.raises(IntentTrackerCorrupt, match="hash is invalid"):
+            tracker.load_receipt_by_hash(receipt_hash)
+        with pytest.raises(IntentTrackerCorrupt, match="content address"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+
+    def test_oversized_existing_receipt_is_rejected_before_read(
+        self, tmp_path, monkeypatch,
+    ):
+        import nth_dao.market.claim_intent as claim_intent_module
+
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="o" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory)
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        path = directory / "claim-receipts" / f"{receipt_hash}.json"
+        path.write_bytes(b"x" * (claim_intent_module.MAX_TRACKED_RECEIPT_BYTES + 1))
+        original_read = Path.read_bytes
+
+        def reject_unbounded_read(candidate):
+            if candidate == path:
+                raise AssertionError("oversized receipt was read")
+            return original_read(candidate)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_unbounded_read)
+        with pytest.raises(IntentTrackerCorrupt, match="size limit"):
+            tracker.load_receipt_by_hash(receipt_hash)
+        with pytest.raises(IntentTrackerCorrupt, match="size limit"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+
+    def test_receipt_write_failure_prevents_sent_event(self, tmp_path, monkeypatch):
+        import nth_dao.market.claim_intent as claim_intent_module
+
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="u" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory)
+
+        def fail_receipt_write(path, raw):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(claim_intent_module, "atomic_write_bytes", fail_receipt_write)
+        with pytest.raises(IntentTrackerCorrupt, match="cannot persist claim receipt"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        assert IntentTracker(directory).record(intent["nonce"]) is None
+
+    def test_receipt_survives_crash_before_sent_append(self, tmp_path, monkeypatch):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="z" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory)
+
+        def fail_append(*_args, **_kwargs):
+            raise OSError("simulated crash before sent append")
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(tracker, "_append_events_locked", fail_append)
+            with pytest.raises(OSError, match="simulated crash"):
+                tracker.record_sent(intent, receipt=receipt, announcement=ann)
+
+        restarted = IntentTracker(directory)
+        assert restarted.record(intent["nonce"]) is None
+        assert restarted.load_receipt_by_hash(receipt_hash) == receipt
+        restarted.record_sent(intent, receipt=receipt, announcement=ann)
+        assert IntentTracker(directory).record(intent["nonce"])["state"] == "pending"
+
+    def test_legacy_receipt_hash_without_blob_is_explicitly_missing(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="v" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        directory = tmp_path / "tracker"
+        directory.mkdir()
+        event = {
+            "event": "sent",
+            "nonce": intent["nonce"],
+            "intent": intent,
+            "receipt_id": receipt["receipt_id"],
+            "receipt_hash": receipt_hash,
+        }
+        (directory / "claim-intents.jsonl").write_bytes(canonical_json(event) + b"\n")
+
+        tracker = IntentTracker(directory)
+        assert tracker.load_receipt_by_hash(receipt_hash) is None
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        assert tracker.load_receipt_by_hash(receipt_hash) == receipt
+        assert tracker.record(intent["nonce"])["receipt_retained"] is True
+        assert '"event":"receipt-retained"' in (
+            directory / "claim-intents.jsonl"
+        ).read_text(encoding="utf-8")
+
+        blob = directory / "claim-receipts" / f"{receipt_hash}.json"
+        blob.unlink()
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            IntentTracker(directory).load_receipt_by_hash(receipt_hash)
+
+    def test_legacy_backfill_retention_survives_archiving(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        first = self._intent(agent, ann.announcement_id, token, nonce="x" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        directory = tmp_path / "tracker"
+        directory.mkdir()
+        (directory / "claim-intents.jsonl").write_bytes(canonical_json({
+            "event": "sent", "nonce": first["nonce"], "intent": first,
+            "receipt_id": receipt["receipt_id"], "receipt_hash": receipt_hash,
+        }) + b"\n")
+        tracker = IntentTracker(directory, max_intents=1)
+        tracker.record_sent(first, receipt=receipt, announcement=ann)
+        tracker.mark(first, "rejected")
+        tracker.record_sent(self._intent(
+            agent, ann.announcement_id, token, nonce="y" * 16,
+        ))
+        assert tracker.verify_archive_integrity() == 1
+        with sqlite3.connect(directory / "claim-intents-archive" / "index.sqlite3") as db:
+            retained = db.execute(
+                "SELECT receipt_retained FROM bindings WHERE nonce = ?",
+                (first["nonce"],),
+            ).fetchone()
+        assert retained == (1,)
+
+        (directory / "claim-receipts" / f"{receipt_hash}.json").unlink()
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            IntentTracker(directory, max_intents=1).load_receipt_by_hash(receipt_hash)
+
+    def test_committed_receipt_deletion_fails_closed_active_and_archived(
+        self, tmp_path,
+    ):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        directory = tmp_path / "tracker"
+        tracker = IntentTracker(directory, max_intents=1)
+        intent = self._intent(agent, ann.announcement_id, token, nonce="d" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        blob = directory / "claim-receipts" / f"{receipt_hash}.json"
+        blob.unlink()
+
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            tracker.load_receipt_by_hash(receipt_hash)
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+
+        blob.write_bytes(canonical_json(receipt))
+        tracker.mark(intent, "rejected")
+        tracker.record_sent(self._intent(
+            agent, ann.announcement_id, token, nonce="e" * 16,
+        ))
+        assert tracker.verify_archive_integrity() == 1
+        blob.unlink()
+        restarted = IntentTracker(directory, max_intents=1)
+        with pytest.raises(IntentTrackerCorrupt, match="evidence is missing"):
+            restarted.load_receipt_by_hash(receipt_hash)
+
+    def test_legacy_archive_index_schema_migrates_retention_flag(self, tmp_path):
+        archive_dir = tmp_path / "tracker" / "claim-intents-archive"
+        archive_dir.mkdir(parents=True)
+        index_path = archive_dir / "index.sqlite3"
+        with sqlite3.connect(index_path) as database:
+            database.execute(
+                "CREATE TABLE bindings (nonce TEXT PRIMARY KEY, "
+                "intent_hash TEXT NOT NULL, receipt_id TEXT NOT NULL, "
+                "receipt_hash TEXT NOT NULL)"
+            )
+        IntentTracker(tmp_path / "tracker")
+        with sqlite3.connect(index_path) as database:
+            columns = {row[1] for row in database.execute("PRAGMA table_info(bindings)")}
+        assert "receipt_retained" in columns
 
     def test_record_sent_rejects_shallow_unsigned_receipt(self, tmp_path):
         _, _, _, agent, ann = _setup(tmp_path)
@@ -1213,6 +1540,7 @@ class TestIntentTracker:
             IntentTracker(tmp_path / "tracker").record_sent(
                 intent,
                 receipt=receipt,
+                announcement=ann,
             )
 
     def test_record_sent_rejects_valid_receipt_for_different_token(self, tmp_path):
@@ -1226,7 +1554,169 @@ class TestIntentTracker:
             IntentTracker(tmp_path / "tracker").record_sent(
                 intent,
                 receipt=receipt,
+                announcement=ann,
             )
+
+    def test_record_sent_rejects_signed_event_for_another_announcement(
+        self, tmp_path,
+    ):
+        from nth_dao.execution_receipt import verify_receipt
+
+        _, _, publisher, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="w" * 16)
+        other = sign_announcement(
+            publisher=publisher,
+            title="different task",
+            capability_set=["code_review"],
+        )
+        receipt = sign_claim_receipt(other, agent, token)
+        receipt["goal_id"] = f"market:claim:{ann.announcement_id}"
+        assert verify_receipt(receipt)
+
+        tracker = IntentTracker(tmp_path / "tracker")
+        with pytest.raises(ClaimIntentRejected, match="signed claim event"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        assert tracker.record(intent["nonce"]) is None
+
+    def test_record_sent_rejects_signed_extra_timeline_fields(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="m" * 16)
+        signed = sign_claim_receipt(ann, agent, token)
+        event = signed["timeline"][0]
+        receipt = sign_receipt(
+            [TimelineEntry(
+                timestamp=event["timestamp"],
+                type=event["type"],
+                payload={**event["payload"], "padding": "x"},
+            )],
+            agent,
+            goal_id=signed["goal_id"],
+            authorizing_cap_token=token,
+        )
+        tracker = IntentTracker(tmp_path / "tracker")
+
+        with pytest.raises(ClaimIntentRejected, match="signed claim event"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        assert tracker.record(intent["nonce"]) is None
+        assert not list((tmp_path / "tracker" / "claim-receipts").glob("*.json"))
+
+    def test_record_sent_requires_signed_announcement(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="n" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+
+        with pytest.raises(ClaimIntentRejected, match="requires its signed announcement"):
+            IntentTracker(tmp_path / "tracker").record_sent(intent, receipt=receipt)
+
+    def test_stale_receipt_requires_resigning_without_expiring_intent(self, tmp_path):
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(
+            agent, ann.announcement_id, token, nonce="f" * 16,
+            created_at_ms=int(time.time() * 1000) - 10 * 60 * 1000,
+        )
+        tracker = IntentTracker(tmp_path / "tracker")
+        stale_receipt = sign_claim_receipt(
+            ann, agent, token,
+            now_ms_override=int(time.time() * 1000) - 10 * 60 * 1000,
+        )
+        with pytest.raises(ClaimIntentRejected, match="re-sign it"):
+            tracker.record_sent(intent, receipt=stale_receipt, announcement=ann)
+        assert tracker.record(intent["nonce"]) is None
+
+        refreshed = sign_claim_receipt(ann, agent, token)
+        tracker.record_sent(intent, receipt=refreshed, announcement=ann)
+        assert tracker.record(intent["nonce"])["receipt_id"] == refreshed["receipt_id"]
+
+    def test_record_sent_verifies_the_exact_receipt_bytes_it_retains(
+        self, tmp_path, monkeypatch,
+    ):
+        import nth_dao.market.claim_intent as claim_intent_module
+        from nth_dao.execution_receipt import verify_receipt as actual_verify
+
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="p" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        expected_bytes = canonical_json(receipt)
+
+        def mutate_caller_after_snapshot(candidate):
+            receipt["timeline"][0]["payload"]["reward_minor"] = 999
+            return actual_verify(candidate)
+
+        monkeypatch.setattr(
+            claim_intent_module, "verify_receipt", mutate_caller_after_snapshot,
+        )
+        tracker = IntentTracker(tmp_path / "tracker")
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        receipt_hash = hashlib.sha256(expected_bytes).hexdigest()
+        assert tracker.record(intent["nonce"])["receipt_hash"] == receipt_hash
+        assert (
+            tmp_path / "tracker" / "claim-receipts" / f"{receipt_hash}.json"
+        ).read_bytes() == expected_bytes
+
+    def test_record_sent_snapshots_announcement_before_verification(
+        self, tmp_path, monkeypatch,
+    ):
+        import nth_dao.market.claim_intent as claim_intent_module
+        from nth_dao.market.announcement import verify_announcement as actual_verify
+
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="q" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+
+        def mutate_caller(candidate):
+            ann.title = "changed after snapshot"
+            return actual_verify(candidate)
+
+        monkeypatch.setattr(
+            claim_intent_module, "verify_announcement", mutate_caller,
+        )
+        tracker = IntentTracker(tmp_path / "tracker")
+        tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        assert tracker.record(intent["nonce"])["receipt_id"] == receipt["receipt_id"]
+
+    def test_record_sent_snapshots_intent_before_verification(
+        self, tmp_path, monkeypatch,
+    ):
+        import nth_dao.market.claim_intent as claim_intent_module
+
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="o" * 16)
+        original_signature = intent["signature"]
+        actual_verify = claim_intent_module.verify_claim_intent
+
+        def mutate_caller(candidate, **kwargs):
+            intent["signature"] = "invalid-after-snapshot"
+            return actual_verify(candidate, **kwargs)
+
+        monkeypatch.setattr(
+            claim_intent_module, "verify_claim_intent", mutate_caller,
+        )
+        tracker = IntentTracker(tmp_path / "tracker")
+        tracker.record_sent(intent)
+        assert tracker.record(intent["nonce"])["intent"]["signature"] == original_signature
+
+    def test_record_sent_rejects_oversized_receipt_before_persistence(
+        self, tmp_path, monkeypatch,
+    ):
+        import nth_dao.market.claim_intent as claim_intent_module
+
+        _, _, _, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="x" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        monkeypatch.setattr(claim_intent_module, "MAX_TRACKED_RECEIPT_BYTES", 32)
+        tracker = IntentTracker(tmp_path / "tracker")
+
+        with pytest.raises(ClaimIntentRejected, match="size limit"):
+            tracker.record_sent(intent, receipt=receipt, announcement=ann)
+        assert tracker.record(intent["nonce"]) is None
 
     def test_source_binding_survives_restart_and_is_detached(self, tmp_path):
         _, _, publisher, agent, ann = _setup(tmp_path)
@@ -1237,9 +1727,11 @@ class TestIntentTracker:
         IntentTracker(directory).record_sent(
             intent,
             receipt=receipt,
+            announcement=ann,
+            cap_token=token,
             source_peer="https://source.example",
             source_did=publisher.as_did(),
-            federation_key="nth-ann-sha256:" + "a" * 64,
+            federation_key=announcement_federation_key(ann),
         )
         tracker = IntentTracker(directory)
 
@@ -1254,9 +1746,26 @@ class TestIntentTracker:
         assert tracker.record(intent["nonce"])["source_peer"] == (
             "https://source.example"
         )
-        assert tracker.records()[0]["federation_key"] == (
-            "nth-ann-sha256:" + "a" * 64
-        )
+        assert tracker.records()[0]["federation_key"] == announcement_federation_key(ann)
+
+    def test_record_sent_rejects_different_forwarded_capability_token(
+        self, tmp_path,
+    ):
+        _, _, publisher, agent, ann = _setup(tmp_path)
+        token = _selfissue(agent, ["code_review"])
+        other_token = _selfissue(agent, ["code_review"])
+        intent = self._intent(agent, ann.announcement_id, token, nonce="z" * 16)
+        receipt = sign_claim_receipt(ann, agent, token)
+        tracker = IntentTracker(tmp_path / "tracker")
+
+        with pytest.raises(ClaimIntentRejected, match="differs from the signed receipt"):
+            tracker.record_sent(
+                intent, receipt=receipt, announcement=ann, cap_token=other_token,
+                source_peer="https://source.example",
+                source_did=publisher.as_did(),
+                federation_key=announcement_federation_key(ann),
+            )
+        assert tracker.record(intent["nonce"]) is None
 
     @pytest.mark.parametrize(
         ("source_peer", "source_did", "federation_key"),

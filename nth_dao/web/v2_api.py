@@ -23076,6 +23076,7 @@ def register_v2_routes(app: FastAPI) -> None:
             IntentTracker,
             IntentTrackerCorrupt,
             IntentTrackerFull,
+            IntentReceiptStoreFull,
         )
 
         try:
@@ -23083,6 +23084,8 @@ def register_v2_routes(app: FastAPI) -> None:
             intent_tracker.record_sent(
                 intent,
                 receipt=receipt,
+                announcement=ann,
+                cap_token=cap_token,
                 source_peer=source_peer,
                 source_did=source_did,
                 federation_key=announcement_federation_key(ann),
@@ -23092,7 +23095,19 @@ def register_v2_routes(app: FastAPI) -> None:
                 status_code=502,
                 detail=f"agent claim intent is invalid: {exc.reason}",
             )
-        except (IntentTrackerCorrupt, IntentTrackerFull, OSError) as exc:
+        except IntentReceiptStoreFull as exc:
+            logger.warning("claim receipt storage capacity reached: %s", exc)
+            raise HTTPException(
+                status_code=507,
+                detail="local claim evidence storage is full; no claim was forwarded",
+            ) from exc
+        except IntentTrackerFull as exc:
+            logger.warning("claim intent tracker capacity reached: %s", exc)
+            raise HTTPException(
+                status_code=507,
+                detail="local claim intent tracker capacity is full; no claim was forwarded",
+            ) from exc
+        except (IntentTrackerCorrupt, OSError) as exc:
             logger.warning("cannot persist pending claim intent: %s", exc)
             raise HTTPException(
                 status_code=503,
@@ -23307,6 +23322,7 @@ def register_v2_routes(app: FastAPI) -> None:
         try:
             tracker = IntentTracker(ws / "federation" / "claim_intents")
             all_records = tracker.records(limit=4_096)
+            receipt_storage = tracker.receipt_storage_status()
         except (IntentTrackerCorrupt, OSError, ValueError) as exc:
             logger.warning("cannot read claim intent projection: %s", exc)
             raise HTTPException(
@@ -23317,7 +23333,11 @@ def register_v2_routes(app: FastAPI) -> None:
         for record in all_records:
             state = record["state"]
             stats[state] = stats.get(state, 0) + 1
-        return {"items": all_records[:limit], "stats": stats}
+        return {
+            "items": all_records[:limit],
+            "stats": stats,
+            "receipt_storage": receipt_storage,
+        }
 
     @app.post("/api/v2/market/claim-intents/{nonce}/reconcile")
     async def v2_market_reconcile_claim_intent(

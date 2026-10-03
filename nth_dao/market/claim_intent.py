@@ -51,9 +51,16 @@ from nth_dao.did_key import (
 )
 from nth_dao.execution_receipt import verify_receipt
 from nth_dao.identity import _NACL_AVAILABLE, AgentIdentity
+from nth_dao.market.announcement import (
+    TaskAnnouncement,
+    announcement_federation_key,
+    verify_announcement,
+)
 from nth_dao.market.claim import (
     ClaimOutcome,
     ClaimRejected,
+    MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS,
+    _claim_timeline,
     record_foreign_claim,
 )
 from nth_dao.util.io import InterProcessLock, atomic_write_bytes
@@ -102,10 +109,14 @@ _ANN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _TOKEN_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
 
 _JOURNAL = "claim-intents.jsonl"
+_RECEIPT_DIR = "claim-receipts"
+_RECEIPT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _ARCHIVE_DIR = "claim-intents-archive"
 _ARCHIVE_NAME_RE = re.compile(r"^claim-intents-([0-9a-f]{64})\.jsonl$")
 _ARCHIVE_INDEX = "index.sqlite3"
-_TRACKER_EVENTS = ("sent", "confirmed", "rejected", "expired", "reconciled")
+_TRACKER_EVENTS = (
+    "sent", "receipt-retained", "confirmed", "rejected", "expired", "reconciled",
+)
 _TRACKER_SENT_FIELDS_V1 = frozenset({"event", "nonce", "intent"})
 _TRACKER_SENT_FIELDS_V2 = frozenset(
     {"event", "nonce", "intent", "receipt_id", "receipt_hash"}
@@ -115,10 +126,16 @@ _TRACKER_SENT_FIELDS_V3 = _TRACKER_SENT_FIELDS_V2 | {
     "source_did",
     "federation_key",
 }
+_TRACKER_SENT_FIELDS_V4 = _TRACKER_SENT_FIELDS_V2 | {"receipt_retained"}
+_TRACKER_SENT_FIELDS_V5 = _TRACKER_SENT_FIELDS_V3 | {"receipt_retained"}
 _TRACKER_TERMINAL_FIELDS = frozenset({"event", "nonce"})
 _TRACKER_RECONCILED_FIELDS = frozenset({"event", "nonce", "retry_nonce"})
+_TRACKER_RETENTION_FIELDS = frozenset({"event", "nonce", "receipt_hash"})
 DEFAULT_MAX_TRACKED_INTENTS = 4_096
 MAX_TRACKER_JOURNAL_BYTES = 16 * 1024 * 1024
+MAX_TRACKED_RECEIPT_BYTES = 256 * 1024
+DEFAULT_MAX_RECEIPT_STORE_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_RECEIPT_FILES = 4_096
 
 
 class ClaimIntentRejected(ClaimRejected):
@@ -131,6 +148,10 @@ class IntentTrackerCorrupt(RuntimeError):
 
 class IntentTrackerFull(RuntimeError):
     """Raised when a tracker reaches its configured durable capacity."""
+
+
+class IntentReceiptStoreFull(IntentTrackerFull):
+    """Raised when retained Receipt files reach their local quota."""
 
 
 def _now_ms() -> int:
@@ -367,6 +388,8 @@ class IntentTracker:
         directory: str | Path,
         *,
         max_intents: int = DEFAULT_MAX_TRACKED_INTENTS,
+        max_receipt_store_bytes: int = DEFAULT_MAX_RECEIPT_STORE_BYTES,
+        max_receipt_files: int = DEFAULT_MAX_RECEIPT_FILES,
     ) -> None:
         if (
             isinstance(max_intents, bool)
@@ -374,10 +397,18 @@ class IntentTracker:
             or max_intents < 1
         ):
             raise ValueError("max_intents must be a positive integer")
+        for name, value in (
+            ("max_receipt_store_bytes", max_receipt_store_bytes),
+            ("max_receipt_files", max_receipt_files),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         self._dir = Path(directory)
         self._journal_path = self._dir / _JOURNAL
         self._dir.mkdir(parents=True, exist_ok=True)
         self._max_intents = max_intents
+        self._max_receipt_store_bytes = max_receipt_store_bytes
+        self._max_receipt_files = max_receipt_files
         self._thread_lock = threading.RLock()
         self._journal_stat: tuple[int, int] | None = None
         # nonce -> state dict
@@ -432,14 +463,14 @@ class IntentTracker:
 
     def _archive_sent_bindings(
         self, path: Path, raw: bytes,
-    ) -> list[tuple[str, str, str, str]]:
+    ) -> list[tuple[str, str, str, str, int]]:
         """Extract replay bindings from a verified immutable segment."""
 
         if raw and not raw.endswith(b"\n"):
             raise IntentTrackerCorrupt(
                 f"claim-intent archive {path.name} has a torn tail"
             )
-        bindings = []
+        bindings: dict[str, tuple[str, str, str, str, int]] = {}
         for index, line in enumerate(raw.split(b"\n"), start=1):
             if not line:
                 continue
@@ -453,6 +484,21 @@ class IntentTracker:
                 raise IntentTrackerCorrupt(
                     f"claim-intent archive {path.name} event is not an object"
                 )
+            if event.get("event") == "receipt-retained":
+                nonce = event.get("nonce")
+                prior = bindings.get(nonce) if isinstance(nonce, str) else None
+                if (
+                    frozenset(event) != _TRACKER_RETENTION_FIELDS
+                    or prior is None
+                    or not prior[3]
+                    or prior[3] != event.get("receipt_hash")
+                    or prior[4]
+                ):
+                    raise IntentTrackerCorrupt(
+                        f"claim-intent archive {path.name} retention event is invalid"
+                    )
+                bindings[nonce] = (*prior[:4], 1)
+                continue
             if event.get("event") != "sent":
                 continue
             nonce = event.get("nonce")
@@ -475,6 +521,10 @@ class IntentTracker:
                 )
             receipt_id = event.get("receipt_id", "")
             receipt_hash = event.get("receipt_hash", "")
+            if "receipt_retained" in event and event["receipt_retained"] is not True:
+                raise IntentTrackerCorrupt(
+                    f"claim-intent archive {path.name} retention marker is invalid"
+                )
             if receipt_id or receipt_hash:
                 if (
                     not isinstance(receipt_id, str)
@@ -487,17 +537,22 @@ class IntentTracker:
                     raise IntentTrackerCorrupt(
                         f"claim-intent archive {path.name} receipt binding is invalid"
                     )
-            bindings.append((
+            if nonce in bindings:
+                raise IntentTrackerCorrupt(
+                    f"claim-intent archive {path.name} repeats an intent nonce"
+                )
+            bindings[nonce] = (
                 nonce,
                 hashlib.sha256(canonical_json(intent)).hexdigest(),
                 receipt_id,
                 receipt_hash,
-            ))
+                int(event.get("receipt_retained") is True),
+            )
         if not bindings:
             raise IntentTrackerCorrupt(
                 f"claim-intent archive {path.name} has no sent event"
             )
-        return bindings
+        return list(bindings.values())
 
     def _sync_archive_index_locked(self) -> None:
         """Rebuild only new/changed segments; never load old bindings into RAM."""
@@ -519,12 +574,25 @@ class IntentTracker:
                     database.execute(
                         "CREATE TABLE IF NOT EXISTS bindings "
                         "(nonce TEXT PRIMARY KEY, intent_hash TEXT NOT NULL, "
-                        "receipt_id TEXT NOT NULL, receipt_hash TEXT NOT NULL)"
+                        "receipt_id TEXT NOT NULL, receipt_hash TEXT NOT NULL, "
+                        "receipt_retained INTEGER NOT NULL DEFAULT 0)"
                     )
+                    columns = {
+                        row[1] for row in database.execute("PRAGMA table_info(bindings)")
+                    }
+                    if "receipt_retained" not in columns:
+                        database.execute(
+                            "ALTER TABLE bindings ADD COLUMN "
+                            "receipt_retained INTEGER NOT NULL DEFAULT 0"
+                        )
                     database.execute(
                         "CREATE UNIQUE INDEX IF NOT EXISTS receipt_binding "
                         "ON bindings(receipt_id, receipt_hash) "
                         "WHERE receipt_id <> ''"
+                    )
+                    database.execute(
+                        "CREATE INDEX IF NOT EXISTS retained_receipt_lookup "
+                        "ON bindings(receipt_hash) WHERE receipt_retained = 1"
                     )
                 known = {
                     name: (size, mtime_ns)
@@ -553,7 +621,8 @@ class IntentTracker:
                     with database:
                         for binding in bindings:
                             prior = database.execute(
-                                "SELECT intent_hash, receipt_id, receipt_hash "
+                                "SELECT intent_hash, receipt_id, receipt_hash, "
+                                "receipt_retained "
                                 "FROM bindings WHERE nonce = ?", (binding[0],),
                             ).fetchone()
                             if prior is not None:
@@ -564,8 +633,8 @@ class IntentTracker:
                                 continue
                             database.execute(
                                 "INSERT INTO bindings "
-                                "(nonce, intent_hash, receipt_id, receipt_hash) "
-                                "VALUES (?, ?, ?, ?)", binding,
+                                "(nonce, intent_hash, receipt_id, receipt_hash, "
+                                "receipt_retained) VALUES (?, ?, ?, ?, ?)", binding,
                             )
                         database.execute(
                             "INSERT INTO segments (name, size, mtime_ns) "
@@ -601,6 +670,183 @@ class IntentTracker:
                 f"cannot query claim-intent archive index: {exc}"
             ) from exc
 
+    def _save_receipt_locked(self, raw: bytes, receipt_hash: str) -> None:
+        path = self._dir / _RECEIPT_DIR / f"{receipt_hash}.json"
+        try:
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                file_count, total_bytes = self._receipt_storage_usage_locked()
+                if (
+                    file_count >= self._max_receipt_files
+                    or total_bytes + len(raw) > self._max_receipt_store_bytes
+                ):
+                    raise IntentReceiptStoreFull(
+                        "claim receipt storage capacity reached"
+                    )
+                atomic_write_bytes(path, raw)
+                return
+            if not 0 < size <= MAX_TRACKED_RECEIPT_BYTES:
+                raise IntentTrackerCorrupt("stored claim receipt exceeds size limit")
+            existing = path.read_bytes()
+            if (
+                len(existing) > MAX_TRACKED_RECEIPT_BYTES
+                or existing != raw
+            ):
+                raise IntentTrackerCorrupt(
+                    "stored claim receipt does not match its content address"
+                )
+        except OSError as exc:
+            raise IntentTrackerCorrupt(
+                f"cannot persist claim receipt: {exc}"
+            ) from exc
+
+    def _receipt_storage_usage_locked(self) -> tuple[int, int]:
+        path = self._dir / _RECEIPT_DIR
+        if not path.exists():
+            return 0, 0
+        file_count = 0
+        total_bytes = 0
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if not entry.is_file(follow_symlinks=False):
+                        raise IntentTrackerCorrupt(
+                            "claim receipt storage contains a non-file entry"
+                        )
+                    file_count += 1
+                    total_bytes += entry.stat(follow_symlinks=False).st_size
+        except OSError as exc:
+            raise IntentTrackerCorrupt(
+                f"cannot inspect claim receipt storage: {exc}"
+            ) from exc
+        return file_count, total_bytes
+
+    def receipt_storage_status(self) -> dict[str, int]:
+        """Report physical usage, including crash orphans and temporary files."""
+
+        with self._thread_lock, InterProcessLock(self._journal_path):
+            files, used_bytes = self._receipt_storage_usage_locked()
+            return {
+                "files": files,
+                "used_bytes": used_bytes,
+                "max_files": self._max_receipt_files,
+                "max_bytes": self._max_receipt_store_bytes,
+            }
+
+    def verify_receipt_storage(self) -> int:
+        """Explicitly verify every committed active and archived Receipt blob.
+
+        Legacy hash-only bindings without a retention marker are not evidence.
+        This audit does not remove unreferenced blobs or repair missing ones.
+        """
+
+        self.verify_archive_integrity()
+        with self._thread_lock, InterProcessLock(self._journal_path):
+            self._refold_if_changed_locked()
+            expected = {
+                entry["receipt_hash"]
+                for entry in self._intents.values()
+                if entry.get("receipt_retained")
+            }
+            self._sync_archive_index_locked()
+            index_path = self._dir / _ARCHIVE_DIR / _ARCHIVE_INDEX
+            if index_path.exists():
+                try:
+                    with closing(sqlite3.connect(index_path, timeout=10)) as database:
+                        expected.update(
+                            row[0] for row in database.execute(
+                                "SELECT DISTINCT receipt_hash FROM bindings "
+                                "WHERE receipt_retained = 1"
+                            )
+                        )
+                except sqlite3.DatabaseError as exc:
+                    raise IntentTrackerCorrupt(
+                        f"cannot audit retained claim receipts: {exc}"
+                    ) from exc
+        for receipt_hash in expected:
+            if self.load_receipt_by_hash(receipt_hash) is None:
+                raise IntentTrackerCorrupt(
+                    "committed claim receipt evidence is missing"
+                )
+        return len(expected)
+
+    def load_receipt_by_hash(self, receipt_hash: str) -> dict[str, Any] | None:
+        """Load retained signed evidence by exact hash, including archived claims.
+
+        A missing legacy blob returns ``None``. Missing committed retained
+        evidence is corruption. Callers must still bind the receipt to their
+        intent and source-authority ACK.
+        """
+
+        if (
+            not isinstance(receipt_hash, str)
+            or _RECEIPT_HASH_RE.fullmatch(receipt_hash) is None
+        ):
+            raise ValueError("receipt_hash must be lowercase SHA-256 hex")
+        path = self._dir / _RECEIPT_DIR / f"{receipt_hash}.json"
+        with self._thread_lock, InterProcessLock(self._journal_path):
+            try:
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    self._refold_if_changed_locked()
+                    if any(
+                        entry["receipt_hash"] == receipt_hash
+                        and entry.get("receipt_retained")
+                        for entry in self._intents.values()
+                    ):
+                        raise IntentTrackerCorrupt(
+                            "committed claim receipt evidence is missing"
+                        )
+                    self._sync_archive_index_locked()
+                    index_path = self._dir / _ARCHIVE_DIR / _ARCHIVE_INDEX
+                    if index_path.exists():
+                        try:
+                            with closing(sqlite3.connect(index_path, timeout=10)) as database:
+                                archived = database.execute(
+                                    "SELECT 1 FROM bindings WHERE receipt_hash = ? "
+                                    "AND receipt_retained = 1 LIMIT 1",
+                                    (receipt_hash,),
+                                ).fetchone()
+                        except sqlite3.DatabaseError as exc:
+                            raise IntentTrackerCorrupt(
+                                f"cannot check retained claim receipt: {exc}"
+                            ) from exc
+                        if archived is not None:
+                            raise IntentTrackerCorrupt(
+                                "committed claim receipt evidence is missing"
+                            )
+                    return None
+                if not 0 < size <= MAX_TRACKED_RECEIPT_BYTES:
+                    raise IntentTrackerCorrupt("stored claim receipt exceeds size limit")
+                raw = path.read_bytes()
+            except OSError as exc:
+                raise IntentTrackerCorrupt(
+                    f"cannot read stored claim receipt: {exc}"
+                ) from exc
+            if (
+                len(raw) > MAX_TRACKED_RECEIPT_BYTES
+                or hashlib.sha256(raw).hexdigest() != receipt_hash
+            ):
+                raise IntentTrackerCorrupt("stored claim receipt hash is invalid")
+            try:
+                receipt = json.loads(raw.decode("utf-8"))
+                if (
+                    not isinstance(receipt, dict)
+                    or canonical_json(receipt) != raw
+                    or not verify_receipt(receipt)
+                    or not str(receipt.get("goal_id", "")).startswith("market:claim:")
+                ):
+                    raise IntentTrackerCorrupt("stored claim receipt is invalid")
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError,
+                    RecursionError) as exc:
+                raise IntentTrackerCorrupt(
+                    "stored claim receipt is malformed"
+                ) from exc
+            return receipt
+
     def verify_archive_integrity(self) -> int:
         """Fully rehash archives and compare every replay binding to the index.
 
@@ -628,14 +874,15 @@ class IntentTracker:
                             raise IntentTrackerCorrupt(
                                 f"claim-intent archive {path.name} failed its content hash"
                             )
-                        for nonce, intent_hash, receipt_id, receipt_hash in (
+                        for nonce, intent_hash, receipt_id, receipt_hash, retained in (
                             self._archive_sent_bindings(path, raw)
                         ):
                             indexed = database.execute(
-                                "SELECT intent_hash, receipt_id, receipt_hash "
+                                "SELECT intent_hash, receipt_id, receipt_hash, "
+                                "receipt_retained "
                                 "FROM bindings WHERE nonce = ?", (nonce,),
                             ).fetchone()
-                            if indexed != (intent_hash, receipt_id, receipt_hash):
+                            if indexed != (intent_hash, receipt_id, receipt_hash, retained):
                                 raise IntentTrackerCorrupt(
                                     "claim-intent archive index does not match its segment"
                                 )
@@ -663,12 +910,18 @@ class IntentTracker:
                 _TRACKER_SENT_FIELDS_V1,
                 _TRACKER_SENT_FIELDS_V2,
                 _TRACKER_SENT_FIELDS_V3,
+                _TRACKER_SENT_FIELDS_V4,
+                _TRACKER_SENT_FIELDS_V5,
             )
             if kind == "sent"
             else (
-                (_TRACKER_RECONCILED_FIELDS,)
-                if kind == "reconciled"
-                else (_TRACKER_TERMINAL_FIELDS,)
+                (_TRACKER_RETENTION_FIELDS,)
+                if kind == "receipt-retained"
+                else (
+                    (_TRACKER_RECONCILED_FIELDS,)
+                    if kind == "reconciled"
+                    else (_TRACKER_TERMINAL_FIELDS,)
+                )
             )
         )
         if event_fields not in valid_fields:
@@ -697,6 +950,8 @@ class IntentTracker:
             if event_fields in (
                 _TRACKER_SENT_FIELDS_V2,
                 _TRACKER_SENT_FIELDS_V3,
+                _TRACKER_SENT_FIELDS_V4,
+                _TRACKER_SENT_FIELDS_V5,
             ) and (
                 not isinstance(receipt_id, str)
                 or not receipt_id
@@ -706,7 +961,15 @@ class IntentTracker:
                 or any(ch not in "0123456789abcdef" for ch in receipt_hash)
             ):
                 raise IntentTrackerCorrupt("sent event receipt binding is invalid")
-            if event_fields == _TRACKER_SENT_FIELDS_V3 and (
+            if event_fields in (
+                _TRACKER_SENT_FIELDS_V4,
+                _TRACKER_SENT_FIELDS_V5,
+            ) and event.get("receipt_retained") is not True:
+                raise IntentTrackerCorrupt("sent event retention marker is invalid")
+            if event_fields in (
+                _TRACKER_SENT_FIELDS_V3,
+                _TRACKER_SENT_FIELDS_V5,
+            ) and (
                 not isinstance(event.get("source_peer"), str)
                 or not event["source_peer"]
                 or len(event["source_peer"].encode("utf-8")) > 2_048
@@ -722,10 +985,24 @@ class IntentTracker:
                 "intent": intent,
                 "receipt_id": receipt_id,
                 "receipt_hash": receipt_hash,
+                "receipt_retained": event.get("receipt_retained", False),
                 "source_peer": event.get("source_peer", ""),
                 "source_did": event.get("source_did", ""),
                 "federation_key": event.get("federation_key", ""),
             }
+            return
+        if kind == "receipt-retained":
+            prior = self._intents.get(nonce)
+            if (
+                prior is None
+                or not prior["receipt_hash"]
+                or prior["receipt_hash"] != event["receipt_hash"]
+                or prior["receipt_retained"]
+            ):
+                raise IntentTrackerCorrupt(
+                    "receipt retention event does not bind an unretained intent"
+                )
+            prior["receipt_retained"] = True
             return
         if kind == "reconciled":
             retry_nonce = event.get("retry_nonce")
@@ -881,6 +1158,8 @@ class IntentTracker:
             active_lines.append(line)
             if kind == "sent":
                 active_states[nonce] = "pending"
+            elif kind == "receipt-retained":
+                continue
             elif kind == "reconciled":
                 active_states[nonce] = "confirmed"
                 active_states[retry_nonce] = "rejected"
@@ -928,21 +1207,44 @@ class IntentTracker:
         intent: dict[str, Any],
         *,
         receipt: dict[str, Any] | None = None,
+        announcement: TaskAnnouncement | None = None,
+        cap_token: dict[str, Any] | None = None,
         source_peer: str = "",
         source_did: str = "",
         federation_key: str = "",
     ) -> None:
+        try:
+            intent = json.loads(canonical_json(intent))
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise ClaimIntentRejected(
+                REJECT_INTENT_MALFORMED,
+                "tracked intent is not canonical JSON",
+            ) from exc
         ok, reason = verify_claim_intent(intent)
         if not ok:
             raise ClaimIntentRejected(reason, "refusing to track an invalid intent")
         receipt_id = ""
         receipt_hash = ""
+        receipt_bytes = b""
         if receipt is not None:
             if not isinstance(receipt, dict):
                 raise ClaimIntentRejected(
                     REJECT_INTENT_MALFORMED,
                     "tracked receipt must be an object",
                 )
+            try:
+                receipt_bytes = canonical_json(receipt)
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_MALFORMED,
+                    "tracked receipt is not canonical JSON",
+                ) from exc
+            if len(receipt_bytes) > MAX_TRACKED_RECEIPT_BYTES:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_MALFORMED,
+                    "tracked receipt exceeds size limit",
+                )
+            receipt = json.loads(receipt_bytes)
             if not verify_receipt(receipt):
                 raise ClaimIntentRejected(
                     REJECT_INTENT_SIGNATURE,
@@ -964,8 +1266,67 @@ class IntentTracker:
                     REJECT_INTENT_BINDING,
                     "tracked receipt does not bind the intent",
                 )
+            if not isinstance(announcement, TaskAnnouncement):
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "tracked receipt requires its signed announcement",
+                )
+            try:
+                announcement = deepcopy(announcement)
+            except (TypeError, ValueError, RuntimeError, RecursionError) as exc:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "tracked announcement cannot be snapshotted",
+                ) from exc
+            announcement_ok, _ = verify_announcement(announcement)
+            if not announcement_ok or announcement.announcement_id != intent["announcement_id"]:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "tracked announcement is invalid or does not bind the intent",
+                )
+            timeline = receipt.get("timeline")
+            if not isinstance(timeline, list) or len(timeline) != 1:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "tracked receipt must contain one signed claim event",
+                )
+            entry = timeline[0]
+            if (
+                not isinstance(entry, dict)
+                or type(entry.get("timestamp")) is not int
+                or entry["timestamp"] <= 0
+                or timeline != [
+                    item.to_dict() for item in _claim_timeline(
+                        announcement,
+                        intent["claimant_did"],
+                        intent["cap_token_id"],
+                        entry["timestamp"],
+                    )
+                ]
+            ):
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "signed claim event does not bind the intent",
+                )
+            signed_at = entry["timestamp"]
+            if abs(signed_at - _now_ms()) > MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "signed claim receipt is outside the authority clock window; re-sign it",
+                )
+            if (
+                type(authorizing_token.get("not_before")) is not int
+                or type(authorizing_token.get("not_after")) is not int
+                or not authorizing_token["not_before"]
+                <= signed_at
+                <= authorizing_token["not_after"]
+            ):
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "signed claim receipt is outside the token validity window",
+                )
             receipt_id = receipt_id_value
-            receipt_hash = hashlib.sha256(canonical_json(receipt)).hexdigest()
+            receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
         source_values = (source_peer, source_did, federation_key)
         if not all(isinstance(value, str) for value in source_values):
             raise ClaimIntentRejected(
@@ -982,6 +1343,26 @@ class IntentTracker:
                 REJECT_INTENT_BINDING,
                 "tracked claim source binding requires a signed receipt",
             )
+        if cap_token is not None or source_peer:
+            if not isinstance(cap_token, dict) or receipt is None:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "tracked forwarded claim requires its capability token",
+                )
+            try:
+                same_token = canonical_json(cap_token) == canonical_json(
+                    receipt["authorizing_cap_token"]
+                )
+            except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "tracked forwarded capability token is malformed",
+                ) from exc
+            if not same_token:
+                raise ClaimIntentRejected(
+                    REJECT_INTENT_BINDING,
+                    "forwarded capability token differs from the signed receipt",
+                )
         if source_peer and (
             not isinstance(source_peer, str)
             or len(source_peer.encode("utf-8")) > 2_048
@@ -994,6 +1375,14 @@ class IntentTracker:
             raise ClaimIntentRejected(
                 REJECT_INTENT_BINDING,
                 "tracked claim source binding is invalid",
+            )
+        if source_peer and (
+            source_did != (announcement.authority_did or announcement.publisher_did)
+            or federation_key != announcement_federation_key(announcement)
+        ):
+            raise ClaimIntentRejected(
+                REJECT_INTENT_BINDING,
+                "tracked claim source does not bind its signed announcement",
             )
         nonce = intent["nonce"]
         with self._thread_lock, InterProcessLock(self._journal_path):
@@ -1012,6 +1401,24 @@ class IntentTracker:
                         REJECT_INTENT_BINDING,
                         "nonce is already bound to a different intent",
                 )
+                if receipt_bytes:
+                    if existing.get("receipt_retained") and not (
+                        self._dir / _RECEIPT_DIR / f"{receipt_hash}.json"
+                    ).exists():
+                        raise IntentTrackerCorrupt(
+                            "committed claim receipt evidence is missing"
+                        )
+                    self._save_receipt_locked(receipt_bytes, receipt_hash)
+                    if not existing.get("receipt_retained"):
+                        self._append_events_locked(
+                            [{
+                                "event": "receipt-retained",
+                                "nonce": nonce,
+                                "receipt_hash": receipt_hash,
+                            }],
+                            protected_nonces=frozenset({nonce}),
+                        )
+                        existing["receipt_retained"] = True
                 return
             archived_nonce, archived_receipt = self._archived_binding_exists_locked(
                 nonce, receipt_id, receipt_hash,
@@ -1054,11 +1461,17 @@ class IntentTracker:
                     )
             if len(self._intents) >= self._max_intents:
                 raise IntentTrackerFull("claim-intent tracker capacity reached")
+            if receipt_bytes:
+                # Evidence must be durable before an intent can be forwarded.
+                # A crash here can leave an unreferenced blob, never a sent
+                # journal entry that points at bytes we did not retain.
+                self._save_receipt_locked(receipt_bytes, receipt_hash)
             stored_intent = deepcopy(intent)
             event = {"event": "sent", "nonce": nonce, "intent": stored_intent}
             if receipt is not None:
                 event["receipt_id"] = receipt_id
                 event["receipt_hash"] = receipt_hash
+                event["receipt_retained"] = True
             if source_peer:
                 event["source_peer"] = source_peer
                 event["source_did"] = source_did
@@ -1069,6 +1482,7 @@ class IntentTracker:
                 "intent": stored_intent,
                 "receipt_id": receipt_id,
                 "receipt_hash": receipt_hash,
+                "receipt_retained": bool(receipt_bytes),
                 "source_peer": source_peer,
                 "source_did": source_did,
                 "federation_key": federation_key,
@@ -1322,6 +1736,7 @@ __all__ = [
     "IntentTracker",
     "IntentTrackerCorrupt",
     "IntentTrackerFull",
+    "IntentReceiptStoreFull",
     "admit_claim_intent",
     "sign_claim_intent",
     "verify_claim_intent",

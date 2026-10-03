@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   same 256-character alphabet as the announcement protocol. Torn journal
   tails are repaired before future appends, and conflicting terminal
   transitions fail instead of masquerading as idempotent retries.
+- Claimant-side Claim Receipt retention now saves the fully verified canonical
+  bytes by content hash before a federated Intent can be journaled or sent.
+  Restart and active-journal compaction preserve the evidence required by a
+  later Mission Completion proof. Reads recheck size, hash, canonical bytes,
+  and signature; legacy hash-only records remain explicitly unavailable. The
+  signed announcement is required for exact timeline binding, cumulative
+  storage is bounded without deleting evidence, and missing committed blobs
+  fail closed while historical hash-only records remain readable.
+  Legacy retry backfill journals an explicit retention marker that survives
+  archiving. Claim forwarding checks the outer capability token against the
+  signed Receipt and preflights the source's five-minute Receipt clock window.
+  The claim-intent projection reports Receipt storage usage, and operators can
+  explicitly verify all committed active and archived blobs without deleting
+  crash orphans. Receipt capacity and other tracker capacity failures have
+  distinct HTTP 507 details.
 - Federated task claims now use the Claim Intent lifecycle end to end. The
   supervised Agent signs the capability token, receipt, and intent without
   exporting its private key; the claimant journals pending before transport;

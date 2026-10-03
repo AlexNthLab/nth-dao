@@ -429,7 +429,7 @@ def claim_announcement(
 
 REJECT_RECEIPT_INVALID = "claim-receipt-invalid"   # 收据签名/结构验不过
 REJECT_RECEIPT_BINDING = "claim-receipt-binding"   # 收据没绑定到本公告/claimant
-_MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS = 5 * 60 * 1000
+MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS = 5 * 60 * 1000
 
 
 def _claim_timeline(
@@ -569,7 +569,7 @@ def record_foreign_claim(
             "receipt must contain exactly one valid task-claim event",
         )
     signed_claimed_at = timeline[0]["timestamp"]
-    if abs(signed_claimed_at - claimed_at) > _MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS:
+    if abs(signed_claimed_at - claimed_at) > MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS:
         raise ClaimRejected(
             REJECT_RECEIPT_BINDING,
             "receipt timestamp is outside the authority clock-skew window",

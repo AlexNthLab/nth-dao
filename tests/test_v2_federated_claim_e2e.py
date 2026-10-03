@@ -31,6 +31,11 @@ from nth_dao.market.announcement import (  # noqa: E402
     sign_announcement,
 )
 from nth_dao.market.claim_ack import sign_authority_claim_ack  # noqa: E402
+from nth_dao.market.claim_intent import (  # noqa: E402
+    IntentReceiptStoreFull,
+    IntentTracker,
+    IntentTrackerFull,
+)
 from nth_dao.web import create_app  # noqa: E402
 from nth_dao.web.market_federation_poll import FederationCache  # noqa: E402
 
@@ -68,7 +73,9 @@ class _BgServer:
         self._thread.join(timeout=5)
 
 
-def test_cross_dao_claim_full_loop(tmp_path: Path) -> None:
+def test_cross_dao_claim_full_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # ── 源 DAO:真服务 + 发布一个任务 ──
     src_ws = tmp_path / "source"
     src_app = create_app(src_ws, require_console_auth=False)
@@ -127,6 +134,44 @@ def test_cross_dao_claim_full_loop(tmp_path: Path) -> None:
 
             # ── 一键跨 DAO 认领(agent 启动时序 → not-yet-authorized 退避重试)──
             source_key = announcement_federation_key(source_ann)
+            with monkeypatch.context() as patcher:
+                def reject_full_store(*_args, **_kwargs):
+                    raise IntentReceiptStoreFull("claim receipt storage capacity reached")
+
+                patcher.setattr(IntentTracker, "record_sent", reject_full_store)
+                for _ in range(20):
+                    capacity = orch.post(
+                        "/api/v2/market/federated/claim",
+                        json={
+                            "announcement_id": aid,
+                            "federation_key": source_key,
+                            "agent_did": did,
+                        },
+                    )
+                    if "not-yet-authorized" not in capacity.text:
+                        break
+                    time.sleep(0.5)
+                assert capacity.status_code == 507, capacity.text
+                assert "storage is full" in capacity.text
+                assert not ClaimStore(src_ws).is_claimed(aid)
+
+            with monkeypatch.context() as patcher:
+                def reject_full_tracker(*_args, **_kwargs):
+                    raise IntentTrackerFull("claim-intent tracker capacity reached")
+
+                patcher.setattr(IntentTracker, "record_sent", reject_full_tracker)
+                capacity = orch.post(
+                    "/api/v2/market/federated/claim",
+                    json={
+                        "announcement_id": aid,
+                        "federation_key": source_key,
+                        "agent_did": did,
+                    },
+                )
+                assert capacity.status_code == 507, capacity.text
+                assert "intent tracker capacity" in capacity.text
+                assert not ClaimStore(src_ws).is_claimed(aid)
+
             r = orch.post(
                 "/api/v2/market/federated/claim",
                 json={
@@ -159,8 +204,20 @@ def test_cross_dao_claim_full_loop(tmp_path: Path) -> None:
             assert ClaimStore(src_ws).is_claimed(aid)
             intent_status = orch.get("/api/v2/market/claim-intents").json()
             assert intent_status["stats"] == {"confirmed": 1}
+            assert intent_status["receipt_storage"]["files"] >= 1
+            assert intent_status["receipt_storage"]["used_bytes"] > 0
             assert intent_status["items"][0]["state"] == "confirmed"
             assert intent_status["items"][0]["intent"]["claimant_did"] == did
+            tracker = IntentTracker(orch_ws / "federation" / "claim_intents")
+            tracked = tracker.record(r.json()["claim_intent_nonce"])
+            assert tracked is not None
+            retained_receipt = tracker.load_receipt_by_hash(tracked["receipt_hash"])
+            assert retained_receipt is not None
+            assert retained_receipt["signer_did"] == did
+            assert retained_receipt["goal_id"] == f"market:claim:{aid}"
+            assert r.json()["authority_ack"]["claim_receipt_hash"] == (
+                tracked["receipt_hash"]
+            )
             source_status = TestClient(src_app).post(
                 "/api/v2/market/federation/claim-status",
                 json={

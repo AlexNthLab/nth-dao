@@ -150,7 +150,8 @@ DAO, which remains the single CAS authority for that listing.
 
 A federated claim carries three claimant-signed public artifacts: a scoped
 capability token, a Claim Receipt, and a short-lived Claim Intent. The local
-hub persists the Intent as `pending` before transport. The source DAO verifies
+hub verifies and retains the complete Claim Receipt by canonical content hash
+before journaling the Intent as `pending` and before transport. The source DAO verifies
 the Intent and its exact claimant, announcement, token, and Receipt bindings
 before running the authoritative claim CAS. A pending Intent reserves nothing.
 
@@ -213,7 +214,7 @@ complete view.
 | `POST /api/v2/market/federation/claim-foreign` | Verify claimant token, Receipt, and Intent; run source-authority CAS | Public crypto-authorized write, rate-limited |
 | `POST /api/v2/market/federation/claim-status` | Recover a signed ACK for a matching durable source claim | Public crypto-authorized read-by-proof, rate-limited |
 | `POST /api/v2/market/federated/claim` | Sign locally, journal pending, route to the pinned source, and verify its ACK | Console write |
-| `GET /api/v2/market/claim-intents` | Bounded local pending/confirmed/rejected/expired projection | Console read |
+| `GET /api/v2/market/claim-intents` | Bounded local pending/confirmed/rejected/expired projection and Receipt storage usage | Console read |
 | `POST /api/v2/market/claim-intents/{nonce}/reconcile` | Re-verify the retained source and recover a lost signed ACK | Console write |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
@@ -226,6 +227,31 @@ complete view.
 | `POST /api/v2/trade/orders/{order_digest}/execution-receipts/{execution_id}/reviews/{review_id}/dispute-statements/fetch` | Sign a Fetch Request, pin and authenticate the peer, and return the independently verified Response without importing it | Console write; Bearer required when console auth is enabled |
 
 The local Claim Intent tracker keeps pending records in its active journal.
+Its `claim-receipts/` directory retains signed Receipt bytes under their
+SHA-256 content addresses, including after the corresponding terminal Intent
+is archived. Each write requires the verified signed announcement and matches
+the source authority's complete claim timeline. `load_receipt_by_hash()`
+rechecks the hash and signature; the caller must still bind the result to the
+Intent and authority ACK. New journal entries mark evidence retention, so a
+missing committed blob is an integrity error; legacy hash-only records remain
+explicitly unavailable. No evidence is reconstructed from a hash or unsigned
+source response. Retaining a signed statement does not establish that the task
+was completed or that its contents are true. A forwarded Receipt must use the
+same capability token sent to the authority. The claimant preflight applies
+the authority's five-minute Receipt clock window; if an unexpired Intent is
+paired with an older Receipt, the claimant must sign a fresh Receipt before
+retrying. This preflight cannot eliminate network delay or clock drift at the
+authority. The local store defaults to 256
+KiB per Receipt, 64 MiB total, and 4,096 files; all files, including crash
+orphans, count toward the limits. A full Receipt store fails closed before
+forwarding with HTTP 507; other tracker capacity failures use a distinct 507
+detail. The console projection exposes `receipt_storage` file and byte usage
+with the configured limits. Operators can explicitly run
+`IntentTracker.verify_receipt_storage()` to check all committed active and
+archived Receipt blobs, after archive integrity verification. This does not
+audit unreferenced crash orphans, which are counted in capacity only. No
+evidence is deleted automatically; operators must review and export retained
+evidence before any deliberate retention-policy cleanup.
 When terminal history reaches the configured capacity, it archives the oldest
 terminal events in immutable, SHA-256-named segments before atomically
 compacting the active journal. A rebuildable SQLite index keeps archived
