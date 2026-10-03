@@ -33,6 +33,7 @@ import hashlib
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from nth_dao.b64u import b64u_decode, b64u_encode
@@ -404,6 +405,40 @@ def verify_mission_completion(
     return False, "completion evidence is required"
 
 
+def verify_confirmed_mission_completion(
+    workspace: Path,
+    nonce: str,
+    record: Any,
+    execution_receipt: dict[str, Any],
+    *,
+    now_ms: int | None = None,
+) -> tuple[bool, str]:
+    """Verify completion against the locally confirmed source claim."""
+
+    from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
+
+    evidence = resolve_confirmed_claim_evidence(workspace, nonce)
+    intent = evidence["intent"]
+    if not isinstance(record, dict) or (
+        record.get("announcement_id") != intent["announcement_id"]
+        or record.get("claimant_did") != intent["claimant_did"]
+    ):
+        return False, "completion does not bind the confirmed claim"
+    claim_timeline = evidence["claim_receipt"]["timeline"]
+    claimed_mission_id = claim_timeline[0]["payload"]["mission_id"]
+    if claimed_mission_id and record.get("mission_id") != claimed_mission_id:
+        return False, "completion mission differs from signed claim"
+    return verify_mission_completion(
+        record,
+        claim_receipt=evidence["claim_receipt"],
+        authority_ack=evidence["authority_ack"],
+        execution_receipt=execution_receipt,
+        expected_authority_did=evidence["source_did"],
+        expected_federation_key=evidence["federation_key"],
+        now_ms=now_ms,
+    )
+
+
 __all__ = [
     "COMPLETION_FIELDS",
     "COMPLETION_KIND",
@@ -414,4 +449,5 @@ __all__ = [
     "receipt_digest",
     "sign_mission_completion",
     "verify_mission_completion",
+    "verify_confirmed_mission_completion",
 ]

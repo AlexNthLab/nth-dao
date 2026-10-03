@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,7 +11,7 @@ pytest.importorskip("nacl")
 
 from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
 from nth_dao.identity import AgentIdentity
-from nth_dao.market.announcement import sign_announcement
+from nth_dao.market.announcement import announcement_federation_key, sign_announcement
 from nth_dao.market.claim import sign_claim_receipt
 from nth_dao.market.claim_ack import (
     AuthorityClaimAckStore,
@@ -65,6 +68,272 @@ def test_authority_claim_ack_roundtrip_and_store(tmp_path: Path) -> None:
     assert path.is_file()
     assert store.load(ack["ack_id"]) == ack
     assert store.save(ack) == path
+
+
+def test_claim_ack_lookup_requires_exact_signed_receipt_and_source(
+    tmp_path: Path,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    store = AuthorityClaimAckStore(tmp_path)
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) is None
+    store.save(ack)
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) == ack
+    with pytest.raises(ValueError, match="matching claim ACK"):
+        store.find_for_receipt(
+            receipt,
+            expected_authority_did=authority.as_did(),
+            expected_federation_key="nth-ann-sha256:wrong",
+            expected_claimant_did=claimant.as_did(),
+        )
+    with pytest.raises(ValueError, match="envelope does not bind"):
+        store.find_for_receipt(
+            {**receipt, "goal_id": "market:claim:tampered"},
+            expected_authority_did=authority.as_did(),
+            expected_federation_key=announcement_federation_key(announcement),
+            expected_claimant_did=claimant.as_did(),
+        )
+
+
+def test_claim_ack_lookup_rejects_conflicting_valid_acknowledgements(
+    tmp_path: Path,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    first = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    second = sign_authority_claim_ack(
+        authority=authority, announcement=announcement,
+        claim_record={**record, "foreign": False},
+    )
+    assert first["ack_id"] != second["ack_id"]
+    store.save(first)
+    store.save(second)
+    with pytest.raises(ValueError, match="more than one source ACK"):
+        store.find_for_receipt(
+            receipt,
+            expected_authority_did=authority.as_did(),
+            expected_federation_key=announcement_federation_key(announcement),
+            expected_claimant_did=claimant.as_did(),
+        )
+
+
+def test_claim_ack_lookup_rejects_signed_ack_for_another_announcement(
+    tmp_path: Path,
+) -> None:
+    authority, claimant, _announcement, receipt, record = _fixture()
+    other = sign_announcement(
+        publisher=authority,
+        authority_did=authority.as_did(),
+        title="different task",
+    )
+    mismatched_ack = sign_authority_claim_ack(
+        authority=authority, announcement=other, claim_record=record,
+    )
+    store = AuthorityClaimAckStore(tmp_path)
+    store.save(mismatched_ack)
+    with pytest.raises(ValueError, match="does not bind the signed claim event"):
+        store.find_for_receipt(
+            receipt,
+            expected_authority_did=authority.as_did(),
+            expected_federation_key=announcement_federation_key(other),
+            expected_claimant_did=claimant.as_did(),
+        )
+
+
+def test_claim_ack_lookup_isolates_unrelated_corruption(tmp_path: Path) -> None:
+    authority, claimant, announcement, receipt, _record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    store.root.mkdir(parents=True)
+    (store.root / f"{'0' * 64}.json").write_text("{broken", encoding="utf-8")
+    (store.root / f"{'1' * 64}.json").write_text(
+        '{"ack_id":"' + '1' * 64 + '"}', encoding="utf-8",
+    )
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) is None
+    with pytest.raises(ValueError):
+        store.audit()
+
+
+def test_claim_ack_lookup_handles_more_than_legacy_scan_cap(tmp_path: Path) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    store.save(ack)
+    for index in range(4_097):
+        (store.root / f"unrelated-{index}.json").write_text("{}", encoding="utf-8")
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) == ack
+
+
+def test_claim_ack_lookup_uses_bounded_descriptor_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    path = store.save(ack)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Path, "read_text", lambda *_args, **_kwargs: (
+            pytest.fail("unbounded path read")
+        ))
+        assert store.find_for_receipt(
+            receipt,
+            expected_authority_did=authority.as_did(),
+            expected_federation_key=announcement_federation_key(announcement),
+            expected_claimant_did=claimant.as_did(),
+        ) == ack
+    path.write_bytes(b" " * (64 * 1024 + 1))
+    with pytest.raises(ValueError, match="oversized"):
+        store.find_for_receipt(
+            receipt,
+            expected_authority_did=authority.as_did(),
+            expected_federation_key=announcement_federation_key(announcement),
+            expected_claimant_did=claimant.as_did(),
+        )
+
+
+def test_corrupt_derived_index_does_not_block_durable_ack(tmp_path: Path) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    index = store.root / "_index" / "ack-index.sqlite3"
+    index.parent.mkdir(parents=True)
+    index.write_bytes(b"not a sqlite database")
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    path = store.save(ack)
+    assert path.is_file()
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) == ack
+
+
+def test_imported_ack_is_found_even_if_directory_mtime_is_restored(
+    tmp_path: Path,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    lookup = {
+        "expected_authority_did": authority.as_did(),
+        "expected_federation_key": announcement_federation_key(announcement),
+        "expected_claimant_did": claimant.as_did(),
+    }
+    store.root.mkdir(parents=True)
+    assert store.find_for_receipt(receipt, **lookup) is None
+    before = store.root.stat()
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    (store.root / f"{ack['ack_id']}.json").write_text(
+        json.dumps(ack), encoding="utf-8",
+    )
+    os.utime(store.root, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.find_for_receipt(receipt, **lookup) == ack
+
+
+def test_saving_ack_does_not_scan_historical_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Path, "glob", lambda *_args, **_kwargs: (
+            pytest.fail("save scanned historical ACK files")
+        ))
+        assert store.save(ack).is_file()
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) == ack
+
+
+def test_unavailable_index_directory_does_not_change_save_result(
+    tmp_path: Path,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    store.root.mkdir(parents=True)
+    (store.root / "_index").write_bytes(b"not a directory")
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    assert store.save(ack).is_file()
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) == ack
+
+
+def test_wrong_index_receipt_mapping_is_recovered_from_signed_file(
+    tmp_path: Path,
+) -> None:
+    authority, claimant, announcement, receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    store.save(ack)
+    with sqlite3.connect(store.root / "_index" / "ack-index.sqlite3") as db:
+        db.execute(
+            "UPDATE files SET receipt_hash = ? WHERE ack_id = ?",
+            ("0" * 64, ack["ack_id"]),
+        )
+    assert store.find_for_receipt(
+        receipt,
+        expected_authority_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        expected_claimant_did=claimant.as_did(),
+    ) == ack
+
+
+def test_save_does_not_overwrite_corrupt_existing_ack(tmp_path: Path) -> None:
+    authority, _claimant, announcement, _receipt, record = _fixture()
+    store = AuthorityClaimAckStore(tmp_path)
+    ack = sign_authority_claim_ack(
+        authority=authority, announcement=announcement, claim_record=record,
+    )
+    store.root.mkdir(parents=True)
+    path = store.root / f"{ack['ack_id']}.json"
+    path.write_bytes(b"{broken")
+    with pytest.raises(ValueError):
+        store.save(ack)
+    assert path.read_bytes() == b"{broken"
 
 
 @pytest.mark.parametrize(

@@ -7818,6 +7818,13 @@ class AcceptBody(BaseModel):
     completer_did: str
 
 
+class CompletionVerifyBody(BaseModel):
+    """Claimant-signed completion plus its separately signed execution receipt."""
+
+    completion_record: Dict[str, Any]
+    execution_receipt: Dict[str, Any]
+
+
 class SocialTargetBody(BaseModel):
     """社交动作入参(关注/好友):只需关系对象 DID;发起方=本节点身份,服务端签名。"""
 
@@ -23361,6 +23368,54 @@ def register_v2_routes(app: FastAPI) -> None:
             "stats": stats,
             "receipt_storage": receipt_storage,
             "next_cursor": next_cursor,
+        }
+
+    @app.post("/api/v2/market/claim-intents/{nonce}/completion/verify")
+    def v2_market_verify_claim_completion(
+        nonce: str, body: CompletionVerifyBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Verify an Agent-signed completion against this node's accepted claim."""
+
+        from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
+        from nth_dao.market.claim_intent import IntentTrackerCorrupt
+        from nth_dao.market.mission_completion import (
+            verify_confirmed_mission_completion,
+        )
+        from nth_dao.canonical_json import canonical_json
+
+        _require_federation_operator(request)
+        if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
+            raise HTTPException(status_code=422, detail="invalid claim nonce")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            completion_size = len(canonical_json(body.completion_record))
+            execution_size = len(canonical_json(body.execution_receipt))
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise HTTPException(
+                status_code=422, detail="completion evidence is not canonical JSON",
+            ) from exc
+        if completion_size > 256 * 1024 or execution_size > 256 * 1024:
+            raise HTTPException(
+                status_code=413, detail="completion evidence is too large",
+            )
+        try:
+            verified, reason = verify_confirmed_mission_completion(
+                ws, nonce, body.completion_record, body.execution_receipt,
+            )
+        except ClaimEvidenceUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (IntentTrackerCorrupt, OSError, TimeoutError, ValueError) as exc:
+            logger.warning("completion evidence is unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="completion evidence is unavailable",
+            ) from exc
+        return {
+            "nonce": nonce,
+            "verified": verified,
+            "reason": reason,
+            "verification_scope": "signed_evidence_only",
         }
 
     @app.post("/api/v2/market/claim-intents/{nonce}/reconcile")

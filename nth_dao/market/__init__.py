@@ -104,6 +104,10 @@ from nth_dao.market.claim_ack import (
     sign_authority_claim_ack,
     verify_authority_claim_ack,
 )
+from nth_dao.market.claim_evidence import (
+    ClaimEvidenceUnavailable,
+    resolve_confirmed_claim_evidence,
+)
 from nth_dao.market.claim_intent import (
     DEFAULT_INTENT_TTL_MS,
     DEFAULT_MAX_TRACKED_INTENTS,
@@ -127,6 +131,7 @@ from nth_dao.market.mission_completion import (
     MissionCompletionRejected,
     receipt_digest,
     sign_mission_completion,
+    verify_confirmed_mission_completion,
     verify_mission_completion,
 )
 from nth_dao.market.resource_profile import (
@@ -248,6 +253,8 @@ __all__ = [
     "sign_claim_intent",
     "verify_claim_intent",
     # Mission completion evidence chain
+    "ClaimEvidenceUnavailable",
+    "resolve_confirmed_claim_evidence",
     "COMPLETION_FIELDS",
     "COMPLETION_KIND",
     "COMPLETION_VERSION",
@@ -256,6 +263,7 @@ __all__ = [
     "MissionCompletionRejected",
     "receipt_digest",
     "sign_mission_completion",
+    "verify_confirmed_mission_completion",
     "verify_mission_completion",
     # Resource Profile Skills
     "PROFILE_KIND",
