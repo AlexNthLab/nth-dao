@@ -186,6 +186,76 @@ def test_completion_verification_requires_console_authorization(
     assert response.status_code in (401, 403)
 
 
+def test_claim_evidence_summary_requires_complete_signed_chain(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    tracker, intent, receipt, ack, _claimant, _ann = _prepared_claim(
+        tmp_path, include_signer=True, mission_id="mission-1",
+    )
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    url = f"/api/v2/market/claim-intents/{intent['nonce']}/evidence"
+    assert client.get(url).status_code == 409
+    tracker.mark(intent, "confirmed")
+    assert client.get(url).status_code == 409
+    path = AuthorityClaimAckStore(tmp_path).save(ack)
+    response = client.get(url)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "nonce": intent["nonce"],
+        "evidence_verified": True,
+        "verification_scope": "signed_claim_only",
+        "claim_receipt_id": receipt["receipt_id"],
+        "authority_ack_id": ack["ack_id"],
+        "claimant_did": intent["claimant_did"],
+        "source_did": ack["authority_did"],
+        "mission_id": "mission-1",
+    }
+    assert client.get(
+        "/api/v2/market/claim-intents/invalid!/evidence"
+    ).status_code == 422
+    path.write_text("{}", encoding="utf-8")
+    assert client.get(url).status_code == 503
+
+
+def test_claim_evidence_summary_requires_console_authorization(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    client = TestClient(create_app(tmp_path, require_console_auth=True))
+    response = client.get(
+        "/api/v2/market/claim-intents/1234567890123456/evidence"
+    )
+    assert response.status_code in (401, 403)
+
+
+def test_claim_evidence_summary_accepts_maximum_mission_id(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    mission_id = "m" * 256
+    tracker, intent, _receipt, ack = _prepared_claim(
+        tmp_path, mission_id=mission_id,
+    )
+    tracker.mark(intent, "confirmed")
+    AuthorityClaimAckStore(tmp_path).save(ack)
+    with TestClient(create_app(tmp_path, require_console_auth=False)) as client:
+        response = client.get(
+            f"/api/v2/market/claim-intents/{intent['nonce']}/evidence"
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["mission_id"] == mission_id
+
+
 def test_confirmed_claim_evidence_requires_retained_receipt_and_source_ack(
     tmp_path: Path,
 ) -> None:
@@ -210,6 +280,18 @@ def test_confirmed_claim_evidence_rejects_tampered_ack(tmp_path: Path) -> None:
     path = AuthorityClaimAckStore(tmp_path).save(ack)
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="malformed record"):
+        resolve_confirmed_claim_evidence(tmp_path, intent["nonce"])
+
+
+def test_confirmed_claim_evidence_rejects_corrupt_ack_after_cold_start(
+    tmp_path: Path,
+) -> None:
+    tracker, intent, _receipt, ack = _prepared_claim(tmp_path)
+    tracker.mark(intent, "confirmed")
+    path = AuthorityClaimAckStore(tmp_path).save(ack)
+    path.write_text("{}", encoding="utf-8")
+    AuthorityClaimAckStore._directory_cache.clear()
+    with pytest.raises(ValueError, match="unreadable record"):
         resolve_confirmed_claim_evidence(tmp_path, intent["nonce"])
 
 

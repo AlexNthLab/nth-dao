@@ -27,6 +27,23 @@ The primary navigation remains stable:
 - **Blackboard** is the human-visible execution record for a Mission.
 - **Mandates** define authority and transaction limits.
 
+For a cross-DAO Task claim, **My claims** may re-verify the retained signed
+claim receipt and the source authority's ACK on demand. A confirmed intent
+without both records is not shown as verified evidence. This check proves
+source-accepted claim provenance only; it does not complete the Mission,
+accept delivery, authorize payment, or establish that the work was correct.
+ACK lookup enumerates filenames on each check to detect direct file/Git imports
+even if directory timestamps are restored. It reuses prior content bindings
+for unchanged content-addressed names and never trusts the obsolete SQLite
+index for evidence completeness. A malformed or invalidly signed file with a
+valid ACK filename blocks verification, since its receipt binding cannot be
+trusted.
+The directory scan fails closed above 65,536 entries instead of consuming
+unbounded work on a request; operators must archive or migrate before that
+limit. This remains a linear scan, not a scalable lookup index.
+A fully sublinear lookup would require a new
+authoritative on-disk layout and migration of direct-sync clients.
+
 Market uses familiar sections:
 
 1. **Discover** - all searchable market entries, with broad facets.

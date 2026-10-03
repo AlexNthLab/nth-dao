@@ -475,6 +475,18 @@ export interface ClaimIntentPage {
   };
 }
 
+/** Verified local provenance of a source-accepted claim, not completion. */
+export interface ClaimEvidenceSummary {
+  nonce: string;
+  evidence_verified: true;
+  verification_scope: "signed_claim_only";
+  claim_receipt_id: string;
+  authority_ack_id: string;
+  claimant_did: string;
+  source_did: string;
+  mission_id: string;
+}
+
 export type MarketSearchCategory =
   | "tasks"
   | "products"

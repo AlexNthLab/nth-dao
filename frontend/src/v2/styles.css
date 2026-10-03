@@ -1473,6 +1473,9 @@ select option {
 .task-claim-intent-meta code { overflow-wrap: anywhere; }
 .task-claim-intent-actions { display: flex; align-items: center; justify-content: flex-end; min-height: 30px; }
 .task-claim-intent-actions .btn { font-size: 11px; }
+.task-claim-evidence { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 14px; min-width: 0; border-top: 1px solid var(--border); padding-top: 8px; font-size: 11px; color: var(--fg-tertiary); }
+.task-claim-evidence strong { color: var(--accent); }
+.task-claim-evidence span, .task-claim-evidence code { min-width: 0; overflow-wrap: anywhere; }
 .claim-intent-pending { color: var(--warning); border-color: var(--warning); }
 .claim-intent-confirmed { color: var(--accent); border-color: var(--accent); }
 .claim-intent-rejected { color: var(--danger); border-color: var(--danger); }

@@ -28,6 +28,7 @@ import type {
   Channel,
   ChannelMessage,
   ClaimIntentPage,
+  ClaimEvidenceSummary,
   ChatMessage,
   Conversation,
   ConversationSummary,
@@ -3264,6 +3265,57 @@ export async function listClaimIntents(
     `/market/claim-intents?limit=${encodeURIComponent(String(limit))}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
     signal,
   );
+}
+
+/** Re-verify the retained claim receipt and source authority ACK on demand. */
+export async function getClaimEvidence(
+  nonce: string,
+  signal?: AbortSignal,
+): Promise<ClaimEvidenceSummary> {
+  const path = `/market/claim-intents/${encodeURIComponent(nonce)}/evidence`;
+  const response = await fetch(`${BASE}${path}`, {
+    signal,
+    headers: { Accept: "application/json", ...authHeader() },
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    const message = response.status === 409
+      ? "Claim is unconfirmed or signed evidence is missing"
+      : response.status === 503
+        ? "Claim evidence storage is temporarily unavailable"
+        : response.status === 401 || response.status === 403
+          ? "Console access is required to verify claim evidence"
+          : response.status === 404
+            ? "This server does not support claim evidence checks"
+            : `Claim evidence check failed (HTTP ${response.status})`;
+    throw new Error(message);
+  }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error("Invalid claim evidence summary");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid claim evidence summary");
+  }
+  const item = value as Record<string, unknown>;
+  const fields = [
+    "claim_receipt_id", "authority_ack_id", "claimant_did", "source_did",
+  ];
+  if (
+    item.nonce !== nonce
+    || item.evidence_verified !== true
+    || item.verification_scope !== "signed_claim_only"
+    || typeof item.mission_id !== "string"
+    || item.mission_id.length > 256
+    || new TextEncoder().encode(item.mission_id).length > 256
+    || fields.some((key) => typeof item[key] !== "string"
+      || !(item[key] as string).length || (item[key] as string).length > 1024)
+  ) {
+    throw new Error("Invalid claim evidence summary");
+  }
+  return item as unknown as ClaimEvidenceSummary;
 }
 
 /** Ask the original DAO authority to recover a lost signed claim ACK. */

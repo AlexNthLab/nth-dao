@@ -60,6 +60,7 @@ vi.mock("../api", () => ({
     discovery_errors: [],
   }),
   fetchAgents: vi.fn().mockResolvedValue([]),
+  getClaimEvidence: vi.fn(),
   listClaimIntents: vi.fn().mockResolvedValue({ items: [], stats: {} }),
   reconcileClaimIntent: vi.fn(),
   claimTask: vi.fn(),
@@ -71,6 +72,7 @@ import {
   claimTask,
   discoverFederationPeers,
   fetchAgents,
+  getClaimEvidence,
   listClaimIntents,
   listOpenTasks,
   reconcileClaimIntent,
@@ -86,6 +88,148 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
+  it("checks confirmed claim provenance without claiming mission completion", async () => {
+    const nonce = "v".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "signed-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getClaimEvidence).mockResolvedValueOnce({
+      nonce, evidence_verified: true, verification_scope: "signed_claim_only",
+      claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+      claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+      mission_id: "mission-1",
+    });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Verify claim evidence" }));
+    expect(await screen.findByText("Claim evidence verified")).toBeTruthy();
+    expect(screen.getByText(/Signed claim only/)).toBeTruthy();
+    expect(screen.getByText(/Checked locally:/)).toBeTruthy();
+    expect(screen.getByText(/Advertised mission ID/)).toBeTruthy();
+    expect(screen.getByText(/mission-1/)).toBeTruthy();
+    expect(screen.queryByText(/Mission completed/)).toBeNull();
+    expect(getClaimEvidence).toHaveBeenCalledWith(nonce, expect.any(AbortSignal));
+    fireEvent.click(screen.getByRole("button", { name: /Available/ }));
+    fireEvent.click(screen.getByRole("button", { name: /My claims/ }));
+    expect(screen.queryByText("Claim evidence verified")).toBeNull();
+  });
+
+  it("shows a missing ACK and discards an in-flight check on refresh", async () => {
+    const nonce = "w".repeat(24);
+    const record = {
+      state: "confirmed" as const, receipt_id: "receipt-1", source_did: "did:key:zSource",
+      intent: {
+        kind: "nth-market-claim-intent" as const, version: 1,
+        announcement_id: "source-task", claimant_did: "did:key:zClaimant",
+        cap_token_id: "token-1", nonce,
+        created_at_ms: 1_700_000_000_000,
+        expires_at_ms: 1_700_001_800_000, signature: "signature",
+      },
+    };
+    vi.mocked(listClaimIntents).mockResolvedValue({
+      items: [record], stats: { confirmed: 1 },
+    });
+    vi.mocked(getClaimEvidence).mockRejectedValueOnce(new Error("HTTP 409"));
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Verify claim evidence" }));
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent", expect.stringContaining("Claim evidence unavailable"),
+    );
+
+    let resolveOld!: (value: Awaited<ReturnType<typeof getClaimEvidence>>) => void;
+    vi.mocked(getClaimEvidence).mockReturnValueOnce(
+      new Promise((resolve) => { resolveOld = resolve; }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Verify claim evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await act(async () => {
+      resolveOld({
+        nonce, evidence_verified: true, verification_scope: "signed_claim_only",
+        claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+        claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+        mission_id: "mission-1",
+      });
+    });
+    expect(screen.queryByText("Claim evidence verified")).toBeNull();
+  });
+
+  it("discards an in-flight evidence check when leaving My claims", async () => {
+    const nonce = "y".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "source-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    let resolveCheck!: (value: Awaited<ReturnType<typeof getClaimEvidence>>) => void;
+    vi.mocked(getClaimEvidence).mockReturnValueOnce(
+      new Promise((resolve) => { resolveCheck = resolve; }),
+    );
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Verify claim evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: /Available/ }));
+    await act(async () => {
+      resolveCheck({
+        nonce, evidence_verified: true, verification_scope: "signed_claim_only",
+        claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+        claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+        mission_id: "mission-1",
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: /My claims/ }));
+    expect(screen.queryByText("Claim evidence verified")).toBeNull();
+  });
+
+  it.each([
+    { claim_receipt_id: "other-receipt" },
+    { claimant_did: "did:key:zOther" },
+    { source_did: "did:key:zOther" },
+  ])("rejects evidence that differs from the visible claim: %o", async (override) => {
+    const nonce = "x".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "source-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getClaimEvidence).mockResolvedValueOnce({
+      nonce, evidence_verified: true, verification_scope: "signed_claim_only",
+      claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+      claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+      mission_id: "mission-1", ...override,
+    });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Verify claim evidence" }));
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent", expect.stringContaining("does not match this claim"),
+    );
+    expect(screen.queryByText("Claim evidence verified")).toBeNull();
+  });
+
   it("loads older recoverable claims through the cursor and keeps earlier cards", async () => {
     const makeRecord = (nonce: string, name: string) => ({
       state: "pending" as const, receipt_id: `receipt-${name}`,

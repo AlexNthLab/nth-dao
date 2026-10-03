@@ -23370,6 +23370,45 @@ def register_v2_routes(app: FastAPI) -> None:
             "next_cursor": next_cursor,
         }
 
+    @app.get("/api/v2/market/claim-intents/{nonce}/evidence")
+    def v2_market_claim_evidence_summary(
+        nonce: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Summarize verified claim provenance, without accepting completion."""
+
+        from nth_dao.market.claim_evidence import (
+            ClaimEvidenceUnavailable,
+            resolve_confirmed_claim_evidence,
+        )
+        from nth_dao.market.claim_intent import IntentTrackerCorrupt
+
+        _require_federation_operator(request)
+        if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
+            raise HTTPException(status_code=422, detail="invalid claim nonce")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            evidence = resolve_confirmed_claim_evidence(ws, nonce)
+        except ClaimEvidenceUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (IntentTrackerCorrupt, OSError, TimeoutError, ValueError) as exc:
+            logger.warning("claim evidence cannot be verified: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="claim evidence is unavailable",
+            ) from exc
+        receipt = evidence["claim_receipt"]
+        return {
+            "nonce": nonce,
+            "evidence_verified": True,
+            "verification_scope": "signed_claim_only",
+            "claim_receipt_id": receipt["receipt_id"],
+            "authority_ack_id": evidence["authority_ack"]["ack_id"],
+            "claimant_did": evidence["intent"]["claimant_did"],
+            "source_did": evidence["source_did"],
+            "mission_id": receipt["timeline"][0]["payload"]["mission_id"],
+        }
+
     @app.post("/api/v2/market/claim-intents/{nonce}/completion/verify")
     def v2_market_verify_claim_completion(
         nonce: str, body: CompletionVerifyBody, request: Request,

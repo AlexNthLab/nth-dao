@@ -7,6 +7,7 @@ import {
   getFederationStatus,
   announceTask,
   claimFederatedTask,
+  getClaimEvidence,
   listClaimIntents,
   reconcileClaimIntent,
   listOpenTasks,
@@ -72,6 +73,72 @@ describe("v2 agent discovery API wiring", () => {
       `/api/v2/market/claim-intents/${"a".repeat(24)}/reconcile`,
       expect.objectContaining({ method: "POST", credentials: "same-origin" }),
     );
+  });
+
+  it("fetches a bounded verified claim summary by nonce", async () => {
+    const nonce = "a".repeat(24);
+    const summary = {
+      nonce, evidence_verified: true, verification_scope: "signed_claim_only",
+      claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+      claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+      mission_id: "mission-1",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(summary));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getClaimEvidence(nonce)).resolves.toEqual(summary);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/market/claim-intents/${nonce}/evidence`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it.each([
+    ["m".repeat(200), true],
+    ["m".repeat(256), true],
+    ["m".repeat(257), false],
+    ["é".repeat(128), true],
+    ["é".repeat(129), false],
+  ])("enforces the signed announcement's UTF-8 mission ID bound", async (missionId, valid) => {
+    const nonce = "a".repeat(24);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      nonce, evidence_verified: true, verification_scope: "signed_claim_only",
+      claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+      claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+      mission_id: missionId,
+    })));
+    if (valid) {
+      await expect(getClaimEvidence(nonce)).resolves.toMatchObject({ mission_id: missionId });
+    } else {
+      await expect(getClaimEvidence(nonce)).rejects.toThrow("Invalid claim evidence summary");
+    }
+  });
+
+  it.each([
+    { nonce: "b".repeat(24), evidence_verified: true, verification_scope: "signed_claim_only" },
+    { nonce: "a".repeat(24), evidence_verified: false, verification_scope: "signed_claim_only" },
+    { nonce: "a".repeat(24), evidence_verified: true, verification_scope: "mission_completed" },
+  ])("rejects a misbound claim summary: %o", async (override) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      claim_receipt_id: "receipt-1", authority_ack_id: "ack-1",
+      claimant_did: "did:key:zClaimant", source_did: "did:key:zSource",
+      mission_id: "",
+      ...override,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getClaimEvidence("a".repeat(24))).rejects.toThrow(
+      "Invalid claim evidence summary",
+    );
+  });
+
+  it.each([
+    [409, "Claim is unconfirmed or signed evidence is missing"],
+    [503, "Claim evidence storage is temporarily unavailable"],
+    [403, "Console access is required to verify claim evidence"],
+    [404, "This server does not support claim evidence checks"],
+  ])("explains claim evidence HTTP %i without exposing a raw route", async (status, message) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({}, status)));
+    await expect(getClaimEvidence("a".repeat(24))).rejects.toThrow(message);
   });
 
   it("adds a pasted DID through the hardened legacy add endpoint", async () => {

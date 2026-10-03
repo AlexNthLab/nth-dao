@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
-import sqlite3
+import re
 import stat
-from contextlib import closing
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -38,7 +38,7 @@ _ACK_KEYS = {
     "authority_sig",
 }
 _MAX_ACK_FILE_BYTES = 64 * 1024
-logger = logging.getLogger("nth_dao.market")
+_ACK_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _sha256_json(value: Any) -> str:
@@ -165,137 +165,61 @@ def verify_authority_claim_ack(
 class AuthorityClaimAckStore:
     """Immutable local store of source-authority claim acknowledgements."""
 
+    _cache_lock = threading.RLock()
+    _directory_cache: OrderedDict[Path, dict[str, str]] = OrderedDict()
+    _MAX_CACHED_WORKSPACES = 16
+    _MAX_DIRECTORY_ENTRIES = 65_536
+
     def __init__(self, workspace: Path) -> None:
         self.root = Path(workspace) / "federation" / "claim_acks"
 
-    @staticmethod
-    def _ensure_index_schema(db: sqlite3.Connection) -> None:
-        with db:
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS files "
-                "(ack_id TEXT PRIMARY KEY, receipt_hash TEXT NOT NULL, "
-                "size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL)"
-            )
-            db.execute(
-                "CREATE INDEX IF NOT EXISTS by_receipt ON files(receipt_hash)"
-            )
+    def _cached_bindings(self) -> dict[str, str]:
+        key = self.root.absolute()
+        mapping = self._directory_cache.setdefault(key, {})
+        self._directory_cache.move_to_end(key)
+        while len(self._directory_cache) > self._MAX_CACHED_WORKSPACES:
+            self._directory_cache.popitem(last=False)
+        return mapping
 
-    def _index_dir(self) -> Path:
+    def _candidates(self, receipt_hash: str) -> list[Path]:
+        """Map immutable ACK filenames from disk; never trust a mutable index.
+
+        Enumerating names on every read discovers Git-synced files even when a
+        directory mtime is restored. A valid ACK cannot change its receipt
+        binding without changing its content-addressed ACK ID.
+        """
         if self.root.is_symlink():
             raise ValueError("claim ACK store root must not be a symlink")
-        index_dir = self.root / "_index"
-        if index_dir.is_symlink():
-            raise ValueError("claim ACK index must not be a symlink")
-        index_dir.mkdir(exist_ok=True)
-        if (index_dir / "ack-index.sqlite3").is_symlink():
-            raise ValueError("claim ACK index database must not be a symlink")
-        return index_dir
-
-    def _register_ack(self, ack: Dict[str, Any], path: Path) -> None:
-        """Index one durable ACK without re-reading every historical file."""
-        index_dir = self._index_dir()
-        with InterProcessLock(index_dir / "ack-index.lock"):
-            try:
-                with closing(
-                    sqlite3.connect(index_dir / "ack-index.sqlite3", timeout=10)
-                ) as db:
-                    db.execute("PRAGMA synchronous=FULL")
-                    self._ensure_index_schema(db)
-                    file_stat = path.stat()
-                    with db:
-                        db.execute(
-                            "INSERT INTO files (ack_id, receipt_hash, size, mtime_ns) "
-                            "VALUES (?, ?, ?, ?) ON CONFLICT(ack_id) DO UPDATE SET "
-                            "receipt_hash=excluded.receipt_hash, size=excluded.size, "
-                            "mtime_ns=excluded.mtime_ns",
-                            (ack["ack_id"], ack["claim_receipt_hash"],
-                             file_stat.st_size, file_stat.st_mtime_ns),
-                        )
-            except sqlite3.DatabaseError as exc:
-                logger.warning("claim ACK index update failed; ACK is durable: %s", exc)
-
-    def _scan_candidates(self, receipt_hash: str) -> list[Path]:
-        """Read-only recovery path when the derived SQLite index is unusable."""
-        candidates: list[Path] = []
-        for path in self.root.glob("*.json"):
-            try:
-                ack = self._read_ack(path)
-            except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
-                continue  # The explicit audit reports unrelated bad records.
-            if ack["claim_receipt_hash"] == receipt_hash:
-                candidates.append(path)
-        return candidates
-
-    def _indexed_candidates(self, receipt_hash: str) -> list[Path]:
-        """Refresh an advisory index when the immutable ACK directory changes."""
         if not self.root.exists():
             return []
-        if self.root.is_symlink():
-            raise ValueError("claim ACK store root must not be a symlink")
-        try:
-            index_dir = self._index_dir()
-            with InterProcessLock(index_dir / "ack-index.lock"):
-                index_path = index_dir / "ack-index.sqlite3"
-                with closing(sqlite3.connect(index_path, timeout=10)) as db:
-                    db.execute("PRAGMA synchronous=FULL")
-                    self._ensure_index_schema(db)
-                    known = {row[0] for row in db.execute("SELECT ack_id FROM files")}
-                    seen: set[str] = set()
-                    with db:
-                        for path in self.root.glob("*.json"):
-                            seen.add(path.stem)
-                            if path.stem in known:
-                                continue
-                            try:
-                                ack = self._read_ack(path)
-                            except (
-                                ValueError,
-                                OSError,
-                                UnicodeError,
-                                json.JSONDecodeError,
-                            ):
-                                continue
-                            file_stat = path.stat()
-                            db.execute(
-                                "INSERT INTO files "
-                                "(ack_id, receipt_hash, size, mtime_ns) "
-                                "VALUES (?, ?, ?, ?)",
-                                (
-                                    path.stem, ack["claim_receipt_hash"],
-                                    file_stat.st_size, file_stat.st_mtime_ns,
-                                ),
-                            )
-                        for missing in known - seen:
-                            db.execute("DELETE FROM files WHERE ack_id = ?", (missing,))
-                    ids = [
-                        row[0]
-                        for row in db.execute(
-                            "SELECT ack_id FROM files WHERE receipt_hash = ?",
-                            (receipt_hash,),
-                        )
-                    ]
-                    if not ids:
-                        recovered = self._scan_candidates(receipt_hash)
-                        with db:
-                            for path in recovered:
-                                file_stat = path.stat()
-                                db.execute(
-                                    "INSERT INTO files "
-                                    "(ack_id, receipt_hash, size, mtime_ns) "
-                                    "VALUES (?, ?, ?, ?) "
-                                    "ON CONFLICT(ack_id) DO UPDATE SET "
-                                    "receipt_hash=excluded.receipt_hash, "
-                                    "size=excluded.size, mtime_ns=excluded.mtime_ns",
-                                    (path.stem, receipt_hash,
-                                     file_stat.st_size, file_stat.st_mtime_ns),
-                                )
-                        ids = [path.stem for path in recovered]
-        except (sqlite3.DatabaseError, OSError, TimeoutError, ValueError) as exc:
-            logger.warning(
-                "claim ACK index is unavailable; scanning ACK files: %s", exc
-            )
-            return self._scan_candidates(receipt_hash)
-        return [self.root / f"{ack_id}.json" for ack_id in ids]
+        with self._cache_lock:
+            mapping = self._cached_bindings()
+            with os.scandir(self.root) as entries:
+                names = set()
+                for count, entry in enumerate(entries, start=1):
+                    if count > self._MAX_DIRECTORY_ENTRIES:
+                        raise ValueError("claim ACK directory exceeds lookup limit")
+                    if entry.name.endswith(".json") and _ACK_ID_RE.fullmatch(
+                        entry.name[:-5]
+                    ):
+                        names.add(entry.name[:-5])
+            for missing in mapping.keys() - names:
+                del mapping[missing]
+            for ack_id in names - mapping.keys():
+                try:
+                    ack = self._read_ack(self.root / f"{ack_id}.json")
+                except (ValueError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "claim ACK store contains an unreadable record"
+                    ) from exc
+                ok, reason = verify_authority_claim_ack(ack)
+                if not ok:
+                    raise ValueError(
+                        f"claim ACK store contains invalid evidence: {reason}"
+                    )
+                mapping[ack_id] = ack["claim_receipt_hash"]
+            return [self.root / f"{ack_id}.json" for ack_id, value in mapping.items()
+                    if value == receipt_hash]
 
     @staticmethod
     def _read_ack(path: Path) -> Dict[str, Any]:
@@ -352,6 +276,8 @@ class AuthorityClaimAckStore:
     def audit(self) -> int:
         """Verify every ACK, including records not selected by the lookup index."""
         count = 0
+        if self.root.is_symlink():
+            raise ValueError("claim ACK store root must not be a symlink")
         if not self.root.exists():
             return count
         for path in self.root.glob("*.json"):
@@ -379,10 +305,8 @@ class AuthorityClaimAckStore:
                     raise ValueError("claim ack id collision")
             else:
                 atomic_write_json(path, ack, ensure_ascii=True, indent=2)
-        try:
-            self._register_ack(ack, path)
-        except (OSError, TimeoutError, ValueError) as exc:
-            logger.warning("claim ACK index update failed; ACK is durable: %s", exc)
+        with self._cache_lock:
+            self._cached_bindings()[ack_id] = ack["claim_receipt_hash"]
         return path
 
     def load(self, ack_id: str) -> Optional[Dict[str, Any]]:
@@ -405,8 +329,9 @@ class AuthorityClaimAckStore:
     ) -> Optional[Dict[str, Any]]:
         """Resolve a retained ACK by exact signed receipt and pinned source.
 
-        The index is advisory: selected records are still fully verified.
-        Invalid unrelated records are reported by audit(), not by this lookup.
+        No untrusted directory index may omit a candidate. Malformed files
+        with valid ACK names fail closed because their receipt binding cannot
+        be recovered from their content.
         """
 
         if (
@@ -439,7 +364,7 @@ class AuthorityClaimAckStore:
         wanted_hash = _sha256_json(receipt)
         matches: list[Dict[str, Any]] = []
         try:
-            for path in self._indexed_candidates(wanted_hash):
+            for path in self._candidates(wanted_hash):
                 ack = self._read_ack(path)
                 ok, reason = verify_authority_claim_ack(ack)
                 if not ok:

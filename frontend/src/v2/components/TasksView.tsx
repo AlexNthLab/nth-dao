@@ -9,7 +9,8 @@
  */
 import { useEffect, useRef, useState } from "react";
 import {
-  claimFederatedTask, claimTask, fetchAgents, listClaimIntents, listOpenTasks,
+  claimFederatedTask, claimTask, fetchAgents, getClaimEvidence,
+  listClaimIntents, listOpenTasks,
   listTaskCategories, reconcileClaimIntent,
 } from "../api";
 import { IconBriefcase } from "./Icons";
@@ -18,6 +19,7 @@ import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
 import type {
   AgentEntry,
+  ClaimEvidenceSummary,
   ClaimIntentPage,
   ClaimIntentRecord,
   TaskAnnouncement,
@@ -86,6 +88,10 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const [claimIntentVersion, setClaimIntentVersion] = useState(0);
   const [reconcilingNonce, setReconcilingNonce] = useState("");
   const [retryEligibleNonce, setRetryEligibleNonce] = useState("");
+  const [checkingEvidenceNonce, setCheckingEvidenceNonce] = useState("");
+  const [claimEvidence, setClaimEvidence] = useState<Record<string, ClaimEvidenceSummary & { checkedAtMs: number }>>({});
+  const [claimEvidenceError, setClaimEvidenceError] = useState<Record<string, string>>({});
+  const evidenceController = useRef<AbortController | null>(null);
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -151,6 +157,11 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
 
   useEffect(() => {
     const ac = new AbortController();
+    evidenceController.current?.abort();
+    evidenceController.current = null;
+    setCheckingEvidenceNonce("");
+    setClaimEvidence({});
+    setClaimEvidenceError({});
     claimMoreController.current?.abort();
     claimMoreController.current = null;
     setClaimIntentLoading(true);
@@ -179,9 +190,22 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
       });
     return () => {
       ac.abort();
+      evidenceController.current?.abort();
       claimMoreController.current?.abort();
     };
   }, [claimIntentVersion]);
+
+
+  function selectTab(nextTab: "market" | "mine" | "claims") {
+    if (tab === "claims" && nextTab !== "claims") {
+      evidenceController.current?.abort();
+      evidenceController.current = null;
+      setCheckingEvidenceNonce("");
+      setClaimEvidence({});
+      setClaimEvidenceError({});
+    }
+    setTab(nextTab);
+  }
 
   async function loadOlderClaims() {
     if (!claimNextCursor || claimLoadingMore || claimIntentLoading || claimIntentError) return;
@@ -376,6 +400,52 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
     }
   }
 
+  async function handleCheckEvidence(record: ClaimIntentRecord) {
+    if (checkingEvidenceNonce || evidenceController.current) return;
+    const nonce = record.intent.nonce;
+    const ac = new AbortController();
+    evidenceController.current = ac;
+    setCheckingEvidenceNonce(nonce);
+    setClaimEvidence((current) => {
+      const next = { ...current };
+      delete next[nonce];
+      return next;
+    });
+    setClaimEvidenceError((current) => {
+      const next = { ...current };
+      delete next[nonce];
+      return next;
+    });
+    try {
+      const summary = await getClaimEvidence(nonce, ac.signal);
+      if (!ac.signal.aborted) {
+        if (
+          summary.claim_receipt_id !== record.receipt_id
+          || summary.claimant_did !== record.intent.claimant_did
+          || !record.source_did
+          || summary.source_did !== record.source_did
+        ) {
+          throw new Error("Claim evidence does not match this claim");
+        }
+        setClaimEvidence((current) => ({
+          ...current, [nonce]: { ...summary, checkedAtMs: Date.now() },
+        }));
+      }
+    } catch (error) {
+      if (!ac.signal.aborted) {
+        setClaimEvidenceError((current) => ({
+          ...current,
+          [nonce]: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    } finally {
+      if (evidenceController.current === ac) {
+        evidenceController.current = null;
+        if (!ac.signal.aborted) setCheckingEvidenceNonce("");
+      }
+    }
+  }
+
   return (
     <>
       <aside className="sidebar">
@@ -493,7 +563,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             <button
               className={`btn ${tab === "market" ? "btn-primary" : "btn-ghost"}`}
               style={{ fontSize: 12 }}
-              onClick={() => setTab("market")}
+              onClick={() => selectTab("market")}
               title={t("各 DAO 发布的、可承接的活(含联邦)", "Claimable work from across DAOs (incl. federated)")}
             >
               Available ({tasks.length})
@@ -501,7 +571,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             <button
               className={`btn ${tab === "mine" ? "btn-primary" : "btn-ghost"}`}
               style={{ fontSize: 12 }}
-              onClick={() => setTab("mine")}
+              onClick={() => selectTab("mine")}
               title={t("本节点发布、供他人认领的活", "Tasks this DAO published for others to claim")}
             >
               {t("我发布的", "My published")} ({myTasks.length})
@@ -509,7 +579,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             <button
               className={`btn ${tab === "claims" ? "btn-primary" : "btn-ghost"}`}
               style={{ fontSize: 12 }}
-              onClick={() => setTab("claims")}
+              onClick={() => selectTab("claims")}
             >
               {t("我的认领", "My claims")} ({claimIntentError || claimIntentLoading ? "?" : `${claimIntents.length}${claimNextCursor ? "+" : ""}`})
             </button>
@@ -641,6 +711,31 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                       )}
                     </div>
                   )}
+                  {state === "confirmed" && <>
+                    <div className="task-claim-intent-actions">
+                      <button className="btn btn-ghost" type="button"
+                        disabled={Boolean(checkingEvidenceNonce)}
+                        onClick={() => void handleCheckEvidence(record)}>
+                        {checkingEvidenceNonce === intent.nonce
+                          ? "Checking…"
+                          : "Verify claim evidence"}
+                      </button>
+                    </div>
+                    {claimEvidenceError[intent.nonce] && <p role="alert" className="danger-text">
+                      Claim evidence unavailable: {claimEvidenceError[intent.nonce]}
+                    </p>}
+                    {claimEvidence[intent.nonce] && <div className="task-claim-evidence" role="status">
+                      <strong>Claim evidence verified</strong>
+                      <span>Scope: Signed claim only</span>
+                      <span>Checked locally: <time dateTime={new Date(claimEvidence[intent.nonce].checkedAtMs).toISOString()}>{new Date(claimEvidence[intent.nonce].checkedAtMs).toLocaleString()}</time></span>
+                      <span>Claim receipt: <code title={claimEvidence[intent.nonce].claim_receipt_id}>{claimEvidence[intent.nonce].claim_receipt_id.slice(0, 18)}…</code></span>
+                      <span>Authority ACK: <code title={claimEvidence[intent.nonce].authority_ack_id}>{claimEvidence[intent.nonce].authority_ack_id.slice(0, 18)}…</code></span>
+                      <span>Source DID: <code title={claimEvidence[intent.nonce].source_did}>{claimEvidence[intent.nonce].source_did.slice(0, 22)}…</code></span>
+                      {claimEvidence[intent.nonce].mission_id && <span>
+                        Advertised mission ID: <code>{claimEvidence[intent.nonce].mission_id}</code>
+                      </span>}
+                    </div>}
+                  </>}
                 </article>
                 );
               })}
