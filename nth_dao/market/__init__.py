@@ -108,6 +108,17 @@ from nth_dao.market.claim_evidence import (
     ClaimEvidenceUnavailable,
     resolve_confirmed_claim_evidence,
 )
+from nth_dao.market.completion_store import (
+    ClaimCompletionStore,
+    CompletionEvidenceConflict,
+    CompletionEvidenceCorrupt,
+    CompletionEvidenceRejected,
+)
+from nth_dao.market.completion_flow import (
+    build_portable_completion_proof,
+    record_local_mission_completion,
+    verify_portable_completion_proof,
+)
 from nth_dao.market.claim_intent import (
     DEFAULT_INTENT_TTL_MS,
     DEFAULT_MAX_TRACKED_INTENTS,
@@ -255,6 +266,13 @@ __all__ = [
     # Mission completion evidence chain
     "ClaimEvidenceUnavailable",
     "resolve_confirmed_claim_evidence",
+    "ClaimCompletionStore",
+    "CompletionEvidenceConflict",
+    "CompletionEvidenceCorrupt",
+    "CompletionEvidenceRejected",
+    "build_portable_completion_proof",
+    "record_local_mission_completion",
+    "verify_portable_completion_proof",
     "COMPLETION_FIELDS",
     "COMPLETION_KIND",
     "COMPLETION_VERSION",

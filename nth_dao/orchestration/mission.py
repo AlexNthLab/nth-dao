@@ -516,12 +516,10 @@ class Mission:
         }
 
     def is_finished(self) -> bool:
-        """所有 step 都 DONE / HANDED_OFF 终态？空 step list = False（待规划）。"""
+        """All steps delivered work; a handoff is still awaiting the next agent."""
         if not self.steps:
             return False
-        # HANDED_OFF 算"我方做完了"，新 owner 会继续推进
-        terminal_ok = {StepStatus.DONE.value, StepStatus.HANDED_OFF.value}
-        return all(s.status in terminal_ok for s in self.steps)
+        return all(s.status == StepStatus.DONE.value for s in self.steps)
 
     def short(self) -> str:
         p = self.progress()

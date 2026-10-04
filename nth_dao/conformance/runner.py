@@ -760,9 +760,9 @@ def check_market_claim_intent_v1(vectors: List[dict]) -> List[ConformanceFailure
 
 
 def check_market_mission_completion_v1(
-    vectors: List[dict],
+    vectors: List[dict], *, category: str = "market_mission_completion_v1",
 ) -> List[ConformanceFailure]:
-    """Verify MissionCompletion v1 evidence chain and canonical bytes."""
+    """Verify MissionCompletion evidence chain and canonical bytes."""
     from ..market.mission_completion import receipt_digest, verify_mission_completion
 
     failures: List[ConformanceFailure] = []
@@ -781,7 +781,7 @@ def check_market_mission_completion_v1(
         if actual != expected:
             failures.append(ConformanceFailure(
                 vector_id=vector.get("id", "market-mission-completion:invalid"),
-                category="market_mission_completion_v1",
+                category=category,
                 description="validation result",
                 expected=expected,
                 actual=actual,
@@ -793,7 +793,7 @@ def check_market_mission_completion_v1(
             if actual_canonical != expected_canonical:
                 failures.append(ConformanceFailure(
                     vector_id=vector["id"],
-                    category="market_mission_completion_v1",
+                    category=category,
                     description="canonical completion bytes",
                     expected=expected_canonical,
                     actual=actual_canonical,
@@ -804,11 +804,105 @@ def check_market_mission_completion_v1(
             if actual_digest != expected_digest:
                 failures.append(ConformanceFailure(
                     vector_id=vector["id"],
-                    category="market_mission_completion_v1",
+                    category=category,
                     description="completion record digest",
                     expected=expected_digest,
                     actual=actual_digest,
                 ))
+    return failures
+
+
+def check_market_completion_lineage_vectors(
+    vectors: List[dict], *, category: str,
+) -> List[ConformanceFailure]:
+    """Verify signed records plus the complete predecessor graph on the wire."""
+    from ..market.mission_completion import (
+        CompletionLineageError, receipt_digest, resolve_completion_lineage,
+        verify_mission_completion,
+    )
+
+    def check(vector: dict) -> tuple[bool, str]:
+        chain = vector.get("completion_chain")
+        if not isinstance(chain, list) or not 1 <= len(chain) <= 32:
+            return False, "completion chain is invalid"
+        envelopes = {}
+        presented = []
+        nonce = chain[0].get("nonce") if isinstance(chain[0], dict) else None
+        for envelope in chain:
+            if (not isinstance(envelope, dict)
+                    or set(envelope) != {"version", "nonce", "completion_record", "execution_receipt"}
+                    or type(envelope["version"]) is not int or envelope["version"] != 1
+                    or envelope["nonce"] != nonce):
+                return False, "completion envelope is invalid"
+            valid, reason = verify_mission_completion(
+                envelope["completion_record"],
+                claim_receipt=vector.get("claim_receipt"),
+                authority_ack=vector.get("authority_ack"),
+                execution_receipt=envelope["execution_receipt"],
+                expected_authority_did=vector.get("expected_authority_did", ""),
+                expected_federation_key=vector.get("expected_federation_key", ""),
+                now_ms=vector.get("verification_time_ms"),
+            )
+            if not valid:
+                return False, f"completion evidence is invalid: {reason}"
+            digest = receipt_digest(envelope)
+            if digest in envelopes:
+                return False, "completion chain repeats an envelope"
+            envelopes[digest] = envelope
+            presented.append(digest)
+        try:
+            order, heads = resolve_completion_lineage(envelopes)
+        except CompletionLineageError as exc:
+            return False, str(exc)
+        if len(heads) != 1:
+            return False, "completion merge has multiple heads"
+        if order != presented or heads[0] != presented[-1]:
+            return False, "completion chain order is noncanonical"
+        record = chain[-1]["completion_record"]
+        if vector.get("record") != record or vector.get("execution_receipt") != chain[-1]["execution_receipt"]:
+            return False, "completion vector does not bind its head"
+        if "predecessor_digest" in vector and (
+            vector["predecessor_digest"] != record.get("supersedes_digest")
+            or vector["predecessor_digest"] != presented[0]
+        ):
+            return False, "completion lineage metadata mismatch"
+        if "predecessor_digests" in vector and (
+            vector["predecessor_digests"] != record.get("supersedes_digests")
+        ):
+            return False, "completion lineage metadata mismatch"
+        return True, "ok"
+
+    failures: List[ConformanceFailure] = []
+    for vector in vectors:
+        try:
+            actual = check(vector)
+        except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
+            actual = (False, "completion chain is malformed")
+        expected = (vector["expected_valid"], vector.get("expected_reason"))
+        if actual != expected:
+            failures.append(ConformanceFailure(
+                vector_id=vector.get("id", "market-completion:invalid"),
+                category=category, description="signed completion lineage",
+                expected=expected, actual=actual,
+            ))
+            continue
+        if not actual[0]:
+            continue
+        record = vector["record"]
+        if canonical_json(record).hex() != vector.get("expected_canonical_hex"):
+            failures.append(ConformanceFailure(
+                vector_id=vector["id"], category=category,
+                description="canonical completion bytes",
+                expected=vector.get("expected_canonical_hex"),
+                actual=canonical_json(record).hex(),
+            ))
+        if receipt_digest(record) != vector.get("expected_record_sha256"):
+            failures.append(ConformanceFailure(
+                vector_id=vector["id"], category=category,
+                description="completion record digest",
+                expected=vector.get("expected_record_sha256"),
+                actual=receipt_digest(record),
+            ))
     return failures
 
 
@@ -838,6 +932,12 @@ _CHECKERS: Dict[str, Callable[[List[dict]], List[ConformanceFailure]]] = {
     "delivery_ack_v1":             check_delivery_ack_v1,
     "market_claim_intent_v1":      check_market_claim_intent_v1,
     "market_mission_completion_v1": check_market_mission_completion_v1,
+    "market_mission_completion_v2": lambda vectors: check_market_completion_lineage_vectors(
+        vectors, category="market_mission_completion_v2",
+    ),
+    "market_mission_completion_v3": lambda vectors: check_market_completion_lineage_vectors(
+        vectors, category="market_mission_completion_v3",
+    ),
 }
 
 

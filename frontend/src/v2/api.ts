@@ -29,6 +29,7 @@ import type {
   ChannelMessage,
   ClaimIntentPage,
   ClaimEvidenceSummary,
+  ClaimCompletionSummary,
   ChatMessage,
   Conversation,
   ConversationSummary,
@@ -3316,6 +3317,69 @@ export async function getClaimEvidence(
     throw new Error("Invalid claim evidence summary");
   }
   return item as unknown as ClaimEvidenceSummary;
+}
+
+/** Read one locally retained signed completion claim, if one exists. */
+export async function getRecordedClaimCompletion(
+  nonce: string,
+  signal?: AbortSignal,
+): Promise<ClaimCompletionSummary | null> {
+  const response = await fetch(
+    `${BASE}/market/claim-intents/${encodeURIComponent(nonce)}/completion`,
+    { signal, headers: { Accept: "application/json", ...authHeader() }, credentials: "same-origin" },
+  );
+  if (response.status === 404) {
+    let detail: unknown;
+    try {
+      detail = (await response.json() as { detail?: unknown }).detail;
+    } catch {
+      // A proxy or older server may not return the current JSON error shape.
+    }
+    if (detail === "completion evidence not recorded") return null;
+    throw new Error("This server does not support completion evidence checks");
+  }
+  if (!response.ok) {
+    throw new Error(response.status === 503
+      ? "Signed completion evidence cannot be verified right now"
+      : response.status === 401 || response.status === 403
+        ? "Console access is required to inspect completion evidence"
+        : `Completion evidence check failed (HTTP ${response.status})`);
+  }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error("Invalid completion evidence summary");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid completion evidence summary");
+  }
+  const item = value as Record<string, unknown>;
+  if (
+    item.nonce !== nonce
+    || typeof item.source_claim_id !== "string"
+    || !/^[0-9a-f]{64}$/.test(item.source_claim_id)
+    || item.nonce_authenticated !== false
+    || item.recorded !== true
+    || item.verification_scope !== "signed_evidence_only"
+    || typeof item.mission_id !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(item.mission_id)
+    || (item.outcome !== "succeeded" && item.outcome !== "failed")
+    || typeof item.completed_at_ms !== "number"
+    || !Number.isSafeInteger(item.completed_at_ms)
+    || item.completed_at_ms <= 0
+    || (item.revision !== undefined && (
+      typeof item.revision !== "number"
+      || !Number.isSafeInteger(item.revision)
+      || item.revision < 0
+      || item.revision > 31
+    ))
+    || typeof item.evidence_digest !== "string"
+    || !/^sha256:[0-9a-f]{64}$/.test(item.evidence_digest)
+  ) {
+    throw new Error("Invalid completion evidence summary");
+  }
+  return item as unknown as ClaimCompletionSummary;
 }
 
 /** Ask the original DAO authority to recover a lost signed claim ACK. */

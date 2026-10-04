@@ -44,6 +44,42 @@ limit. This remains a linear scan, not a scalable lookup index.
 A fully sublinear lookup would require a new
 authoritative on-disk layout and migration of direct-sync clients.
 
+A claimant may submit an already signed completion record and execution
+receipt to `POST /api/v2/market/claim-intents/{nonce}/completion/record`.
+The local node verifies them against its confirmed claim receipt and source
+authority ACK, then retains one immutable, content-addressed evidence bundle
+as the v1 root for a nonce. A claimant can append v2 revisions signed with a
+strict sequence number and the previous bundle digest. Exact retries are
+idempotent; missing links, alternate roots, and concurrent forks fail closed
+rather than silently replacing a prior outcome. An unresolved fork can be
+recovered only by the claimant explicitly running `nth-claim-completion record
+--resolve-fork`, which signs a v3 merge naming every verified current head.
+All competing statements remain on disk and in the v2 portable proof graph;
+merely selecting one branch is not recovery. A handed-off Mission step is not
+completed work, even when an older workspace persisted the parent status as
+`completed`. The agent-owned
+`nth-claim-completion record` command signs only an existing local terminal
+Mission owned by the confirmed claimant, using an explicitly supplied local
+identity file. The Web Server never receives or uses that private key. Signed
+claim, ACK, execution, and completion timestamps must be internally ordered;
+those timestamps remain claimant/source statements, not independent proof of
+correct work. The operator-only GET
+endpoint at `/api/v2/market/claim-intents/{nonce}/completion` re-verifies the
+current head and returns a summary. A separate operator-only `/completion/proof`
+GET exports the bounded signed lineage for explicit transfer. A recipient must
+pin the expected source DID and federation key from its own trusted market
+context before offline verification. There is no automatic public relay of
+private completion material. Local writes stage outside the synced evidence
+slot, fsync the file, then use a write-through rename on Windows or a directory
+fsync on POSIX; network filesystems and external Git synchronization have
+different durability guarantees. These endpoints
+report `signed_evidence_only`: they do not establish correct work, source
+acceptance of delivery, dispute resolution, or payment. No server key signs a
+completion on the claimant's behalf. The REST summary and CLI expose the
+source-signed `source_claim_id` as the deduplication key and explicitly mark
+the claimant-local nonce as not source-authenticated. A new source ACK wire
+version would be required to authenticate the original Intent nonce.
+
 Market uses familiar sections:
 
 1. **Discover** - all searchable market entries, with broad facets.

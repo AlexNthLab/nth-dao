@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   claimFederatedTask, claimTask, fetchAgents, getClaimEvidence,
+  getRecordedClaimCompletion,
   listClaimIntents, listOpenTasks,
   listTaskCategories, reconcileClaimIntent,
 } from "../api";
@@ -20,6 +21,7 @@ import { useLang } from "../i18n";
 import type {
   AgentEntry,
   ClaimEvidenceSummary,
+  ClaimCompletionSummary,
   ClaimIntentPage,
   ClaimIntentRecord,
   TaskAnnouncement,
@@ -92,6 +94,10 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const [claimEvidence, setClaimEvidence] = useState<Record<string, ClaimEvidenceSummary & { checkedAtMs: number }>>({});
   const [claimEvidenceError, setClaimEvidenceError] = useState<Record<string, string>>({});
   const evidenceController = useRef<AbortController | null>(null);
+  const [checkingCompletionNonce, setCheckingCompletionNonce] = useState("");
+  const [completionChecks, setCompletionChecks] = useState<Record<string, { summary: ClaimCompletionSummary | null; checkedAtMs: number }>>({});
+  const [completionErrors, setCompletionErrors] = useState<Record<string, string>>({});
+  const completionController = useRef<AbortController | null>(null);
 
   // 我发布的 = 本节点 feed(非联邦);市场 = 全部(可承接)。按所选维度排序。
   const myTasks = tasks.filter((x) => !x.federated);
@@ -162,6 +168,11 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
     setCheckingEvidenceNonce("");
     setClaimEvidence({});
     setClaimEvidenceError({});
+    completionController.current?.abort();
+    completionController.current = null;
+    setCheckingCompletionNonce("");
+    setCompletionChecks({});
+    setCompletionErrors({});
     claimMoreController.current?.abort();
     claimMoreController.current = null;
     setClaimIntentLoading(true);
@@ -191,6 +202,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
     return () => {
       ac.abort();
       evidenceController.current?.abort();
+      completionController.current?.abort();
       claimMoreController.current?.abort();
     };
   }, [claimIntentVersion]);
@@ -203,6 +215,11 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
       setCheckingEvidenceNonce("");
       setClaimEvidence({});
       setClaimEvidenceError({});
+      completionController.current?.abort();
+      completionController.current = null;
+      setCheckingCompletionNonce("");
+      setCompletionChecks({});
+      setCompletionErrors({});
     }
     setTab(nextTab);
   }
@@ -446,6 +463,44 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
     }
   }
 
+  async function handleCheckCompletion(record: ClaimIntentRecord) {
+    if (checkingCompletionNonce || completionController.current) return;
+    const nonce = record.intent.nonce;
+    const ac = new AbortController();
+    completionController.current = ac;
+    setCheckingCompletionNonce(nonce);
+    setCompletionChecks((current) => {
+      const next = { ...current };
+      delete next[nonce];
+      return next;
+    });
+    setCompletionErrors((current) => {
+      const next = { ...current };
+      delete next[nonce];
+      return next;
+    });
+    try {
+      const summary = await getRecordedClaimCompletion(nonce, ac.signal);
+      if (!ac.signal.aborted) {
+        setCompletionChecks((current) => ({
+          ...current, [nonce]: { summary, checkedAtMs: Date.now() },
+        }));
+      }
+    } catch (error) {
+      if (!ac.signal.aborted) {
+        setCompletionErrors((current) => ({
+          ...current,
+          [nonce]: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    } finally {
+      if (completionController.current === ac) {
+        completionController.current = null;
+        if (!ac.signal.aborted) setCheckingCompletionNonce("");
+      }
+    }
+  }
+
   return (
     <>
       <aside className="sidebar">
@@ -657,6 +712,8 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                   (state === "pending" || state === "expired")
                   && Boolean(record.source_peer && record.source_did && record.federation_key && record.receipt_id)
                 );
+                const completionCheck = completionChecks[intent.nonce];
+                const completionSummary = completionCheck?.summary;
                 return (
                 <article
                   key={intent.nonce}
@@ -720,6 +777,13 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                           ? "Checking…"
                           : "Verify claim evidence"}
                       </button>
+                      <button className="btn btn-ghost" type="button"
+                        disabled={Boolean(checkingCompletionNonce)}
+                        onClick={() => void handleCheckCompletion(record)}>
+                        {checkingCompletionNonce === intent.nonce
+                          ? "Checking…"
+                          : "Check signed completion"}
+                      </button>
                     </div>
                     {claimEvidenceError[intent.nonce] && <p role="alert" className="danger-text">
                       Claim evidence unavailable: {claimEvidenceError[intent.nonce]}
@@ -734,6 +798,21 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                       {claimEvidence[intent.nonce].mission_id && <span>
                         Advertised mission ID: <code>{claimEvidence[intent.nonce].mission_id}</code>
                       </span>}
+                    </div>}
+                    {completionErrors[intent.nonce] && <p role="alert" className="danger-text">
+                      Completion evidence unavailable: {completionErrors[intent.nonce]}
+                    </p>}
+                    {completionCheck && <div className="task-claim-evidence" role="status">
+                      {completionSummary ? <>
+                        <strong>Signed completion statement recorded</strong>
+                        <span>Claimant-reported outcome: {completionSummary.outcome}</span>
+                        {(completionSummary.revision ?? 0) > 0 && <span>Revision {completionSummary.revision} (prior statement retained)</span>}
+                        <span>Signed evidence only. Not work acceptance or payment.</span>
+                        <span>Source claim ID: <code title={completionSummary.source_claim_id}>{completionSummary.source_claim_id.slice(0, 18)}…</code></span>
+                        <span>Local nonce is not source-authenticated.</span>
+                        <span>Mission ID: <code>{completionSummary.mission_id}</code></span>
+                        <span>Evidence: <code title={completionSummary.evidence_digest}>{completionSummary.evidence_digest.slice(0, 25)}…</code></span>
+                      </> : <span>No signed completion statement recorded</span>}
                     </div>}
                   </>}
                 </article>

@@ -487,6 +487,20 @@ export interface ClaimEvidenceSummary {
   mission_id: string;
 }
 
+/** A retained claimant statement, not acceptance, delivery, or settlement. */
+export interface ClaimCompletionSummary {
+  nonce: string;
+  source_claim_id: string;
+  nonce_authenticated: false;
+  recorded: true;
+  verification_scope: "signed_evidence_only";
+  mission_id: string;
+  outcome: "succeeded" | "failed";
+  completed_at_ms: number;
+  revision?: number;
+  evidence_digest: string;
+}
+
 export type MarketSearchCategory =
   | "tasks"
   | "products"

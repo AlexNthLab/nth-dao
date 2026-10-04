@@ -148,6 +148,33 @@ DAO, which remains the single CAS authority for that listing.
 
 ### Federated Claim Lifecycle
 
+After a claim is locally confirmed, a claimant can retain its own signed
+Mission completion statement with an execution receipt using the operator-only
+`POST /api/v2/market/claim-intents/{nonce}/completion/record` endpoint. The
+node verifies the complete retained claim/authority-ACK/execution chain before
+writing an immutable content-addressed bundle. The claimant can create that
+signature locally with `nth-claim-completion record --workspace WORKSPACE
+--identity-file AGENT_KEY --nonce NONCE --mission-id MISSION_ID`; the server
+never signs on its behalf. A later signed v2 record may supersede the head by
+digest and sequence, retaining the old outcome. Concurrent v1 roots or v2
+branches fail closed until the claimant explicitly uses `record --resolve-fork`
+to sign a v3 merge naming every verified head. The competing signed statements
+remain in the portable proof; no branch is silently discarded. `GET` on
+the same path without `/record` returns a re-verified summary. Operator-only
+`GET .../completion/proof` exports a bounded portable proof. A different node
+can run `nth-claim-completion verify --proof-file PROOF --source-did DID
+--federation-key KEY`, using pins independently obtained from its trusted
+market listing. Copying both pins from the proof would not establish trust.
+The source-signed `source_claim_id` (ACK ID), not the claimant-local nonce, is
+the deduplication key for transferred proofs: the current source ACK does not
+sign the Intent nonce. Rewrapping a valid claim under another local nonce must
+not create another accepted source claim, reputation event, or payment.
+REST and CLI completion summaries expose this stable ID and explicitly report
+`nonce_authenticated: false`. Source-side nonce authentication requires a
+future ACK wire version, not a local verifier shortcut.
+This is explicit/manual transfer, not automatic federation delivery. Neither
+route accepts work or authorizes settlement.
+
 A federated claim carries three claimant-signed public artifacts: a scoped
 capability token, a Claim Receipt, and a short-lived Claim Intent. The local
 hub verifies and retains the complete Claim Receipt by canonical content hash
@@ -216,6 +243,9 @@ complete view.
 | `POST /api/v2/market/federated/claim` | Sign locally, journal pending, route to the pinned source, and verify its ACK | Console write |
 | `GET /api/v2/market/claim-intents` | Bounded local pending/confirmed/rejected/expired projection and Receipt storage usage | Console read |
 | `POST /api/v2/market/claim-intents/{nonce}/reconcile` | Re-verify the retained source and recover a lost signed ACK | Console write |
+| `GET /api/v2/market/claim-intents/{nonce}/completion` | Re-verified latest claimant completion statement | Console read |
+| `POST /api/v2/market/claim-intents/{nonce}/completion/record` | Retain a claimant-signed root or linked revision | Console write |
+| `GET /api/v2/market/claim-intents/{nonce}/completion/proof` | Explicitly export the full signed lineage for pinned offline verification | Console read |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 | `GET /api/v2/trade/federation/offers/{digest}/head-proof` | Bounded complete disclosed revision chain for a live publisher head claim | Public read |

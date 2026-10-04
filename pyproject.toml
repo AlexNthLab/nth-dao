@@ -72,6 +72,7 @@ Changelog = "https://github.com/AlexNthLab/nth-dao/blob/main/CHANGELOG.md"
 nth-web = "nth_dao.web:main"
 nth-status = "nth_dao.cli.status:main"
 nth-metrics = "nth_dao.cli.metrics:main"
+nth-claim-completion = "nth_dao.cli.claim_completion:main"
 
 [tool.setuptools]
 # Package membership comes from importable packages, not a manually maintained

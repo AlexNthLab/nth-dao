@@ -54,6 +54,8 @@ def test_each_category_has_at_least_one_vector():
         "delivery_ack_v1",
         "market_claim_intent_v1",
         "market_mission_completion_v1",
+        "market_mission_completion_v2",
+        "market_mission_completion_v3",
     }
     data = load_vectors()
     present = set(data["vectors"].keys())
@@ -83,6 +85,8 @@ def test_main_regenerator_preserves_documented_categories(tmp_path):
         "delivery_ack_v1",
         "market_claim_intent_v1",
         "market_mission_completion_v1",
+        "market_mission_completion_v2",
+        "market_mission_completion_v3",
     } <= present
 
 
@@ -102,9 +106,30 @@ def test_market_claim_intent_vectors_cover_signature_time_and_shape():
 
 def test_market_mission_completion_vectors_require_full_authority_chain():
     cases = load_vectors()["vectors"].get("market_mission_completion_v1", [])
-    assert len(cases) == 4
+    assert len(cases) == 5
     assert cases[0]["expected_valid"] is True
     assert all(case["expected_valid"] is False for case in cases[1:])
+    assert "chronology" in cases[-1]["expected_reason"]
+
+
+def test_completion_lineage_vectors_check_predecessors_and_forks():
+    from copy import deepcopy
+    from nth_dao.conformance.runner import check_market_completion_lineage_vectors
+
+    vectors = load_vectors()["vectors"]
+    v2 = vectors["market_mission_completion_v2"]
+    v3 = vectors["market_mission_completion_v3"]
+    assert len(v2) >= 3 and len(v3) >= 3
+    assert all("completion_chain" in case for case in [*v2, *v3])
+    assert any(not case["expected_valid"] for case in v2)
+    assert any(not case["expected_valid"] for case in v3)
+
+    wrong_digest = deepcopy(v2[0])
+    wrong_digest["predecessor_digest"] = "sha256:" + "0" * 64
+    assert check_market_completion_lineage_vectors([wrong_digest], category="market_mission_completion_v2")
+    missing_branch = deepcopy(v3[0])
+    missing_branch["completion_chain"].pop(1)
+    assert check_market_completion_lineage_vectors([missing_branch], category="market_mission_completion_v3")
 
 
 def test_main_regenerator_matches_shipped_vectors_byte_for_byte(tmp_path):

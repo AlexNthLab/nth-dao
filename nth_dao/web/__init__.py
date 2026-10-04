@@ -115,6 +115,7 @@ logger = logging.getLogger("nth_dao.web")
 
 
 _FOREIGN_CLAIM_MAX_BODY_BYTES = 256 * 1024
+_CLAIM_COMPLETION_MAX_BODY_BYTES = 512 * 1024
 _FEDERATION_HELLO_MAX_BODY_BYTES = 16 * 1024
 _COMMERCE_CART_MAX_BODY_BYTES = 256 * 1024
 _COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
@@ -210,6 +211,12 @@ class _FederationBodyLimitMiddleware:
             scope.get("type") == "http"
             and scope.get("method") in {"POST", "PUT", "PATCH"}
             and path.startswith("/api/v2/commerce/")
+        )
+        is_claim_completion_write = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/v2/market/claim-intents/")
+            and path.endswith(("/completion/verify", "/completion/record"))
         )
         is_trade_offer_write = (
             scope.get("type") == "http"
@@ -321,6 +328,7 @@ class _FederationBodyLimitMiddleware:
         )
         if not (
             is_foreign_claim
+            or is_claim_completion_write
             or is_federation_hello
             or is_commerce_write
             or is_trade_offer_write
@@ -345,6 +353,9 @@ class _FederationBodyLimitMiddleware:
         if is_foreign_claim:
             max_body_bytes = _FOREIGN_CLAIM_MAX_BODY_BYTES
             body_label = "foreign claim"
+        elif is_claim_completion_write:
+            max_body_bytes = _CLAIM_COMPLETION_MAX_BODY_BYTES
+            body_label = "claim completion evidence"
         elif is_federation_hello:
             max_body_bytes = _FEDERATION_HELLO_MAX_BODY_BYTES
             body_label = "federation hello"

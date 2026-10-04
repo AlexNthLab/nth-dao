@@ -32,7 +32,7 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from nth_dao.market.resource_descriptor import (
@@ -7820,6 +7820,8 @@ class AcceptBody(BaseModel):
 
 class CompletionVerifyBody(BaseModel):
     """Claimant-signed completion plus its separately signed execution receipt."""
+
+    model_config = ConfigDict(extra="forbid")
 
     completion_record: Dict[str, Any]
     execution_receipt: Dict[str, Any]
@@ -23456,6 +23458,146 @@ def register_v2_routes(app: FastAPI) -> None:
             "reason": reason,
             "verification_scope": "signed_evidence_only",
         }
+
+    def _completion_summary(
+        nonce: str, evidence: Dict[str, Any], source_claim_id: str,
+    ) -> Dict[str, Any]:
+        from nth_dao.canonical_json import canonical_json
+
+        record = evidence["completion_record"]
+        return {
+            "nonce": nonce,
+            "source_claim_id": source_claim_id,
+            "nonce_authenticated": False,
+            "recorded": True,
+            "verification_scope": "signed_evidence_only",
+            "mission_id": record["mission_id"],
+            "outcome": record["outcome"],
+            "completed_at_ms": record["completed_at_ms"],
+            "revision": record.get("revision", 0),
+            "evidence_digest": "sha256:" + hashlib.sha256(
+                canonical_json(evidence)
+            ).hexdigest(),
+        }
+
+    @app.post("/api/v2/market/claim-intents/{nonce}/completion/record")
+    def v2_market_record_claim_completion(
+        nonce: str, body: CompletionVerifyBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Retain the claimant's signed statement; never sign or accept work."""
+
+        from nth_dao.market.claim_evidence import (
+            ClaimEvidenceUnavailable, resolve_confirmed_claim_evidence,
+        )
+        from nth_dao.market.claim_intent import IntentTrackerCorrupt
+        from nth_dao.market.completion_store import (
+            ClaimCompletionStore, CompletionEvidenceConflict,
+            CompletionEvidenceCorrupt, CompletionEvidenceRejected,
+        )
+
+        _require_federation_operator(request)
+        if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
+            raise HTTPException(status_code=422, detail="invalid claim nonce")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            evidence, created = ClaimCompletionStore(ws).record(
+                nonce, body.completion_record, body.execution_receipt,
+            )
+            source_claim_id = resolve_confirmed_claim_evidence(ws, nonce)[
+                "authority_ack"
+            ]["ack_id"]
+        except CompletionEvidenceRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (CompletionEvidenceConflict, ClaimEvidenceUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            CompletionEvidenceCorrupt, IntentTrackerCorrupt,
+            OSError, TimeoutError, ValueError,
+        ) as exc:
+            logger.warning("completion evidence cannot be retained: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="completion evidence store unavailable",
+            ) from exc
+        return {
+            **_completion_summary(nonce, evidence, source_claim_id),
+            "already_recorded": not created,
+        }
+
+    @app.get("/api/v2/market/claim-intents/{nonce}/completion/proof")
+    def v2_market_export_claim_completion_proof(
+        nonce: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Explicit operator disclosure of a portable signed evidence chain."""
+
+        from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
+        from nth_dao.market.claim_intent import IntentTrackerCorrupt
+        from nth_dao.market.completion_flow import build_portable_completion_proof
+        from nth_dao.market.completion_store import (
+            CompletionEvidenceConflict, CompletionEvidenceCorrupt,
+        )
+
+        _require_federation_operator(request)
+        if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
+            raise HTTPException(status_code=422, detail="invalid claim nonce")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            proof = build_portable_completion_proof(ws, nonce)
+        except (
+            ClaimEvidenceUnavailable, CompletionEvidenceConflict,
+            CompletionEvidenceCorrupt, IntentTrackerCorrupt,
+            OSError, TimeoutError, ValueError,
+        ) as exc:
+            logger.warning("portable completion proof unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="portable completion proof unavailable",
+            ) from exc
+        if proof is None:
+            raise HTTPException(status_code=404, detail="completion evidence not recorded")
+        return proof
+
+    @app.get("/api/v2/market/claim-intents/{nonce}/completion")
+    def v2_market_claim_completion_summary(
+        nonce: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Re-verify one retained signed completion without accepting it."""
+
+        from nth_dao.market.claim_evidence import (
+            ClaimEvidenceUnavailable, resolve_confirmed_claim_evidence,
+        )
+        from nth_dao.market.claim_intent import IntentTrackerCorrupt
+        from nth_dao.market.completion_store import (
+            ClaimCompletionStore, CompletionEvidenceConflict,
+            CompletionEvidenceCorrupt,
+        )
+
+        _require_federation_operator(request)
+        if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
+            raise HTTPException(status_code=422, detail="invalid claim nonce")
+        ws = _state_workspace(request)
+        if ws is None:
+            raise HTTPException(status_code=503, detail="workspace unavailable")
+        try:
+            evidence = ClaimCompletionStore(ws).load(nonce)
+            source_claim_id = (
+                resolve_confirmed_claim_evidence(ws, nonce)["authority_ack"]["ack_id"]
+                if evidence is not None else ""
+            )
+        except (
+            ClaimEvidenceUnavailable, CompletionEvidenceConflict,
+            CompletionEvidenceCorrupt, IntentTrackerCorrupt,
+            OSError, TimeoutError, ValueError,
+        ) as exc:
+            logger.warning("completion evidence cannot be read: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="completion evidence store unavailable",
+            ) from exc
+        if evidence is None:
+            raise HTTPException(status_code=404, detail="completion evidence not recorded")
+        return _completion_summary(nonce, evidence, source_claim_id)
 
     @app.post("/api/v2/market/claim-intents/{nonce}/reconcile")
     async def v2_market_reconcile_claim_intent(

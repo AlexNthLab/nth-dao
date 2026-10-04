@@ -69,6 +69,14 @@ COMPLETION_FIELDS = frozenset(
         "signature",
     }
 )
+COMPLETION_REVISION_VERSION = 2
+COMPLETION_REVISION_FIELDS = COMPLETION_FIELDS | frozenset({
+    "revision", "supersedes_digest",
+})
+COMPLETION_MERGE_VERSION = 3
+COMPLETION_MERGE_FIELDS = COMPLETION_FIELDS | frozenset({
+    "revision", "supersedes_digests",
+})
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_FAILED = "failed"
 OUTCOMES = (OUTCOME_SUCCEEDED, OUTCOME_FAILED)
@@ -84,6 +92,10 @@ _COMPLETION_EVENT_TYPES = {
 
 class MissionCompletionRejected(ValueError):
     """Raised when a completion record cannot be built or verified."""
+
+
+class CompletionLineageError(ValueError):
+    """A completion graph has an invalid or missing predecessor."""
 
 
 def receipt_digest(receipt: Any) -> str:
@@ -107,15 +119,42 @@ def _check_shape(record: Any, *, now_ms: int, max_age_ms: int | None) -> str | N
         or not 0 < max_age_ms <= _MAX_SAFE_INTEGER
     ):
         return "max_age_ms is invalid"
-    if frozenset(record) != COMPLETION_FIELDS:
+    version = record.get("version")
+    expected_fields = (
+        COMPLETION_FIELDS if version == COMPLETION_VERSION else
+        COMPLETION_REVISION_FIELDS if version == COMPLETION_REVISION_VERSION else
+        COMPLETION_MERGE_FIELDS if version == COMPLETION_MERGE_VERSION else None
+    )
+    if expected_fields is None or frozenset(record) != expected_fields:
         return "missing or unknown fields"
     if record.get("kind") != COMPLETION_KIND:
         return "wrong kind or version"
     if (
         type(record.get("version")) is not int
-        or record["version"] != COMPLETION_VERSION
+        or version not in (
+            COMPLETION_VERSION, COMPLETION_REVISION_VERSION, COMPLETION_MERGE_VERSION,
+        )
     ):
         return "wrong kind or version"
+    if version == COMPLETION_REVISION_VERSION and (
+        type(record.get("revision")) is not int
+        or not 1 <= record["revision"] <= 31
+        or not isinstance(record.get("supersedes_digest"), str)
+        or _DIGEST_RE.fullmatch(record["supersedes_digest"]) is None
+    ):
+        return "completion revision link is invalid"
+    if version == COMPLETION_MERGE_VERSION and (
+        type(record.get("revision")) is not int
+        or not 1 <= record["revision"] <= 31
+        or not isinstance(record.get("supersedes_digests"), list)
+        or not 2 <= len(record["supersedes_digests"]) <= 31
+        or any(
+            not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None
+            for digest in record["supersedes_digests"]
+        )
+        or record["supersedes_digests"] != sorted(set(record["supersedes_digests"]))
+    ):
+        return "completion merge links are invalid"
     if (
         not isinstance(record.get("announcement_id"), str)
         or _ID_RE.fullmatch(record["announcement_id"]) is None
@@ -175,6 +214,8 @@ def _claim_receipt_error(
     payload = entry.get("payload")
     if entry.get("type") != "nth.task_claimed" or not isinstance(payload, dict):
         return "claim receipt does not contain a task claim"
+    if type(entry.get("timestamp")) is not int or entry["timestamp"] <= 0:
+        return "claim receipt timestamp is invalid"
     if payload.get("announcement_id") != announcement_id:
         return "claim receipt payload does not bind the announcement"
     if payload.get("claimant_did") != claimant_did:
@@ -183,7 +224,8 @@ def _claim_receipt_error(
 
 
 def _execution_receipt_error(
-    receipt: Any, *, mission_id: str, claimant_did: str, outcome: str
+    receipt: Any, *, mission_id: str, claimant_did: str, outcome: str,
+    claim_at_ms: int, accepted_at_ms: int, completed_at_ms: int,
 ) -> str | None:
     if not isinstance(receipt, dict) or not verify_receipt(receipt):
         return "execution receipt signature is invalid"
@@ -195,6 +237,15 @@ def _execution_receipt_error(
     timeline = receipt.get("timeline")
     if not isinstance(timeline, list):
         return "execution receipt timeline is invalid"
+    if (
+        type(claim_at_ms) is not int
+        or type(accepted_at_ms) is not int
+        or type(completed_at_ms) is not int
+        or claim_at_ms <= 0
+        or accepted_at_ms < claim_at_ms
+        or completed_at_ms < accepted_at_ms
+    ):
+        return "claim, authority acknowledgement, and completion chronology is invalid"
     for entry in timeline:
         if not isinstance(entry, dict) or set(entry) != {
             "timestamp",
@@ -208,6 +259,12 @@ def _execution_receipt_error(
             and isinstance(payload, dict)
             and payload.get("mission_id") == mission_id
         ):
+            event_at_ms = entry.get("timestamp")
+            if (
+                type(event_at_ms) is not int
+                or not accepted_at_ms <= event_at_ms <= completed_at_ms
+            ):
+                return "execution event is outside the confirmed claim chronology"
             return None
     return f"execution receipt does not prove outcome {outcome}"
 
@@ -247,6 +304,9 @@ def sign_mission_completion(
     execution_receipt: dict[str, Any],
     outcome: str = OUTCOME_SUCCEEDED,
     completed_at_ms: int | None = None,
+    revision: int = 0,
+    supersedes_digest: str = "",
+    supersedes_digests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Sign one completion record binding claim + execution receipts.
 
@@ -257,34 +317,55 @@ def sign_mission_completion(
 
     if outcome not in OUTCOMES:
         raise MissionCompletionRejected("outcome must be succeeded or failed")
-    claimant_did = claimant.as_did()
-    for error in (
-        _claim_receipt_error(
-            claim_receipt,
-            announcement_id=announcement_id,
-            claimant_did=claimant_did,
-        ),
-        _authority_ack_error(
-            authority_ack,
-            announcement_id=announcement_id,
-            claimant_did=claimant_did,
-            claim_receipt=claim_receipt,
-        ),
-        _execution_receipt_error(
-            execution_receipt,
-            mission_id=mission_id,
-            claimant_did=claimant_did,
-            outcome=outcome,
-        ),
+    if type(revision) is int and revision == 0 and not supersedes_digest and not supersedes_digests:
+        version = COMPLETION_VERSION
+    elif (
+        type(revision) is int
+        and 1 <= revision <= 31
+        and isinstance(supersedes_digest, str)
+        and _DIGEST_RE.fullmatch(supersedes_digest) is not None
+        and not supersedes_digests
     ):
-        if error is not None:
-            raise MissionCompletionRejected(error)
+        version = COMPLETION_REVISION_VERSION
+    elif (
+        type(revision) is int
+        and 1 <= revision <= 31
+        and not supersedes_digest
+        and isinstance(supersedes_digests, list)
+        and 2 <= len(supersedes_digests) <= 31
+        and all(isinstance(digest, str) and _DIGEST_RE.fullmatch(digest)
+                for digest in supersedes_digests)
+        and supersedes_digests == sorted(set(supersedes_digests))
+    ):
+        version = COMPLETION_MERGE_VERSION
+    else:
+        raise MissionCompletionRejected("completion revision link is invalid")
     completed_at = (
         completed_at_ms if completed_at_ms is not None else int(time.time() * 1000)
     )
+    claimant_did = claimant.as_did()
+    error = _claim_receipt_error(
+        claim_receipt, announcement_id=announcement_id, claimant_did=claimant_did,
+    )
+    if error is not None:
+        raise MissionCompletionRejected(error)
+    error = _authority_ack_error(
+        authority_ack, announcement_id=announcement_id,
+        claimant_did=claimant_did, claim_receipt=claim_receipt,
+    )
+    if error is not None:
+        raise MissionCompletionRejected(error)
+    error = _execution_receipt_error(
+        execution_receipt, mission_id=mission_id, claimant_did=claimant_did,
+        outcome=outcome, claim_at_ms=claim_receipt["timeline"][0]["timestamp"],
+        accepted_at_ms=authority_ack["accepted_at_ms"],
+        completed_at_ms=completed_at,
+    )
+    if error is not None:
+        raise MissionCompletionRejected(error)
     record: dict[str, Any] = {
         "kind": COMPLETION_KIND,
-        "version": COMPLETION_VERSION,
+        "version": version,
         "announcement_id": str(announcement_id),
         "mission_id": str(mission_id),
         "claimant_did": claimant_did,
@@ -294,6 +375,12 @@ def sign_mission_completion(
         "outcome": outcome,
         "completed_at_ms": completed_at,
     }
+    if version == COMPLETION_REVISION_VERSION:
+        record["revision"] = revision
+        record["supersedes_digest"] = supersedes_digest
+    elif version == COMPLETION_MERGE_VERSION:
+        record["revision"] = revision
+        record["supersedes_digests"] = list(supersedes_digests)
     body = canonical_json(record)
     record["signature"] = b64u_encode(claimant.sign(body))
     reason = _check_shape(record, now_ms=completed_at, max_age_ms=None)
@@ -377,30 +464,29 @@ def verify_mission_completion(
                 return False, "execution receipt digest does not match the record"
         except (TypeError, ValueError, RecursionError):
             return False, "completion evidence is not canonical JSON"
-        binding_errors = (
-            _claim_receipt_error(
-                claim_receipt,
-                announcement_id=record["announcement_id"],
-                claimant_did=record["claimant_did"],
-            ),
-            _authority_ack_error(
-                authority_ack,
-                announcement_id=record["announcement_id"],
-                claimant_did=record["claimant_did"],
-                claim_receipt=claim_receipt,
-                expected_authority_did=expected_authority_did,
-                expected_federation_key=expected_federation_key,
-            ),
-            _execution_receipt_error(
-                execution_receipt,
-                mission_id=record["mission_id"],
-                claimant_did=record["claimant_did"],
-                outcome=record["outcome"],
-            ),
+        error = _claim_receipt_error(
+            claim_receipt, announcement_id=record["announcement_id"],
+            claimant_did=record["claimant_did"],
         )
-        for error in binding_errors:
-            if error is not None:
-                return False, error
+        if error is not None:
+            return False, error
+        error = _authority_ack_error(
+            authority_ack, announcement_id=record["announcement_id"],
+            claimant_did=record["claimant_did"], claim_receipt=claim_receipt,
+            expected_authority_did=expected_authority_did,
+            expected_federation_key=expected_federation_key,
+        )
+        if error is not None:
+            return False, error
+        error = _execution_receipt_error(
+            execution_receipt, mission_id=record["mission_id"],
+            claimant_did=record["claimant_did"], outcome=record["outcome"],
+            claim_at_ms=claim_receipt["timeline"][0]["timestamp"],
+            accepted_at_ms=authority_ack["accepted_at_ms"],
+            completed_at_ms=record["completed_at_ms"],
+        )
+        if error is not None:
+            return False, error
         return True, "ok"
     return False, "completion evidence is required"
 
@@ -439,10 +525,63 @@ def verify_confirmed_mission_completion(
     )
 
 
+def resolve_completion_lineage(
+    envelopes: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Validate signed-envelope ancestry and return topological order and heads.
+
+    Callers must verify signatures and claim bindings before using this graph.
+    An unresolved fork is reported as multiple heads, never silently selected.
+    """
+    children: set[str] = set()
+    for digest, envelope in envelopes.items():
+        if _DIGEST_RE.fullmatch(digest) is None:
+            raise CompletionLineageError("completion envelope digest is invalid")
+        record = envelope["completion_record"]
+        version = record["version"]
+        if version == COMPLETION_VERSION:
+            parents: list[str] = []
+            rank = 0
+        elif version == COMPLETION_REVISION_VERSION:
+            parents = [record["supersedes_digest"]]
+            rank = record["revision"]
+        elif version == COMPLETION_MERGE_VERSION:
+            parents = record["supersedes_digests"]
+            rank = record["revision"]
+        else:
+            raise CompletionLineageError("completion version is invalid")
+        if any(parent not in envelopes for parent in parents):
+            raise CompletionLineageError("completion revision predecessor is missing")
+        if parents and (
+            rank != max(envelopes[parent]["completion_record"].get("revision", 0)
+                        for parent in parents) + 1
+            or any(record["completed_at_ms"] <
+                   envelopes[parent]["completion_record"]["completed_at_ms"]
+                   for parent in parents)
+        ):
+            raise CompletionLineageError("completion revision order is invalid")
+        children.update(parents)
+    order = sorted(
+        envelopes,
+        key=lambda digest: (
+            envelopes[digest]["completion_record"].get("revision", 0), digest,
+        ),
+    )
+    heads = [digest for digest in order if digest not in children]
+    if not heads and envelopes:
+        raise CompletionLineageError("completion revision cycle")
+    return order, heads
+
+
 __all__ = [
     "COMPLETION_FIELDS",
     "COMPLETION_KIND",
+    "COMPLETION_REVISION_FIELDS",
+    "COMPLETION_REVISION_VERSION",
+    "COMPLETION_MERGE_FIELDS",
+    "COMPLETION_MERGE_VERSION",
     "COMPLETION_VERSION",
+    "CompletionLineageError",
     "OUTCOME_FAILED",
     "OUTCOME_SUCCEEDED",
     "MissionCompletionRejected",
@@ -450,4 +589,5 @@ __all__ = [
     "sign_mission_completion",
     "verify_mission_completion",
     "verify_confirmed_mission_completion",
+    "resolve_completion_lineage",
 ]

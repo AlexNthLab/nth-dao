@@ -8,6 +8,7 @@ import {
   announceTask,
   claimFederatedTask,
   getClaimEvidence,
+  getRecordedClaimCompletion,
   listClaimIntents,
   reconcileClaimIntent,
   listOpenTasks,
@@ -91,6 +92,57 @@ describe("v2 agent discovery API wiring", () => {
       `/api/v2/market/claim-intents/${nonce}/evidence`,
       expect.objectContaining({ credentials: "same-origin" }),
     );
+  });
+
+  it("reads a signed completion summary without treating absence as success", async () => {
+    const nonce = "a".repeat(24);
+    const summary = {
+      nonce, recorded: true, verification_scope: "signed_evidence_only",
+      source_claim_id: "b".repeat(64), nonce_authenticated: false,
+      mission_id: "mission-1", outcome: "succeeded",
+      completed_at_ms: 1_700_000_000_000,
+      evidence_digest: `sha256:${"a".repeat(64)}`,
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(summary))
+      .mockResolvedValueOnce(jsonResponse({ detail: "completion evidence not recorded" }, 404))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Not Found" }, 404))
+      .mockResolvedValueOnce(jsonResponse({ detail: "corrupt" }, 503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getRecordedClaimCompletion(nonce)).resolves.toEqual(summary);
+    await expect(getRecordedClaimCompletion(nonce)).resolves.toBeNull();
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/does not support/);
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/cannot be verified/);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v2/market/claim-intents/${nonce}/completion`,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("rejects an unbound or misleading completion summary", async () => {
+    const nonce = "a".repeat(24);
+    const base = {
+      nonce, recorded: true, verification_scope: "signed_evidence_only",
+      source_claim_id: "b".repeat(64), nonce_authenticated: false,
+      mission_id: "mission-1", outcome: "succeeded",
+      completed_at_ms: 1_700_000_000_000,
+      evidence_digest: `sha256:${"a".repeat(64)}`,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...base, nonce: "b".repeat(24) }))
+      .mockResolvedValueOnce(jsonResponse({ ...base, verification_scope: "accepted_and_paid" }))
+      .mockResolvedValueOnce(jsonResponse({ ...base, evidence_digest: "untrusted" }))
+      .mockResolvedValueOnce(jsonResponse({ ...base, revision: -1 }))
+      .mockResolvedValueOnce(jsonResponse({ ...base, source_claim_id: "untrusted" }))
+      .mockResolvedValueOnce(jsonResponse({ ...base, nonce_authenticated: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/Invalid completion/);
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/Invalid completion/);
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/Invalid completion/);
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/Invalid completion/);
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/Invalid completion/);
+    await expect(getRecordedClaimCompletion(nonce)).rejects.toThrow(/Invalid completion/);
   });
 
   it.each([

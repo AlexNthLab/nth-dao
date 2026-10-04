@@ -12,7 +12,7 @@ pytest.importorskip("nacl")
 from nth_dao.b64u import b64u_encode
 from nth_dao.canonical_json import canonical_json
 from nth_dao.cap_token import CAP_NTH_RECEIPT_SIGN, sign_cap_token
-from nth_dao.execution_receipt import sign_receipt
+from nth_dao.execution_receipt import TimelineEntry, sign_receipt
 from nth_dao.identity import AgentIdentity
 from nth_dao.market import (
     ClaimStore,
@@ -28,6 +28,7 @@ from nth_dao.market.claim_intent import (
 )
 from nth_dao.market.mission_completion import (
     MissionCompletionRejected,
+    receipt_digest,
     sign_mission_completion,
     verify_mission_completion,
 )
@@ -44,7 +45,7 @@ def _selfissue(agent, caps):
 
 
 @pytest.fixture()
-def claimed_task(tmp_path):
+def claimed_task(tmp_path, monkeypatch):
     """A claimed announcement: agent claims via the intent path, returns
     everything needed to complete it."""
 
@@ -64,6 +65,7 @@ def claimed_task(tmp_path):
     # collection-time constant (NOW_MS) lands before the token's
     # not-before and fails — admit at the real clock instead
     now = int(time.time() * 1000)
+    monkeypatch.setitem(globals(), "NOW_MS", now)
     intent = sign_claim_intent(
         agent,
         announcement_id=ann.announcement_id,
@@ -127,6 +129,18 @@ def _verify_with_evidence(
 
 
 class TestSignAndVerify:
+    def test_merge_signer_rejects_unhashable_predecessors(self, claimed_task):
+        agent, ann, claim_receipt, authority_ack = claimed_task
+        with pytest.raises(MissionCompletionRejected, match="revision link"):
+            sign_mission_completion(
+                agent, announcement_id=ann.announcement_id,
+                mission_id="mission-1", claim_receipt=claim_receipt,
+                authority_ack=authority_ack,
+                execution_receipt=_exec_receipt(agent),
+                completed_at_ms=NOW_MS + 3_000, revision=1,
+                supersedes_digests=[{"not": "a digest"}, "sha256:" + "0" * 64],
+            )
+
     def test_statement_only_verification_must_be_explicit(self, claimed_task):
         agent, ann, claim_receipt, authority_ack = claimed_task
         exec_receipt = _exec_receipt(agent)
@@ -281,6 +295,59 @@ class TestSignAndVerify:
             now_ms=NOW_MS + 4_000,
         )
         assert ok and record["outcome"] == "failed"
+
+    def test_preclaim_execution_event_is_rejected_at_sign_and_verify(self, claimed_task):
+        agent, ann, claim_receipt, authority_ack = claimed_task
+        claim_at = claim_receipt["timeline"][0]["timestamp"]
+        old_execution = sign_receipt(
+            [TimelineEntry(
+                timestamp=claim_at - 86_400_000,
+                type="nth.task_completed",
+                payload={"mission_id": "mission-1"},
+            )],
+            agent, goal_id="mission:mission-1",
+        )
+        with pytest.raises(MissionCompletionRejected, match="chronology"):
+            sign_mission_completion(
+                agent, announcement_id=ann.announcement_id,
+                mission_id="mission-1", claim_receipt=claim_receipt,
+                authority_ack=authority_ack, execution_receipt=old_execution,
+                completed_at_ms=claim_at + 3_000,
+            )
+
+        current_execution = sign_receipt(
+            [TimelineEntry(
+                timestamp=claim_at + 2_000,
+                type="nth.task_completed",
+                payload={"mission_id": "mission-1"},
+            )],
+            agent, goal_id="mission:mission-1",
+        )
+        record = sign_mission_completion(
+            agent, announcement_id=ann.announcement_id,
+            mission_id="mission-1", claim_receipt=claim_receipt,
+            authority_ack=authority_ack, execution_receipt=current_execution,
+            completed_at_ms=claim_at + 3_000,
+        )
+        record["execution_receipt_digest"] = receipt_digest(old_execution)
+        record["signature"] = b64u_encode(agent.sign(canonical_json({
+            key: value for key, value in record.items() if key != "signature"
+        })))
+        ok, reason = _verify_with_evidence(
+            record, ann, claim_receipt, authority_ack, old_execution,
+            now_ms=claim_at + 4_000,
+        )
+        assert not ok and "chronology" in reason
+
+    def test_boolean_revision_is_not_a_v1_root(self, claimed_task):
+        agent, ann, claim_receipt, authority_ack = claimed_task
+        with pytest.raises(MissionCompletionRejected, match="revision link"):
+            sign_mission_completion(
+                agent, announcement_id=ann.announcement_id,
+                mission_id="mission-1", claim_receipt=claim_receipt,
+                authority_ack=authority_ack, execution_receipt=_exec_receipt(agent),
+                revision=False,
+            )
 
     def test_unknown_field_rejected(self, claimed_task):
         agent, ann, claim_receipt, authority_ack = claimed_task

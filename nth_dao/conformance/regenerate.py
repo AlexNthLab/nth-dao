@@ -1226,6 +1226,7 @@ def gen_market_mission_completion_v1() -> list:
         return []
     from copy import deepcopy
 
+    from ..b64u import b64u_encode
     from ..execution_receipt import TimelineEntry, sign_receipt
     from ..identity import AgentID, AgentIdentity
     from ..market.announcement import (
@@ -1356,6 +1357,25 @@ def gen_market_mission_completion_v1() -> list:
     def _tamper_execution(value):
         value["execution_receipt"]["timeline"][0]["payload"]["result"] = "evil"
 
+    def _preclaim_execution(value):
+        execution = sign_receipt(
+            [TimelineEntry(
+                timestamp=claim_time_ms - 1_000,
+                type="nth.task_completed",
+                payload={"mission_id": mission_id, "result": "ok"},
+            )],
+            claimant,
+            goal_id=f"mission:{mission_id}",
+            receipt_id="preclaim-execution-vector-001",
+        )
+        execution["issued_at"] = "2025-06-15T15:06:40+00:00"
+        value["execution_receipt"] = execution
+        record = value["record"]
+        record["execution_receipt_digest"] = receipt_digest(execution)
+        record["signature"] = b64u_encode(claimant.sign(canonical_json({
+            key: item for key, item in record.items() if key != "signature"
+        })))
+
     vectors.extend([
         _negative(
             "market-mission-completion-002",
@@ -1375,8 +1395,223 @@ def gen_market_mission_completion_v1() -> list:
             "Verification-grade mode rejects partial evidence",
             lambda value: value.__setitem__("authority_ack", None),
         ),
+        _negative(
+            "market-mission-completion-005",
+            "A claimant-signed execution event predating claim acceptance is not completion",
+            _preclaim_execution,
+        ),
     ])
     return vectors
+
+
+def gen_market_mission_completion_v2() -> list:
+    """Revision wire bytes remain reproducible independently of the local store."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+    from copy import deepcopy
+
+    from ..execution_receipt import TimelineEntry, sign_receipt
+    from ..identity import AgentID, AgentIdentity
+    from ..market.mission_completion import (
+        receipt_digest, sign_mission_completion,
+    )
+
+    prior = deepcopy(gen_market_mission_completion_v1()[0])
+    signing_key = SigningKey(bytes.fromhex(BOB_SEED_HEX))
+    verify_key = signing_key.verify_key.encode()
+    claimant = AgentIdentity(
+        agent_id=AgentID.from_pubkey(verify_key.hex()),
+        label="vector-bob", _signing_key=bytes.fromhex(BOB_SEED_HEX),
+        _verify_key=verify_key,
+    )
+    nonce = "vectornonce1234567890"
+    predecessor = {
+        "version": 1, "nonce": nonce,
+        "completion_record": prior["record"],
+        "execution_receipt": prior["execution_receipt"],
+    }
+    predecessor_digest = receipt_digest(predecessor)
+    execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=1_750_000_004_000, type="nth.task_completed",
+            payload={"mission_id": "mission-vector-001", "result": "recovered"},
+        )],
+        claimant, goal_id="mission:mission-vector-001",
+        receipt_id="execution-receipt-vector-002",
+    )
+    execution["issued_at"] = "2025-06-15T15:06:44+00:00"
+    record = sign_mission_completion(
+        claimant, announcement_id="dao:task-vector-001",
+        mission_id="mission-vector-001",
+        claim_receipt=prior["claim_receipt"],
+        authority_ack=prior["authority_ack"],
+        execution_receipt=execution,
+        completed_at_ms=1_750_000_005_000,
+        revision=1, supersedes_digest=predecessor_digest,
+    )
+    successor = {
+        "version": 1, "nonce": nonce,
+        "completion_record": record, "execution_receipt": execution,
+    }
+    positive = {
+        "id": "market-mission-completion-v2-001",
+        "description": "Signed revision binds a prior content-addressed completion",
+        "record": record,
+        "claim_receipt": prior["claim_receipt"],
+        "authority_ack": prior["authority_ack"],
+        "execution_receipt": execution,
+        "expected_authority_did": prior["expected_authority_did"],
+        "expected_federation_key": prior["expected_federation_key"],
+        "verification_time_ms": 1_750_000_006_000,
+        "expected_valid": True,
+        "expected_reason": "ok",
+        "expected_canonical_hex": canonical_json(record).hex(),
+        "expected_record_sha256": receipt_digest(record),
+        "predecessor_digest": predecessor_digest,
+        "completion_chain": [predecessor, successor],
+    }
+    missing = deepcopy(positive)
+    missing.update(
+        id="market-mission-completion-v2-002",
+        description="A signed revision without its content-addressed predecessor fails",
+        expected_valid=False,
+        expected_reason="completion revision predecessor is missing",
+        completion_chain=[successor],
+    )
+    wrong_metadata = deepcopy(positive)
+    wrong_metadata.update(
+        id="market-mission-completion-v2-003",
+        description="The vector's predecessor digest must name the retained root",
+        expected_valid=False,
+        expected_reason="completion lineage metadata mismatch",
+        predecessor_digest="sha256:" + "0" * 64,
+    )
+    return [positive, missing, wrong_metadata]
+
+
+def gen_market_mission_completion_v3() -> list:
+    """A signed merge names every branch; partial or unresolved graphs fail."""
+    try:
+        from nacl.signing import SigningKey
+    except ImportError:
+        return []
+    from copy import deepcopy
+
+    from ..execution_receipt import TimelineEntry, sign_receipt
+    from ..identity import AgentID, AgentIdentity
+    from ..market.mission_completion import receipt_digest, sign_mission_completion
+
+    prior = deepcopy(gen_market_mission_completion_v2()[0])
+    signing_key = SigningKey(bytes.fromhex(BOB_SEED_HEX))
+    verify_key = signing_key.verify_key.encode()
+    claimant = AgentIdentity(
+        agent_id=AgentID.from_pubkey(verify_key.hex()),
+        label="vector-bob", _signing_key=bytes.fromhex(BOB_SEED_HEX),
+        _verify_key=verify_key,
+    )
+    nonce = prior["completion_chain"][0]["nonce"]
+    root, branch_a = prior["completion_chain"]
+    branch_b_execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=1_750_000_004_000, type="nth.task_failed",
+            payload={"mission_id": "mission-vector-001", "result": "failed"},
+        )],
+        claimant, goal_id="mission:mission-vector-001",
+        receipt_id="execution-receipt-vector-003",
+    )
+    branch_b_execution["issued_at"] = "2025-06-15T15:06:44+00:00"
+    branch_b_record = sign_mission_completion(
+        claimant, announcement_id="dao:task-vector-001",
+        mission_id="mission-vector-001",
+        claim_receipt=prior["claim_receipt"],
+        authority_ack=prior["authority_ack"],
+        execution_receipt=branch_b_execution, outcome="failed",
+        completed_at_ms=1_750_000_005_000,
+        revision=1, supersedes_digest=receipt_digest(root),
+    )
+    branch_b = {
+        "version": 1, "nonce": nonce,
+        "completion_record": branch_b_record,
+        "execution_receipt": branch_b_execution,
+    }
+    parents = sorted([receipt_digest(branch_a), receipt_digest(branch_b)])
+    merged_execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=1_750_000_006_000, type="nth.task_completed",
+            payload={"mission_id": "mission-vector-001", "result": "merged"},
+        )],
+        claimant, goal_id="mission:mission-vector-001",
+        receipt_id="execution-receipt-vector-004",
+    )
+    merged_execution["issued_at"] = "2025-06-15T15:06:46+00:00"
+    merged_record = sign_mission_completion(
+        claimant, announcement_id="dao:task-vector-001",
+        mission_id="mission-vector-001",
+        claim_receipt=prior["claim_receipt"],
+        authority_ack=prior["authority_ack"],
+        execution_receipt=merged_execution,
+        completed_at_ms=1_750_000_007_000,
+        revision=2, supersedes_digests=parents,
+    )
+    merged = {
+        "version": 1, "nonce": nonce,
+        "completion_record": merged_record,
+        "execution_receipt": merged_execution,
+    }
+    chain = sorted(
+        [root, branch_a, branch_b, merged],
+        key=lambda item: (item["completion_record"].get("revision", 0),
+                          receipt_digest(item)),
+    )
+    positive = {
+        "id": "market-mission-completion-v3-001",
+        "description": "A signed multi-parent revision preserves both competing branches",
+        "record": merged_record,
+        "claim_receipt": prior["claim_receipt"],
+        "authority_ack": prior["authority_ack"],
+        "execution_receipt": merged_execution,
+        "expected_authority_did": prior["expected_authority_did"],
+        "expected_federation_key": prior["expected_federation_key"],
+        "verification_time_ms": 1_750_000_008_000,
+        "expected_valid": True,
+        "expected_reason": "ok",
+        "expected_canonical_hex": canonical_json(merged_record).hex(),
+        "expected_record_sha256": receipt_digest(merged_record),
+        "predecessor_digests": parents,
+        "completion_chain": chain,
+    }
+    missing_branch = deepcopy(positive)
+    missing_branch.update(
+        id="market-mission-completion-v3-002",
+        description="A merge proof cannot omit either signed branch",
+        expected_valid=False,
+        expected_reason="completion revision predecessor is missing",
+        completion_chain=[item for item in chain if receipt_digest(item) != parents[0]],
+    )
+    unresolved = deepcopy(positive)
+    unresolved.update(
+        id="market-mission-completion-v3-003",
+        description="An unresolved fork has no single completion outcome",
+        expected_valid=False,
+        expected_reason="completion merge has multiple heads",
+        completion_chain=[item for item in chain if item != merged],
+    )
+    wrong_revision = deepcopy(positive)
+    wrong_revision["id"] = "market-mission-completion-v3-004"
+    wrong_revision["description"] = "A signed merge cannot skip the next revision"
+    wrong_revision["expected_valid"] = False
+    wrong_revision["expected_reason"] = "completion revision order is invalid"
+    wrong_revision["record"] = sign_mission_completion(
+        claimant, announcement_id="dao:task-vector-001",
+        mission_id="mission-vector-001", claim_receipt=prior["claim_receipt"],
+        authority_ack=prior["authority_ack"], execution_receipt=merged_execution,
+        completed_at_ms=1_750_000_007_000,
+        revision=3, supersedes_digests=parents,
+    )
+    wrong_revision["completion_chain"][-1]["completion_record"] = wrong_revision["record"]
+    return [positive, missing_branch, unresolved, wrong_revision]
 
 
 def regenerate(path: Path = VECTORS_PATH) -> None:
@@ -1406,6 +1641,8 @@ def regenerate(path: Path = VECTORS_PATH) -> None:
             "delivery_ack_v1":             gen_delivery_ack_v1(),
             "market_claim_intent_v1":      gen_market_claim_intent_v1(),
             "market_mission_completion_v1": gen_market_mission_completion_v1(),
+            "market_mission_completion_v2": gen_market_mission_completion_v2(),
+            "market_mission_completion_v3": gen_market_mission_completion_v3(),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

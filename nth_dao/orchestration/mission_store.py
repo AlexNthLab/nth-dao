@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .mission import Mission, MissionStatus, MissionStep, StepStatus
 from .template import (
@@ -409,6 +409,9 @@ class MissionStore:
                 mission.status = MissionStatus.FAILED.value
                 if not mission.completed_at:
                     mission.completed_at = now_iso
+            elif mission.status == MissionStatus.COMPLETED.value:
+                mission.status = MissionStatus.ACTIVE.value
+                mission.completed_at = None
             elif mission.status == MissionStatus.PLANNING.value and any(
                 s.status != StepStatus.TODO.value for s in mission.steps
             ):
@@ -429,7 +432,6 @@ class MissionStore:
         要求 step 当前在 TODO/HANDED_OFF/BLOCKED 之一，且 assignee 为空 或 == agent_id
         （后者支持 retry 同一 agent 重新 claim）。
         """
-        allowed_status_when_unassigned = StepStatus.TODO.value
         # 用 update_step 的 CAS：但 update_step 一次只能 expect 一个 status；
         # 这里手动加锁后再做更细的检查。
         path = self._path_for(mission_id)
@@ -480,8 +482,9 @@ class MissionStore:
                 author=agent_id,
             )
 
-            if mission.status == MissionStatus.PLANNING.value:
+            if mission.status in (MissionStatus.PLANNING.value, MissionStatus.COMPLETED.value):
                 mission.status = MissionStatus.ACTIVE.value
+                mission.completed_at = None
 
             self._save_unlocked(mission)
             return step

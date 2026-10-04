@@ -61,6 +61,7 @@ vi.mock("../api", () => ({
   }),
   fetchAgents: vi.fn().mockResolvedValue([]),
   getClaimEvidence: vi.fn(),
+  getRecordedClaimCompletion: vi.fn(),
   listClaimIntents: vi.fn().mockResolvedValue({ items: [], stats: {} }),
   reconcileClaimIntent: vi.fn(),
   claimTask: vi.fn(),
@@ -73,6 +74,7 @@ import {
   discoverFederationPeers,
   fetchAgents,
   getClaimEvidence,
+  getRecordedClaimCompletion,
   listClaimIntents,
   listOpenTasks,
   reconcileClaimIntent,
@@ -88,6 +90,62 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
+  it("shows a retained completion as a claimant statement, not acceptance", async () => {
+    const nonce = "c".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "signed-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getRecordedClaimCompletion).mockResolvedValueOnce({
+      nonce, recorded: true, verification_scope: "signed_evidence_only",
+      source_claim_id: "b".repeat(64), nonce_authenticated: false,
+      mission_id: "mission-1", outcome: "succeeded",
+      completed_at_ms: 1_700_000_000_000,
+      revision: 1,
+      evidence_digest: `sha256:${"a".repeat(64)}`,
+    });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
+    expect(await screen.findByText("Signed completion statement recorded")).toBeTruthy();
+    expect(screen.getByText(/Claimant-reported outcome: succeeded/)).toBeTruthy();
+    expect(screen.getByText(/Revision 1 \(prior statement retained\)/)).toBeTruthy();
+    expect(screen.getByText(/Not work acceptance or payment/)).toBeTruthy();
+    expect(screen.getByText(/Source claim ID:/)).toBeTruthy();
+    expect(screen.getByText(/nonce is not source-authenticated/)).toBeTruthy();
+    expect(screen.queryByText("Mission completed")).toBeNull();
+  });
+
+  it("does not report a completion when none was retained", async () => {
+    const nonce = "d".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "signed-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getRecordedClaimCompletion).mockResolvedValueOnce(null);
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
+    expect(await screen.findByText("No signed completion statement recorded")).toBeTruthy();
+    expect(screen.queryByText("Signed completion statement recorded")).toBeNull();
+  });
+
   it("checks confirmed claim provenance without claiming mission completion", async () => {
     const nonce = "v".repeat(24);
     vi.mocked(listClaimIntents).mockResolvedValueOnce({
