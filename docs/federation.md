@@ -204,6 +204,9 @@ or included in the rotation record. This does not change the active node key,
 team owner, or agent identity. A key lost before this dual-signature step
 cannot be made a trusted predecessor by self-declaration or by the current
 guardian module alone; a separate anchored recovery flow is still required.
+Malformed complete rows are logged and ignored only when the required
+dual-signed chain remains intact. A missing chain, valid fork, cycle, oversized
+history, or truncated tail still fails closed.
 The response identifies the source claim and the checked completion head, but
 reports `recorded: false`, `accepted: false`, `settled: false`, and
 `nonce_authenticated: false`. The source does not retain the proof, issue an
@@ -225,8 +228,17 @@ The inbox has bounded per-claim storage and
 does not silently replace a different statement with the same semantic key.
 POST and GET responses recompute the lineage across locally retained signed
 proofs for that claim. `lineage_state: unresolved_fork` means competing heads
-exist; `single_retained_head_digest` is then null. A single retained head is
+exist at the signed-record level, even if historical nonce aliases also
+exist; `has_duplicate_signed_head` reports those aliases independently.
+`single_retained_head_digest` is then null. A single retained head is
 only a local inventory observation, not a global or adjudicated outcome. The
+inbox rejects a second proof wrapper around the same signed completion record
+before persistence. Historical duplicate wrappers remain readable as
+`duplicate_signed_head` with no single-head assertion; they are not treated
+as independent claimant-signed results and are never silently discarded. An
+already retained but unaudited historical alias can be resolved only by the
+explicit digest-pinned reconcile operation, which signs its receipt and then
+reports the duplicate state. New aliases are rejected before persistence.
 `outcome` field describes the submitted head alone. Missing local source
 evidence returns 503 (verification unavailable), while an invalid proof
 returns 422. Windows inbox filenames use extended paths and a non-overwriting
@@ -253,7 +265,33 @@ The result still reports `nonce_authenticated: false`, `accepted: false`, and
 acknowledgement to the claimant, a work review, a reputation decision, or a
 payment instruction. Automated bilateral transport and acknowledgement remain
 future protocol work. The local audit payload has a versioned structural vector
-at `nth_dao/market/vectors/source-completion-received-v1.json`.
+at `nth_dao/market/vectors/source-completion-received-v1.json`. The fixed
+signed event and rotation fixture at
+`nth_dao/market/vectors/source-completion-receipt-crypto-v1.json` is verified
+by both Python and Node tests. It covers signature interoperability, not audit
+inclusion, source retention, or the full claimant-proof binding.
+The source response also includes `source_receipt_event`, the exact signed
+Spine event behind `audit_event_id`, and `source_rotation_chain`, an exact
+dual-signed path from the announcement authority to the event signer (empty
+when no rotation occurred). An operator may transfer that event with
+the original portable proof and verify it offline using
+`nth-claim-completion verify-receipt --proof-file PROOF --receipt-event-file
+EVENT --source-did DID --federation-key KEY`. Supply both pins independently;
+never take them from the transferred proof or event. The verifier requires
+the event signer to equal the pinned source DID or be reachable through a
+continuous, bounded, dual-signed rotation path. It also validates the complete
+proof and binds every signed audit payload field to that proof. The rotation
+chain is evidence, not a trust root. `receipt_verified` means that the pinned
+source signed this statement and its signed payload binds the supplied proof;
+it is not cryptographic
+proof that the event ever entered Spine or that its disk still retains the
+blob, nor evidence of acceptance or settlement. The CLI explicitly reports
+`audit_inclusion_verified: false` and `source_retention_verified: false`.
+The CLI accepts either the bare signed event or the complete
+source REST response. In the latter case it checks the wrapper's audit ID and
+every mirrored signed payload field against the signed event, but does not trust the wrapper's
+unsigned status flags. A rotated signer requires the response's verified
+`source_rotation_chain`; a bare event alone cannot establish that link.
 The retained proof includes a signed scoped capability token and claimant
 metadata. Keep the workspace private; do not publish or sync the inbox as a
 public Git artifact merely because its statements are signed.
@@ -330,6 +368,9 @@ complete view.
 | `POST /api/v2/market/claim-intents/{nonce}/completion/record` | Retain a claimant-signed root or linked revision | Console write |
 | `GET /api/v2/market/claim-intents/{nonce}/completion/proof` | Explicitly export the full signed lineage for pinned offline verification | Console read |
 | `POST /api/v2/market/completion-proofs/verify-source` | Check a transferred proof against this source's signed announcement and CAS claim; no retention or acceptance | Console write; bounded and operator-only |
+| `POST /api/v2/market/completion-proofs/record-source` | Retain a verified proof and sign a source receipt event | Console write; bounded and operator-only |
+| `GET /api/v2/market/completion-proofs/source/{source_claim_id}/{head_hex}` | Reverify an exact retained proof and return its signed source receipt event | Console read; bounded and operator-only |
+| `POST /api/v2/market/completion-proofs/source/{source_claim_id}/{head_hex}/reconcile` | Explicitly audit a verified pending blob by its full proof digest | Console write; bounded and operator-only |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 | `GET /api/v2/trade/federation/offers/{digest}/head-proof` | Bounded complete disclosed revision chain for a live publisher head claim | Public read |

@@ -351,7 +351,67 @@ def test_source_rotation_rejects_forged_or_unrelated_lineage(tmp_path: Path) -> 
         verify_source_claim_completion(source, proof, source_did=current.as_did())
 
 
+def test_source_rotation_rejects_duplicate_json_fields_before_export(
+    tmp_path: Path,
+) -> None:
+    from nth_dao.market.source_identity import export_source_identity_rotation_chain
+
+    source, old, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    current = AgentIdentity.generate(label="current")
+    record_source_identity_rotation(source, old, current)
+    path = source / "market_feed" / "source_identity_rotations.jsonl"
+    line = path.read_bytes().removesuffix(b"\n")
+    path.write_bytes(b'{"previous_did":"forged",' + line[1:] + b"\n")
+    with pytest.raises(ValueError, match="corrupt source identity history"):
+        verify_source_claim_completion(source, proof, source_did=current.as_did())
+    with pytest.raises(ValueError, match="corrupt source identity history"):
+        export_source_identity_rotation_chain(source, old.as_did(), current.as_did())
+
+
+def test_source_rotation_export_tolerates_identical_edge_retries(
+    tmp_path: Path,
+) -> None:
+    from nth_dao.market.source_identity import export_source_identity_rotation_chain
+
+    source, old, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    current = AgentIdentity.generate(label="current")
+    first = record_source_identity_rotation(source, old, current)
+    record_source_identity_rotation(source, old, current)
+    assert export_source_identity_rotation_chain(
+        source, old.as_did(), current.as_did(),
+    ) == [first]
+    recorded = SourceCompletionInbox(
+        source, source_did=current.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", current),
+    ).record(proof)
+    assert recorded["source_rotation_chain"] == [first]
+
+
+def test_source_receipt_survives_unrelated_malformed_rotation_row(
+    tmp_path: Path,
+) -> None:
+    source, old, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    current = AgentIdentity.generate(label="current")
+    rotation = record_source_identity_rotation(source, old, current)
+    inbox = SourceCompletionInbox(
+        source, source_did=current.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", current),
+    )
+    recorded = inbox.record(proof)
+    path = source / "market_feed" / "source_identity_rotations.jsonl"
+    with path.open("ab") as stream:
+        stream.write(b"{invalid unrelated row}\n")
+    assert verify_source_claim_completion(
+        source, proof, source_did=current.as_did(),
+    ) == (True, "ok")
+    recovered = inbox.get(proof["source_claim_id"], recorded["completion_head_digest"][7:])
+    assert recovered["audit_event_id"] == recorded["audit_event_id"]
+    assert recovered["source_rotation_chain"] == [rotation]
+
+
 def test_source_rotation_multihop_and_fork_fail_closed(tmp_path: Path) -> None:
+    from nth_dao.market.source_identity import export_source_identity_rotation_chain
+
     source, original, _claimant, _announcement, proof = _source_and_proof(tmp_path)
     middle = AgentIdentity.generate(label="middle")
     current = AgentIdentity.generate(label="current")
@@ -365,6 +425,10 @@ def test_source_rotation_multihop_and_fork_fail_closed(tmp_path: Path) -> None:
     assert not verify_source_claim_completion(
         source, proof, source_did=current.as_did(),
     )[0]
+    with pytest.raises(ValueError, match="ambiguous"):
+        export_source_identity_rotation_chain(
+            source, original.as_did(), current.as_did(),
+        )
 
 
 def test_source_rotation_rejects_signed_cycle(tmp_path: Path) -> None:
@@ -380,7 +444,7 @@ def test_source_rotation_rejects_signed_cycle(tmp_path: Path) -> None:
 def test_source_rotation_refuses_write_that_would_brick_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import nth_dao.market.source_identity as source_identity
+    from nth_dao.market import source_identity
 
     old = AgentIdentity.generate(label="old")
     new = AgentIdentity.generate(label="new")
@@ -396,6 +460,7 @@ def test_corrupt_rotation_evidence_is_unavailable_not_claimant_mismatch(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -419,6 +484,7 @@ def test_unreadable_rotation_history_is_unavailable(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -447,6 +513,7 @@ def test_unreadable_rotation_history_is_unavailable(
 def test_source_rotation_is_respected_by_operator_rest(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -471,6 +538,7 @@ def test_source_proof_rest_is_operator_only_and_never_accepts_work(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -653,7 +721,8 @@ def test_source_proof_get_has_one_slot_and_shares_post_budget() -> None:
 ])
 def test_source_proof_streamed_body_without_length_is_bounded(route: str) -> None:
     from nth_dao.web import (
-        _CLAIM_SOURCE_PROOF_MAX_BODY_BYTES, _FederationBodyLimitMiddleware,
+        _CLAIM_SOURCE_PROOF_MAX_BODY_BYTES,
+        _FederationBodyLimitMiddleware,
     )
 
     async def exercise() -> None:
@@ -703,6 +772,7 @@ def test_source_proof_reports_local_storage_failure_as_unavailable(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -739,6 +809,7 @@ def test_source_proof_reports_corrupt_local_evidence_as_unavailable(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -778,9 +849,203 @@ def test_source_inbox_records_one_signed_receipt_without_accepting_work(
     event = spine.get_verified_event(first["audit_event_id"])
     assert event is not None and event.type == RECEIVED_EVENT
     assert event.author_did == authority.as_did()
+    assert first["source_receipt_event"] == event.to_dict()
     assert inbox.get(
         proof["source_claim_id"], first["completion_head_digest"][7:],
     ) == {**first, "already_recorded": True}
+
+
+def test_source_receipt_offline_verifier_binds_pins_proof_and_audit(
+    tmp_path: Path,
+) -> None:
+    from nth_dao.market.source_completion_receipt import (
+        verify_source_completion_receipt,
+    )
+    from nth_dao.spine.event import sign_event
+
+    source, authority, claimant, announcement, proof = _source_and_proof(tmp_path)
+    recorded = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    event = recorded["source_receipt_event"]
+    pins = {
+        "expected_source_did": authority.as_did(),
+        "expected_federation_key": announcement_federation_key(announcement),
+    }
+    assert verify_source_completion_receipt(proof, event, **pins) == (True, "ok")
+    assert not verify_source_completion_receipt(proof, event, **{
+        **pins, "expected_source_did": claimant.as_did(),
+    })[0]
+    assert not verify_source_completion_receipt(proof, event, **{
+        **pins, "expected_federation_key": "untrusted",
+    })[0]
+    assert not verify_source_completion_receipt(proof, {}, **pins)[0]
+    assert not verify_source_completion_receipt(proof, {
+        **event, "payload": {**event["payload"], "accepted": True},
+    }, **pins)[0]
+    signed_wrong_meaning = sign_event(
+        seq=event["seq"], prev_hash=event["prev_hash"],
+        event_type=RECEIVED_EVENT,
+        payload={**event["payload"], "accepted": True},
+        identity=authority, ts_ms=event["ts_ms"],
+    ).to_dict()
+    assert not verify_source_completion_receipt(
+        proof, signed_wrong_meaning, **pins,
+    )[0]
+    signed_wrong_type = sign_event(
+        seq=event["seq"], prev_hash=event["prev_hash"],
+        event_type=RECEIVED_EVENT,
+        payload={**event["payload"], "accepted": 0},
+        identity=authority, ts_ms=event["ts_ms"],
+    ).to_dict()
+    assert not verify_source_completion_receipt(
+        proof, signed_wrong_type, **pins,
+    )[0]
+    signed_wrong_author = sign_event(
+        seq=event["seq"], prev_hash=event["prev_hash"],
+        event_type=RECEIVED_EVENT, payload=event["payload"],
+        identity=AgentIdentity.generate(label="untrusted"), ts_ms=event["ts_ms"],
+    ).to_dict()
+    assert not verify_source_completion_receipt(
+        proof, signed_wrong_author, **pins,
+    )[0]
+    assert not verify_source_completion_receipt(
+        _competing_root(proof, claimant), event, **pins,
+    )[0]
+
+
+def test_source_receipt_offline_verifies_dual_signed_source_rotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+    from nth_dao.market.source_completion_receipt import (
+        verify_source_completion_receipt,
+    )
+
+    source, old, _claimant, announcement, proof = _source_and_proof(tmp_path)
+    middle = AgentIdentity.generate(label="middle-source")
+    current = AgentIdentity.generate(label="current-source")
+    first = record_source_identity_rotation(source, old, middle)
+    second = record_source_identity_rotation(source, middle, current)
+    recorded = SourceCompletionInbox(
+        source, source_did=current.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", current),
+    ).record(proof)
+    event = recorded["source_receipt_event"]
+    pins = {
+        "expected_source_did": old.as_did(),
+        "expected_federation_key": announcement_federation_key(announcement),
+    }
+    assert not verify_source_completion_receipt(proof, event, **pins)[0]
+    assert recorded["source_rotation_chain"] == [first, second]
+    chain = recorded["source_rotation_chain"]
+    assert verify_source_completion_receipt(
+        proof, event, rotation_chain=chain, **pins,
+    ) == (True, "ok")
+    for invalid in (
+        [second], [first], list(reversed(chain)),
+        [{**first, "successor_sig": "0" * 128}, second],
+        [first, second, first],
+    ):
+        assert not verify_source_completion_receipt(
+            proof, event, rotation_chain=invalid, **pins,
+        )[0]
+    assert not verify_source_completion_receipt(
+        proof, event, rotation_chain=chain,
+        expected_source_did=middle.as_did(),
+        expected_federation_key=pins["expected_federation_key"],
+    )[0]
+    proof_file = tmp_path / "rotated-proof.json"
+    response_file = tmp_path / "rotated-source-response.json"
+    proof_file.write_bytes(canonical_json(proof))
+    response_file.write_bytes(canonical_json(recorded))
+    command = [
+        "verify-receipt", "--proof-file", str(proof_file),
+        "--receipt-event-file", str(response_file),
+        "--source-did", old.as_did(),
+        "--federation-key", pins["expected_federation_key"],
+    ]
+    assert main(command) == 0
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is True
+    response_file.write_bytes(canonical_json({
+        **recorded, "source_rotation_chain": [{
+            **first, "previous_sig": "0" * 128,
+        }, second],
+    }))
+    assert main(command) == 1
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is False
+
+
+def test_source_receipt_cli_verifies_statement_binding_without_audit_inclusion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+
+    source, authority, _claimant, announcement, proof = _source_and_proof(tmp_path)
+    recorded = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    proof_file = tmp_path / "completion-proof.json"
+    event_file = tmp_path / "source-receipt-event.json"
+    proof_file.write_bytes(canonical_json(proof))
+    event = recorded["source_receipt_event"]
+    event_file.write_bytes(canonical_json(event))
+    command = [
+        "verify-receipt", "--proof-file", str(proof_file),
+        "--receipt-event-file", str(event_file),
+        "--source-did", authority.as_did(),
+        "--federation-key", announcement_federation_key(announcement),
+    ]
+    assert main(command) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["receipt_verified"] is True
+    assert result["audit_inclusion_verified"] is False
+    assert result["verification_scope"] == "source_statement_and_proof_binding"
+    assert "source_statement_signature_verified" not in result
+    assert result["accepted"] is False and result["settled"] is False
+    event_file.write_bytes(b'{"seq":0,' + canonical_json(event)[1:])
+    assert main(command) == 1
+    assert "repeats a field" in capsys.readouterr().err
+    event_file.write_bytes(canonical_json({
+        **event, "payload": {**event["payload"], "accepted": True},
+    }))
+    assert main(command) == 1
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is False
+
+
+def test_source_receipt_offline_signature_does_not_claim_spine_inclusion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+    from nth_dao.market.source_completion_receipt import _payload_for_verified_proof
+    from nth_dao.spine.event import GENESIS_PREV, sign_event
+
+    source, authority, _claimant, announcement, proof = _source_and_proof(tmp_path)
+    event = sign_event(
+        seq=0, prev_hash=GENESIS_PREV, event_type=RECEIVED_EVENT,
+        payload=_payload_for_verified_proof(proof, canonical_json(proof)),
+        identity=authority, ts_ms=int(time.time() * 1000),
+    )
+    assert not (source / "spine.jsonl").exists()
+    proof_file = tmp_path / "proof.json"
+    event_file = tmp_path / "unrecorded-event.json"
+    proof_file.write_bytes(canonical_json(proof))
+    event_file.write_bytes(canonical_json(event.to_dict()))
+    assert main([
+        "verify-receipt", "--proof-file", str(proof_file),
+        "--receipt-event-file", str(event_file),
+        "--source-did", authority.as_did(),
+        "--federation-key", announcement_federation_key(announcement),
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["receipt_verified"] is True
+    assert result["audit_inclusion_verified"] is False
+    assert result["source_retention_verified"] is False
 
 
 def test_source_receipt_event_matches_packaged_conformance_vector(
@@ -798,6 +1063,13 @@ def test_source_receipt_event_matches_packaged_conformance_vector(
     ).record(proof)
     event = spine.get_verified_event(result["audit_event_id"])
     assert event is not None and event.type == vector["event_type"] == RECEIVED_EVENT
+    assert vector["portable_receipt_field"] == "source_receipt_event"
+    assert vector["portable_rotation_field"] == "source_rotation_chain"
+    assert result[vector["portable_rotation_field"]] == []
+    assert set(result[vector["portable_receipt_field"]]) == set(
+        vector["portable_receipt_event_fields"]
+    )
+    assert result["source_receipt_event"] == event.to_dict()
     assert set(event.payload) == set(vector["payload"])
     assert event.payload[vector["semantic_key_field"]] == (
         event.payload["source_claim_id"] + ":" + event.payload["completion_head_digest"]
@@ -808,6 +1080,156 @@ def test_source_receipt_event_matches_packaged_conformance_vector(
     assert sample["completion_key"] == (
         sample["source_claim_id"] + ":" + sample["completion_head_digest"]
     )
+
+
+def test_source_receipt_fixed_signature_and_rotation_vector() -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.market.source_identity import verify_portable_source_rotation_chain
+    from nth_dao.spine.event import SpineEvent, verify_event
+
+    vector_path = (
+        Path(__file__).parents[1] / "nth_dao" / "market" / "vectors"
+        / "source-completion-receipt-crypto-v1.json"
+    )
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    event = SpineEvent.from_dict(vector["event"])
+    assert canonical_json(event.core()).decode("utf-8") == vector["event_core_canonical_json"]
+    assert verify_event(event) == (True, "ok")
+    chain = vector["rotation_chain"]
+    body = {key: value for key, value in chain[0].items() if not key.endswith("_sig")}
+    assert canonical_json(body).decode("utf-8") == vector["rotation_body_canonical_json"]
+    assert verify_portable_source_rotation_chain(
+        chain, vector["pinned_source_did"], event.author_did,
+    )
+    assert not verify_portable_source_rotation_chain(
+        [], vector["pinned_source_did"], event.author_did,
+    )
+    assert not verify_portable_source_rotation_chain(
+        [{**chain[0], "previous_sig": "0" * 128}],
+        vector["pinned_source_did"], event.author_did,
+    )
+    tampered = SpineEvent.from_dict({
+        **vector["event"], "payload": {**event.payload, "accepted": True},
+    })
+    assert not verify_event(tampered)[0]
+
+
+def test_source_inbox_rejects_signed_audit_payload_type_confusion(
+    tmp_path: Path,
+) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    spine = SignedEventLog(source / "spine.jsonl", authority)
+    inbox = SourceCompletionInbox(source, source_did=authority.as_did(), spine=spine)
+    _raw, payload = inbox._verified_payload(proof)
+    spine.append_unique(
+        RECEIVED_EVENT, {**payload, "accepted": 0},
+        unique_payload_fields=("completion_key",),
+    )
+    with pytest.raises(SourceCompletionConflict, match="different proof"):
+        inbox.record(proof)
+    assert not list(inbox.root.rglob("*.json"))
+
+
+def test_source_inbox_rejects_nonce_rewrapped_signed_completion(
+    tmp_path: Path,
+) -> None:
+    source, authority, claimant, announcement, proof = _source_and_proof(tmp_path)
+    spine = SignedEventLog(source / "spine.jsonl", authority)
+    inbox = SourceCompletionInbox(source, source_did=authority.as_did(), spine=spine)
+    first = inbox.record(proof)
+    replacement_intent = sign_claim_intent(
+        claimant, announcement_id=announcement.announcement_id,
+        cap_token=proof["claim_receipt"]["authorizing_cap_token"],
+    )
+    rebound = {
+        **proof, "nonce": replacement_intent["nonce"],
+        "intent": replacement_intent,
+        "completion_chain": [
+            {**envelope, "nonce": replacement_intent["nonce"]}
+            for envelope in proof["completion_chain"]
+        ],
+    }
+    assert verify_source_claim_completion(
+        source, rebound, source_did=authority.as_did(),
+    ) == (True, "ok")
+    with pytest.raises(SourceCompletionConflict, match="same signed completion"):
+        inbox.record(rebound)
+    assert spine.head_seq == 0
+    assert len(list(inbox.root.rglob("*.json"))) == 1
+    assert inbox.get(proof["source_claim_id"], first["completion_head_digest"][7:])[
+        "lineage_state"
+    ] == "single_retained_head"
+
+
+def test_source_inbox_marks_legacy_nonce_aliases_as_duplicate_signed_head(
+    tmp_path: Path,
+) -> None:
+    source, authority, claimant, announcement, proof = _source_and_proof(tmp_path)
+    spine = SignedEventLog(source / "spine.jsonl", authority)
+    inbox = SourceCompletionInbox(source, source_did=authority.as_did(), spine=spine)
+    first = inbox.record(proof)
+    replacement_intent = sign_claim_intent(
+        claimant, announcement_id=announcement.announcement_id,
+        cap_token=proof["claim_receipt"]["authorizing_cap_token"],
+    )
+    rebound = {
+        **proof, "nonce": replacement_intent["nonce"],
+        "intent": replacement_intent,
+        "completion_chain": [
+            {**envelope, "nonce": replacement_intent["nonce"]}
+            for envelope in proof["completion_chain"]
+        ],
+    }
+    raw, payload = inbox._verified_payload(rebound)
+    slot = inbox._slot(proof["source_claim_id"])
+    inbox._write_immutable(slot / (payload["completion_head_digest"][7:] + ".json"), raw)
+    spine.append_unique(
+        RECEIVED_EVENT, payload, unique_payload_fields=("completion_key",),
+    )
+    legacy = inbox.get(proof["source_claim_id"], first["completion_head_digest"][7:])
+    assert legacy["lineage_state"] == "duplicate_signed_head"
+    assert legacy["single_retained_head_digest"] is None
+    assert len(legacy["lineage_heads"]) == 2
+    assert spine.head_seq == 1
+    competing = inbox.record(_competing_root(proof, claimant))
+    assert competing["lineage_state"] == "unresolved_fork"
+    assert competing["has_duplicate_signed_head"] is True
+    assert len(competing["lineage_heads"]) == 3
+
+
+def test_source_inbox_allows_audited_retry_with_legacy_pending_alias(
+    tmp_path: Path,
+) -> None:
+    source, authority, claimant, announcement, proof = _source_and_proof(tmp_path)
+    spine = SignedEventLog(source / "spine.jsonl", authority)
+    inbox = SourceCompletionInbox(source, source_did=authority.as_did(), spine=spine)
+    first = inbox.record(proof)
+    replacement_intent = sign_claim_intent(
+        claimant, announcement_id=announcement.announcement_id,
+        cap_token=proof["claim_receipt"]["authorizing_cap_token"],
+    )
+    rebound = {
+        **proof, "nonce": replacement_intent["nonce"],
+        "intent": replacement_intent,
+        "completion_chain": [
+            {**envelope, "nonce": replacement_intent["nonce"]}
+            for envelope in proof["completion_chain"]
+        ],
+    }
+    raw, payload = inbox._verified_payload(rebound)
+    slot = inbox._slot(proof["source_claim_id"])
+    inbox._write_immutable(slot / (payload["completion_head_digest"][7:] + ".json"), raw)
+    retry = inbox.record(proof)
+    assert retry["audit_event_id"] == first["audit_event_id"]
+    assert retry["already_recorded"] is True
+    assert retry["lineage_state"] == "pending_audit"
+    reconciled = inbox.reconcile_pending(
+        proof["source_claim_id"], payload["completion_head_digest"][7:],
+        expected_proof_digest=payload["proof_digest"],
+    )
+    assert reconciled["lineage_state"] == "duplicate_signed_head"
+    assert reconciled["single_retained_head_digest"] is None
+    assert spine.head_seq == 1
 
 
 def test_source_inbox_retry_repairs_blob_after_failed_audit(
@@ -1224,6 +1646,7 @@ def test_source_inbox_rest_is_operator_only_and_failure_is_explicit(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -1251,6 +1674,9 @@ def test_source_inbox_rest_is_operator_only_and_failure_is_explicit(
         + proof["source_claim_id"] + "/" + body["completion_head_digest"][7:]
     )
     assert client.get(lookup).json()["audit_event_id"] == body["audit_event_id"]
+    assert client.get(lookup).json()["source_receipt_event"] == body[
+        "source_receipt_event"
+    ]
     assert client.post(route, json={"proof": proof}).json()["already_recorded"] is True
 
     locked = create_app(source, require_console_auth=True)
@@ -1270,9 +1696,73 @@ def test_source_inbox_rest_is_operator_only_and_failure_is_explicit(
     ).status_code == 413
 
 
+def test_source_receipt_cli_consumes_real_source_rest_response(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+    from nth_dao.web import create_app
+
+    source = tmp_path / "source"
+    app = create_app(source, require_console_auth=False)
+    _source, authority, _claimant, announcement, proof = _source_and_proof(
+        tmp_path, authority=app.state.nth.node_identity,
+    )
+    client = TestClient(app)
+    recorded = client.post(
+        "/api/v2/market/completion-proofs/record-source", json={"proof": proof},
+    )
+    assert recorded.status_code == 200, recorded.text
+    lookup = (
+        "/api/v2/market/completion-proofs/source/"
+        + proof["source_claim_id"] + "/"
+        + recorded.json()["completion_head_digest"][7:]
+    )
+    response = client.get(lookup)
+    assert response.status_code == 200, response.text
+    proof_file = tmp_path / "proof.json"
+    receipt_file = tmp_path / "source-response.json"
+    proof_file.write_bytes(canonical_json(proof))
+    receipt_file.write_bytes(canonical_json(response.json()))
+    command = [
+        "verify-receipt", "--proof-file", str(proof_file),
+        "--receipt-event-file", str(receipt_file),
+        "--source-did", authority.as_did(),
+        "--federation-key", announcement_federation_key(announcement),
+    ]
+    assert main(command) == 0
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is True
+    receipt_file.write_bytes(canonical_json({
+        **response.json(), "audit_event_id": "0" * 64,
+    }))
+    assert main(command) == 1
+    capsys.readouterr()
+    receipt_file.write_bytes(canonical_json({
+        **response.json(), "outcome": "failed",
+    }))
+    assert main(command) == 1
+    capsys.readouterr()
+    receipt_file.write_bytes(canonical_json({
+        **response.json(), "accepted": 0,
+    }))
+    assert main(command) == 1
+    capsys.readouterr()
+    receipt_file.write_bytes(canonical_json({
+        **response.json(), "source_receipt_event": {
+            **response.json()["source_receipt_event"], "sig": "bad",
+        },
+    }))
+    assert main(command) == 1
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is False
+
+
 def test_source_inbox_missing_local_announcement_is_unavailable(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"
@@ -1297,6 +1787,7 @@ def test_source_inbox_reconcile_rest_is_explicit_and_bounded(
 ) -> None:
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
+
     from nth_dao.web import create_app
 
     source = tmp_path / "source"

@@ -1,6 +1,12 @@
 {
   "format": "nth-market-source-completion-received-v1",
   "event_type": "market.claim.completion.received",
+  "portable_receipt_field": "source_receipt_event",
+  "portable_rotation_field": "source_rotation_chain",
+  "portable_receipt_event_fields": [
+    "seq", "prev_hash", "type", "payload", "author_did", "ts_ms",
+    "content_hash", "sig"
+  ],
   "semantic_key_field": "completion_key",
   "scope": "source-local receipt of a claimant statement; not acceptance or settlement",
   "payload": {

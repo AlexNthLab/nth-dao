@@ -161,6 +161,23 @@ execution boundary confirms that the in-flight turn stopped.
 Passing this descriptor vector alone does not prove those runtime properties;
 the negative and real-child integration tests enforce them in Python.
 
+The market source-completion receipt v1 vector in
+`nth_dao/market/vectors/source-completion-received-v1.json` fixes the audit
+payload, its portable signed Spine-event field, and the optional dual-signed
+source-rotation path field. It is a structural vector. The separate fixed
+signature fixture in
+`nth_dao/market/vectors/source-completion-receipt-crypto-v1.json` includes
+canonical event/rotation bytes and valid Ed25519 signatures. Python verifies
+it in `tests/test_market_source_completion.py`; Node independently decodes
+the DID keys and verifies the signatures and negative mutations in
+`frontend/sourceReceiptVector.test.js`. This tests wire-level cryptography,
+not complete cross-language source-receipt processing. Consumers must independently verify
+the Spine signature, an externally pinned source DID and federation key, each
+rotation hop from that DID to the event signer when present, the
+complete claimant proof, and the exact payload-to-proof binding. A signed
+receipt authenticates a source statement; it does not prove evidence truth,
+Spine inclusion, continued disk retention, work acceptance, or settlement.
+
 Recognition federation also ships a deterministic multi-page v2 graph in
 `rule-recognition-proof-pages-v2.json` and matching page/import schemas. It
 covers 129 sequence-linked statements, byte-exact page canonicalization,

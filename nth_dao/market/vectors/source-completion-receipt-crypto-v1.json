@@ -1,0 +1,45 @@
+{
+  "format": "nth-market-source-completion-receipt-crypto-v1",
+  "pinned_source_did": "did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV",
+  "event_core_canonical_json": "{\"author_did\":\"did:key:z6MkkveV6bpqv7LnRAFaLTwdqx5952CWHHTBaXHgy8eeAR1s\",\"payload\":{\"accepted\":false,\"claimant_did\":\"did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV\",\"completion_head_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"completion_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mission_id\":\"mission-vector\",\"nonce_authenticated\":false,\"outcome\":\"succeeded\",\"proof_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"revision\":0,\"settled\":false,\"source_claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_did\":\"did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV\"},\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"seq\":0,\"ts_ms\":1780000000000,\"type\":\"market.claim.completion.received\"}",
+  "rotation_body_canonical_json": "{\"created_at_ms\":1770000000000,\"kind\":\"nth-market-source-identity-rotation\",\"previous_did\":\"did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV\",\"successor_did\":\"did:key:z6MkkveV6bpqv7LnRAFaLTwdqx5952CWHHTBaXHgy8eeAR1s\",\"version\":1}",
+  "rotation_chain": [
+    {
+      "kind": "nth-market-source-identity-rotation",
+      "version": 1,
+      "previous_did": "did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV",
+      "successor_did": "did:key:z6MkkveV6bpqv7LnRAFaLTwdqx5952CWHHTBaXHgy8eeAR1s",
+      "created_at_ms": 1770000000000,
+      "previous_sig": "289c4871b16208051dbde522226fd51fd2e904466ec35c8b713b72f89068f0bead38914ec35f51139ca30251b3abb690e593270371f0f19cde96beaed2fd220f",
+      "successor_sig": "41570d30c3a2a7e09761a22978bd7d1a5ce912b34655b5c0d0cd779b74c314aacc70181d4be13f0a3aa3229e7a0dad0b01354430c69e609816c3298487367d0e"
+    }
+  ],
+  "event": {
+    "seq": 0,
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "type": "market.claim.completion.received",
+    "payload": {
+      "completion_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_claim_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "completion_head_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "proof_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "claimant_did": "did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV",
+      "source_did": "did:key:z6MkgmNyxqzP5GKLgggh1wVToQdHgM5LwEt5s9xG28XEMpCV",
+      "mission_id": "mission-vector",
+      "outcome": "succeeded",
+      "revision": 0,
+      "nonce_authenticated": false,
+      "accepted": false,
+      "settled": false
+    },
+    "author_did": "did:key:z6MkkveV6bpqv7LnRAFaLTwdqx5952CWHHTBaXHgy8eeAR1s",
+    "ts_ms": 1780000000000,
+    "content_hash": "603a1a4c23ec6d74094ac5b66ff5f1688045b67268312faa5e13d5063e072b12",
+    "sig": "9kYoEFaAGzjo_Mi9J9AdxWHvfAjv726GqRFYBSsDtXB8NBv6zikQAATXysiDXqFF_S2-sCc2y3hm21pHDdBsCw"
+  },
+  "negative_mutations": [
+    "omit rotation_chain",
+    "change rotation_chain[0].previous_sig",
+    "change event.payload.accepted"
+  ]
+}

@@ -15,22 +15,30 @@ from pathlib import Path
 from typing import Any
 
 from nth_dao.canonical_json import canonical_json
-from nth_dao.market.announcement import TaskAnnouncement
 from nth_dao.market.completion_flow import (
     MAX_PORTABLE_COMPLETION_PROOF_BYTES,
     SourceCompletionEvidenceUnavailable,
     verify_source_claim_completion,
 )
 from nth_dao.market.mission_completion import (
+    COMPLETION_MERGE_VERSION,
+    COMPLETION_REVISION_VERSION,
     CompletionLineageError,
     receipt_digest,
     resolve_completion_lineage,
 )
-from nth_dao.market.source_identity import source_identity_precedes
+from nth_dao.market.source_completion_receipt import (
+    RECEIVED_EVENT,
+    _payload_for_verified_proof,
+    _same_payload_bytes,
+)
+from nth_dao.market.source_identity import (
+    export_source_identity_rotation_chain,
+    source_identity_precedes,
+)
 from nth_dao.spine.log import SignedEventLog, SpineSemanticConflict
 from nth_dao.util.io import InterProcessLock
 
-RECEIVED_EVENT = "market.claim.completion.received"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_HEADS_PER_CLAIM = 8
 _MAX_BYTES_PER_CLAIM = 64 * 1024 * 1024
@@ -218,26 +226,8 @@ class SourceCompletionInbox:
         raw = canonical_json(proof)
         if len(raw) > MAX_PORTABLE_COMPLETION_PROOF_BYTES:
             raise SourceCompletionRejected("source proof exceeds size limit")
-        head = proof["completion_chain"][-1]
-        record = head["completion_record"]
-        source_claim_id = self._digest(proof["source_claim_id"])
-        head_digest = receipt_digest(head)
-        payload = {
-            "completion_key": f"{source_claim_id}:{head_digest}",
-            "source_claim_id": source_claim_id,
-            "completion_head_digest": head_digest,
-            "proof_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
-            "claimant_did": proof["intent"]["claimant_did"],
-            "source_did": TaskAnnouncement.from_dict(
-                proof["announcement"],
-            ).effective_authority_did(),
-            "mission_id": record["mission_id"],
-            "outcome": record["outcome"],
-            "revision": record.get("revision", 0),
-            "nonce_authenticated": False,
-            "accepted": False,
-            "settled": False,
-        }
+        self._digest(proof["source_claim_id"])
+        payload = _payload_for_verified_proof(proof, raw)
         return raw, payload
 
     def _audit(self, payload: dict[str, Any]) -> Any:
@@ -249,7 +239,7 @@ class SourceCompletionInbox:
             self.workspace, event.author_did, self.source_did,
         ):
             raise SourceCompletionCorrupt("source audit signer is not in the rotation chain")
-        if event is not None and event.payload != payload:
+        if event is not None and not _same_payload_bytes(event.payload, payload):
             raise SourceCompletionConflict("source audit binds a different proof")
         return event
 
@@ -278,12 +268,14 @@ class SourceCompletionInbox:
     def _lineage_state(
         self, slot: Path, *, allow_missing_audited: str | None = None,
     ) -> tuple[
-        dict[str, tuple[dict[str, Any], Any]], dict[str, dict[str, Any]], dict[str, Any],
+        dict[str, tuple[dict[str, Any], Any]], dict[str, dict[str, Any]],
+        dict[str, str], dict[str, Any],
     ]:
         self._entries(slot)
         audited = self._audited_heads(slot.name)
         retained: dict[str, tuple[dict[str, Any], Any]] = {}
         pending: dict[str, dict[str, Any]] = {}
+        signed_head_by_envelope: dict[str, str] = {}
         graph: dict[str, dict[str, Any]] = {}
         for path in sorted(slot.glob("*.json")):
             raw = self._read_raw(path)
@@ -305,10 +297,13 @@ class SourceCompletionInbox:
                 or payload["proof_digest"] != "sha256:" + hashlib.sha256(raw).hexdigest()
             ):
                 raise SourceCompletionCorrupt("source proof path or audit does not match")
+            signed_head_by_envelope[digest] = receipt_digest(
+                proof["completion_chain"][-1]["completion_record"]
+            )
             if event is None:
                 pending[digest] = payload
                 continue
-            if event.payload != payload:
+            if not _same_payload_bytes(event.payload, payload):
                 raise SourceCompletionCorrupt("source proof and audit disagree")
             retained[digest] = payload, event
             for envelope in proof["completion_chain"]:
@@ -319,11 +314,15 @@ class SourceCompletionInbox:
         missing = audited.keys() - retained.keys()
         if missing and missing != {allow_missing_audited}:
             raise SourceCompletionCorrupt("audited source proof is missing")
+        has_aliases = len(set(signed_head_by_envelope.values())) != len(
+            signed_head_by_envelope
+        )
         if pending or missing:
-            return retained, pending, {
+            return retained, pending, signed_head_by_envelope, {
                 "lineage_state": "pending_audit" if pending else "pending_repair",
                 "lineage_heads": [],
                 "single_retained_head_digest": None,
+                "has_duplicate_signed_head": has_aliases,
                 "pending_head_digests": sorted(pending),
                 "outcome_scope": "submitted_head_only",
             }
@@ -331,25 +330,53 @@ class SourceCompletionInbox:
             _, heads = resolve_completion_lineage(graph)
         except CompletionLineageError as exc:
             raise SourceCompletionCorrupt("retained completion lineage is invalid") from exc
+        signed_record_by_envelope = {
+            digest: receipt_digest(envelope["completion_record"])
+            for digest, envelope in graph.items()
+        }
+        superseded_records: set[str] = set()
+        for envelope in graph.values():
+            record = envelope["completion_record"]
+            if record["version"] == COMPLETION_REVISION_VERSION:
+                parents = [record["supersedes_digest"]]
+            elif record["version"] == COMPLETION_MERGE_VERSION:
+                parents = record["supersedes_digests"]
+            else:
+                parents = []
+            superseded_records.update(
+                signed_record_by_envelope[parent] for parent in parents
+            )
+        semantic_heads = set(signed_record_by_envelope.values()) - superseded_records
         state = {
             "lineage_state": (
-                "unresolved_fork" if len(heads) > 1 else "single_retained_head"
+                "unresolved_fork" if len(semantic_heads) > 1 else
+                "duplicate_signed_head" if has_aliases else "single_retained_head"
             ),
             "lineage_heads": sorted(heads),
-            "single_retained_head_digest": heads[0] if len(heads) == 1 else None,
+            "single_retained_head_digest": (
+                heads[0] if len(heads) == 1 and not has_aliases else None
+            ),
+            "has_duplicate_signed_head": has_aliases,
             "pending_head_digests": [],
             "outcome_scope": "submitted_head_only",
         }
-        return retained, pending, state
+        return retained, pending, signed_head_by_envelope, state
 
-    @staticmethod
     def _summary(
-        payload: dict[str, Any], event: Any, *, created: bool,
+        self, payload: dict[str, Any], event: Any, *, created: bool,
         lineage: dict[str, Any],
     ) -> dict[str, Any]:
+        try:
+            rotation_chain = export_source_identity_rotation_chain(
+                self.workspace, payload["source_did"], event.author_did,
+            )
+        except (OSError, ValueError) as exc:
+            raise SourceCompletionCorrupt("source rotation proof is unavailable") from exc
         return {
             **payload, **lineage,
             "audit_event_id": event.event_id,
+            "source_receipt_event": event.to_dict(),
+            "source_rotation_chain": rotation_chain,
             "verified": True,
             "verification_scope": "source_claim_binding_only",
             "recorded": True,
@@ -364,12 +391,27 @@ class SourceCompletionInbox:
         with InterProcessLock(self._lock_target(source_claim_id)):
             count, total = self._entries(slot)
             existing_event = self._audit(payload)
-            _, pending, _ = self._lineage_state(
+            try:
+                export_source_identity_rotation_chain(
+                    self.workspace, payload["source_did"],
+                    existing_event.author_did if existing_event is not None else self.source_did,
+                )
+            except (OSError, ValueError) as exc:
+                raise SourceCompletionCorrupt("source rotation proof is unavailable") from exc
+            _, pending, signed_heads, _ = self._lineage_state(
                 slot,
                 allow_missing_audited=(
                     payload["completion_head_digest"] if existing_event is not None else None
                 ),
             )
+            signed_head = receipt_digest(proof["completion_chain"][-1]["completion_record"])
+            if existing_event is None and any(
+                other != payload["completion_head_digest"] and value == signed_head
+                for other, value in signed_heads.items()
+            ):
+                raise SourceCompletionConflict(
+                    "same signed completion already binds a different proof wrapper"
+                )
             if pending and not existing_event and payload["completion_head_digest"] not in pending:
                 raise SourceCompletionPending(
                     "source inbox has an unaudited proof; reconcile it first"
@@ -403,9 +445,9 @@ class SourceCompletionInbox:
                 event, created = existing_event, False
             if not source_identity_precedes(
                 self.workspace, event.author_did, self.source_did,
-            ) or event.payload != payload:
+            ) or not _same_payload_bytes(event.payload, payload):
                 raise SourceCompletionCorrupt("source audit signer or payload changed")
-            retained, _, lineage = self._lineage_state(slot)
+            retained, _, _, lineage = self._lineage_state(slot)
             if payload["completion_head_digest"] not in retained:
                 raise SourceCompletionCorrupt("recorded proof is absent from source lineage")
             return self._summary(payload, event, created=created, lineage=lineage)
@@ -428,7 +470,7 @@ class SourceCompletionInbox:
                 raise SourceCompletionCorrupt("audited source proof is missing")
             raise SourceCompletionRejected("pending source proof is absent")
         with InterProcessLock(self._lock_target(source_claim_id)):
-            retained, pending, lineage = self._lineage_state(slot)
+            retained, pending, _, lineage = self._lineage_state(slot)
             item = retained.get(digest)
             if item is not None:
                 payload, event = item
@@ -446,7 +488,7 @@ class SourceCompletionInbox:
                 )
             except SpineSemanticConflict as exc:
                 raise SourceCompletionConflict("source audit binds a different proof") from exc
-            retained, _, lineage = self._lineage_state(slot)
+            retained, _, _, lineage = self._lineage_state(slot)
             if digest not in retained or retained[digest][1].event_id != event.event_id:
                 raise SourceCompletionCorrupt("reconciled source audit does not match")
             return self._summary(payload, event, created=created, lineage=lineage)
@@ -462,7 +504,7 @@ class SourceCompletionInbox:
                 return None
         with InterProcessLock(self._lock_target(source_claim_id)):
             self._entries(slot)
-            retained, pending, lineage = self._lineage_state(slot)
+            retained, pending, _, lineage = self._lineage_state(slot)
             item = retained.get(f"sha256:{head_hex}")
             if item is None:
                 if f"sha256:{head_hex}" in pending:

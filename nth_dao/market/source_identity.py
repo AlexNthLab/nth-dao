@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from nth_dao.canonical_json import canonical_json
 from nth_dao.did_key import is_did_key
 from nth_dao.identity import AgentIdentity
 from nth_dao.util.io import InterProcessLock
@@ -21,10 +22,21 @@ _FIELDS = frozenset({
     "previous_sig", "successor_sig",
 })
 _MAX_LOG_BYTES = 1024 * 1024
+MAX_PORTABLE_SOURCE_ROTATION_CHAIN_BYTES = _MAX_LOG_BYTES
+MAX_PORTABLE_SOURCE_ROTATION_HOPS = 256
 
 
 def _rotation_path(workspace: Path) -> Path:
     return Path(workspace) / "market_feed" / "source_identity_rotations.jsonl"
+
+
+def _unique_json_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("source identity rotation repeats a JSON field")
+        value[key] = item
+    return value
 
 
 def record_source_identity_rotation(
@@ -100,6 +112,83 @@ def _verified_rotation(raw: Any) -> tuple[str, str] | None:
     return previous, successor
 
 
+def verify_portable_source_rotation_chain(
+    chain: Any, previous_did: str, current_did: str,
+) -> bool:
+    """Verify an exact dual-signed path from an external DID pin to a signer."""
+    if not is_did_key(previous_did) or not is_did_key(current_did):
+        return False
+    if not isinstance(chain, list) or len(chain) > MAX_PORTABLE_SOURCE_ROTATION_HOPS:
+        return False
+    try:
+        if len(canonical_json({"chain": chain})) > MAX_PORTABLE_SOURCE_ROTATION_CHAIN_BYTES:
+            return False
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+    candidate = previous_did
+    visited = {candidate}
+    for record in chain:
+        edge = _verified_rotation(record)
+        if edge is None or edge[0] != candidate or edge[1] in visited:
+            return False
+        candidate = edge[1]
+        visited.add(candidate)
+    return candidate == current_did
+
+
+def export_source_identity_rotation_chain(
+    workspace: Path, previous_did: str, current_did: str,
+) -> list[dict[str, Any]]:
+    """Export only the required, unambiguous path; never export private keys."""
+    if not is_did_key(previous_did) or not is_did_key(current_did):
+        raise ValueError("source rotation DID is invalid")
+    if previous_did == current_did:
+        return []
+    path = _rotation_path(Path(workspace))
+    with InterProcessLock(path.parent / ".locks" / path.name), path.open("rb") as stream:
+        data = stream.read(_MAX_LOG_BYTES + 1)
+    if len(data) > _MAX_LOG_BYTES or not data.endswith(b"\n"):
+        raise ValueError("source rotation history is oversized or truncated")
+    edges: dict[str, dict[str, Any]] = {}
+    corrupt_rows = 0
+    for seq, line in enumerate(data.split(b"\n")[:-1]):
+        try:
+            record = json.loads(line, object_pairs_hook=_unique_json_fields)
+            edge = _verified_rotation(record)
+        except (UnicodeError, ValueError, TypeError, RecursionError):
+            edge = None
+        if edge is None:
+            logger.warning("source identity rotation seq=%d is invalid", seq)
+            corrupt_rows += 1
+            continue
+        previous = edges.get(edge[0])
+        if previous is not None:
+            if previous["successor_did"] != edge[1]:
+                raise ValueError("source rotation history is invalid or ambiguous")
+            continue
+        edges[edge[0]] = record
+    chain: list[dict[str, Any]] = []
+    candidate = previous_did
+    visited: set[str] = set()
+    while candidate != current_did:
+        record = edges.get(candidate)
+        if (
+            record is None or candidate in visited
+            or len(chain) >= MAX_PORTABLE_SOURCE_ROTATION_HOPS
+        ):
+            if corrupt_rows:
+                raise ValueError("corrupt source identity history may conceal the rotation")
+            raise ValueError("source rotation chain is absent or too long")
+        visited.add(candidate)
+        chain.append(record)
+        candidate = record["successor_did"]
+        if candidate in visited:
+            raise ValueError("source rotation chain contains a cycle")
+    if not verify_portable_source_rotation_chain(chain, previous_did, current_did):
+        raise ValueError("source rotation chain is not portable")
+    return chain
+
+
 def source_identity_precedes(
     workspace: Path, previous_did: str, current_did: str,
 ) -> bool:
@@ -125,7 +214,7 @@ def source_identity_precedes(
         return False
     for seq, line in enumerate(data.split(b"\n")[:-1]):
         try:
-            edge = _verified_rotation(json.loads(line))
+            edge = _verified_rotation(json.loads(line, object_pairs_hook=_unique_json_fields))
         except (UnicodeError, ValueError, TypeError, RecursionError):
             edge = None
         if edge is None:
@@ -155,4 +244,11 @@ def source_identity_precedes(
     return False
 
 
-__all__ = ["record_source_identity_rotation", "source_identity_precedes"]
+__all__ = [
+    "MAX_PORTABLE_SOURCE_ROTATION_CHAIN_BYTES",
+    "MAX_PORTABLE_SOURCE_ROTATION_HOPS",
+    "export_source_identity_rotation_chain",
+    "record_source_identity_rotation",
+    "source_identity_precedes",
+    "verify_portable_source_rotation_chain",
+]
