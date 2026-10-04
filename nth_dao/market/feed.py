@@ -25,6 +25,7 @@ M1 的 poll 返回"游标之后的全部"，不做能力/兴趣过滤（那是 M
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -35,10 +36,11 @@ from nth_dao.market.announcement import (
     NTH_ANNOUNCEMENT_KIND_V3,
     NTH_TRADE_OFFER_ANNOUNCEMENT_KIND_V1,
     TaskAnnouncement,
+    announcement_federation_key,
     verify_announcement,
 )
 from nth_dao.market.projection import EVENT_MARKET_ANNOUNCE
-from nth_dao.util.io import InterProcessLock
+from nth_dao.util.io import InterProcessLock, atomic_write_json, safe_load_json
 from nth_dao.util.jsonl_safe import safe_append_jsonl
 
 if TYPE_CHECKING:
@@ -47,6 +49,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger("nth_dao.market.feed")
 
 PathLike = Union[str, Path]
+_MAX_HISTORICAL_ROW_BYTES = 2 * 1024 * 1024
+
+
+def _valid_federation_key(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("nth-ann-sha256:")
+        and len(value) == 79
+        and all(ch in "0123456789abcdef" for ch in value[-64:])
+    )
 
 
 @dataclass
@@ -276,12 +288,7 @@ class MarketFeed:
         """
         from nth_dao.market.announcement import announcement_federation_key
 
-        if not (
-            isinstance(federation_key, str)
-            and federation_key.startswith("nth-ann-sha256:")
-            and len(federation_key) == 79
-            and all(ch in "0123456789abcdef" for ch in federation_key[-64:])
-        ):
+        if not _valid_federation_key(federation_key):
             return None
         for seq, raw in self._read_all():
             ann = self._safe_parse(seq, raw)
@@ -294,9 +301,95 @@ class MarketFeed:
             return ann
         return None
 
+    def get_signed_historical_by_federation_key(
+        self, federation_key: str,
+    ) -> Optional[TaskAnnouncement]:
+        """Read a signed historical claim target without live listing policy.
+
+        This is only for verifying a claim already retained by this source.
+        Discovery and new claims must keep using the current listing-binding
+        path, which excludes withdrawn or superseded offers.
+        """
+        if not _valid_federation_key(federation_key):
+            return None
+        locator_path = self.root / "historical_index" / f"{federation_key[-64:]}.json"
+        with InterProcessLock(self.root / ".locks" / self.log_path.name):
+            with self.log_path.open("rb") as stream:
+                locator = safe_load_json(locator_path, log_warn=False)
+                if isinstance(locator, dict) and locator.get("federation_key") == federation_key:
+                    offset = locator.get("offset")
+                    digest = locator.get("line_sha256")
+                    if type(offset) is int and offset >= 0 and isinstance(digest, str):
+                        stream.seek(0, 2)
+                        if offset < stream.tell():
+                            stream.seek(offset)
+                            line = stream.readline(_MAX_HISTORICAL_ROW_BYTES + 1)
+                            if hashlib.sha256(line).hexdigest() == digest:
+                                announcement, _corrupt = self._historical_row(line, federation_key)
+                                if announcement is not None:
+                                    return announcement
+
+                stream.seek(0)
+                corrupt_rows = 0
+                match: Optional[TaskAnnouncement] = None
+                match_offset = 0
+                match_digest = ""
+                seq = 0
+                while True:
+                    offset = stream.tell()
+                    line = stream.readline(_MAX_HISTORICAL_ROW_BYTES + 1)
+                    if not line:
+                        break
+                    if len(line) > _MAX_HISTORICAL_ROW_BYTES or not line.endswith(b"\n"):
+                        while line and not line.endswith(b"\n"):
+                            line = stream.readline(64 * 1024)
+                        corrupt_rows += 1
+                    else:
+                        announcement, corrupt = self._historical_row(line, federation_key)
+                        if corrupt:
+                            logger.warning("source feed seq=%d is malformed or unsigned", seq)
+                            corrupt_rows += 1
+                        elif announcement is not None and match is None:
+                            match = announcement
+                            match_offset = offset
+                            match_digest = hashlib.sha256(line).hexdigest()
+                    seq += 1
+        if corrupt_rows:
+            logger.warning("source feed has %d corrupt rows", corrupt_rows)
+        if match is not None:
+            try:
+                atomic_write_json(locator_path, {
+                    "version": 1, "federation_key": federation_key,
+                    "offset": match_offset, "line_sha256": match_digest,
+                })
+            except OSError as exc:
+                logger.warning("historical source index write failed: %s", exc)
+            return match
+        if corrupt_rows:
+            raise ValueError("source feed corruption may conceal the announcement")
+        return None
+
+    @staticmethod
+    def _historical_row(
+        line: bytes, federation_key: str,
+    ) -> tuple[Optional[TaskAnnouncement], bool]:
+        if len(line) > _MAX_HISTORICAL_ROW_BYTES or not line.endswith(b"\n"):
+            return None, True
+        try:
+            raw = json.loads(line)
+            if not isinstance(raw, dict):
+                return None, True
+            announcement = TaskAnnouncement.from_dict(raw)
+            if announcement_federation_key(announcement) != federation_key:
+                return None, False
+            valid, _reason = verify_announcement(announcement)
+        except (TypeError, ValueError, RecursionError, UnicodeError):
+            return None, True
+        return (announcement, False) if valid else (None, True)
+
     # ── 内部 ─────────────────────────────────────────────────────
 
-    def _read_all(self) -> List[tuple]:
+    def _read_all(self, *, raise_on_io_error: bool = False) -> List[tuple]:
         """读全部行，返回 [(seq, raw_dict), ...]。
 
         seq 是 0-based 行号（append-only 保证稳定）。损坏的行仍占一个
@@ -312,17 +405,15 @@ class MarketFeed:
         一条记录内不会出现裸 ``\\n``，所以 ``split("\\n")`` 是唯一安全的
         行边界。中文/多语种内容里这类字符并不罕见，必须按 \\n 切。
         """
-        if not self.log_path.exists():
+        if not raise_on_io_error and not self.log_path.exists():
             return []
-        # M4 加固（此前 M1/M3 标的 deferred 读锁项）：读取时持与
-        # safe_append_jsonl 同一把 InterProcessLock，关掉"并发 append
-        # 写到一半时被读到半行"的窗口。append 写整行+fsync 在锁内完成,
-        # 读也在锁内 → 读到的永远是完整行。锁路径 = log_path+".lock",
-        # 与 append 一致，二者串行。读很快，锁占用极短。
+        # Match safe_append_jsonl's .locks/<filename>.lock, not the data path.
         try:
-            with InterProcessLock(self.log_path):
+            with InterProcessLock(self.root / ".locks" / self.log_path.name):
                 text = self.log_path.read_text(encoding="utf-8")
         except OSError as e:
+            if raise_on_io_error:
+                raise
             logger.warning("market feed read failed at %s: %s", self.log_path, e)
             return []
         if not text:

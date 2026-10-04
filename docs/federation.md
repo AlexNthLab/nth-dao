@@ -175,6 +175,41 @@ future ACK wire version, not a local verifier shortcut.
 This is explicit/manual transfer, not automatic federation delivery. Neither
 route accepts work or authorizes settlement.
 
+A source operator can submit that transferred proof to
+`POST /api/v2/market/completion-proofs/verify-source` as
+`{"proof": <portable-proof>}`. The route is console-principal-only (or
+loopback-only in an explicitly unauthenticated development app). Authorization
+is checked before parsing the bounded request body, and concurrent checks are
+limited. It pins the source DID to this node's identity or a locally retained
+dual-signed predecessor chain, looks up the exact locally retained signed
+announcement, verifies the full proof, and compares the
+source-signed ACK's claim-record hash to the locally retained CAS winner. A
+self-signed announcement included in the transferred proof is not sufficient.
+Historical proof lookup checks the announcement signature but does not require
+its linked Offer to remain today's active chain head; ordinary discovery and
+new claims still enforce that live listing policy. Missing source evidence
+returns an unverified result; unreadable or corrupt local evidence returns 503
+rather than accusing the claimant of presenting a mismatched proof.
+The first historical lookup streams the append-only feed under the same lock
+used for appends. A derived byte-offset index speeds subsequent requests, but
+each hit rereads the original row, checks its content hash and federation key,
+and verifies its signature. A corrupt unrelated row cannot hide a valid target;
+an absent target in a corrupt feed is not reported as a clean miss.
+
+Planned source-key rotation requires signatures from both the old and new
+identity before the old key is retired. Local Python callers can use
+`nth_dao.market.record_source_identity_rotation(workspace, old_identity,
+new_identity)` to append that evidence; no private key is sent to the server
+or included in the rotation record. This does not change the active node key,
+team owner, or agent identity. A key lost before this dual-signature step
+cannot be made a trusted predecessor by self-declaration or by the current
+guardian module alone; a separate anchored recovery flow is still required.
+The response identifies the source claim and the checked completion head, but
+reports `recorded: false`, `accepted: false`, `settled: false`, and
+`nonce_authenticated: false`. The source does not retain the proof, issue an
+acceptance, know whether another signed head exists elsewhere, or move funds.
+This is a verification preflight for a later bilateral delivery/inbox protocol.
+
 A federated claim carries three claimant-signed public artifacts: a scoped
 capability token, a Claim Receipt, and a short-lived Claim Intent. The local
 hub verifies and retains the complete Claim Receipt by canonical content hash
@@ -246,6 +281,7 @@ complete view.
 | `GET /api/v2/market/claim-intents/{nonce}/completion` | Re-verified latest claimant completion statement | Console read |
 | `POST /api/v2/market/claim-intents/{nonce}/completion/record` | Retain a claimant-signed root or linked revision | Console write |
 | `GET /api/v2/market/claim-intents/{nonce}/completion/proof` | Explicitly export the full signed lineage for pinned offline verification | Console read |
+| `POST /api/v2/market/completion-proofs/verify-source` | Check a transferred proof against this source's signed announcement and CAS claim; no retention or acceptance | Console write; bounded and operator-only |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |
 | `GET /api/v2/trade/federation/offers/{digest}` | Exact signed Offer while locally announced | Public read |
 | `GET /api/v2/trade/federation/offers/{digest}/head-proof` | Bounded complete disclosed revision chain for a live publisher head claim | Public read |

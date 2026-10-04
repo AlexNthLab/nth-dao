@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.did_key import is_did_key
 from nth_dao.execution_receipt import TimelineEntry, sign_receipt
 from nth_dao.identity import AgentIdentity
 from nth_dao.market.announcement import (
     TaskAnnouncement, announcement_federation_key, verify_announcement,
 )
 from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
+from nth_dao.market.claim import CLAIM_STATUS_CLAIMED, ClaimStore
 from nth_dao.market.claim_intent import IntentTracker, verify_claim_intent
 from nth_dao.market.completion_store import ClaimCompletionStore, CompletionEvidenceConflict
 from nth_dao.market.mission_completion import (
     CompletionLineageError, MissionCompletionRejected, receipt_digest,
     resolve_completion_lineage, sign_mission_completion, verify_mission_completion,
 )
+from nth_dao.market.feed import MarketFeed
+from nth_dao.market.source_identity import source_identity_precedes
 from nth_dao.orchestration.mission import MissionStatus, StepStatus
 from nth_dao.orchestration.mission_store import MissionStore
 
@@ -271,8 +277,71 @@ def verify_portable_completion_proof(
         return False, "portable proof encoding or binding is invalid"
 
 
+def verify_source_claim_completion(
+    workspace: Path, proof: Any, *, source_did: str,
+    now_ms: int | None = None,
+) -> tuple[bool, str]:
+    """Check transferred evidence against this source's own signed CAS claim.
+
+    This authenticates a claimant statement. It does not retain, accept, or
+    settle the work, and the source DID must come from the local host identity.
+    """
+    if not isinstance(source_did, str) or not is_did_key(source_did):
+        return False, "local source identity is unavailable"
+    if not isinstance(proof, dict):
+        return False, "portable proof schema is invalid"
+    ack = proof.get("authority_ack")
+    announcement_body = proof.get("announcement")
+    if not isinstance(ack, dict) or not isinstance(announcement_body, dict):
+        return False, "portable proof source binding is invalid"
+    federation_key = ack.get("federation_key")
+    if not isinstance(federation_key, str):
+        return False, "portable proof federation key is invalid"
+    workspace = Path(workspace)
+    feed_path = workspace / "market_feed" / "announcements.jsonl"
+    try:
+        feed_path.stat()
+    except FileNotFoundError:
+        return False, "source announcement is not retained locally"
+    announcement = MarketFeed(workspace).get_signed_historical_by_federation_key(
+        federation_key,
+    )
+    if announcement is None or announcement.to_dict() != announcement_body:
+        return False, "proof does not match this source's signed announcement"
+    historical_source_did = announcement.effective_authority_did()
+    if not source_identity_precedes(workspace, historical_source_did, source_did):
+        return False, "source identity is not linked to the signed announcement"
+    valid, reason = verify_portable_completion_proof(
+        proof, expected_source_did=historical_source_did,
+        expected_federation_key=announcement_federation_key(announcement),
+        now_ms=now_ms,
+    )
+    if not valid:
+        return False, reason
+    claim_root = workspace / "market_claims"
+    try:
+        claim_root_mode = claim_root.lstat().st_mode
+    except FileNotFoundError:
+        return False, "source claim is not retained and verified locally"
+    if not stat.S_ISDIR(claim_root_mode):
+        return False, "source claim is not retained and verified locally"
+    claim = ClaimStore(workspace).get(
+        announcement.announcement_id, announcement=announcement, strict_read=True,
+    )
+    if claim is None or claim.get("status") != CLAIM_STATUS_CLAIMED:
+        return False, "source claim is not retained and verified locally"
+    if (
+        claim.get("claimant_did") != proof["intent"]["claimant_did"]
+        or claim.get("receipt") != proof["claim_receipt"]
+        or ack.get("claim_record_hash")
+        != hashlib.sha256(canonical_json(claim)).hexdigest()
+    ):
+        return False, "portable proof differs from the source CAS claim"
+    return True, "ok"
+
+
 __all__ = [
     "MAX_PORTABLE_COMPLETION_PROOF_BYTES",
     "record_local_mission_completion", "build_portable_completion_proof",
-    "verify_portable_completion_proof",
+    "verify_portable_completion_proof", "verify_source_claim_completion",
 ]

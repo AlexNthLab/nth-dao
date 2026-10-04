@@ -38,6 +38,7 @@ C4 问题：旧 marketplace.claim 非原子，prior 审计标了 double-claim �
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import threading
 from contextlib import contextmanager
@@ -179,14 +180,27 @@ class ClaimStore:
     def _record_for(
         path: Path, announcement_id: str,
         announcement: Optional[TaskAnnouncement] = None,
+        *, strict_read: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        record = safe_load_json(path, fallback=None)
+        if strict_read:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return None
+        else:
+            record = safe_load_json(path, fallback=None)
         if not isinstance(record, dict):
+            if strict_read:
+                raise ValueError("source claim record is malformed")
             return None
         if record.get("announcement_id") != announcement_id:
+            if strict_read:
+                raise ValueError("source claim record has the wrong announcement")
             return None
         ok, reason = verify_claim_record(record, announcement=announcement)
         if not ok:
+            if strict_read:
+                raise ValueError(f"source claim record is invalid: {reason}")
             logger.warning(
                 "claim record %s failed verification: %s", announcement_id, reason,
             )
@@ -198,11 +212,13 @@ class ClaimStore:
         announcement_id: str,
         *,
         announcement: Optional[TaskAnnouncement] = None,
+        strict_read: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Load a valid claim, optionally binding it to an authoritative announcement."""
+        """Load a valid claim; strict audit reads distinguish corrupt from missing."""
         current_path = self._path(announcement_id)
         current = self._record_for(
             current_path, announcement_id, announcement,
+            strict_read=strict_read,
         )
         # The collision-resistant namespace is authoritative once present.
         # Falling back after a malformed current record would let stale legacy
@@ -211,6 +227,7 @@ class ClaimStore:
             return current
         return self._record_for(
             self._legacy_path(announcement_id), announcement_id, announcement,
+            strict_read=strict_read,
         )
 
     def has_record_file(self, announcement_id: str) -> bool:

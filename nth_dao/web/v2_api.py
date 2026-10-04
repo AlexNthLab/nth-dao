@@ -7827,6 +7827,14 @@ class CompletionVerifyBody(BaseModel):
     execution_receipt: Dict[str, Any]
 
 
+class SourceCompletionProofBody(BaseModel):
+    """Portable claimant proof presented for local source-side verification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proof: Dict[str, Any]
+
+
 class SocialTargetBody(BaseModel):
     """社交动作入参(关注/好友):只需关系对象 DID;发起方=本节点身份,服务端签名。"""
 
@@ -23410,6 +23418,48 @@ def register_v2_routes(app: FastAPI) -> None:
             "source_did": evidence["source_did"],
             "mission_id": receipt["timeline"][0]["payload"]["mission_id"],
         }
+
+    @app.post("/api/v2/market/completion-proofs/verify-source")
+    def v2_market_verify_source_claim_completion(
+        body: SourceCompletionProofBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Verify a transferred claimant statement against this node's CAS claim."""
+        from nth_dao.market.completion_flow import verify_source_claim_completion
+        from nth_dao.market.mission_completion import receipt_digest
+
+        _require_federation_operator(request)
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        if ws is None or identity is None or not callable(getattr(identity, "as_did", None)):
+            raise HTTPException(status_code=503, detail="source identity unavailable")
+        try:
+            verified, reason = verify_source_claim_completion(
+                ws, body.proof, source_did=identity.as_did(),
+            )
+        except (OSError, TimeoutError, ValueError, OverflowError, RecursionError) as exc:
+            logger.warning("source completion proof unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="source completion verification unavailable",
+            ) from exc
+        result: Dict[str, Any] = {
+            "verified": verified,
+            "reason": reason,
+            "verification_scope": "source_claim_binding_only",
+            "nonce_authenticated": False,
+            "recorded": False,
+            "accepted": False,
+            "settled": False,
+        }
+        if verified:
+            head = body.proof["completion_chain"][-1]["completion_record"]
+            result.update({
+                "source_claim_id": body.proof["source_claim_id"],
+                "outcome": head["outcome"],
+                "mission_id": head["mission_id"],
+                "completion_head_digest": receipt_digest(body.proof["completion_chain"][-1]),
+                "revision": head.get("revision", 0),
+            })
+        return result
 
     @app.post("/api/v2/market/claim-intents/{nonce}/completion/verify")
     def v2_market_verify_claim_completion(

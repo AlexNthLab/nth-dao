@@ -118,6 +118,11 @@ from nth_dao.market.completion_flow import (
     build_portable_completion_proof,
     record_local_mission_completion,
     verify_portable_completion_proof,
+    verify_source_claim_completion,
+)
+from nth_dao.market.source_identity import (
+    record_source_identity_rotation,
+    source_identity_precedes,
 )
 from nth_dao.market.claim_intent import (
     DEFAULT_INTENT_TTL_MS,
@@ -273,6 +278,9 @@ __all__ = [
     "build_portable_completion_proof",
     "record_local_mission_completion",
     "verify_portable_completion_proof",
+    "verify_source_claim_completion",
+    "record_source_identity_rotation",
+    "source_identity_precedes",
     "COMPLETION_FIELDS",
     "COMPLETION_KIND",
     "COMPLETION_VERSION",

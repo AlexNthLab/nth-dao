@@ -88,6 +88,7 @@ from nth_dao.mandate import (
     verify_intent_mandate,
     verify_payment_mandate,
 )
+from nth_dao.market.completion_flow import MAX_PORTABLE_COMPLETION_PROOF_BYTES
 from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
 from nth_dao.orchestration import MissionStore
 from nth_dao.plugins import (
@@ -116,6 +117,7 @@ logger = logging.getLogger("nth_dao.web")
 
 _FOREIGN_CLAIM_MAX_BODY_BYTES = 256 * 1024
 _CLAIM_COMPLETION_MAX_BODY_BYTES = 512 * 1024
+_CLAIM_SOURCE_PROOF_MAX_BODY_BYTES = MAX_PORTABLE_COMPLETION_PROOF_BYTES + 1024 * 1024
 _FEDERATION_HELLO_MAX_BODY_BYTES = 16 * 1024
 _COMMERCE_CART_MAX_BODY_BYTES = 256 * 1024
 _COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
@@ -178,8 +180,59 @@ class _FederationBodyLimitMiddleware:
 
     def __init__(self, app: Any) -> None:
         self.app = app
+        self._source_proof_slots = threading.BoundedSemaphore(2)
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == "/api/v2/market/completion-proofs/verify-source"
+        ):
+            if not self._source_proof_operator_authorized(scope):
+                await JSONResponse(
+                    status_code=403,
+                    content={"detail": "source proof verification requires the console principal"},
+                )(scope, receive, send)
+                return
+            if not self._source_proof_slots.acquire(blocking=False):
+                await JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "1"},
+                    content={"detail": "source proof verification is busy"},
+                )(scope, receive, send)
+                return
+            try:
+                await self._dispatch(scope, receive, send)
+            finally:
+                self._source_proof_slots.release()
+            return
+        await self._dispatch(scope, receive, send)
+
+    @staticmethod
+    def _source_proof_operator_authorized(scope: dict) -> bool:
+        state = getattr(scope.get("app"), "state", None)
+        if bool(getattr(state, "nth_require_console_auth", True)):
+            expected = str(getattr(state, "nth_console_token", "") or "")
+            values = [
+                value for name, value in scope.get("headers") or []
+                if name.lower() == b"authorization"
+            ]
+            if not expected or len(values) != 1:
+                return False
+            supplied = values[0].decode("latin-1")
+            return supplied.startswith("Bearer ") and hmac.compare_digest(
+                supplied[len("Bearer "):].strip(), expected,
+            )
+        client = scope.get("client")
+        host = str(client[0]).strip() if client else ""
+        if host == "testclient":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    async def _dispatch(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path") or "")
         is_foreign_claim = (
             scope.get("type") == "http"
@@ -217,6 +270,11 @@ class _FederationBodyLimitMiddleware:
             and scope.get("method") == "POST"
             and path.startswith("/api/v2/market/claim-intents/")
             and path.endswith(("/completion/verify", "/completion/record"))
+        )
+        is_claim_source_proof_verify = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path == "/api/v2/market/completion-proofs/verify-source"
         )
         is_trade_offer_write = (
             scope.get("type") == "http"
@@ -329,6 +387,7 @@ class _FederationBodyLimitMiddleware:
         if not (
             is_foreign_claim
             or is_claim_completion_write
+            or is_claim_source_proof_verify
             or is_federation_hello
             or is_commerce_write
             or is_trade_offer_write
@@ -356,6 +415,9 @@ class _FederationBodyLimitMiddleware:
         elif is_claim_completion_write:
             max_body_bytes = _CLAIM_COMPLETION_MAX_BODY_BYTES
             body_label = "claim completion evidence"
+        elif is_claim_source_proof_verify:
+            max_body_bytes = _CLAIM_SOURCE_PROOF_MAX_BODY_BYTES
+            body_label = "source completion proof"
         elif is_federation_hello:
             max_body_bytes = _FEDERATION_HELLO_MAX_BODY_BYTES
             body_label = "federation hello"
