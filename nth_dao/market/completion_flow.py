@@ -41,6 +41,10 @@ _PROOF_FIELDS = frozenset({
 })
 
 
+class SourceCompletionEvidenceUnavailable(RuntimeError):
+    """Required local source evidence is absent, not proof-invalid."""
+
+
 def record_local_mission_completion(
     workspace: Path, nonce: str, mission_id: str, claimant: AgentIdentity,
     *, resolve_fork: bool = False,
@@ -279,12 +283,13 @@ def verify_portable_completion_proof(
 
 def verify_source_claim_completion(
     workspace: Path, proof: Any, *, source_did: str,
-    now_ms: int | None = None,
+    now_ms: int | None = None, strict_source_evidence: bool = False,
 ) -> tuple[bool, str]:
     """Check transferred evidence against this source's own signed CAS claim.
 
     This authenticates a claimant statement. It does not retain, accept, or
     settle the work, and the source DID must come from the local host identity.
+    Strict callers distinguish absent source evidence from invalid proof.
     """
     if not isinstance(source_did, str) or not is_did_key(source_did):
         return False, "local source identity is unavailable"
@@ -298,15 +303,22 @@ def verify_source_claim_completion(
     if not isinstance(federation_key, str):
         return False, "portable proof federation key is invalid"
     workspace = Path(workspace)
+    def unavailable(reason: str) -> tuple[bool, str]:
+        if strict_source_evidence:
+            raise SourceCompletionEvidenceUnavailable(reason)
+        return False, reason
+
     feed_path = workspace / "market_feed" / "announcements.jsonl"
     try:
         feed_path.stat()
     except FileNotFoundError:
-        return False, "source announcement is not retained locally"
+        return unavailable("source announcement is not retained locally")
     announcement = MarketFeed(workspace).get_signed_historical_by_federation_key(
         federation_key,
     )
-    if announcement is None or announcement.to_dict() != announcement_body:
+    if announcement is None:
+        return unavailable("source announcement is not retained locally")
+    if announcement.to_dict() != announcement_body:
         return False, "proof does not match this source's signed announcement"
     historical_source_did = announcement.effective_authority_did()
     if not source_identity_precedes(workspace, historical_source_did, source_did):
@@ -322,13 +334,15 @@ def verify_source_claim_completion(
     try:
         claim_root_mode = claim_root.lstat().st_mode
     except FileNotFoundError:
-        return False, "source claim is not retained and verified locally"
+        return unavailable("source claim is not retained and verified locally")
     if not stat.S_ISDIR(claim_root_mode):
-        return False, "source claim is not retained and verified locally"
+        return unavailable("source claim is not retained and verified locally")
     claim = ClaimStore(workspace).get(
         announcement.announcement_id, announcement=announcement, strict_read=True,
     )
-    if claim is None or claim.get("status") != CLAIM_STATUS_CLAIMED:
+    if claim is None:
+        return unavailable("source claim is not retained and verified locally")
+    if claim.get("status") != CLAIM_STATUS_CLAIMED:
         return False, "source claim is not retained and verified locally"
     if (
         claim.get("claimant_did") != proof["intent"]["claimant_did"]
@@ -341,6 +355,7 @@ def verify_source_claim_completion(
 
 
 __all__ = [
+    "SourceCompletionEvidenceUnavailable",
     "MAX_PORTABLE_COMPLETION_PROOF_BYTES",
     "record_local_mission_completion", "build_portable_completion_proof",
     "verify_portable_completion_proof", "verify_source_claim_completion",

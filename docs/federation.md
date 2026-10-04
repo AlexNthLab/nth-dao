@@ -210,6 +210,54 @@ reports `recorded: false`, `accepted: false`, `settled: false`, and
 acceptance, know whether another signed head exists elsewhere, or move funds.
 This is a verification preflight for a later bilateral delivery/inbox protocol.
 
+For an explicit, operator-controlled import, submit the same bounded proof to
+`POST /api/v2/market/completion-proofs/record-source`. This verifies the
+historical announcement and the local CAS claim again, retains canonical
+proof bytes under `federation/inbox/<source_claim_id>/<head_sha256_hex>.json`,
+and appends one source-signed `market.claim.completion.received` Spine event.
+Both the full source-signed ACK ID and the full completion head digest identify
+the statement. An exact retry is idempotent, including after a lost response
+or an interrupted audit append; an unaudited blob is never reported as
+recorded. Operator-only
+`GET /api/v2/market/completion-proofs/source/<source_claim_id>/<head_sha256_hex>`
+rechecks the retained proof, source claim, and matching signed audit event.
+The inbox has bounded per-claim storage and
+does not silently replace a different statement with the same semantic key.
+POST and GET responses recompute the lineage across locally retained signed
+proofs for that claim. `lineage_state: unresolved_fork` means competing heads
+exist; `single_retained_head_digest` is then null. A single retained head is
+only a local inventory observation, not a global or adjudicated outcome. The
+`outcome` field describes the submitted head alone. Missing local source
+evidence returns 503 (verification unavailable), while an invalid proof
+returns 422. Windows inbox filenames use extended paths and a non-overwriting
+write-through move. POSIX publishers fsync newly created directory ancestors
+before the proof and the target directory after publication. Both paths still
+verify the audit/file pair after recovery; a failed publication is not audited
+as received.
+Every read compares the local proof set with the verified source-signed Spine
+receipt set. A missing audited proof makes the claim unavailable; it cannot
+silently erase a previously observed fork. A valid proof blob left by an
+interrupted audit is `pending_audit`, not recorded. Other recorded proofs remain
+readable but have no single-head assertion while it is pending; new unrelated
+proofs are held until it is reconciled. An operator can explicitly retry the
+exact original proof, or POST to
+`/api/v2/market/completion-proofs/source/<source_claim_id>/<head_sha256_hex>/reconcile`
+with `expected_proof_digest=sha256:<canonical-proof-sha256>` and an empty body.
+The latter verifies the retained proof again before signing the receipt event.
+Source-proof GET is reverified against current files and signed audit rather
+than served from a potentially stale cache. Per Web process, at most one such
+GET and two total source-proof operations run concurrently; excess requests
+receive HTTP 429. Multiple server processes do not share this admission budget.
+The result still reports `nonce_authenticated: false`, `accepted: false`, and
+`settled: false`. It is a source receipt of a claimant statement, not an
+acknowledgement to the claimant, a work review, a reputation decision, or a
+payment instruction. Automated bilateral transport and acknowledgement remain
+future protocol work. The local audit payload has a versioned structural vector
+at `nth_dao/market/vectors/source-completion-received-v1.json`.
+The retained proof includes a signed scoped capability token and claimant
+metadata. Keep the workspace private; do not publish or sync the inbox as a
+public Git artifact merely because its statements are signed.
+
 A federated claim carries three claimant-signed public artifacts: a scoped
 capability token, a Claim Receipt, and a short-lived Claim Intent. The local
 hub verifies and retains the complete Claim Receipt by canonical content hash

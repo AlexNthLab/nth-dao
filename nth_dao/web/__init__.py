@@ -181,28 +181,60 @@ class _FederationBodyLimitMiddleware:
     def __init__(self, app: Any) -> None:
         self.app = app
         self._source_proof_slots = threading.BoundedSemaphore(2)
+        self._source_proof_read_slots = threading.BoundedSemaphore(1)
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if (
+        path = str(scope.get("path") or "")
+        is_source_proof_read = (
+            scope.get("type") == "http"
+            and scope.get("method") == "GET"
+            and re.fullmatch(
+                r"/api/v2/market/completion-proofs/source/"
+                r"[0-9a-f]{64}/[0-9a-f]{64}",
+                path,
+            ) is not None
+        )
+        is_source_proof_write = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
-            and scope.get("path") == "/api/v2/market/completion-proofs/verify-source"
-        ):
+            and (
+                path in {
+                    "/api/v2/market/completion-proofs/verify-source",
+                    "/api/v2/market/completion-proofs/record-source",
+                }
+                or re.fullmatch(
+                    r"/api/v2/market/completion-proofs/source/"
+                    r"[0-9a-f]{64}/[0-9a-f]{64}/reconcile",
+                    path,
+                ) is not None
+            )
+        )
+        if is_source_proof_read or is_source_proof_write:
             if not self._source_proof_operator_authorized(scope):
                 await JSONResponse(
                     status_code=403,
                     content={"detail": "source proof verification requires the console principal"},
                 )(scope, receive, send)
                 return
+            busy = JSONResponse(
+                status_code=429,
+                headers={"Retry-After": "1"},
+                content={"detail": "source proof verification is busy"},
+            )
             if not self._source_proof_slots.acquire(blocking=False):
-                await JSONResponse(
-                    status_code=429,
-                    headers={"Retry-After": "1"},
-                    content={"detail": "source proof verification is busy"},
-                )(scope, receive, send)
+                await busy(scope, receive, send)
                 return
             try:
-                await self._dispatch(scope, receive, send)
+                if is_source_proof_read:
+                    if not self._source_proof_read_slots.acquire(blocking=False):
+                        await busy(scope, receive, send)
+                        return
+                    try:
+                        await self._dispatch(scope, receive, send)
+                    finally:
+                        self._source_proof_read_slots.release()
+                else:
+                    await self._dispatch(scope, receive, send)
             finally:
                 self._source_proof_slots.release()
             return
@@ -271,10 +303,22 @@ class _FederationBodyLimitMiddleware:
             and path.startswith("/api/v2/market/claim-intents/")
             and path.endswith(("/completion/verify", "/completion/record"))
         )
-        is_claim_source_proof_verify = (
+        is_claim_source_proof_operation = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
-            and path == "/api/v2/market/completion-proofs/verify-source"
+            and path in {
+                "/api/v2/market/completion-proofs/verify-source",
+                "/api/v2/market/completion-proofs/record-source",
+            }
+        )
+        is_claim_source_proof_reconcile = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/market/completion-proofs/source/"
+                r"[0-9a-f]{64}/[0-9a-f]{64}/reconcile",
+                path,
+            ) is not None
         )
         is_trade_offer_write = (
             scope.get("type") == "http"
@@ -387,7 +431,8 @@ class _FederationBodyLimitMiddleware:
         if not (
             is_foreign_claim
             or is_claim_completion_write
-            or is_claim_source_proof_verify
+            or is_claim_source_proof_operation
+            or is_claim_source_proof_reconcile
             or is_federation_hello
             or is_commerce_write
             or is_trade_offer_write
@@ -415,9 +460,12 @@ class _FederationBodyLimitMiddleware:
         elif is_claim_completion_write:
             max_body_bytes = _CLAIM_COMPLETION_MAX_BODY_BYTES
             body_label = "claim completion evidence"
-        elif is_claim_source_proof_verify:
+        elif is_claim_source_proof_operation:
             max_body_bytes = _CLAIM_SOURCE_PROOF_MAX_BODY_BYTES
             body_label = "source completion proof"
+        elif is_claim_source_proof_reconcile:
+            max_body_bytes = 0
+            body_label = "source completion reconciliation"
         elif is_federation_hello:
             max_body_bytes = _FEDERATION_HELLO_MAX_BODY_BYTES
             body_label = "federation hello"

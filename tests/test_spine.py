@@ -739,6 +739,26 @@ def test_verified_semantic_lookup_rejects_duplicate_keys(tmp_path: Path) -> None
         )
 
 
+def test_verified_payload_lookup_returns_bounded_matching_events(tmp_path: Path) -> None:
+    log = SignedEventLog(tmp_path / "events.jsonl", _id())
+    first = log.append("market.claim.completion.received", {"source_claim_id": "claim-a"})
+    log.append("market.claim.completion.received", {"source_claim_id": "claim-b"})
+    second = log.append("market.claim.completion.received", {"source_claim_id": "claim-a"})
+    assert log.find_events_by_payload(
+        "market.claim.completion.received", payload_field="source_claim_id",
+        payload_value="claim-a", limit=2,
+    ) == (first, second)
+    assert log.find_events_by_payload(
+        "market.claim.completion.received", payload_field="source_claim_id",
+        payload_value="claim-c", limit=2,
+    ) == ()
+    with pytest.raises(ValueError, match="result limit"):
+        log.find_events_by_payload(
+            "market.claim.completion.received", payload_field="source_claim_id",
+            payload_value="claim-a", limit=1,
+        )
+
+
 def test_append_unique_many_scans_once_and_prevalidates_conflicts(
     tmp_path: Path,
     monkeypatch,

@@ -1,0 +1,20 @@
+{
+  "format": "nth-market-source-completion-received-v1",
+  "event_type": "market.claim.completion.received",
+  "semantic_key_field": "completion_key",
+  "scope": "source-local receipt of a claimant statement; not acceptance or settlement",
+  "payload": {
+    "completion_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "source_claim_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "completion_head_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "proof_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "claimant_did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+    "source_did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+    "mission_id": "mission-vector",
+    "outcome": "succeeded",
+    "revision": 0,
+    "nonce_authenticated": false,
+    "accepted": false,
+    "settled": false
+  }
+}

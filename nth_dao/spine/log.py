@@ -893,6 +893,44 @@ class SignedEventLog:
                     raise RuntimeError("spine semantic index is inconsistent")
                 return self._snapshot_event(events[sequence])
 
+    def find_events_by_payload(
+        self,
+        event_type: str,
+        *,
+        payload_field: str,
+        payload_value: str,
+        limit: int,
+    ) -> tuple[SpineEvent, ...]:
+        """Return a bounded, signed snapshot matching one payload field."""
+        for name, value in (
+            ("event_type", event_type),
+            ("payload_field", payload_field),
+            ("payload_value", payload_value),
+        ):
+            if not isinstance(value, str) or not value or len(value) > 2_048:
+                raise ValueError(f"{name} must be a bounded non-empty string")
+        if type(limit) is not int or not 1 <= limit <= 1_024:
+            raise ValueError("limit must be between 1 and 1024")
+        with self._lock, InterProcessLock(self._path, timeout=self._lock_timeout):
+            self._recover_pending_append_unlocked()
+            ok, reason, events, _token = self._verified_events_cached_unlocked()
+            if not ok:
+                raise ValueError(
+                    f"spine log at {self._path} is corrupt and cannot be queried: {reason}"
+                )
+            owners = self._semantic_index_unlocked(
+                event_type, (payload_field,), events,
+            ).get((payload_field, payload_value), set())
+            if len(owners) > limit:
+                raise ValueError("spine payload query exceeds its result limit")
+            sequences = sorted(
+                sequence for owner_kind, sequence in owners
+                if owner_kind == "existing" and 0 <= sequence < len(events)
+            )
+            if len(sequences) != len(owners):
+                raise RuntimeError("spine semantic index is inconsistent")
+            return tuple(self._snapshot_event(events[seq]) for seq in sequences)
+
     def get_verified_event(self, event_id: str) -> Optional[SpineEvent]:
         """Return one verified event by content-addressed event id."""
 

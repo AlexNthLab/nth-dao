@@ -23461,6 +23461,118 @@ def register_v2_routes(app: FastAPI) -> None:
             })
         return result
 
+    @app.post("/api/v2/market/completion-proofs/record-source")
+    def v2_market_record_source_claim_completion(
+        body: SourceCompletionProofBody, request: Request,
+    ) -> Dict[str, Any]:
+        """Retain a verified claimant statement and source-signed receipt audit."""
+        from nth_dao.market.source_completion_inbox import (
+            SourceCompletionConflict, SourceCompletionCorrupt,
+            SourceCompletionEvidenceUnavailable, SourceCompletionInbox,
+            SourceCompletionRejected,
+        )
+
+        _require_federation_operator(request)
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="source audit unavailable")
+        try:
+            return SourceCompletionInbox(
+                ws, source_did=identity.as_did(), spine=spine,
+            ).record(body.proof)
+        except SourceCompletionRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SourceCompletionEvidenceUnavailable as exc:
+            raise HTTPException(status_code=503, detail="source evidence unavailable") from exc
+        except SourceCompletionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            SourceCompletionCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("source completion inbox unavailable: %s", exc)
+            raise HTTPException(status_code=503, detail="source completion inbox unavailable") from exc
+
+    @app.get("/api/v2/market/completion-proofs/source/{source_claim_id}/{head_hex}")
+    def v2_market_source_claim_completion_summary(
+        source_claim_id: str, head_hex: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Reverify one exact source inbox item and its signed receipt audit."""
+        from nth_dao.market.source_completion_inbox import (
+            SourceCompletionCorrupt, SourceCompletionEvidenceUnavailable,
+            SourceCompletionInbox, SourceCompletionPending, SourceCompletionRejected,
+        )
+
+        _require_federation_operator(request)
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="source audit unavailable")
+        try:
+            result = SourceCompletionInbox(
+                ws, source_did=identity.as_did(), spine=spine,
+            ).get(source_claim_id, head_hex)
+        except SourceCompletionRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SourceCompletionPending as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SourceCompletionEvidenceUnavailable as exc:
+            raise HTTPException(status_code=503, detail="source evidence unavailable") from exc
+        except (
+            SourceCompletionCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("source completion inbox cannot be read: %s", exc)
+            raise HTTPException(status_code=503, detail="source completion inbox unavailable") from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="source completion proof not recorded")
+        return result
+
+    @app.post(
+        "/api/v2/market/completion-proofs/source/"
+        "{source_claim_id}/{head_hex}/reconcile"
+    )
+    async def v2_market_reconcile_source_claim_completion(
+        source_claim_id: str, head_hex: str, expected_proof_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Explicitly repair one retained proof after an interrupted audit append."""
+        from nth_dao.market.source_completion_inbox import (
+            SourceCompletionConflict, SourceCompletionCorrupt,
+            SourceCompletionEvidenceUnavailable, SourceCompletionInbox,
+            SourceCompletionRejected,
+        )
+
+        _require_federation_operator(request)
+        if await request.body():
+            raise HTTPException(status_code=400, detail="reconciliation does not accept a body")
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="source audit unavailable")
+        try:
+            return SourceCompletionInbox(
+                ws, source_did=identity.as_did(), spine=spine,
+            ).reconcile_pending(
+                source_claim_id, head_hex, expected_proof_digest=expected_proof_digest,
+            )
+        except SourceCompletionRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SourceCompletionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SourceCompletionEvidenceUnavailable as exc:
+            raise HTTPException(status_code=503, detail="source evidence unavailable") from exc
+        except (
+            SourceCompletionCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("source completion reconciliation unavailable: %s", exc)
+            raise HTTPException(status_code=503, detail="source completion inbox unavailable") from exc
+
     @app.post("/api/v2/market/claim-intents/{nonce}/completion/verify")
     def v2_market_verify_claim_completion(
         nonce: str, body: CompletionVerifyBody, request: Request,
