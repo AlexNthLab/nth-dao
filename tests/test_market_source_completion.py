@@ -1017,6 +1017,297 @@ def test_source_receipt_cli_verifies_statement_binding_without_audit_inclusion(
     assert json.loads(capsys.readouterr().out)["receipt_verified"] is False
 
 
+def test_source_receipt_cli_verifies_against_local_claim_pins(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+    from nth_dao.spine.event import sign_event
+
+    source, old, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    current = AgentIdentity.generate(label="rotated-source")
+    record_source_identity_rotation(source, old, current)
+    recorded = SourceCompletionInbox(
+        source, source_did=current.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", current),
+    ).record(proof)
+    response_file = tmp_path / "source-response.json"
+    response_file.write_bytes(canonical_json(recorded))
+    command = [
+        "verify-receipt-local", "--workspace", str(tmp_path / "claimant"),
+        "--nonce", proof["nonce"], "--receipt-event-file", str(response_file),
+    ]
+    assert main(command) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["receipt_verified"] is True
+    assert result["pins_from_local_claim"] is True
+    assert result["audit_inclusion_verified"] is False
+    assert result["source_claim_id"] == proof["source_claim_id"]
+
+    response_file.write_bytes(canonical_json({
+        **recorded,
+        "source_rotation_chain": [{
+            **recorded["source_rotation_chain"][0],
+            "previous_sig": "0" * 128,
+        }],
+    }))
+    assert main(command) == 1
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is False
+
+    event = recorded["source_receipt_event"]
+    forged = sign_event(
+        seq=event["seq"], prev_hash=event["prev_hash"],
+        event_type=event["type"], payload=event["payload"],
+        identity=AgentIdentity.generate(label="stranger"), ts_ms=event["ts_ms"],
+    ).to_dict()
+    response_file.write_bytes(canonical_json({
+        **recorded, "audit_event_id": forged["content_hash"],
+        "source_receipt_event": forged, "source_rotation_chain": [],
+    }))
+    assert main(command) == 1
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is False
+
+    response_file.write_bytes(canonical_json(recorded))
+    assert main([
+        "verify-receipt-local", "--workspace", str(tmp_path / "claimant"),
+        "--nonce", "x" * 16, "--receipt-event-file", str(response_file),
+    ]) == 1
+    assert "matching local completion head is unavailable" in capsys.readouterr().err
+
+    response_file.write_bytes(canonical_json({
+        **recorded["source_receipt_event"],
+        "payload": {
+            key: value for key, value in recorded["source_receipt_event"]["payload"].items()
+            if key != "completion_head_digest"
+        },
+    }))
+    assert main(command) == 1
+    assert "source receipt completion head is invalid" in capsys.readouterr().err
+
+
+def test_local_receipt_remains_verifiable_after_completion_revision(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+
+    source, authority, claimant, _announcement, proof = _source_and_proof(tmp_path)
+    old_receipt = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    record = proof["completion_chain"][0]["completion_record"]
+    completed_at = record["completed_at_ms"] + 3
+    execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=completed_at - 1, type="nth.task_completed",
+            payload={"mission_id": "mission-1"},
+        )], claimant, goal_id="mission:mission-1",
+    )
+    revision = sign_mission_completion(
+        claimant, announcement_id=record["announcement_id"],
+        mission_id="mission-1", claim_receipt=proof["claim_receipt"],
+        authority_ack=proof["authority_ack"], execution_receipt=execution,
+        outcome="succeeded", completed_at_ms=completed_at, revision=1,
+        supersedes_digest=old_receipt["completion_head_digest"],
+    )
+    claimant_workspace = tmp_path / "claimant"
+    ClaimCompletionStore(claimant_workspace).record(proof["nonce"], revision, execution)
+    current = build_portable_completion_proof(claimant_workspace, proof["nonce"])
+    assert current is not None and len(current["completion_chain"]) == 2
+    response_file = tmp_path / "old-source-response.json"
+    response_file.write_bytes(canonical_json(old_receipt))
+    assert main([
+        "verify-receipt-local", "--workspace", str(claimant_workspace),
+        "--nonce", proof["nonce"], "--receipt-event-file", str(response_file),
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["receipt_verified"] is True
+    assert result["completion_head_digest"] == old_receipt["completion_head_digest"]
+
+
+def test_historical_receipt_ignores_unrelated_corrupt_completion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+    from nth_dao.market.completion_store import CompletionEvidenceCorrupt
+
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    receipt = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    response_file = tmp_path / "source-response.json"
+    response_file.write_bytes(canonical_json(receipt))
+    slot = tmp_path / "claimant" / "federation" / "claim_completions" / proof["nonce"]
+    (slot / ("f" * 64 + ".json")).write_bytes(b"{}")
+    (slot / "unrelated.tmp").write_bytes(b"ignored by historical lookup")
+
+    assert main([
+        "verify-receipt-local", "--workspace", str(tmp_path / "claimant"),
+        "--nonce", proof["nonce"], "--receipt-event-file", str(response_file),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is True
+    with pytest.raises(CompletionEvidenceCorrupt):
+        build_portable_completion_proof(tmp_path / "claimant", proof["nonce"])
+
+
+def test_historical_proof_selector_keeps_merge_ancestry(tmp_path: Path) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.market.completion_flow import verify_portable_completion_proof
+    from nth_dao.market.completion_store import CompletionEvidenceCorrupt
+
+    _source, authority, claimant, announcement, proof = _source_and_proof(tmp_path)
+    workspace = tmp_path / "claimant"
+    nonce = proof["nonce"]
+    original = proof["completion_chain"][0]
+    alternate = _competing_root(proof, claimant)["completion_chain"][0]
+    slot = workspace / "federation" / "claim_completions" / nonce
+    (slot / f"{receipt_digest(alternate)[7:]}.json").write_bytes(canonical_json(alternate))
+    parents = sorted([receipt_digest(original), receipt_digest(alternate)])
+    completed_at = max(
+        item["completion_record"]["completed_at_ms"] for item in (original, alternate)
+    ) + 3
+    execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=completed_at - 1, type="nth.task_completed",
+            payload={"mission_id": "mission-1"},
+        )], claimant, goal_id="mission:mission-1",
+    )
+    merge = sign_mission_completion(
+        claimant, announcement_id=original["completion_record"]["announcement_id"],
+        mission_id="mission-1", claim_receipt=proof["claim_receipt"],
+        authority_ack=proof["authority_ack"], execution_receipt=execution,
+        completed_at_ms=completed_at, revision=1, supersedes_digests=parents,
+    )
+    merged, created = ClaimCompletionStore(workspace).record(nonce, merge, execution)
+    assert created is True
+    old_proof = build_portable_completion_proof(
+        workspace, nonce, head_digest=receipt_digest(original),
+    )
+    assert old_proof == proof
+    merged_proof = build_portable_completion_proof(
+        workspace, nonce, head_digest=receipt_digest(merged),
+    )
+    assert merged_proof == build_portable_completion_proof(workspace, nonce)
+    assert merged_proof is not None and merged_proof["version"] == 2
+    assert len(merged_proof["completion_chain"]) == 3
+    assert verify_portable_completion_proof(
+        merged_proof, expected_source_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+    ) == (True, "ok")
+    root_path = slot / f"{receipt_digest(original)[7:]}.json"
+    root_path.write_bytes(b"{}")
+    with pytest.raises(CompletionEvidenceCorrupt, match="content hash changed"):
+        build_portable_completion_proof(workspace, nonce, head_digest=receipt_digest(merged))
+    root_path.unlink()
+    with pytest.raises(CompletionEvidenceCorrupt, match="predecessor is missing"):
+        build_portable_completion_proof(workspace, nonce, head_digest=receipt_digest(merged))
+
+
+def test_local_receipt_rejects_another_confirmed_claim(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.cli.claim_completion import main
+
+    source, authority, _claimant, _announcement, _proof = _source_and_proof(tmp_path / "a")
+    first_proof = build_portable_completion_proof(tmp_path / "a" / "claimant", _proof["nonce"])
+    assert first_proof is not None
+    receipt = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(first_proof)
+    _second_source, _second_authority, _second_claimant, _second_announcement, second = (
+        _source_and_proof(tmp_path / "b")
+    )
+    response_file = tmp_path / "first-source-response.json"
+    response_file.write_bytes(canonical_json(receipt))
+    assert main([
+        "verify-receipt-local", "--workspace", str(tmp_path / "b" / "claimant"),
+        "--nonce", second["nonce"], "--receipt-event-file", str(response_file),
+    ]) == 1
+    assert "matching local completion head is unavailable" in capsys.readouterr().err
+
+
+def test_local_receipt_resolves_confirmed_claim_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import nth_dao.cli.claim_completion as claim_cli
+    from nth_dao.canonical_json import canonical_json
+    from nth_dao.market import claim_evidence, completion_flow, completion_store
+
+    source, authority, claimant, _announcement, proof = _source_and_proof(tmp_path)
+    receipt = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    record = proof["completion_chain"][0]["completion_record"]
+    completed_at = record["completed_at_ms"] + 3
+    execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=completed_at - 1, type="nth.task_completed",
+            payload={"mission_id": "mission-1"},
+        )], claimant, goal_id="mission:mission-1",
+    )
+    revision = sign_mission_completion(
+        claimant, announcement_id=record["announcement_id"],
+        mission_id="mission-1", claim_receipt=proof["claim_receipt"],
+        authority_ack=proof["authority_ack"], execution_receipt=execution,
+        outcome="succeeded", completed_at_ms=completed_at, revision=1,
+        supersedes_digest=receipt["completion_head_digest"],
+    )
+    ClaimCompletionStore(tmp_path / "claimant").record(proof["nonce"], revision, execution)
+    response_file = tmp_path / "source-response.json"
+    response_file.write_bytes(canonical_json(receipt))
+    original = claim_evidence.resolve_confirmed_claim_evidence
+    calls = 0
+
+    def counted(workspace: Path, nonce: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return original(workspace, nonce)
+
+    monkeypatch.setattr(claim_evidence, "resolve_confirmed_claim_evidence", counted)
+    monkeypatch.setattr(completion_flow, "resolve_confirmed_claim_evidence", counted)
+    monkeypatch.setattr(completion_store, "resolve_confirmed_claim_evidence", counted)
+    monkeypatch.setattr(claim_cli, "resolve_confirmed_claim_evidence", counted)
+    assert claim_cli.main([
+        "verify-receipt-local", "--workspace", str(tmp_path / "claimant"),
+        "--nonce", proof["nonce"], "--receipt-event-file", str(response_file),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["receipt_verified"] is True
+    assert calls == 1
+
+
+def test_portable_proof_uses_the_verified_claim_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nth_dao.market.claim_intent import IntentTracker
+
+    _source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    replacement = sign_announcement(
+        publisher=authority, authority_did=authority.as_did(), title="other work",
+    ).to_dict()
+    original = IntentTracker.record
+    reads = 0
+
+    def changed_on_second_read(self: IntentTracker, nonce: str) -> dict | None:
+        nonlocal reads
+        reads += 1
+        retained = original(self, nonce)
+        if reads == 2 and retained is not None:
+            return {**retained, "announcement": replacement}
+        return retained
+
+    monkeypatch.setattr(IntentTracker, "record", changed_on_second_read)
+    exported = build_portable_completion_proof(tmp_path / "claimant", proof["nonce"])
+    assert exported == proof
+    assert reads == 1
+
+
 def test_source_receipt_offline_signature_does_not_claim_spine_inclusion(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:

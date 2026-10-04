@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 from nth_dao.market.mission_completion import (
     COMPLETION_MERGE_VERSION, COMPLETION_REVISION_VERSION,
     CompletionLineageError, resolve_completion_lineage,
-    verify_confirmed_mission_completion,
+    _verify_with_confirmed_claim_evidence, verify_confirmed_mission_completion,
 )
 from nth_dao.util.io import InterProcessLock
 
 _NONCE_RE = re.compile(r"[A-Za-z0-9]{16,64}\Z")
 _DIGEST_FILE_RE = re.compile(r"[0-9a-f]{64}\.json\Z")
+_HEAD_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _MAX_RECORD_BYTES = 512 * 1024
 _MAX_DIRECTORY_ENTRIES = 32
 
@@ -128,8 +130,14 @@ class ClaimCompletionStore:
 
     def _graph(
         self, entries: list[Path], nonce: str,
+        *, evidence: dict[str, Any] | None = None,
     ) -> tuple[list[tuple[Path, dict[str, Any]]], list[str]]:
-        records = {f"sha256:{path.stem}": (path, self._read(path, nonce))
+        if not entries:
+            return [], []
+        claim = evidence if evidence is not None else resolve_confirmed_claim_evidence(
+            self.workspace, nonce,
+        )
+        records = {f"sha256:{path.stem}": (path, self._read(path, nonce, claim))
                    for path in entries}
         try:
             order, heads = resolve_completion_lineage(
@@ -148,7 +156,9 @@ class ClaimCompletionStore:
     def _head(self, entries: list[Path], nonce: str) -> tuple[Path, dict[str, Any]]:
         return self._ordered(entries, nonce)[-1]
 
-    def _read(self, path: Path, nonce: str) -> dict[str, Any]:
+    def _read(
+        self, path: Path, nonce: str, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
         if path.is_symlink():
             raise CompletionEvidenceCorrupt("completion evidence is a symlink")
         before = os.stat(path, follow_symlinks=False)
@@ -195,8 +205,8 @@ class ClaimCompletionStore:
             or value["nonce"] != nonce
         ):
             raise CompletionEvidenceCorrupt("completion evidence envelope is invalid")
-        verified, reason = verify_confirmed_mission_completion(
-            self.workspace, nonce, value["completion_record"], value["execution_receipt"]
+        verified, reason = _verify_with_confirmed_claim_evidence(
+            evidence, value["completion_record"], value["execution_receipt"],
         )
         if not verified:
             raise CompletionEvidenceCorrupt(f"retained completion is invalid: {reason}")
@@ -213,13 +223,77 @@ class ClaimCompletionStore:
 
     def load_chain(self, nonce: str) -> list[dict[str, Any]]:
         """Return every verified branch only when they have one resolved head."""
+        chain, _ = self.load_chain_with_claim(nonce)
+        return chain
+
+    def load_chain_to_head(self, nonce: str, head_digest: str) -> list[dict[str, Any]]:
+        """Rebuild the verified ancestor proof for one retained signed head."""
+        chain, _ = self.load_chain_with_claim(nonce, head_digest=head_digest)
+        return chain
+
+    def _ancestry_to_head(
+        self, directory: Path, nonce: str, head_digest: str,
+        evidence: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        selected: dict[str, dict[str, Any]] = {}
+        pending = [head_digest]
+        while pending:
+            digest = pending.pop()
+            if digest in selected:
+                continue
+            if len(selected) >= _MAX_DIRECTORY_ENTRIES:
+                raise CompletionEvidenceCorrupt("historical completion ancestry exceeds limit")
+            path = directory / f"{digest[7:]}.json"
+            try:
+                value = self._read(path, nonce, evidence)
+            except FileNotFoundError as exc:
+                if digest == head_digest:
+                    return []
+                raise CompletionEvidenceCorrupt(
+                    "historical completion predecessor is missing"
+                ) from exc
+            selected[digest] = value
+            record = value["completion_record"]
+            if record["version"] == COMPLETION_REVISION_VERSION:
+                pending.append(record["supersedes_digest"])
+            elif record["version"] == COMPLETION_MERGE_VERSION:
+                pending.extend(record["supersedes_digests"])
+        try:
+            order, heads = resolve_completion_lineage(selected)
+        except CompletionLineageError as exc:
+            raise CompletionEvidenceCorrupt("historical completion lineage is invalid") from exc
+        if heads != [head_digest]:
+            raise CompletionEvidenceCorrupt("historical completion head is ambiguous")
+        return [selected[digest] for digest in order]
+
+    def load_chain_with_claim(
+        self, nonce: str, *, head_digest: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Return a verified chain and the same confirmed-claim snapshot."""
+        if head_digest is not None and (
+            not isinstance(head_digest, str)
+            or _HEAD_DIGEST_RE.fullmatch(head_digest) is None
+        ):
+            raise CompletionEvidenceRejected("completion head digest is invalid")
         directory = self._directory(nonce)
         self._check_directory(directory)
         if not directory.exists():
-            return []
+            return [], None
         with InterProcessLock(self._lock_target(nonce)):
+            if head_digest is not None:
+                head_path = directory / f"{head_digest[7:]}.json"
+                if not head_path.exists() and not head_path.is_symlink():
+                    return [], None
+                evidence = resolve_confirmed_claim_evidence(self.workspace, nonce)
+                return self._ancestry_to_head(directory, nonce, head_digest, evidence), evidence
             entries = self._entries(directory, nonce)
-            return [value for _, value in self._ordered(entries, nonce)] if entries else []
+            if not entries:
+                return [], None
+            evidence = resolve_confirmed_claim_evidence(self.workspace, nonce)
+            ordered, heads = self._graph(entries, nonce, evidence=evidence)
+            if len(heads) != 1:
+                raise CompletionEvidenceConflict("claim has forked completion revisions")
+            return [value for _, value in ordered], evidence
 
     def heads(self, nonce: str) -> list[tuple[str, dict[str, Any]]]:
         """Expose verified conflicting heads to the claimant for explicit resolution."""

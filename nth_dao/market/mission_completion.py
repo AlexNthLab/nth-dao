@@ -504,6 +504,16 @@ def verify_confirmed_mission_completion(
     from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 
     evidence = resolve_confirmed_claim_evidence(workspace, nonce)
+    return _verify_with_confirmed_claim_evidence(
+        evidence, record, execution_receipt, now_ms=now_ms,
+    )
+
+
+def _verify_with_confirmed_claim_evidence(
+    evidence: dict[str, Any], record: Any, execution_receipt: dict[str, Any],
+    *, now_ms: int | None = None,
+) -> tuple[bool, str]:
+    """Verify against one snapshot from resolve_confirmed_claim_evidence."""
     intent = evidence["intent"]
     if not isinstance(record, dict) or (
         record.get("announcement_id") != intent["announcement_id"]

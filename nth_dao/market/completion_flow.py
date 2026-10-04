@@ -18,7 +18,7 @@ from nth_dao.market.announcement import (
 )
 from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 from nth_dao.market.claim import CLAIM_STATUS_CLAIMED, ClaimStore
-from nth_dao.market.claim_intent import IntentTracker, verify_claim_intent
+from nth_dao.market.claim_intent import verify_claim_intent
 from nth_dao.market.completion_store import ClaimCompletionStore, CompletionEvidenceConflict
 from nth_dao.market.mission_completion import (
     CompletionLineageError, MissionCompletionRejected, receipt_digest,
@@ -130,28 +130,39 @@ def record_local_mission_completion(
     return completion_store.record(nonce, record, execution)
 
 
-def build_portable_completion_proof(workspace: Path, nonce: str) -> dict[str, Any] | None:
-    """Export signed evidence for explicit sharing, without any private key."""
+def build_portable_completion_proof(
+    workspace: Path, nonce: str, *, head_digest: str | None = None,
+) -> dict[str, Any] | None:
+    """Export signed evidence for the current or an exact retained historical head."""
+    built = build_portable_completion_proof_with_pins(
+        workspace, nonce, head_digest=head_digest,
+    )
+    return built[0] if built is not None else None
+
+
+def build_portable_completion_proof_with_pins(
+    workspace: Path, nonce: str, *, head_digest: str | None = None,
+) -> tuple[dict[str, Any], str, str] | None:
+    """Export a proof and its pins from one locally verified claim snapshot."""
     workspace = Path(workspace)
-    chain = ClaimCompletionStore(workspace).load_chain(nonce)
+    chain, evidence = ClaimCompletionStore(workspace).load_chain_with_claim(
+        nonce, head_digest=head_digest,
+    )
     if not chain:
         return None
-    evidence = resolve_confirmed_claim_evidence(workspace, nonce)
-    tracker = IntentTracker(workspace / "federation" / "claim_intents")
-    retained = tracker.record(nonce) or tracker.archived_record(nonce)
-    if not isinstance(retained, dict) or not isinstance(retained.get("announcement"), dict):
-        raise ValueError("retained signed announcement is unavailable")
+    if evidence is None:
+        raise ValueError("confirmed claim snapshot is unavailable")
     proof = {
         "kind": "nth-market-claim-completion-proof",
         "version": 2 if any(item["completion_record"]["version"] == 3 for item in chain) else 1,
         "nonce": nonce, "source_claim_id": evidence["authority_ack"]["ack_id"],
-        "announcement": retained["announcement"],
+        "announcement": evidence["announcement"],
         "intent": evidence["intent"], "claim_receipt": evidence["claim_receipt"],
         "authority_ack": evidence["authority_ack"], "completion_chain": chain,
     }
     if len(canonical_json(proof)) > MAX_PORTABLE_COMPLETION_PROOF_BYTES:
         raise ValueError("portable completion proof exceeds disclosure limit")
-    return proof
+    return proof, evidence["source_did"], evidence["federation_key"]
 
 
 def verify_portable_completion_proof(
@@ -358,5 +369,6 @@ __all__ = [
     "SourceCompletionEvidenceUnavailable",
     "MAX_PORTABLE_COMPLETION_PROOF_BYTES",
     "record_local_mission_completion", "build_portable_completion_proof",
+    "build_portable_completion_proof_with_pins",
     "verify_portable_completion_proof", "verify_source_claim_completion",
 ]

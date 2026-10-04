@@ -13,6 +13,7 @@ from nth_dao.identity import AgentIdentity
 from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 from nth_dao.market.completion_flow import (
     MAX_PORTABLE_COMPLETION_PROOF_BYTES,
+    build_portable_completion_proof_with_pins,
     record_local_mission_completion,
     verify_portable_completion_proof,
 )
@@ -87,6 +88,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         command.add_argument("--source-did", required=True)
         command.add_argument("--federation-key", required=True)
     verify_receipt.add_argument("--receipt-event-file", type=Path, required=True)
+    verify_receipt_local = commands.add_parser(
+        "verify-receipt-local",
+        help="verify against a local confirmed claim; writable lock/index space required",
+        description=(
+            "Verify a source receipt against local signed claim evidence. "
+            "This may create lock files or refresh derived indexes; use a writable workspace. "
+            "No signed protocol evidence is added."
+        ),
+    )
+    verify_receipt_local.add_argument("--workspace", type=Path, required=True)
+    verify_receipt_local.add_argument("--nonce", required=True)
+    verify_receipt_local.add_argument("--receipt-event-file", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "record":
@@ -110,13 +123,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "evidence_digest": receipt_digest(evidence),
             }, sort_keys=True))
         else:
-            proof = _read_json_object(
-                args.proof_file, MAX_PORTABLE_COMPLETION_PROOF_BYTES,
-            )
+            if args.command == "verify-receipt-local":
+                response = _read_json_object(
+                    args.receipt_event_file, MAX_SOURCE_RECEIPT_RESPONSE_BYTES,
+                )
+                event, rotation_chain = _receipt_from_file(response)
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    raise ValueError("source receipt completion head is invalid")
+                head_digest = payload.get("completion_head_digest")
+                if not isinstance(head_digest, str):
+                    raise ValueError("source receipt completion head is invalid")
+                built = build_portable_completion_proof_with_pins(
+                    args.workspace, args.nonce,
+                    head_digest=head_digest,
+                )
+                if built is None:
+                    raise ValueError("matching local completion head is unavailable")
+                proof, source_did, federation_key = built
+            else:
+                proof = _read_json_object(
+                    args.proof_file, MAX_PORTABLE_COMPLETION_PROOF_BYTES,
+                )
+                source_did = args.source_did
+                federation_key = args.federation_key
             if args.command == "verify":
                 valid, reason = verify_portable_completion_proof(
-                    proof, expected_source_did=args.source_did,
-                    expected_federation_key=args.federation_key,
+                    proof, expected_source_did=source_did,
+                    expected_federation_key=federation_key,
                 )
                 print(json.dumps({
                     "verified": valid, "reason": reason,
@@ -124,16 +158,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "nonce_authenticated": False,
                 }, sort_keys=True))
             else:
-                response = _read_json_object(
-                    args.receipt_event_file, MAX_SOURCE_RECEIPT_RESPONSE_BYTES,
-                )
-                event, rotation_chain = _receipt_from_file(response)
+                if args.command != "verify-receipt-local":
+                    response = _read_json_object(
+                        args.receipt_event_file, MAX_SOURCE_RECEIPT_RESPONSE_BYTES,
+                    )
+                    event, rotation_chain = _receipt_from_file(response)
                 valid, reason = verify_source_completion_receipt(
-                    proof, event, expected_source_did=args.source_did,
-                    expected_federation_key=args.federation_key,
+                    proof, event, expected_source_did=source_did,
+                    expected_federation_key=federation_key,
                     rotation_chain=rotation_chain,
                 )
-                print(json.dumps({
+                result = {
                     "receipt_verified": valid, "reason": reason,
                     "verification_scope": "source_statement_and_proof_binding",
                     "audit_inclusion_verified": False,
@@ -145,7 +180,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "nonce_authenticated": False,
                     "accepted": False,
                     "settled": False,
-                }, sort_keys=True))
+                }
+                if args.command == "verify-receipt-local":
+                    result["pins_from_local_claim"] = True
+                print(json.dumps(result, sort_keys=True))
             return 0 if valid else 1
     except (OSError, UnicodeError, ValueError, TypeError, RuntimeError, TimeoutError, RecursionError) as exc:
         print(f"claim completion failed: {exc}", file=sys.stderr)

@@ -23689,7 +23689,7 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/market/claim-intents/{nonce}/completion/proof")
     def v2_market_export_claim_completion_proof(
-        nonce: str, request: Request,
+        nonce: str, request: Request, head_digest: str | None = None,
     ) -> Dict[str, Any]:
         """Explicit operator disclosure of a portable signed evidence chain."""
 
@@ -23703,11 +23703,15 @@ def register_v2_routes(app: FastAPI) -> None:
         _require_federation_operator(request)
         if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
             raise HTTPException(status_code=422, detail="invalid claim nonce")
+        if head_digest is not None and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", head_digest,
+        ) is None:
+            raise HTTPException(status_code=422, detail="invalid completion head digest")
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
         try:
-            proof = build_portable_completion_proof(ws, nonce)
+            proof = build_portable_completion_proof(ws, nonce, head_digest=head_digest)
         except (
             ClaimEvidenceUnavailable, CompletionEvidenceConflict,
             CompletionEvidenceCorrupt, IntentTrackerCorrupt,

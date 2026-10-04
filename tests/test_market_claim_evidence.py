@@ -731,6 +731,63 @@ def test_completion_proof_export_is_operator_only(tmp_path: Path) -> None:
     assert locked.get(url).status_code in (401, 403)
 
 
+def test_completion_proof_export_selects_a_historical_head(tmp_path: Path) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    tracker, intent, receipt, ack, claimant, ann = _prepared_claim(
+        tmp_path, include_signer=True,
+    )
+    tracker.mark(intent, "confirmed")
+    AuthorityClaimAckStore(tmp_path).save(ack)
+    completed_at = ack["accepted_at_ms"] + 1
+    execution = sign_receipt(
+        [TimelineEntry(timestamp=completed_at, type="nth.task_completed",
+                       payload={"mission_id": "mission-1"})],
+        claimant, goal_id="mission:mission-1",
+    )
+    root = sign_mission_completion(
+        claimant, announcement_id=ann.announcement_id, mission_id="mission-1",
+        claim_receipt=receipt, authority_ack=ack, execution_receipt=execution,
+        completed_at_ms=completed_at,
+    )
+    store = ClaimCompletionStore(tmp_path)
+    root_envelope, _ = store.record(intent["nonce"], root, execution)
+    historical = build_portable_completion_proof(tmp_path, intent["nonce"])
+    head_digest = receipt_digest(root_envelope)
+    revised_at = completed_at + 2
+    revised_execution = sign_receipt(
+        [TimelineEntry(timestamp=revised_at, type="nth.task_completed",
+                       payload={"mission_id": "mission-1"})],
+        claimant, goal_id="mission:mission-1",
+    )
+    revision = sign_mission_completion(
+        claimant, announcement_id=ann.announcement_id, mission_id="mission-1",
+        claim_receipt=receipt, authority_ack=ack,
+        execution_receipt=revised_execution, completed_at_ms=revised_at,
+        revision=1, supersedes_digest=head_digest,
+    )
+    store.record(intent["nonce"], revision, revised_execution)
+
+    url = f"/api/v2/market/claim-intents/{intent['nonce']}/completion/proof"
+    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    current = client.get(url)
+    assert current.status_code == 200
+    assert len(current.json()["completion_chain"]) == 2
+    response = client.get(url, params={"head_digest": head_digest})
+    assert response.status_code == 200, response.text
+    assert response.json() == historical
+    assert client.get(url, params={"head_digest": "sha256:" + "f" * 64}).status_code == 404
+    assert client.get(url, params={"head_digest": "../invalid"}).status_code == 422
+    locked = TestClient(create_app(tmp_path, require_console_auth=True))
+    assert locked.get(url, params={"head_digest": head_digest}).status_code in (401, 403)
+    slot = store.root / intent["nonce"]
+    (slot / ("f" * 64 + ".json")).write_bytes(b"{}")
+    assert client.get(url, params={"head_digest": head_digest}).json() == historical
+    assert client.get(url).status_code == 503
+
+
 def test_completion_rejects_a_different_signed_claim_mission(tmp_path: Path) -> None:
     _tracker, intent, ack, completion, execution = _signed_completion(
         tmp_path, claimed_mission_id="mission-original",
@@ -1038,6 +1095,39 @@ def test_confirmed_claim_evidence_survives_archival_and_index_migration(
         resolve_confirmed_claim_evidence(tmp_path, intent["nonce"])["authority_ack"]
         == ack
     )
+
+
+def test_archived_confirmed_claim_exports_the_same_completion_proof(
+    tmp_path: Path,
+) -> None:
+    tracker, intent, receipt, ack, claimant, ann = _prepared_claim(
+        tmp_path, max_intents=1, include_signer=True,
+    )
+    tracker.mark(intent, "confirmed")
+    AuthorityClaimAckStore(tmp_path).save(ack)
+    completed_at = ack["accepted_at_ms"] + 1
+    execution = sign_receipt(
+        [TimelineEntry(timestamp=completed_at, type="nth.task_completed",
+                       payload={"mission_id": "mission-1"})],
+        claimant, goal_id="mission:mission-1",
+    )
+    completion = sign_mission_completion(
+        claimant, announcement_id=ann.announcement_id, mission_id="mission-1",
+        claim_receipt=receipt, authority_ack=ack, execution_receipt=execution,
+        completed_at_ms=completed_at,
+    )
+    ClaimCompletionStore(tmp_path).record(intent["nonce"], completion, execution)
+    before = build_portable_completion_proof(tmp_path, intent["nonce"])
+    assert before is not None
+
+    _prepared_claim(tmp_path, max_intents=1)
+    assert tracker.archived_record(intent["nonce"]) is not None
+    after = build_portable_completion_proof(tmp_path, intent["nonce"])
+    assert after == before
+    assert verify_portable_completion_proof(
+        after, expected_source_did=ack["authority_did"],
+        expected_federation_key=ack["federation_key"],
+    ) == (True, "ok")
 
 
 def test_legacy_source_record_without_announcement_fails_closed(tmp_path: Path) -> None:

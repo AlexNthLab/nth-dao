@@ -161,7 +161,10 @@ branches fail closed until the claimant explicitly uses `record --resolve-fork`
 to sign a v3 merge naming every verified head. The competing signed statements
 remain in the portable proof; no branch is silently discarded. `GET` on
 the same path without `/record` returns a re-verified summary. Operator-only
-`GET .../completion/proof` exports a bounded portable proof. A different node
+`GET .../completion/proof` exports the current bounded portable proof; the
+operator may supply `?head_digest=sha256:<64 lowercase hex characters>` to
+export the exact signed ancestry for a retained historical head. This does
+not treat the selected head as the current outcome. A different node
 can run `nth-claim-completion verify --proof-file PROOF --source-did DID
 --federation-key KEY`, using pins independently obtained from its trusted
 market listing. Copying both pins from the proof would not establish trust.
@@ -292,6 +295,22 @@ source REST response. In the latter case it checks the wrapper's audit ID and
 every mirrored signed payload field against the signed event, but does not trust the wrapper's
 unsigned status flags. A rotated signer requires the response's verified
 `source_rotation_chain`; a bare event alone cannot establish that link.
+On the claimant node, `nth-claim-completion verify-receipt-local --workspace
+WORKSPACE --nonce NONCE --receipt-event-file RESPONSE` reconstructs the
+locally retained completion proof for the receipt's exact signed head, including
+its verified ancestors after later revisions or a merge. It takes the source DID and
+federation key from the confirmed local claim. It accepts a transferred
+source REST response or bare event without letting either supply trust pins.
+The head field is only an untrusted selector until the complete proof and
+source signature are checked. Only the selected head's signed ancestry is read;
+unrelated slot corruption cannot block that historical check, and a successful
+check does not certify the whole slot. Missing or corrupt ancestors fail closed. This
+manual check does not append signed protocol evidence, but local readers can
+create lock files and refresh derived archive indexes. Use a writable workspace;
+for a read-only archive, use `verify-receipt` with a previously exported proof
+and independently retained source pins. A successful check is not a durable
+claimant-side import, source retention proof, work acceptance, or payment
+authorization.
 The retained proof includes a signed scoped capability token and claimant
 metadata. Keep the workspace private; do not publish or sync the inbox as a
 public Git artifact merely because its statements are signed.

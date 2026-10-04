@@ -23,7 +23,7 @@ def resolve_confirmed_claim_evidence(
     workspace: Path,
     nonce: str,
 ) -> dict[str, Any]:
-    """Return verified claim receipt and source ACK for one confirmed nonce.
+    """Return one confirmed claim's verified announcement, receipt, and source ACK.
 
     This proves source acceptance of the claim, not mission execution or
     delivery. Legacy hash-only intents have no retained claim evidence and
@@ -99,6 +99,7 @@ def resolve_confirmed_claim_evidence(
     if ack is None:
         raise ClaimEvidenceUnavailable("source authority acknowledgement is missing")
     return {
+        "announcement": raw_announcement,
         "intent": intent,
         "claim_receipt": receipt,
         "authority_ack": ack,
