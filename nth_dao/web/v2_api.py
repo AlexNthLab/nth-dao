@@ -32,7 +32,7 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from nth_dao.market.resource_descriptor import (
@@ -7833,6 +7833,23 @@ class SourceCompletionProofBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     proof: Dict[str, Any]
+
+
+class SourceReceiptImportBody(BaseModel):
+    """A transferred source response; trust pins come from the local claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_response: Dict[str, Any]
+
+
+def _unique_source_receipt_json_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError("source receipt request repeats a JSON field")
+        fields[key] = value
+    return fields
 
 
 class SocialTargetBody(BaseModel):
@@ -23572,6 +23589,168 @@ def register_v2_routes(app: FastAPI) -> None:
         ) as exc:
             logger.warning("source completion reconciliation unavailable: %s", exc)
             raise HTTPException(status_code=503, detail="source completion inbox unavailable") from exc
+
+    @app.post("/api/v2/market/claim-intents/{nonce}/completion/source-receipt")
+    async def v2_market_import_claimant_source_receipt(
+        nonce: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Observe a verified source statement without accepting or settling work."""
+        from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
+        from nth_dao.market.claimant_receipt_store import (
+            ClaimantReceiptConflict, ClaimantReceiptCorrupt,
+            ClaimantReceiptMissing, ClaimantReceiptRejected,
+            ClaimantSourceReceiptStore,
+        )
+
+        _require_federation_operator(request)
+        try:
+            parsed = json.loads(
+                (await request.body()).decode("utf-8"),
+                object_pairs_hook=_unique_source_receipt_json_fields,
+            )
+            body = SourceReceiptImportBody.model_validate(parsed)
+        except (UnicodeError, ValueError, TypeError, RecursionError, ValidationError) as exc:
+            raise HTTPException(status_code=422, detail="invalid source receipt JSON") from exc
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="claimant receipt audit unavailable")
+        try:
+            store = ClaimantSourceReceiptStore(
+                ws, observer_did=identity.as_did(), spine=spine,
+            )
+            return await run_in_threadpool(store.record, nonce, body.source_response)
+        except ClaimantReceiptMissing as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ClaimantReceiptRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (ClaimantReceiptConflict, ClaimEvidenceUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            ClaimantReceiptCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("claimant source receipt import unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="claimant source receipt import unavailable",
+            ) from exc
+
+    @app.get("/api/v2/market/claim-intents/{nonce}/completion/source-receipt")
+    def v2_market_claimant_source_receipt(
+        nonce: str, head_digest: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Reverify the exact locally observed receipt and signed observation."""
+        from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
+        from nth_dao.market.claimant_receipt_store import (
+            ClaimantReceiptCorrupt, ClaimantReceiptPending,
+            ClaimantReceiptRejected, ClaimantSourceReceiptStore,
+        )
+
+        _require_federation_operator(request)
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="claimant receipt audit unavailable")
+        try:
+            result = ClaimantSourceReceiptStore(
+                ws, observer_did=identity.as_did(), spine=spine,
+            ).get(nonce, head_digest)
+        except ClaimantReceiptRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (ClaimantReceiptPending, ClaimEvidenceUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            ClaimantReceiptCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("claimant source receipt unavailable: %s", exc)
+            raise HTTPException(status_code=503, detail="claimant source receipt unavailable") from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="source receipt not locally observed")
+        return result
+
+    @app.post("/api/v2/market/claim-intents/{nonce}/completion/source-receipt/reconcile")
+    async def v2_market_reconcile_claimant_source_receipt(
+        nonce: str, head_digest: str, expected_response_digest: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Reverify and audit a pending local receipt without a remote response."""
+        from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
+        from nth_dao.market.claimant_receipt_store import (
+            ClaimantReceiptConflict, ClaimantReceiptCorrupt,
+            ClaimantReceiptMissing, ClaimantReceiptRejected,
+            ClaimantSourceReceiptStore,
+        )
+
+        _require_federation_operator(request)
+        if await request.body():
+            raise HTTPException(status_code=400, detail="reconciliation does not accept a body")
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="claimant receipt audit unavailable")
+        try:
+            store = ClaimantSourceReceiptStore(
+                ws, observer_did=identity.as_did(), spine=spine,
+            )
+            return await run_in_threadpool(
+                store.reconcile_pending,
+                nonce, head_digest, expected_response_digest=expected_response_digest,
+            )
+        except ClaimantReceiptMissing as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ClaimantReceiptRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (ClaimantReceiptConflict, ClaimEvidenceUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            ClaimantReceiptCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("claimant source receipt reconciliation unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="claimant source receipt reconciliation unavailable",
+            ) from exc
+
+    @app.get("/api/v2/market/claim-intents/{nonce}/completion/source-receipt/pending")
+    def v2_market_claimant_source_receipt_pending(
+        nonce: str, head_digest: str, request: Request,
+    ) -> Dict[str, Any]:
+        """Reverify local evidence and expose its digest without auditing it."""
+        from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
+        from nth_dao.market.claimant_receipt_store import (
+            ClaimantReceiptConflict, ClaimantReceiptCorrupt,
+            ClaimantReceiptMissing, ClaimantReceiptRejected,
+            ClaimantSourceReceiptStore,
+        )
+
+        _require_federation_operator(request)
+        ws = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if ws is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="claimant receipt audit unavailable")
+        try:
+            return ClaimantSourceReceiptStore(
+                ws, observer_did=identity.as_did(), spine=spine,
+            ).pending_info(nonce, head_digest)
+        except ClaimantReceiptMissing as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ClaimantReceiptRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (ClaimantReceiptConflict, ClaimEvidenceUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            ClaimantReceiptCorrupt, OSError, TimeoutError, ValueError,
+            OverflowError, RecursionError,
+        ) as exc:
+            logger.warning("claimant source receipt inspection unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503, detail="claimant source receipt inspection unavailable",
+            ) from exc
 
     @app.post("/api/v2/market/claim-intents/{nonce}/completion/verify")
     def v2_market_verify_claim_completion(

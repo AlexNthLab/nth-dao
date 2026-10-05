@@ -32,7 +32,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from .util import atomic_write_json, safe_load_json, safe_id as _safe_id
+from .util import InterProcessLock, atomic_write_json, safe_load_json
+from .util import safe_id as _safe_id
 
 logger = logging.getLogger("nth_dao.membership")
 
@@ -287,15 +288,40 @@ class MembershipManager:
         return cfg
 
     def save_config(self, config: TeamConfig) -> None:
-        """Save team config, signing it if owner_identity is set on this manager."""
-        # 如果 manager 持有 owner_identity 且能签名 → 写入 owner_pubkey + sig
-        if self._owner_identity is not None and getattr(self._owner_identity, "can_sign", False):
-            config.owner_pubkey = self._owner_identity.pubkey_hex
-            config.sig_updated_at = datetime.now().isoformat()
-            # 先清空 owner_sig 再签
-            config.owner_sig = ""
-            config.owner_sig = self._owner_identity.sign_json(config.signable_dict())
-        atomic_write_json(self.config_path, config.to_dict())
+        """Save only with the key already pinned by a signed on-disk config."""
+        with InterProcessLock(self.workspace / ".nth" / "locks" / "team-config"):
+            try:
+                raw = self.config_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                existing = None
+            else:
+                try:
+                    data = json.loads(raw)
+                    if not isinstance(data, dict):
+                        raise ValueError("team config is not an object")
+                    existing = TeamConfig.from_dict(data)
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise TamperedTeamConfigError("existing team config is invalid") from exc
+                if existing.owner_pubkey and not _verify_config_signature(existing):
+                    raise TamperedTeamConfigError("existing team owner signature is invalid")
+
+            signer = self._owner_identity
+            signer_key = (
+                signer.pubkey_hex.lower()
+                if signer is not None and getattr(signer, "can_sign", False)
+                else ""
+            )
+            pinned = existing.owner_pubkey.lower() if existing is not None else ""
+            if pinned and (signer_key != pinned or config.owner_pubkey.lower() != pinned):
+                raise TamperedTeamConfigError("pinned team owner key is unavailable")
+            if config.owner_pubkey and config.owner_pubkey.lower() != signer_key:
+                raise TamperedTeamConfigError("team config signer differs from its owner pin")
+            if signer_key:
+                config.owner_pubkey = signer.pubkey_hex
+                config.sig_updated_at = datetime.now().isoformat()
+                config.owner_sig = ""
+                config.owner_sig = signer.sign_json(config.signable_dict())
+            atomic_write_json(self.config_path, config.to_dict())
 
     def enable_signed_owner(
         self,
@@ -316,9 +342,15 @@ class MembershipManager:
         config = self.load_config()
         # Owner enablement is admin-gated unless team has no admins yet
         self._require_admin(config, actor_id)
+        if config.owner_pubkey and config.owner_pubkey.lower() != owner_identity.pubkey_hex.lower():
+            raise TamperedTeamConfigError("enable_signed_owner cannot rotate a pinned owner")
+        previous_identity = self._owner_identity
         self._owner_identity = owner_identity
-        # Trigger a signed save
-        self.save_config(config)
+        try:
+            self.save_config(config)
+        except Exception:
+            self._owner_identity = previous_identity
+            raise
         return self.load_config()
 
     def init_team(

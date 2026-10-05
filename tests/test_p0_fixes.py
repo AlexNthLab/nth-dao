@@ -360,6 +360,59 @@ def test_membership_unsigned_config_still_loads(tmp_path):
     assert reloaded.owner_pubkey == ""  # 未签名
 
 
+def test_signed_team_rejects_owner_drift_without_corrupting_config(tmp_path):
+    if not crypto_available():
+        pytest.skip("PyNaCl not installed")
+    old = AgentIdentity.generate(label="old owner")
+    signed = nth.MembershipManager(tmp_path, owner_identity=old)
+    signed.init_team(team_name="signed-team", admin_ids=["alice"])
+    path = tmp_path / "team.json"
+    original = path.read_bytes()
+
+    no_key = nth.MembershipManager(tmp_path)
+    with pytest.raises(TamperedTeamConfigError):
+        no_key.set_policy("approval", actor_id="alice")
+    assert path.read_bytes() == original
+
+    new = AgentIdentity.generate(label="new owner")
+    wrong_key = nth.MembershipManager(tmp_path, owner_identity=new)
+    with pytest.raises(TamperedTeamConfigError):
+        wrong_key.add_admin("bob", actor_id="alice")
+    assert path.read_bytes() == original
+    with pytest.raises(TamperedTeamConfigError):
+        no_key.enable_signed_owner(new, actor_id="alice")
+    assert path.read_bytes() == original
+
+    downgraded = no_key.load_config()
+    downgraded.owner_pubkey = ""
+    downgraded.owner_sig = ""
+    with pytest.raises(TamperedTeamConfigError):
+        no_key.save_config(downgraded)
+    assert path.read_bytes() == original
+    assert signed.load_config().team_name == "signed-team"
+    assert not (tmp_path / "team.json.lock").exists()
+
+
+def test_web_bootstrap_owner_drift_does_not_resign_team(tmp_path):
+    if not crypto_available():
+        pytest.skip("PyNaCl not installed")
+    from nth_dao.identity import default_identity_path
+    from nth_dao.web import create_app
+
+    original_app = create_app(tmp_path)
+    assert original_app.state.nth.membership.load_config().owner_pubkey
+    config_path = tmp_path / "team.json"
+    original = config_path.read_bytes()
+
+    AgentIdentity.generate(
+        label="replacement", save_path=default_identity_path(tmp_path),
+    )
+    drifted_app = create_app(tmp_path)
+    with pytest.raises(TamperedTeamConfigError):
+        drifted_app.state.nth.membership.set_policy("approval", actor_id="admin")
+    assert config_path.read_bytes() == original
+
+
 def test_reputation_credits_scoped_by_pubkey(tmp_path):
     """P3: 同 pubkey 的不同 agent_id 共享 credit 池，无法 5×agent_id sybil。"""
     if not crypto_available():

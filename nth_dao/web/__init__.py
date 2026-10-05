@@ -89,6 +89,7 @@ from nth_dao.mandate import (
     verify_payment_mandate,
 )
 from nth_dao.market.completion_flow import MAX_PORTABLE_COMPLETION_PROOF_BYTES
+from nth_dao.market.source_completion_receipt import MAX_SOURCE_RECEIPT_RESPONSE_BYTES
 from nth_dao.membership import MembershipManager, TeamConfig, TeamRole
 from nth_dao.orchestration import MissionStore
 from nth_dao.plugins import (
@@ -118,6 +119,7 @@ logger = logging.getLogger("nth_dao.web")
 _FOREIGN_CLAIM_MAX_BODY_BYTES = 256 * 1024
 _CLAIM_COMPLETION_MAX_BODY_BYTES = 512 * 1024
 _CLAIM_SOURCE_PROOF_MAX_BODY_BYTES = MAX_PORTABLE_COMPLETION_PROOF_BYTES + 1024 * 1024
+_CLAIM_SOURCE_RECEIPT_MAX_BODY_BYTES = MAX_SOURCE_RECEIPT_RESPONSE_BYTES + 16 * 1024
 _FEDERATION_HELLO_MAX_BODY_BYTES = 16 * 1024
 _COMMERCE_CART_MAX_BODY_BYTES = 256 * 1024
 _COMMERCE_SYNC_MAX_BODY_BYTES = 768 * 1024
@@ -188,11 +190,16 @@ class _FederationBodyLimitMiddleware:
         is_source_proof_read = (
             scope.get("type") == "http"
             and scope.get("method") == "GET"
-            and re.fullmatch(
-                r"/api/v2/market/completion-proofs/source/"
-                r"[0-9a-f]{64}/[0-9a-f]{64}",
-                path,
-            ) is not None
+            and (
+                re.fullmatch(
+                    r"/api/v2/market/completion-proofs/source/"
+                    r"[0-9a-f]{64}/[0-9a-f]{64}", path,
+                ) is not None
+                or re.fullmatch(
+                    r"/api/v2/market/claim-intents/[^/]+"
+                    r"/completion/source-receipt(?:/pending)?", path,
+                ) is not None
+            )
         )
         is_source_proof_write = (
             scope.get("type") == "http"
@@ -206,6 +213,10 @@ class _FederationBodyLimitMiddleware:
                     r"/api/v2/market/completion-proofs/source/"
                     r"[0-9a-f]{64}/[0-9a-f]{64}/reconcile",
                     path,
+                ) is not None
+                or re.fullmatch(
+                    r"/api/v2/market/claim-intents/[^/]+"
+                    r"/completion/source-receipt(?:/reconcile)?", path,
                 ) is not None
             )
         )
@@ -318,6 +329,22 @@ class _FederationBodyLimitMiddleware:
                 r"/api/v2/market/completion-proofs/source/"
                 r"[0-9a-f]{64}/[0-9a-f]{64}/reconcile",
                 path,
+            ) is not None
+        )
+        is_claim_source_receipt_import = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/market/claim-intents/[^/]+"
+                r"/completion/source-receipt", path,
+            ) is not None
+        )
+        is_claim_source_receipt_reconcile = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(
+                r"/api/v2/market/claim-intents/[^/]+"
+                r"/completion/source-receipt/reconcile", path,
             ) is not None
         )
         is_trade_offer_write = (
@@ -433,6 +460,8 @@ class _FederationBodyLimitMiddleware:
             or is_claim_completion_write
             or is_claim_source_proof_operation
             or is_claim_source_proof_reconcile
+            or is_claim_source_receipt_import
+            or is_claim_source_receipt_reconcile
             or is_federation_hello
             or is_commerce_write
             or is_trade_offer_write
@@ -466,6 +495,12 @@ class _FederationBodyLimitMiddleware:
         elif is_claim_source_proof_reconcile:
             max_body_bytes = 0
             body_label = "source completion reconciliation"
+        elif is_claim_source_receipt_import:
+            max_body_bytes = _CLAIM_SOURCE_RECEIPT_MAX_BODY_BYTES
+            body_label = "source completion receipt"
+        elif is_claim_source_receipt_reconcile:
+            max_body_bytes = 0
+            body_label = "claimant source receipt reconciliation"
         elif is_federation_hello:
             max_body_bytes = _FEDERATION_HELLO_MAX_BODY_BYTES
             body_label = "federation hello"

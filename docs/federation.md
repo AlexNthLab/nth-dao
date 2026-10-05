@@ -311,6 +311,51 @@ for a read-only archive, use `verify-receipt` with a previously exported proof
 and independently retained source pins. A successful check is not a durable
 claimant-side import, source retention proof, work acceptance, or payment
 authorization.
+For durable, explicitly operator-controlled observation, submit the source
+REST response (or bare signed event for an unrotated source) to
+`POST /api/v2/market/claim-intents/<nonce>/completion/source-receipt` as
+`{"source_response": <response>}` on the claimant node. The node takes source
+pins only from its locally confirmed claim, reconstructs the selected signed
+completion ancestry, verifies the source signature and optional dual-signed
+rotation path, then retains the normalized event and rotation evidence under
+`federation/claim_completion_receipts/<source_claim_id>/`. A content hash in
+the immutable filename detects replacement; a local signed
+`market.claim.completion.source_receipt.observed` Spine event binds that exact
+file and completion head. The import endpoint rejects duplicate JSON object
+fields at every nesting level before model validation. Retention precedes
+local audit. If the audit append
+fails, the blob is pending rather than observed. The exact same response can
+be retried. If that response is no longer available, an operator can POST to
+`.../completion/source-receipt/reconcile` with the full `head_digest` and
+`expected_response_digest=sha256:<canonical-retained-blob-hash>` and no body.
+The operator-only `GET .../completion/source-receipt/pending?head_digest=...`
+reverifies the retained bytes and returns that exact digest after a restart;
+`pending: true` explicitly means no signed local observation exists yet.
+Reconciliation rechecks the retained bytes against the local confirmed claim,
+source signature, and digest before signing the observation. It cannot repair
+a missing or altered blob by trusting a filename or an unverified status flag.
+An already audited response is idempotent; a different source
+event for the same head conflicts. Operator-only `GET` on the same path with
+`?head_digest=sha256:<64 lowercase hex characters>` rechecks the retained
+event, local audit, and historical local proof, including after a later
+completion revision. Historical local observation signers remain valid after
+node key rotation only when the workspace retains an unambiguous dual-signed
+old-to-current DID chain in `market_feed/source_identity_rotations.jsonl`;
+an absent, invalid, or forked chain fails closed. Recording such a chain does
+not itself rotate the workspace identity or team ownership. Missing audited
+files and changed content fail closed.
+The local observation proves that this node verified and retained a source
+statement at import time. It still does not prove source Spine inclusion,
+ongoing source retention, work acceptance, settlement, or authenticated nonce.
+The event payload shape is frozen in
+`nth_dao/market/vectors/claimant-source-receipt-observed-v1.json`, including
+fixed canonical JSON, SHA-256, and a signed event. Python verifies the event,
+while the frontend conformance test independently checks its bytes and Ed25519
+signature with WebCrypto. This cross-runtime check does not establish source
+audit inclusion or independent third-party protocol interoperability.
+Team owner key drift is fail-closed for membership writes; rotating the owner
+key requires a separate explicit migration and is not performed by receipt
+observation or web bootstrap.
 The retained proof includes a signed scoped capability token and claimant
 metadata. Keep the workspace private; do not publish or sync the inbox as a
 public Git artifact merely because its statements are signed.
@@ -388,6 +433,10 @@ complete view.
 | `GET /api/v2/market/claim-intents/{nonce}/completion/proof` | Explicitly export the full signed lineage for pinned offline verification | Console read |
 | `POST /api/v2/market/completion-proofs/verify-source` | Check a transferred proof against this source's signed announcement and CAS claim; no retention or acceptance | Console write; bounded and operator-only |
 | `POST /api/v2/market/completion-proofs/record-source` | Retain a verified proof and sign a source receipt event | Console write; bounded and operator-only |
+| `POST /api/v2/market/claim-intents/{nonce}/completion/source-receipt` | Verify and durably observe a transferred source receipt against the claimant's local confirmed claim | Console write; bounded and operator-only |
+| `GET /api/v2/market/claim-intents/{nonce}/completion/source-receipt?head_digest=sha256:{hex}` | Reverify one historical local source receipt and its signed observation | Console read; bounded and operator-only |
+| `GET /api/v2/market/claim-intents/{nonce}/completion/source-receipt/pending?head_digest=sha256:{hex}` | Reverify a retained source receipt and return its exact digest and pending status without appending audit | Console read; bounded and operator-only |
+| `POST /api/v2/market/claim-intents/{nonce}/completion/source-receipt/reconcile?head_digest=sha256:{hex}&expected_response_digest=sha256:{hex}` | Reverify and audit one pending locally retained receipt without the original remote response | Console write; empty body, bounded and operator-only |
 | `GET /api/v2/market/completion-proofs/source/{source_claim_id}/{head_hex}` | Reverify an exact retained proof and return its signed source receipt event | Console read; bounded and operator-only |
 | `POST /api/v2/market/completion-proofs/source/{source_claim_id}/{head_hex}/reconcile` | Explicitly audit a verified pending blob by its full proof digest | Console write; bounded and operator-only |
 | `POST /api/v2/trade/offers/{digest}/announce` | Publish a discovery hint for this node's active canonical Offer | Console write |

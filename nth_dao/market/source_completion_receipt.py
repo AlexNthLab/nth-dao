@@ -26,6 +26,36 @@ MAX_SOURCE_RECEIPT_RESPONSE_BYTES = (
 )
 
 
+def extract_source_completion_receipt(value: Any) -> tuple[dict, list]:
+    """Extract signed evidence, checking any unsigned REST wrapper for consistency."""
+    if not isinstance(value, dict):
+        raise ValueError("source receipt response must be an object")
+    try:
+        size = len(canonical_json(value))
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ValueError("source receipt response is not canonical JSON") from exc
+    if size > MAX_SOURCE_RECEIPT_RESPONSE_BYTES:
+        raise ValueError("source receipt response exceeds size limit")
+    if "source_receipt_event" not in value:
+        if size > MAX_SOURCE_RECEIPT_EVENT_BYTES:
+            raise ValueError("source receipt event exceeds size limit")
+        return value, []
+    event = value["source_receipt_event"]
+    chain = value.get("source_rotation_chain")
+    if not isinstance(event, dict) or not isinstance(chain, list):
+        raise ValueError("source response lacks a receipt event or rotation chain")
+    if len(canonical_json(event)) > MAX_SOURCE_RECEIPT_EVENT_BYTES:
+        raise ValueError("source receipt event exceeds size limit")
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or value.get("audit_event_id") != event.get("content_hash"):
+        raise ValueError("source response audit event ID differs from its event")
+    if not payload.keys() <= value.keys() or canonical_json({
+        field: value[field] for field in payload
+    }) != canonical_json(payload):
+        raise ValueError("source response fields differ from the signed event")
+    return event, chain
+
+
 def _payload_for_verified_proof(proof: dict[str, Any], raw: bytes) -> dict[str, Any]:
     """Construct the receipt payload only after the caller verifies the proof."""
     head = proof["completion_chain"][-1]
@@ -98,6 +128,7 @@ def verify_source_completion_receipt(
 
 
 __all__ = [
+    "extract_source_completion_receipt",
     "MAX_SOURCE_RECEIPT_EVENT_BYTES",
     "MAX_SOURCE_RECEIPT_RESPONSE_BYTES",
     "RECEIVED_EVENT",

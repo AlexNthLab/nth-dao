@@ -121,6 +121,7 @@ from nth_dao.market.completion_flow import (
     verify_source_claim_completion,
 )
 from nth_dao.market.source_completion_receipt import verify_source_completion_receipt
+from nth_dao.market.claimant_receipt_store import ClaimantSourceReceiptStore
 from nth_dao.market.source_identity import (
     record_source_identity_rotation,
     source_identity_precedes,
@@ -281,6 +282,7 @@ __all__ = [
     "verify_portable_completion_proof",
     "verify_source_claim_completion",
     "verify_source_completion_receipt",
+    "ClaimantSourceReceiptStore",
     "record_source_identity_rotation",
     "source_identity_precedes",
     "COMPLETION_FIELDS",

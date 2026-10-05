@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import multiprocessing
 import os
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +23,7 @@ from nth_dao.cap_token import (
     encode_authorization_header,
     sign_cap_token,
 )
+from nth_dao.canonical_json import canonical_json
 from nth_dao.execution_receipt import TimelineEntry, sign_receipt
 from nth_dao.identity import AgentIdentity
 from nth_dao.market.announcement import (
@@ -44,6 +47,12 @@ from nth_dao.market.source_completion_inbox import (
     SourceCompletionCorrupt,
     SourceCompletionInbox,
     SourceCompletionPending,
+)
+from nth_dao.market.claimant_receipt_store import (
+    ClaimantReceiptConflict,
+    ClaimantReceiptCorrupt,
+    ClaimantReceiptRejected,
+    ClaimantSourceReceiptStore,
 )
 from nth_dao.market.source_identity import record_source_identity_rotation
 from nth_dao.market.trade_offer_announcement import create_trade_offer_announcement
@@ -112,6 +121,17 @@ def _source_and_proof(
     proof = build_portable_completion_proof(claimant_workspace, intent["nonce"])
     assert proof is not None
     return source, authority, claimant, announcement, proof
+
+
+def _import_claimant_receipt_in_process(args: tuple) -> tuple[bool, str]:
+    workspace, observer, nonce, response, barrier = args
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    barrier.wait(timeout=30)
+    result = store.record(nonce, response)
+    return result["already_observed"], result["local_observation_event_id"]
 
 
 def _competing_root(proof: dict, claimant: AgentIdentity, *, offset: int = 4) -> dict:
@@ -2128,3 +2148,543 @@ def test_source_inbox_reconcile_rest_is_explicit_and_bounded(
     assert locked.post(route + "/reconcile", params={
         "expected_proof_digest": digest,
     }).status_code in (401, 403)
+
+
+def test_claimant_imports_source_receipt_durably_and_idempotently(tmp_path: Path) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    first = store.record(proof["nonce"], response)
+    assert first["receipt_verified"] is True
+    assert first["observed_locally"] is True
+    assert first["already_observed"] is False
+    assert first["accepted"] is False and first["settled"] is False
+    assert first["audit_inclusion_verified"] is False
+    assert first["source_retention_verified"] is False
+    assert store.record(proof["nonce"], response)["already_observed"] is True
+    restarted = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    assert restarted.get(proof["nonce"], first["completion_head_digest"])[
+        "source_receipt_event_id"
+    ] == response["audit_event_id"]
+    vector = json.loads((
+        Path(__file__).parents[1] / "nth_dao" / "market" / "vectors"
+        / "claimant-source-receipt-observed-v1.json"
+    ).read_text(encoding="utf-8"))
+    observation = restarted.spine.get_verified_event(first["local_observation_event_id"])
+    assert observation is not None and observation.type == vector["event_type"]
+    head = response["completion_head_digest"]
+    expected = {
+        "receipt_key": f'{proof["source_claim_id"]}:{head}',
+        "source_claim_id": proof["source_claim_id"],
+        "completion_head_digest": head,
+        "source_receipt_event_id": response["audit_event_id"],
+        "claimant_did": proof["intent"]["claimant_did"],
+        "source_did": authority.as_did(),
+        "nonce_authenticated": False,
+        "accepted": False,
+        "settled": False,
+        "response_digest": "sha256:" + hashlib.sha256(canonical_json({
+            "version": 1,
+            "source_receipt_event": response["source_receipt_event"],
+            "source_rotation_chain": response["source_rotation_chain"],
+        })).hexdigest(),
+    }
+    assert observation.payload == expected
+    assert set(expected) == set(vector["payload"])
+    assert expected[vector["semantic_key_field"]] == expected["receipt_key"]
+    assert all(type(expected[key]) is type(sample) for key, sample in vector["payload"].items())
+    assert vector["payload"]["receipt_key"] == (
+        vector["payload"]["source_claim_id"] + ":"
+        + vector["payload"]["completion_head_digest"]
+    )
+    assert vector["payload_sha256"] == (
+        "sha256:" + hashlib.sha256(canonical_json(vector["payload"])).hexdigest()
+    )
+
+
+def test_claimant_import_rejects_forged_and_unbound_receipts(tmp_path: Path) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    with pytest.raises(ClaimantReceiptRejected):
+        store.record(proof["nonce"], {
+            **response, "source_receipt_event": {
+                **response["source_receipt_event"], "sig": "bad",
+            },
+        })
+    with pytest.raises(ClaimantReceiptRejected):
+        store.record(proof["nonce"], {**response, "outcome": "failed"})
+    with pytest.raises(ClaimantReceiptRejected):
+        store.record("a" * 32, response)
+    assert not (tmp_path / "claimant" / "federation" / "claim_completion_receipts").exists()
+
+
+def test_claimant_observation_fixed_signed_vector() -> None:
+    from nth_dao.spine.event import SpineEvent, verify_event
+
+    vector = json.loads((
+        Path(__file__).parents[1] / "nth_dao" / "market" / "vectors"
+        / "claimant-source-receipt-observed-v1.json"
+    ).read_text(encoding="utf-8"))
+    event = SpineEvent.from_dict(vector["event"])
+    assert event.type == vector["event_type"]
+    assert event.payload == vector["payload"]
+    assert canonical_json(event.payload).decode("utf-8") == vector["payload_canonical_json"]
+    assert canonical_json(event.core()).decode("utf-8") == vector["event_core_canonical_json"]
+    assert verify_event(event) == (True, "ok")
+    tampered = SpineEvent.from_dict({
+        **vector["event"], "payload": {**event.payload, "accepted": True},
+    })
+    assert not verify_event(tampered)[0]
+
+
+def test_claimant_import_fails_closed_on_corrupt_retained_receipt(tmp_path: Path) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    first = store.record(proof["nonce"], response)
+    path = next((
+        store.root / proof["source_claim_id"]
+    ).glob(f'{first["completion_head_digest"][7:]}-*.json'))
+    path.write_bytes(b"{}")
+    with pytest.raises(ClaimantReceiptCorrupt):
+        store.get(proof["nonce"], first["completion_head_digest"])
+    with pytest.raises(ClaimantReceiptCorrupt):
+        store.pending_info(proof["nonce"], first["completion_head_digest"])
+    with pytest.raises(ClaimantReceiptCorrupt):
+        store.record(proof["nonce"], response)
+
+
+def test_claimant_receipt_rest_requires_operator_and_reverifies_after_restart(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    route = f'/api/v2/market/claim-intents/{proof["nonce"]}/completion/source-receipt'
+    locked = create_app(workspace, require_console_auth=True)
+    client = TestClient(locked)
+    assert client.post(route, json={"source_response": response}).status_code in (401, 403)
+    assert client.get(route, params={
+        "head_digest": response["completion_head_digest"],
+    }).status_code in (401, 403)
+    assert client.post(route, content=b"{", headers={
+        "Content-Length": str(2 * 1024 * 1024),
+    }).status_code in (401, 403)
+    headers = {"Authorization": f"Bearer {locked.state.nth_console_token}"}
+    imported = client.post(route, json={"source_response": response}, headers=headers)
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["observed_locally"] is True
+    assert client.post(route, json={"source_response": {
+        **response, "source_receipt_event": {
+            **response["source_receipt_event"], "sig": "bad",
+        },
+    }}, headers=headers).status_code == 422
+    assert client.post(route, content=b"{}", headers={
+        **headers, "Content-Length": str(2 * 1024 * 1024),
+    }).status_code == 413
+    second = TestClient(create_app(workspace, require_console_auth=True))
+    second_headers = {
+        "Authorization": f"Bearer {second.app.state.nth_console_token}",
+    }
+    read = second.get(route, params={
+        "head_digest": response["completion_head_digest"],
+    }, headers=second_headers)
+    assert read.status_code == 200, read.text
+    assert read.json()["source_receipt_event_id"] == response["audit_event_id"]
+
+
+def test_claimant_receipt_rest_rejects_duplicate_json_fields_at_all_depths(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    app = create_app(workspace, require_console_auth=True)
+    client = TestClient(app)
+    headers = {
+        "Authorization": f"Bearer {app.state.nth_console_token}",
+        "Content-Type": "application/json",
+    }
+    route = f'/api/v2/market/claim-intents/{proof["nonce"]}/completion/source-receipt'
+    encoded = json.dumps(response, separators=(",", ":"))
+    duplicate_outer = (
+        '{"source_response":{},"source_response":' + encoded + "}"
+    ).encode("utf-8")
+    duplicate_event = (
+        '{"source_response":' + encoded.replace(
+            '"source_receipt_event":{',
+            '"source_receipt_event":{"payload":{},', 1,
+        ) + "}"
+    ).encode("utf-8")
+    assert duplicate_event != ('{"source_response":' + encoded + "}").encode("utf-8")
+    for raw in (duplicate_outer, duplicate_event):
+        result = client.post(route, content=raw, headers=headers)
+        assert result.status_code == 422, result.text
+    assert not (workspace / "federation" / "claim_completion_receipts").exists()
+
+
+def test_claimant_import_recovers_only_the_exact_pending_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    spine = SignedEventLog(workspace / "spine.jsonl", observer)
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(), spine=spine,
+    )
+    original = spine.append_unique
+    monkeypatch.setattr(
+        spine, "append_unique",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("audit failed")),
+    )
+    with pytest.raises(OSError, match="audit failed"):
+        store.record(proof["nonce"], response)
+    with pytest.raises(ClaimantReceiptConflict):
+        store.get(proof["nonce"], response["completion_head_digest"])
+    monkeypatch.setattr(spine, "append_unique", original)
+    assert store.record(proof["nonce"], response)["observed_locally"] is True
+    assert spine.find_unique_event(
+        "market.claim.completion.source_receipt.observed", payload_field="receipt_key",
+        payload_value=f'{proof["source_claim_id"]}:{response["completion_head_digest"]}',
+    ) is not None
+
+
+def test_claimant_reconciles_pending_blob_without_original_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    spine = SignedEventLog(workspace / "spine.jsonl", observer)
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(), spine=spine,
+    )
+    original_append = spine.append_unique
+    monkeypatch.setattr(
+        spine, "append_unique",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("audit failed")),
+    )
+    with pytest.raises(OSError, match="audit failed"):
+        store.record(proof["nonce"], response)
+    monkeypatch.setattr(spine, "append_unique", original_append)
+    path = next((store.root / proof["source_claim_id"]).glob("*.json"))
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ClaimantReceiptConflict):
+        store.reconcile_pending(
+            proof["nonce"], response["completion_head_digest"],
+            expected_response_digest="sha256:" + "0" * 64,
+        )
+    assert store.reconcile_pending(
+        proof["nonce"], response["completion_head_digest"],
+        expected_response_digest=digest,
+    )["already_observed"] is False
+    assert store.reconcile_pending(
+        proof["nonce"], response["completion_head_digest"],
+        expected_response_digest=digest,
+    )["already_observed"] is True
+    assert store.get(proof["nonce"], response["completion_head_digest"])[
+        "receipt_verified"
+    ] is True
+
+
+def test_claimant_receipt_reconcile_rest_is_operator_only_and_bodyless(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    app = create_app(workspace, require_console_auth=True)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+    import_route = f'/api/v2/market/claim-intents/{proof["nonce"]}/completion/source-receipt'
+    spine = app.state.nth.spine
+    original_append = spine.append_unique
+    monkeypatch.setattr(
+        spine, "append_unique",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("audit failed")),
+    )
+    assert client.post(import_route, json={
+        "source_response": response,
+    }, headers=headers).status_code == 503
+    monkeypatch.setattr(spine, "append_unique", original_append)
+    restarted = create_app(workspace, require_console_auth=True)
+    client = TestClient(restarted)
+    headers = {"Authorization": f"Bearer {restarted.state.nth_console_token}"}
+    pending_route = import_route + "/pending"
+    selector = {"head_digest": response["completion_head_digest"]}
+    assert client.get(pending_route, params=selector).status_code in (401, 403)
+    status = client.get(pending_route, params=selector, headers=headers)
+    assert status.status_code == 200, status.text
+    assert status.json()["pending"] is True
+    assert status.json()["observed_locally"] is False
+    digest = status.json()["expected_response_digest"]
+    reconcile_route = import_route + "/reconcile"
+    params = {
+        "head_digest": response["completion_head_digest"],
+        "expected_response_digest": digest,
+    }
+    assert client.post(reconcile_route, params=params).status_code in (401, 403)
+    assert client.post(
+        reconcile_route, params=params, content=b"x", headers=headers,
+    ).status_code == 413
+    assert client.post(reconcile_route, params={
+        **params, "expected_response_digest": "sha256:" + "0" * 64,
+    }, headers=headers).status_code == 409
+    recovered = client.post(reconcile_route, params=params, headers=headers)
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["already_observed"] is False
+    assert client.post(reconcile_route, params=params, headers=headers).json()[
+        "already_observed"
+    ] is True
+    completed = client.get(pending_route, params=selector, headers=headers)
+    assert completed.status_code == 200
+    assert completed.json()["pending"] is False
+    assert completed.json()["observed_locally"] is True
+
+
+def test_claimant_receipt_reconcile_does_not_block_other_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    httpx = pytest.importorskip("httpx")
+    from nth_dao.web import create_app
+
+    app = create_app(tmp_path, require_console_auth=True)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def wait_for_io(_store, _nonce, _head, *, expected_response_digest):
+        entered.set()
+        release.wait(timeout=0.8)
+        return {"observed_locally": True}
+
+    monkeypatch.setattr(ClaimantSourceReceiptStore, "reconcile_pending", wait_for_io)
+    digest = "sha256:" + "a" * 64
+    route = "/api/v2/market/claim-intents/" + "b" * 32 + "/completion/source-receipt/reconcile"
+    headers = {"Authorization": f"Bearer {app.state.nth_console_token}"}
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            started = time.monotonic()
+            pending = asyncio.create_task(client.post(
+                route, params={
+                    "head_digest": digest, "expected_response_digest": digest,
+                }, headers=headers,
+            ))
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.005)
+                assert entered.is_set()
+                health = await client.get("/api/v2/health")
+                assert health.status_code == 200
+                assert time.monotonic() - started < 0.4
+            finally:
+                release.set()
+                result = await pending
+            assert result.status_code == 200
+
+    asyncio.run(exercise())
+
+
+def test_claimant_observation_survives_only_unambiguous_dual_signed_rotation(
+    tmp_path: Path,
+) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    old = AgentIdentity.generate(label="old observer")
+    old_store = ClaimantSourceReceiptStore(
+        workspace, observer_did=old.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", old),
+    )
+    observed = old_store.record(proof["nonce"], response)
+    current = AgentIdentity.generate(label="new observer")
+    new_store = ClaimantSourceReceiptStore(
+        workspace, observer_did=current.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", current),
+    )
+    head = response["completion_head_digest"]
+    with pytest.raises(ClaimantReceiptCorrupt):
+        new_store.get(proof["nonce"], head)
+    record_source_identity_rotation(workspace, old, current)
+    assert new_store.get(proof["nonce"], head)[
+        "local_observation_event_id"
+    ] == observed["local_observation_event_id"]
+    assert new_store.record(proof["nonce"], response)["already_observed"] is True
+
+    record_source_identity_rotation(
+        workspace, old, AgentIdentity.generate(label="fork observer"),
+    )
+    with pytest.raises(ClaimantReceiptCorrupt):
+        new_store.get(proof["nonce"], head)
+
+
+def test_claimant_observation_rejects_tampered_rotation_signature(tmp_path: Path) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    old = AgentIdentity.generate(label="old observer")
+    ClaimantSourceReceiptStore(
+        workspace, observer_did=old.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", old),
+    ).record(proof["nonce"], response)
+    current = AgentIdentity.generate(label="new observer")
+    rotation = record_source_identity_rotation(workspace, old, current)
+    path = workspace / "market_feed" / "source_identity_rotations.jsonl"
+    path.write_text(json.dumps({
+        **rotation, "successor_sig": "0" * 128,
+    }) + "\n", encoding="utf-8")
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=current.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", current),
+    )
+    with pytest.raises(ClaimantReceiptCorrupt):
+        store.get(proof["nonce"], response["completion_head_digest"])
+
+
+def test_claimant_import_concurrent_retries_write_one_observation(tmp_path: Path) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    spine = SignedEventLog(workspace / "spine.jsonl", observer)
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(), spine=spine,
+    )
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(
+            lambda _index: store.record(proof["nonce"], response), range(4),
+        ))
+    assert sum(not item["already_observed"] for item in results) == 1
+    assert len({item["local_observation_event_id"] for item in results}) == 1
+
+
+def test_claimant_import_cross_process_writes_one_observation(tmp_path: Path) -> None:
+    source, authority, _claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    context = multiprocessing.get_context("spawn")
+    with context.Manager() as manager:
+        barrier = manager.Barrier(3)
+        args = [(workspace, observer, proof["nonce"], response, barrier)] * 3
+        with ProcessPoolExecutor(max_workers=3, mp_context=context) as pool:
+            results = list(pool.map(_import_claimant_receipt_in_process, args))
+    assert sum(not already for already, _event_id in results) == 1
+    assert len({event_id for _already, event_id in results}) == 1
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    assert store.get(proof["nonce"], response["completion_head_digest"])[
+        "local_observation_event_id"
+    ] == results[0][1]
+
+
+def test_claimant_import_keeps_historical_receipt_after_new_revision(tmp_path: Path) -> None:
+    source, authority, claimant, _announcement, proof = _source_and_proof(tmp_path)
+    response = SourceCompletionInbox(
+        source, source_did=authority.as_did(),
+        spine=SignedEventLog(source / "spine.jsonl", authority),
+    ).record(proof)
+    workspace = tmp_path / "claimant"
+    observer = AgentIdentity.generate(label="observer")
+    store = ClaimantSourceReceiptStore(
+        workspace, observer_did=observer.as_did(),
+        spine=SignedEventLog(workspace / "spine.jsonl", observer),
+    )
+    store.record(proof["nonce"], response)
+    old = proof["completion_chain"][0]["completion_record"]
+    completed_at = old["completed_at_ms"] + 3
+    execution = sign_receipt(
+        [TimelineEntry(
+            timestamp=completed_at - 1, type="nth.task_completed",
+            payload={"mission_id": "mission-1"},
+        )], claimant, goal_id="mission:mission-1",
+    )
+    revision = sign_mission_completion(
+        claimant, announcement_id=old["announcement_id"],
+        mission_id="mission-1", claim_receipt=proof["claim_receipt"],
+        authority_ack=proof["authority_ack"], execution_receipt=execution,
+        outcome="succeeded", completed_at_ms=completed_at, revision=1,
+        supersedes_digest=response["completion_head_digest"],
+    )
+    ClaimCompletionStore(workspace).record(proof["nonce"], revision, execution)
+    current = build_portable_completion_proof(workspace, proof["nonce"])
+    assert current is not None and len(current["completion_chain"]) == 2
+    assert store.get(proof["nonce"], response["completion_head_digest"])[
+        "receipt_verified"
+    ] is True

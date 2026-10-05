@@ -8,7 +8,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from nth_dao.canonical_json import canonical_json
 from nth_dao.identity import AgentIdentity
 from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 from nth_dao.market.completion_flow import (
@@ -19,8 +18,8 @@ from nth_dao.market.completion_flow import (
 )
 from nth_dao.market.mission_completion import receipt_digest
 from nth_dao.market.source_completion_receipt import (
-    MAX_SOURCE_RECEIPT_EVENT_BYTES,
     MAX_SOURCE_RECEIPT_RESPONSE_BYTES,
+    extract_source_completion_receipt,
     verify_source_completion_receipt,
 )
 
@@ -43,28 +42,6 @@ def _read_json_object(path: Path, max_bytes: int) -> dict:
     if not isinstance(value, dict):
         raise TypeError("JSON input must be an object")
     return value
-
-
-def _receipt_from_file(value: dict) -> tuple[dict, object]:
-    """Accept a bare event or the operator REST response that carries it."""
-    if "source_receipt_event" not in value:
-        if len(canonical_json(value)) > MAX_SOURCE_RECEIPT_EVENT_BYTES:
-            raise ValueError("source receipt event exceeds size limit")
-        return value, None
-    event = value["source_receipt_event"]
-    chain = value.get("source_rotation_chain")
-    if not isinstance(event, dict) or not isinstance(chain, list):
-        raise TypeError("source response lacks a receipt event or rotation chain")
-    if len(canonical_json(event)) > MAX_SOURCE_RECEIPT_EVENT_BYTES:
-        raise ValueError("source receipt event exceeds size limit")
-    payload = event.get("payload")
-    if not isinstance(payload, dict) or value.get("audit_event_id") != event.get("content_hash"):
-        raise ValueError("source response audit event ID differs from its event")
-    if not payload.keys() <= value.keys() or canonical_json({
-        field: value[field] for field in payload
-    }) != canonical_json(payload):
-        raise ValueError("source response fields differ from the signed event")
-    return event, chain
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -127,7 +104,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 response = _read_json_object(
                     args.receipt_event_file, MAX_SOURCE_RECEIPT_RESPONSE_BYTES,
                 )
-                event, rotation_chain = _receipt_from_file(response)
+                event, rotation_chain = extract_source_completion_receipt(response)
                 payload = event.get("payload")
                 if not isinstance(payload, dict):
                     raise ValueError("source receipt completion head is invalid")
@@ -162,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     response = _read_json_object(
                         args.receipt_event_file, MAX_SOURCE_RECEIPT_RESPONSE_BYTES,
                     )
-                    event, rotation_chain = _receipt_from_file(response)
+                    event, rotation_chain = extract_source_completion_receipt(response)
                 valid, reason = verify_source_completion_receipt(
                     proof, event, expected_source_did=source_did,
                     expected_federation_key=federation_key,
