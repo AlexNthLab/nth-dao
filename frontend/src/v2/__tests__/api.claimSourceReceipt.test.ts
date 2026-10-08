@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   getClaimSourceReceiptStatus,
+  getPortableClaimCompletionProof,
   getRecordedClaimCompletion,
   importClaimSourceReceipt,
   reconcileClaimSourceReceipt,
@@ -48,9 +49,58 @@ const observation = {
   already_observed: false,
 };
 
+const portableProof = {
+  kind: "nth-market-claim-completion-proof", version: 1,
+  nonce, source_claim_id: sourceClaimId,
+  announcement: {}, intent: { nonce }, claim_receipt: {},
+  authority_ack: { ack_id: sourceClaimId },
+  completion_chain: [{ completion_record: { version: 1 } }],
+};
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("claimant source receipt API", () => {
+  it("exports only the selected signed completion head for manual transfer", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse(portableProof));
+    vi.stubGlobal("fetch", fetcher);
+    const controller = new AbortController();
+    await expect(getPortableClaimCompletionProof(
+      nonce, head, sourceClaimId, controller.signal,
+    )).resolves.toBe(JSON.stringify(portableProof));
+    expect(fetcher).toHaveBeenCalledWith(
+      `/api/v2/market/claim-intents/${nonce}/completion/proof?head_digest=${encodeURIComponent(head)}`,
+      expect.objectContaining({ signal: controller.signal, credentials: "same-origin", cache: "no-store" }),
+    );
+  });
+
+  it("preserves signed integer literals beyond JavaScript's safe range", async () => {
+    const raw = JSON.stringify({
+      ...portableProof, announcement: { reward_minor: "SIGNED_INTEGER" },
+    }).replace('"SIGNED_INTEGER"', "9007199254740993");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(raw, {
+      headers: { "Content-Type": "application/json" },
+    })));
+    await expect(getPortableClaimCompletionProof(nonce, head, sourceClaimId))
+      .resolves.toBe(raw);
+  });
+
+  it("rejects an exported proof for another claim or malformed ancestry", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...portableProof, source_claim_id: "f".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse({ ...portableProof, completion_chain: [] }))
+      .mockResolvedValueOnce(jsonResponse({ ...portableProof, authority_ack: { ack_id: "f".repeat(64) } }))
+      .mockResolvedValueOnce(jsonResponse({ ...portableProof, intent: { nonce: "other" } }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(getPortableClaimCompletionProof(nonce, head, sourceClaimId))
+      .rejects.toThrow(/Invalid portable completion proof/);
+    await expect(getPortableClaimCompletionProof(nonce, head, sourceClaimId))
+      .rejects.toThrow(/Invalid portable completion proof/);
+    await expect(getPortableClaimCompletionProof(nonce, head, sourceClaimId))
+      .rejects.toThrow(/Invalid portable completion proof/);
+    await expect(getPortableClaimCompletionProof(nonce, head, sourceClaimId))
+      .rejects.toThrow(/Invalid portable completion proof/);
+  });
+
   it("keeps older completion summaries readable without inventing a head", async () => {
     const summary = {
       nonce, recorded: true, verification_scope: "signed_evidence_only",

@@ -1,0 +1,14 @@
+{
+  "format": "nth-market-claimant-completion-proof-export-request-v1",
+  "event_type": "market.claim.completion.proof_export.requested",
+  "scope": "node-local operator disclosure request; not browser download, peer delivery, source retention, acceptance, or settlement",
+  "payload": {
+    "source_claim_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "completion_head_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "proof_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "operator_scope": "console-bearer",
+    "result": "requested"
+  },
+  "payload_canonical_json": "{\"completion_head_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"operator_scope\":\"console-bearer\",\"proof_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"result\":\"requested\",\"source_claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+  "payload_sha256": "sha256:20c96db90624a58aa8462abf1c2e5fdc02d36324bdf18b66baf8960f95b8da3c"
+}

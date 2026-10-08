@@ -1478,6 +1478,7 @@ select option {
 .task-claim-evidence span, .task-claim-evidence code { min-width: 0; overflow-wrap: anywhere; }
 .task-source-receipt { display: grid; gap: 7px; min-width: 0; border-top: 1px solid var(--border); padding-top: 8px; font-size: 11px; }
 .task-source-receipt .task-claim-intent-actions { justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+.task-source-receipt-note { margin: 0; line-height: 1.45; }
 .task-source-receipt-form { display: grid; gap: 6px; min-width: 0; }
 .task-source-receipt-form textarea { width: 100%; min-height: 108px; max-height: 300px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
 .task-source-receipt-form input[type="file"] { width: 100%; min-width: 0; font-size: 11px; }

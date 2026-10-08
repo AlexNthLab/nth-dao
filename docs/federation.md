@@ -365,6 +365,24 @@ and head for a helpful early error; the original JSON text is submitted so the
 server's duplicate-field rejection and signature checks see the actual input.
 A timed-out write has an unknown outcome: the UI rechecks local verified
 retention before offering another explicit operator action.
+The same view can explicitly download the portable proof for that exact
+completion head. This is a local browser download, not peer delivery or
+source acknowledgement. The proof contains a scoped claim capability and
+participant metadata; share it only with the intended source operator, who
+must reverify signatures against independently pinned source identity and
+local CAS claim evidence before retaining it or issuing a source receipt.
+The browser checks selectors for display but saves the server's original JSON
+text; parsing and reserializing it could change signed 64-bit integer values.
+Each successful authorized GET appends a node-signed
+`market.claim.completion.proof_export.requested` Spine event before returning
+the proof. The event records only the source claim ID, selected completion head,
+canonical proof digest, and whether authorization used a console bearer or
+explicit loopback development mode; it never records the scoped token or proof
+body. Its ID is returned in `X-NTH-Audit-Event-ID`. A missing or failed Spine
+append returns 503 without disclosing the proof. This audit means an export was
+requested, not that the browser saved a file or another node received it.
+Repeated GETs create separate request events. The fixed payload vector is
+`nth_dao/market/vectors/claimant-completion-proof-export-request-v1.json`.
 Team owner key drift is fail-closed for membership writes; rotating the owner
 key requires a separate explicit migration and is not performed by receipt
 observation or web bootstrap.

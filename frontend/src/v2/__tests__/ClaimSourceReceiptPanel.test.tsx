@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../api")>(),
+  getPortableClaimCompletionProof: vi.fn(),
   getClaimSourceReceiptStatus: vi.fn(),
   importClaimSourceReceipt: vi.fn(),
   reconcileClaimSourceReceipt: vi.fn(),
@@ -11,6 +12,7 @@ vi.mock("../api", async (importOriginal) => ({
 
 import {
   ApiHttpError,
+  getPortableClaimCompletionProof,
   getClaimSourceReceiptStatus,
   importClaimSourceReceipt,
   reconcileClaimSourceReceipt,
@@ -40,14 +42,112 @@ const importResult = {
   source_did: sourceDid, claimant_did: claimantDid,
   observed_locally: true,
 } as const;
+const portableProof = {
+  kind: "nth-market-claim-completion-proof", version: 1, nonce,
+  source_claim_id: sourceClaimId,
+  announcement: {}, intent: { nonce }, claim_receipt: {},
+  authority_ack: { ack_id: sourceClaimId },
+  completion_chain: [{ completion_record: { version: 1 } }],
+};
+const rawProof = JSON.stringify({
+  ...portableProof, announcement: { reward_minor: "SIGNED_INTEGER" },
+}).replace('"SIGNED_INTEGER"', "9007199254740993");
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe("ClaimSourceReceiptPanel", () => {
+  it("downloads only the selected completion proof after an explicit click", async () => {
+    vi.mocked(getPortableClaimCompletionProof).mockResolvedValue(rawProof);
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:completion-proof");
+    const revokeObjectURL = vi.fn();
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, {
+      createObjectURL, revokeObjectURL,
+    }));
+    let downloadedName = "";
+    let downloadCount = 0;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloadCount += 1;
+      downloadedName = this.download;
+      expect(this.href).toBe("blob:completion-proof");
+    });
+    render(<ClaimSourceReceiptPanel {...props} />);
+    expect(getPortableClaimCompletionProof).not.toHaveBeenCalled();
+    expect(screen.getByText(/scoped capability token and participant metadata/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Download proof" }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    const exportedBlob = createObjectURL.mock.calls[0][0];
+    const exportedText = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(exportedBlob);
+    });
+    expect(exportedText).toBe(rawProof);
+    expect(getPortableClaimCompletionProof).toHaveBeenCalledWith(
+      nonce, head, sourceClaimId, expect.any(AbortSignal),
+    );
+    expect(downloadedName).toContain(sourceClaimId.slice(0, 12));
+    expect(downloadedName).toContain(head.slice(7, 19));
+    expect(screen.getByText(/Download requested/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Download proof" }));
+    await waitFor(() => expect(downloadCount).toBe(2));
+    expect(getPortableClaimCompletionProof).toHaveBeenCalledTimes(2);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const releaseIndex = timeoutSpy.mock.calls.findIndex(([, delay]) => delay === 60_000);
+    expect(releaseIndex).toBeGreaterThanOrEqual(0);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    const release = timeoutSpy.mock.calls[releaseIndex][0] as () => void;
+    release();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:completion-proof");
+    clearTimeout(timeoutSpy.mock.results[releaseIndex].value as ReturnType<typeof setTimeout>);
+  });
+
+  it("refuses changed bytes for a previously exported signed head", async () => {
+    vi.mocked(getPortableClaimCompletionProof)
+      .mockResolvedValueOnce(rawProof)
+      .mockResolvedValueOnce(rawProof.replace('"version":1', '"version":2'));
+    const createObjectURL = vi.fn(() => "blob:completion-proof");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, {
+      createObjectURL, revokeObjectURL,
+    }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    render(<ClaimSourceReceiptPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Download proof" }));
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Download proof" }));
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent", expect.stringContaining("changed for the same head"),
+    );
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const releaseIndex = timeoutSpy.mock.calls.findIndex(([, delay]) => delay === 60_000);
+    clearTimeout(timeoutSpy.mock.results[releaseIndex].value as ReturnType<typeof setTimeout>);
+  });
+
+  it("does not create a download when the local proof export is rejected", async () => {
+    vi.mocked(getPortableClaimCompletionProof).mockRejectedValueOnce(
+      new ApiHttpError("GET", "/completion/proof", 503),
+    );
+    const createObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL }));
+    render(<ClaimSourceReceiptPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Download proof" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveProperty(
+      "textContent", expect.stringContaining("HTTP 503"),
+    ));
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Download requested/)).toBeNull();
+  });
+
   it("labels a verified source observation as a statement, not acceptance", async () => {
     vi.mocked(getClaimSourceReceiptStatus).mockResolvedValueOnce(observed);
     render(<ClaimSourceReceiptPanel {...props} />);

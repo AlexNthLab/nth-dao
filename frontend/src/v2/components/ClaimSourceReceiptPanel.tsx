@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ApiHttpError,
   SOURCE_RECEIPT_INPUT_LIMIT_BYTES,
+  getPortableClaimCompletionProof,
   getClaimSourceReceiptStatus,
   importClaimSourceReceipt,
   reconcileClaimSourceReceipt,
@@ -10,6 +11,7 @@ import {
 import type { ClaimSourceReceiptStatus } from "../types-v2";
 
 const RECEIPT_REQUEST_TIMEOUT_MS = 30_000;
+const PROOF_DOWNLOAD_URL_LIFETIME_MS = 60_000;
 
 interface ClaimSourceReceiptPanelProps {
   nonce: string;
@@ -55,12 +57,13 @@ export function ClaimSourceReceiptPanel({
   const [checked, setChecked] = useState(false);
   const [open, setOpen] = useState(false);
   const [raw, setRaw] = useState("");
-  const [busy, setBusy] = useState<"" | "check" | "import" | "reconcile">("");
+  const [busy, setBusy] = useState<"" | "check" | "export" | "import" | "reconcile">("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [unattributedImport, setUnattributedImport] = useState(false);
   const busyRef = useRef(false);
   const requestController = useRef<AbortController | null>(null);
+  const proofDownload = useRef<{ raw: string; url: string } | null>(null);
   const active = useRef(true);
   const fileReadVersion = useRef(0);
 
@@ -168,6 +171,53 @@ export function ClaimSourceReceiptPanel({
         setStatus(null);
         setChecked(false);
         setError(cause instanceof Error ? cause.message : "Source receipt check failed");
+      }
+    } finally {
+      busyRef.current = false;
+      if (active.current) setBusy("");
+    }
+  }
+
+  async function exportProof() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy("export");
+    setError("");
+    setNotice("");
+    try {
+      const rawProof = await withDeadline(
+        (signal) => getPortableClaimCompletionProof(nonce, head, sourceClaimId, signal),
+        "Completion proof export timed out",
+      );
+      if (!active.current) return;
+      const urlApi = URL;
+      const retained = proofDownload.current;
+      if (retained && retained.raw !== rawProof) {
+        throw new Error("Completion proof changed for the same head; reload before exporting");
+      }
+      const url = retained?.url ?? urlApi.createObjectURL(new Blob(
+        [rawProof], { type: "application/json;charset=utf-8" },
+      ));
+      if (!retained) {
+        proofDownload.current = { raw: rawProof, url };
+        setTimeout(() => {
+          urlApi.revokeObjectURL(url);
+          if (proofDownload.current?.url === url) proofDownload.current = null;
+        }, PROOF_DOWNLOAD_URL_LIFETIME_MS);
+      }
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `nth-completion-${sourceClaimId.slice(0, 12)}-${head.slice(7, 19)}.json`;
+      document.body.append(link);
+      try {
+        link.click();
+      } finally {
+        link.remove();
+      }
+      setNotice("Download requested; check your browser's downloads before sharing with the intended source DAO.");
+    } catch (cause) {
+      if (active.current) {
+        setError(cause instanceof Error ? cause.message : "Completion proof export failed");
       }
     } finally {
       busyRef.current = false;
@@ -301,10 +351,17 @@ export function ClaimSourceReceiptPanel({
         {busy === "check" ? "Checking…" : "Check source receipt"}
       </button>
       <button className="btn btn-ghost" type="button" disabled={Boolean(busy)}
+        onClick={() => void exportProof()} title="Save the exact signed completion ancestry for manual transfer">
+        {busy === "export" ? "Preparing…" : "Download proof"}
+      </button>
+      <button className="btn btn-ghost" type="button" disabled={Boolean(busy)}
         onClick={() => { fileReadVersion.current += 1; setOpen(!open); setRaw(""); setError(""); }}>
         {open ? "Close import" : "Import source receipt"}
       </button>
     </div>
+    <p className="muted task-source-receipt-note">
+      Proof contains a scoped capability token and participant metadata. Share only with the intended source DAO. Not acceptance or payment.
+    </p>
     {checked && !status && <span className="muted">No source receipt retained for this completion</span>}
     {status?.pending && <div className="task-claim-evidence" role="status">
       <strong>Verified file awaits local audit</strong>

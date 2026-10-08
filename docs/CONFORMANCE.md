@@ -161,6 +161,14 @@ execution boundary confirms that the in-flight turn stopped.
 Passing this descriptor vector alone does not prove those runtime properties;
 the negative and real-child integration tests enforce them in Python.
 
+The node-local claimant completion-proof export request vector in
+`nth_dao/market/vectors/claimant-completion-proof-export-request-v1.json`
+fixes the signed Spine event type, payload fields, and canonical payload
+digest. It describes an operator's request to disclose a specific proof head,
+not browser download or peer receipt. The event payload intentionally excludes
+the claim capability and proof body. Python checks the vector and the live
+export/audit binding in `tests/test_market_claim_evidence.py`.
+
 The market source-completion receipt v1 vector in
 `nth_dao/market/vectors/source-completion-received-v1.json` fixes the audit
 payload, its portable signed Spine-event field, and the optional dual-signed

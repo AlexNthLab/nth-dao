@@ -34,6 +34,7 @@ _NONCE_RE = re.compile(r"[A-Za-z0-9]{16,64}\Z")
 # The store accepts 32 envelopes of up to 512 KiB each. Leave bounded room
 # for the signed announcement, claim receipt, intent, and authority ACK too.
 MAX_PORTABLE_COMPLETION_PROOF_BYTES = 20 * 1024 * 1024
+PROOF_EXPORT_REQUESTED_EVENT = "market.claim.completion.proof_export.requested"
 _MAX_REVISIONS = 32
 _PROOF_FIELDS = frozenset({
     "kind", "version", "nonce", "source_claim_id", "announcement", "intent", "claim_receipt",
@@ -368,6 +369,7 @@ def verify_source_claim_completion(
 __all__ = [
     "SourceCompletionEvidenceUnavailable",
     "MAX_PORTABLE_COMPLETION_PROOF_BYTES",
+    "PROOF_EXPORT_REQUESTED_EVENT",
     "record_local_mission_completion", "build_portable_completion_proof",
     "build_portable_completion_proof_with_pins",
     "verify_portable_completion_proof", "verify_source_claim_completion",

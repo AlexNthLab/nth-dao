@@ -3392,6 +3392,54 @@ const CLAIM_RECEIPT_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const CLAIM_RECEIPT_ID = /^[0-9a-f]{64}$/;
 export const SOURCE_RECEIPT_INPUT_LIMIT_BYTES = 1024 * 1024 + 2 * 16 * 1024;
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Export only an exact retained head; this does not send evidence to a peer. */
+export async function getPortableClaimCompletionProof(
+  nonce: string, head: string, sourceClaimId: string, signal?: AbortSignal,
+): Promise<string> {
+  if (!/^[A-Za-z0-9]{16,64}$/.test(nonce)
+    || !CLAIM_RECEIPT_DIGEST.test(head) || !CLAIM_RECEIPT_ID.test(sourceClaimId)) {
+    throw new Error("Invalid completion proof selector");
+  }
+  const path = `/market/claim-intents/${encodeURIComponent(nonce)}`
+    + `/completion/proof?head_digest=${encodeURIComponent(head)}`;
+  const response = await fetch(`${BASE}${path}`, {
+    signal, credentials: "same-origin", cache: "no-store",
+    headers: { Accept: "application/json", ...authHeader() },
+  });
+  if (!response.ok) throw new ApiHttpError("GET", path, response.status);
+  let raw: string;
+  let value: unknown;
+  try {
+    raw = await response.text();
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid portable completion proof");
+  }
+  if (!isJsonObject(value)
+    || value.kind !== "nth-market-claim-completion-proof"
+    || (value.version !== 1 && value.version !== 2)
+    || value.nonce !== nonce
+    || value.source_claim_id !== sourceClaimId
+    || !isJsonObject(value.announcement)
+    || !isJsonObject(value.intent)
+    || value.intent.nonce !== nonce
+    || !isJsonObject(value.claim_receipt)
+    || !isJsonObject(value.authority_ack)
+    || value.authority_ack.ack_id !== sourceClaimId
+    || !Array.isArray(value.completion_chain)
+    || value.completion_chain.length === 0
+    || !value.completion_chain.every((entry: unknown) => (
+      isJsonObject(entry) && isJsonObject(entry.completion_record)
+    ))) {
+    throw new Error("Invalid portable completion proof");
+  }
+  return raw;
+}
+
 function claimSourceReceiptPath(nonce: string, head: string): string {
   if (!/^[A-Za-z0-9]{16,64}$/.test(nonce) || !CLAIM_RECEIPT_DIGEST.test(head)) {
     throw new Error("Invalid source receipt selector");

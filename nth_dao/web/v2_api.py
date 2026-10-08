@@ -23870,16 +23870,21 @@ def register_v2_routes(app: FastAPI) -> None:
 
     @app.get("/api/v2/market/claim-intents/{nonce}/completion/proof")
     def v2_market_export_claim_completion_proof(
-        nonce: str, request: Request, head_digest: str | None = None,
+        nonce: str, request: Request, response: Response,
+        head_digest: str | None = None,
     ) -> Dict[str, Any]:
         """Explicit operator disclosure of a portable signed evidence chain."""
 
+        from nth_dao.canonical_json import canonical_json
         from nth_dao.market.claim_evidence import ClaimEvidenceUnavailable
         from nth_dao.market.claim_intent import IntentTrackerCorrupt
-        from nth_dao.market.completion_flow import build_portable_completion_proof
+        from nth_dao.market.completion_flow import (
+            PROOF_EXPORT_REQUESTED_EVENT, build_portable_completion_proof,
+        )
         from nth_dao.market.completion_store import (
             CompletionEvidenceConflict, CompletionEvidenceCorrupt,
         )
+        from nth_dao.market.mission_completion import receipt_digest
 
         _require_federation_operator(request)
         if re.fullmatch(r"[A-Za-z0-9]{16,64}", nonce) is None:
@@ -23891,6 +23896,9 @@ def register_v2_routes(app: FastAPI) -> None:
         ws = _state_workspace(request)
         if ws is None:
             raise HTTPException(status_code=503, detail="workspace unavailable")
+        spine = _state_spine(request)
+        if spine is None:
+            raise HTTPException(status_code=503, detail="proof disclosure audit unavailable")
         try:
             proof = build_portable_completion_proof(ws, nonce, head_digest=head_digest)
         except (
@@ -23904,6 +23912,31 @@ def register_v2_routes(app: FastAPI) -> None:
             ) from exc
         if proof is None:
             raise HTTPException(status_code=404, detail="completion evidence not recorded")
+        try:
+            audit_event = spine.append(
+                PROOF_EXPORT_REQUESTED_EVENT,
+                {
+                    "source_claim_id": proof["source_claim_id"],
+                    "completion_head_digest": receipt_digest(proof["completion_chain"][-1]),
+                    "proof_digest": "sha256:" + hashlib.sha256(canonical_json(proof)).hexdigest(),
+                    "operator_scope": (
+                        "console-bearer" if bool(getattr(
+                            request.app.state, "nth_require_console_auth", False,
+                        )) else "loopback-development"
+                    ),
+                    "result": "requested",
+                },
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, OverflowError) as exc:
+            logger.warning(
+                "portable completion proof disclosure audit unavailable (%s)",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503, detail="proof disclosure audit unavailable",
+            ) from exc
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-NTH-Audit-Event-ID"] = audit_event.event_id
         return proof
 
     @app.get("/api/v2/market/claim-intents/{nonce}/completion")

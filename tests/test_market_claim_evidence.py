@@ -48,6 +48,7 @@ from nth_dao.market.completion_store import (
     CompletionEvidenceRejected,
 )
 from nth_dao.market.completion_flow import (
+    PROOF_EXPORT_REQUESTED_EVENT,
     build_portable_completion_proof,
     record_local_mission_completion,
     verify_portable_completion_proof,
@@ -58,7 +59,7 @@ from nth_dao.orchestration.mission_store import MissionStore
 
 def _prepared_claim(
     workspace: Path, *, max_intents: int = 4096, include_signer: bool = False,
-    mission_id: str = "",
+    mission_id: str = "", reward_minor: int = 0,
 ):
     authority = AgentIdentity.generate(label="authority")
     claimant = AgentIdentity.generate(label="claimant")
@@ -67,6 +68,7 @@ def _prepared_claim(
         authority_did=authority.as_did(),
         title="work",
         mission_id=mission_id,
+        reward_minor=reward_minor,
     )
     token = sign_cap_token(
         issuer=claimant,
@@ -112,9 +114,12 @@ def _prepared_claim(
     return (*result, claimant, ann) if include_signer else result
 
 
-def _signed_completion(workspace: Path, *, claimed_mission_id: str = ""):
+def _signed_completion(
+    workspace: Path, *, claimed_mission_id: str = "", reward_minor: int = 0,
+):
     tracker, intent, receipt, ack, claimant, ann = _prepared_claim(
         workspace, include_signer=True, mission_id=claimed_mission_id,
+        reward_minor=reward_minor,
     )
     tracker.mark(intent, "confirmed")
     execution = sign_receipt(
@@ -723,12 +728,138 @@ def test_completion_proof_export_is_operator_only(tmp_path: Path) -> None:
     authorized = TestClient(create_app(tmp_path, require_console_auth=False))
     response = authorized.get(url)
     assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
     assert verify_portable_completion_proof(
         response.json(), expected_source_did=ack["authority_did"],
         expected_federation_key=ack["federation_key"],
     ) == (True, "ok")
     locked = TestClient(create_app(tmp_path, require_console_auth=True))
     assert locked.get(url).status_code in (401, 403)
+
+
+def test_completion_proof_export_records_signed_disclosure_request(tmp_path: Path) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    _tracker, intent, ack, completion, execution = _signed_completion(tmp_path)
+    AuthorityClaimAckStore(tmp_path).save(ack)
+    ClaimCompletionStore(tmp_path).record(intent["nonce"], completion, execution)
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    spine = app.state.nth.spine
+    assert spine is not None
+    url = f"/api/v2/market/claim-intents/{intent['nonce']}/completion/proof"
+
+    first = client.get(url)
+    assert first.status_code == 200, first.text
+    proof = first.json()
+    events = [event for event in spine.verified_snapshot()
+              if event.type == "market.claim.completion.proof_export.requested"]
+    assert len(events) == 1
+    event = events[0]
+    assert first.headers["x-nth-audit-event-id"] == event.event_id
+    assert event.author_did == app.state.nth.node_identity.as_did()
+    assert event.payload == {
+        "source_claim_id": ack["ack_id"],
+        "completion_head_digest": receipt_digest(proof["completion_chain"][-1]),
+        "proof_digest": "sha256:" + hashlib.sha256(canonical_json(proof)).hexdigest(),
+        "operator_scope": "loopback-development",
+        "result": "requested",
+    }
+    vector = json.loads((
+        Path(__file__).parents[1] / "nth_dao" / "market" / "vectors"
+        / "claimant-completion-proof-export-request-v1.json"
+    ).read_text(encoding="utf-8"))
+    assert set(event.payload) == set(vector["payload"])
+    assert "authorizing_cap_token" not in json.dumps(event.payload)
+    assert client.get(url).status_code == 200
+    assert len([event for event in spine.verified_snapshot()
+                if event.type == "market.claim.completion.proof_export.requested"]) == 2
+    assert client.get(url, params={"head_digest": "sha256:" + "f" * 64}).status_code == 404
+    assert len([event for event in spine.verified_snapshot()
+                if event.type == "market.claim.completion.proof_export.requested"]) == 2
+    locked_app = create_app(tmp_path, require_console_auth=True)
+    locked = TestClient(locked_app)
+    assert locked.get(url).status_code in (401, 403)
+    assert len([event for event in spine.verified_snapshot()
+                if event.type == "market.claim.completion.proof_export.requested"]) == 2
+    console = locked.get(url, headers={
+        "Authorization": f"Bearer {locked_app.state.nth_console_token}",
+    })
+    assert console.status_code == 200, console.text
+    console_event = spine.get_verified_event(console.headers["x-nth-audit-event-id"])
+    assert console_event is not None
+    assert console_event.payload["operator_scope"] == "console-bearer"
+
+
+def test_completion_proof_export_fails_closed_without_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    _tracker, intent, ack, completion, execution = _signed_completion(tmp_path)
+    AuthorityClaimAckStore(tmp_path).save(ack)
+    ClaimCompletionStore(tmp_path).record(intent["nonce"], completion, execution)
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
+    spine = app.state.nth.spine
+    assert spine is not None
+    url = f"/api/v2/market/claim-intents/{intent['nonce']}/completion/proof"
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise OSError("private audit failure detail")
+
+    monkeypatch.setattr(spine, "append", unavailable)
+    failed = client.get(url)
+    assert failed.status_code == 503
+    assert "private audit failure detail" not in failed.text
+    assert "completion_chain" not in failed.text
+    monkeypatch.setattr(app.state.nth, "spine", None)
+    assert client.get(url).status_code == 503
+    assert not [event for event in spine.verified_snapshot()
+                if event.type == "market.claim.completion.proof_export.requested"]
+
+
+def test_completion_proof_export_request_vector() -> None:
+    vector = json.loads((
+        Path(__file__).parents[1] / "nth_dao" / "market" / "vectors"
+        / "claimant-completion-proof-export-request-v1.json"
+    ).read_text(encoding="utf-8"))
+    payload = vector["payload"]
+    assert vector["event_type"] == PROOF_EXPORT_REQUESTED_EVENT
+    assert set(payload) == {
+        "source_claim_id", "completion_head_digest", "proof_digest",
+        "operator_scope", "result",
+    }
+    assert payload["operator_scope"] == "console-bearer"
+    assert payload["result"] == "requested"
+    encoded = canonical_json(payload)
+    assert encoded.decode("utf-8") == vector["payload_canonical_json"]
+    assert "sha256:" + hashlib.sha256(encoded).hexdigest() == vector["payload_sha256"]
+
+
+def test_completion_proof_export_preserves_signed_64_bit_amount(tmp_path: Path) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nth_dao.web import create_app
+
+    _tracker, intent, ack, completion, execution = _signed_completion(
+        tmp_path, reward_minor=(1 << 53) + 1,
+    )
+    AuthorityClaimAckStore(tmp_path).save(ack)
+    ClaimCompletionStore(tmp_path).record(intent["nonce"], completion, execution)
+    response = TestClient(create_app(tmp_path, require_console_auth=False)).get(
+        f"/api/v2/market/claim-intents/{intent['nonce']}/completion/proof",
+    )
+    assert response.status_code == 200, response.text
+    assert b'"reward_minor":9007199254740993' in response.content
+    assert verify_portable_completion_proof(
+        response.json(), expected_source_did=ack["authority_did"],
+        expected_federation_key=ack["federation_key"],
+    ) == (True, "ok")
 
 
 def test_completion_proof_export_selects_a_historical_head(tmp_path: Path) -> None:
@@ -771,13 +902,22 @@ def test_completion_proof_export_selects_a_historical_head(tmp_path: Path) -> No
     store.record(intent["nonce"], revision, revised_execution)
 
     url = f"/api/v2/market/claim-intents/{intent['nonce']}/completion/proof"
-    client = TestClient(create_app(tmp_path, require_console_auth=False))
+    app = create_app(tmp_path, require_console_auth=False)
+    client = TestClient(app)
     current = client.get(url)
     assert current.status_code == 200
     assert len(current.json()["completion_chain"]) == 2
     response = client.get(url, params={"head_digest": head_digest})
     assert response.status_code == 200, response.text
     assert response.json() == historical
+    audit = app.state.nth.spine.get_verified_event(
+        response.headers["x-nth-audit-event-id"],
+    )
+    assert audit is not None
+    assert audit.payload["completion_head_digest"] == head_digest
+    assert audit.payload["proof_digest"] == (
+        "sha256:" + hashlib.sha256(canonical_json(historical)).hexdigest()
+    )
     assert client.get(url, params={"head_digest": "sha256:" + "f" * 64}).status_code == 404
     assert client.get(url, params={"head_digest": "../invalid"}).status_code == 422
     locked = TestClient(create_app(tmp_path, require_console_auth=True))
