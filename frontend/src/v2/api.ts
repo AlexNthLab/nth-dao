@@ -32,6 +32,8 @@ import type {
   ClaimCompletionSummary,
   ClaimSourceReceiptObservation,
   ClaimSourceReceiptStatus,
+  SourceCompletionCheck,
+  SourceCompletionRecord,
   ChatMessage,
   Conversation,
   ConversationSummary,
@@ -3391,9 +3393,214 @@ export async function getRecordedClaimCompletion(
 const CLAIM_RECEIPT_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const CLAIM_RECEIPT_ID = /^[0-9a-f]{64}$/;
 export const SOURCE_RECEIPT_INPUT_LIMIT_BYTES = 1024 * 1024 + 2 * 16 * 1024;
+export const PORTABLE_COMPLETION_PROOF_INPUT_LIMIT_BYTES = 20 * 1024 * 1024;
+
+export class SourceCompletionLookupState extends ApiHttpError {
+  readonly state: "absent" | "pending_audit";
+
+  constructor(path: string, status: number, state: "absent" | "pending_audit") {
+    super("GET", path, status);
+    this.name = "SourceCompletionLookupState";
+    this.state = state;
+  }
+}
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function checkedPortableCompletionProof(raw: string): Record<string, unknown> {
+  if (typeof raw !== "string"
+    || new TextEncoder().encode(raw).byteLength > PORTABLE_COMPLETION_PROOF_INPUT_LIMIT_BYTES) {
+    throw new Error("Portable completion proof exceeds the size limit");
+  }
+  let proof: unknown;
+  try { proof = JSON.parse(raw); } catch { throw new Error("Invalid portable completion proof"); }
+  if (!isJsonObject(proof) || proof.kind !== "nth-market-claim-completion-proof"
+    || (proof.version !== 1 && proof.version !== 2)
+    || typeof proof.source_claim_id !== "string" || !CLAIM_RECEIPT_ID.test(proof.source_claim_id)
+    || typeof proof.nonce !== "string" || !/^[A-Za-z0-9]{16,64}$/.test(proof.nonce)
+    || !isJsonObject(proof.announcement) || !isJsonObject(proof.intent)
+    || !isJsonObject(proof.claim_receipt) || !isJsonObject(proof.authority_ack)
+    || proof.authority_ack.ack_id !== proof.source_claim_id
+    || !Array.isArray(proof.completion_chain)
+    || proof.completion_chain.length < 1 || proof.completion_chain.length > 32
+    || !proof.completion_chain.every((entry: unknown) => isJsonObject(entry)
+      && isJsonObject(entry.completion_record) && isJsonObject(entry.execution_receipt))) {
+    throw new Error("Invalid portable completion proof");
+  }
+  return proof;
+}
+
+async function boundedReceiptText(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Invalid source completion receipt");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const parts: string[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > SOURCE_RECEIPT_INPUT_LIMIT_BYTES) {
+        await reader.cancel();
+        throw new Error("Source completion receipt exceeds the size limit");
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } finally { reader.releaseLock(); }
+}
+
+function parseSourceCompletionCheck(value: unknown): SourceCompletionCheck {
+  if (!isJsonObject(value) || typeof value.verified !== "boolean"
+    || typeof value.reason !== "string"
+    || value.verification_scope !== "source_claim_binding_only"
+    || value.nonce_authenticated !== false || value.recorded !== false
+    || value.accepted !== false || value.settled !== false
+    || (value.verified && (
+      typeof value.source_claim_id !== "string" || !CLAIM_RECEIPT_ID.test(value.source_claim_id)
+      || typeof value.completion_head_digest !== "string" || !CLAIM_RECEIPT_DIGEST.test(value.completion_head_digest)
+      || typeof value.proof_digest !== "string" || !CLAIM_RECEIPT_DIGEST.test(value.proof_digest)
+      || typeof value.mission_id !== "string" || !value.mission_id
+      || !["succeeded", "failed"].includes(String(value.outcome))
+      || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0
+    ))) {
+    throw new Error("Invalid source completion verification response");
+  }
+  return value as unknown as SourceCompletionCheck;
+}
+
+function parseSourceCompletionRecord(
+  value: unknown, claimId: string, head: string,
+): SourceCompletionRecord {
+  const invalid = () => new Error("Invalid source completion receipt");
+  if (!isJsonObject(value) || !isJsonObject(value.source_receipt_event)) throw invalid();
+  const event = value.source_receipt_event;
+  const payload = event.payload;
+  if (!isJsonObject(payload)
+    || Object.keys(event).sort().join(",") !== "author_did,content_hash,payload,prev_hash,seq,sig,ts_ms,type"
+    || Object.keys(payload).sort().join(",") !== "accepted,claimant_did,completion_head_digest,completion_key,mission_id,nonce_authenticated,outcome,proof_digest,revision,settled,source_claim_id,source_did"
+    || value.source_claim_id !== claimId || value.completion_head_digest !== head
+    || value.completion_key !== `${claimId}:${head}`
+    || event.type !== "market.claim.completion.received"
+    || typeof event.content_hash !== "string" || !CLAIM_RECEIPT_ID.test(event.content_hash)
+    || value.audit_event_id !== event.content_hash
+    || typeof event.prev_hash !== "string" || !CLAIM_RECEIPT_ID.test(event.prev_hash)
+    || !Number.isSafeInteger(event.seq) || Number(event.seq) < 0
+    || !Number.isSafeInteger(event.ts_ms) || Number(event.ts_ms) <= 0
+    || typeof event.author_did !== "string" || !event.author_did.startsWith("did:key:")
+    || typeof event.sig !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(event.sig)
+    || typeof value.proof_digest !== "string" || !CLAIM_RECEIPT_DIGEST.test(value.proof_digest)
+    || typeof value.source_did !== "string" || !value.source_did.startsWith("did:key:")
+    || typeof value.claimant_did !== "string" || !value.claimant_did.startsWith("did:key:")
+    || typeof value.mission_id !== "string" || !value.mission_id
+    || !["succeeded", "failed"].includes(String(value.outcome))
+    || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0
+    || value.nonce_authenticated !== false || value.accepted !== false || value.settled !== false
+    || value.verified !== true || value.recorded !== true
+    || value.verification_scope !== "source_claim_binding_only"
+    || typeof value.already_recorded !== "boolean"
+    || !Array.isArray(value.source_rotation_chain)
+    || !["single_retained_head", "unresolved_fork", "duplicate_signed_head", "pending_audit", "pending_repair"].includes(String(value.lineage_state))
+    || !Array.isArray(value.lineage_heads) || value.lineage_heads.length > 8
+    || !value.lineage_heads.every((digest: unknown) => typeof digest === "string" && CLAIM_RECEIPT_DIGEST.test(digest))
+    || new Set(value.lineage_heads).size !== value.lineage_heads.length
+    || !Array.isArray(value.pending_head_digests) || value.pending_head_digests.length > 8
+    || !value.pending_head_digests.every((digest: unknown) => typeof digest === "string" && CLAIM_RECEIPT_DIGEST.test(digest))
+    || new Set(value.pending_head_digests).size !== value.pending_head_digests.length
+    || (value.single_retained_head_digest !== null && (
+      typeof value.single_retained_head_digest !== "string" || !CLAIM_RECEIPT_DIGEST.test(value.single_retained_head_digest)))
+    || typeof value.has_duplicate_signed_head !== "boolean"
+    || value.outcome_scope !== "submitted_head_only"
+    || !Object.entries(payload).every(([field, item]) => value[field] === item)) {
+    throw invalid();
+  }
+  const pending = value.lineage_state === "pending_audit" || value.lineage_state === "pending_repair";
+  if (pending ? (
+    value.lineage_heads.length !== 0 || value.single_retained_head_digest !== null
+    || (value.lineage_state === "pending_audit" ? value.pending_head_digests.length === 0 : value.pending_head_digests.length !== 0)
+  ) : (
+    value.lineage_heads.length === 0 || value.pending_head_digests.length !== 0
+    || (value.lineage_state === "single_retained_head" ? (
+      value.lineage_heads.length !== 1 || value.single_retained_head_digest !== value.lineage_heads[0]
+      || value.has_duplicate_signed_head
+    ) : value.single_retained_head_digest !== null)
+    || (value.lineage_state === "unresolved_fork" && value.lineage_heads.length < 2)
+    || (value.lineage_state === "duplicate_signed_head" && !value.has_duplicate_signed_head)
+  )) throw invalid();
+  return value as unknown as SourceCompletionRecord;
+}
+
+/** Keep the original proof text: browser numbers cannot represent every signed integer. */
+export async function verifySourceCompletionProof(
+  raw: string, signal?: AbortSignal,
+): Promise<SourceCompletionCheck> {
+  checkedPortableCompletionProof(raw);
+  const path = "/market/completion-proofs/verify-source";
+  const response = await fetch(`${BASE}${path}`, {
+    method: "POST", signal, credentials: "same-origin", cache: "no-store",
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...authHeader() },
+    body: `{"proof":${raw}}`,
+  });
+  if (!response.ok) throw new ApiHttpError("POST", path, response.status);
+  return parseSourceCompletionCheck(JSON.parse(await boundedReceiptText(response)));
+}
+
+/** The server checks both selected identifiers before retaining or signing anything. */
+export async function recordSourceCompletionProof(
+  raw: string, claimId: string, head: string, proofDigest?: string, signal?: AbortSignal,
+): Promise<SourceCompletionRecord> {
+  const proof = checkedPortableCompletionProof(raw);
+  if (!CLAIM_RECEIPT_ID.test(claimId) || !CLAIM_RECEIPT_DIGEST.test(head)
+    || proof.source_claim_id !== claimId
+    || (proofDigest !== undefined && !CLAIM_RECEIPT_DIGEST.test(proofDigest))) {
+    throw new Error("Invalid selected source completion");
+  }
+  const path = "/market/completion-proofs/record-source"
+    + `?expected_source_claim_id=${claimId}&expected_head_digest=${encodeURIComponent(head)}`
+    + (proofDigest ? `&expected_proof_digest=${encodeURIComponent(proofDigest)}` : "");
+  const response = await fetch(`${BASE}${path}`, {
+    method: "POST", signal, credentials: "same-origin", cache: "no-store",
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...authHeader() },
+    body: `{"proof":${raw}}`,
+  });
+  if (!response.ok) throw new ApiHttpError("POST", path, response.status);
+  const summary = parseSourceCompletionRecord(JSON.parse(await boundedReceiptText(response)), claimId, head);
+  if (proofDigest && summary.proof_digest !== proofDigest) throw new Error("Invalid source completion receipt proof digest");
+  return summary;
+}
+
+/** Return portable bytes only after the source server rechecks the exact retained entry. */
+export async function getRecordedSourceCompletion(
+  claimId: string, head: string, signal?: AbortSignal,
+): Promise<{ raw: string; summary: SourceCompletionRecord }> {
+  if (!CLAIM_RECEIPT_ID.test(claimId) || !CLAIM_RECEIPT_DIGEST.test(head)) {
+    throw new Error("Invalid source completion selector");
+  }
+  const path = `/market/completion-proofs/source/${claimId}/${head.slice(7)}`;
+  const response = await fetch(`${BASE}${path}`, {
+    signal, credentials: "same-origin", cache: "no-store",
+    headers: { Accept: "application/json", ...authHeader() },
+  });
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 409) {
+      const body: unknown = JSON.parse(await boundedReceiptText(response));
+      if (isJsonObject(body) && response.status === 404
+        && body.detail === "source completion proof not recorded") {
+        throw new SourceCompletionLookupState(path, response.status, "absent");
+      }
+      if (isJsonObject(body) && response.status === 409
+        && body.detail === "source proof is pending audit") {
+        throw new SourceCompletionLookupState(path, response.status, "pending_audit");
+      }
+    }
+    throw new ApiHttpError("GET", path, response.status);
+  }
+  const raw = await boundedReceiptText(response);
+  return { raw, summary: parseSourceCompletionRecord(JSON.parse(raw), claimId, head) };
 }
 
 /** Export only an exact retained head; this does not send evidence to a peer. */

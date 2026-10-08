@@ -199,6 +199,15 @@ each hit rereads the original row, checks its content hash and federation key,
 and verifies its signature. A corrupt unrelated row cannot hide a valid target;
 an absent target in a corrupt feed is not reported as a clean miss.
 
+Portable proof verification/recording and claimant source-receipt imports
+require `Content-Type: application/json`. Supplied browser Origin and Fetch
+Metadata must identify the same origin; a missing Origin is allowed for
+authenticated non-browser callers. JSON duplicate fields at any depth and
+non-JSON numeric constants (`NaN` and `Infinity`) are rejected before protocol
+validation. A file exported by the claimant must be transported as its original
+JSON text: parsing and reserializing it in JavaScript can change signed integers
+above `Number.MAX_SAFE_INTEGER`.
+
 Planned source-key rotation requires signatures from both the old and new
 identity before the old key is retired. Local Python callers can use
 `nth_dao.market.record_source_identity_rotation(workspace, old_identity,
@@ -215,6 +224,26 @@ reports `recorded: false`, `accepted: false`, `settled: false`, and
 `nonce_authenticated: false`. The source does not retain the proof, issue an
 acceptance, know whether another signed head exists elsewhere, or move funds.
 This is a verification preflight for a later bilateral delivery/inbox protocol.
+
+On a verified preflight, `proof_digest` binds the complete canonical proof,
+including its wrapper, while `completion_head_digest` binds the selected final
+envelope. To bind an explicit recording action to that preflight, supply query
+parameters `expected_source_claim_id`, `expected_head_digest`, and optionally
+`expected_proof_digest` to `/record-source`. Claim ID and head must be supplied
+together; a mismatch returns 409 before persistence or signing. Existing
+operator clients without selectors remain supported and must still pass full
+source-side verification.
+
+The source console exposes **Completion receipts** in **Tasks / My published**,
+including when the open-task list is empty. Select a claimant proof file,
+explicitly verify it, then explicitly record and sign its source receipt. The
+console rechecks the exact stored receipt before downloading its original JSON
+for transfer to the claimant. A request timeout is an unknown outcome, not a
+failed write: another record action stays blocked until an exact source lookup
+confirms absence or a recoverable pending audit. Generic HTTP 404/409 failures
+do not grant retry permission. Other pending evidence prevents a unique-result
+assertion but does not invalidate an already verified historical receipt.
+Verification, recording, and downloading never accept work or authorize payment.
 
 For an explicit, operator-controlled import, submit the same bounded proof to
 `POST /api/v2/market/completion-proofs/record-source`. This verifies the

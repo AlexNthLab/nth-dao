@@ -533,6 +533,67 @@ export interface ClaimSourceReceiptObservation {
   already_observed: boolean;
 }
 
+/** Source-side preflight is a verification result, not a retained receipt. */
+export interface SourceCompletionCheck {
+  verified: boolean;
+  reason: string;
+  verification_scope: "source_claim_binding_only";
+  source_claim_id?: string;
+  completion_head_digest?: string;
+  proof_digest?: string;
+  mission_id?: string;
+  outcome?: "succeeded" | "failed";
+  revision?: number;
+  nonce_authenticated: false;
+  recorded: false;
+  accepted: false;
+  settled: false;
+}
+
+export interface SourceCompletionPayload {
+  completion_key: string;
+  source_claim_id: string;
+  completion_head_digest: string;
+  proof_digest: string;
+  claimant_did: string;
+  source_did: string;
+  mission_id: string;
+  outcome: "succeeded" | "failed";
+  revision: number;
+  nonce_authenticated: false;
+  accepted: false;
+  settled: false;
+}
+
+/** The local server revalidates signatures; the browser preserves the response bytes. */
+export interface SourceCompletionRecord extends SourceCompletionPayload {
+  audit_event_id: string;
+  source_receipt_event: {
+    seq: number;
+    prev_hash: string;
+    type: "market.claim.completion.received";
+    author_did: string;
+    ts_ms: number;
+    content_hash: string;
+    sig: string;
+    payload: SourceCompletionPayload;
+  };
+  source_rotation_chain: unknown[];
+  already_recorded: boolean;
+  lineage_state: "single_retained_head" | "unresolved_fork" | "duplicate_signed_head" | "pending_audit" | "pending_repair";
+  lineage_heads: string[];
+  pending_head_digests: string[];
+  single_retained_head_digest: string | null;
+  has_duplicate_signed_head: boolean;
+  outcome_scope: "submitted_head_only";
+  verification_scope: "source_claim_binding_only";
+  verified: true;
+  recorded: true;
+  nonce_authenticated: false;
+  accepted: false;
+  settled: false;
+}
+
 export type MarketSearchCategory =
   | "tasks"
   | "products"

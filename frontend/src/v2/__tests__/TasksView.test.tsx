@@ -66,6 +66,9 @@ vi.mock("../api", () => ({
   reconcileClaimIntent: vi.fn(),
   claimTask: vi.fn(),
   claimFederatedTask: vi.fn(),
+  verifySourceCompletionProof: vi.fn(),
+  recordSourceCompletionProof: vi.fn(),
+  getRecordedSourceCompletion: vi.fn(),
 }));
 
 import {
@@ -91,6 +94,27 @@ afterEach(() => {
 });
 
 describe("TasksView", () => {
+  it("keeps mobile task filters explicitly openable and closeable", () => {
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    const toggle = screen.getByRole("button", { name: /^Filters$/ });
+    const sidebar = document.getElementById("tasks-filters")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(sidebar.classList.contains("tasks-filters-open")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close filters" }));
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(sidebar.classList.contains("tasks-filters-open")).toBe(false);
+  });
+  it("keeps source receipt intake available without an open published Task", async () => {
+    vi.mocked(listOpenTasks).mockResolvedValueOnce([]);
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My published/ }));
+    await waitFor(() => expect(listOpenTasks).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("region", { name: "Source completion receipts" })).toBeTruthy();
+    expect(screen.getByLabelText("Claimant proof file")).toBeTruthy();
+  });
+
   it("shows a retained completion as a claimant statement, not acceptance", async () => {
     const nonce = "c".repeat(24);
     vi.mocked(listClaimIntents).mockResolvedValueOnce({

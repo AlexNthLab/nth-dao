@@ -577,6 +577,7 @@ def test_source_proof_rest_is_operator_only_and_never_accepts_work(
         "source_claim_id": proof["source_claim_id"],
         "outcome": "succeeded", "mission_id": "mission-1",
         "completion_head_digest": receipt_digest(proof["completion_chain"][-1]),
+        "proof_digest": receipt_digest(proof),
         "revision": 0,
         "nonce_authenticated": False,
         "recorded": False, "accepted": False, "settled": False,
@@ -617,6 +618,208 @@ def test_source_proof_rest_is_operator_only_and_never_accepts_work(
     )
     assert authorized.status_code == 200, authorized.text
     assert authorized.json()["verified"] is True
+
+
+@pytest.mark.parametrize("route", [
+    "/api/v2/market/completion-proofs/verify-source",
+    "/api/v2/market/completion-proofs/record-source",
+])
+def test_source_proof_rest_rejects_duplicate_json_fields(
+    tmp_path: Path, route: str,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from nth_dao.web import create_app
+
+    source = tmp_path / "source"
+    app = create_app(source, require_console_auth=False)
+    _source, _authority, _claimant, _announcement, proof = _source_and_proof(
+        tmp_path, authority=app.state.nth.node_identity,
+    )
+    client = TestClient(app)
+    encoded = json.dumps(proof, separators=(",", ":"))
+    duplicate_outer = '{"proof":' + encoded + ',"proof":' + encoded + '}'
+    duplicate_nested = encoded.replace(
+        '"source_claim_id":', '"source_claim_id":"' + '0' * 64 + '","source_claim_id":', 1,
+    )
+    assert duplicate_nested != encoded
+    for raw in (duplicate_outer, '{"proof":' + duplicate_nested + '}'):
+        response = client.post(
+            route, content=raw.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422, response.text
+    assert not (source / "federation" / "inbox").exists()
+
+
+@pytest.mark.parametrize("route", [
+    "/api/v2/market/completion-proofs/verify-source",
+    "/api/v2/market/completion-proofs/record-source",
+])
+@pytest.mark.parametrize("headers,status", [
+    ({"Content-Type": "text/plain"}, 415),
+    ({"Content-Type": "application/json", "Origin": "https://foreign.example"}, 403),
+    ({"Content-Type": "application/json", "Origin": "null"}, 403),
+    ({"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"}, 403),
+])
+def test_source_proof_rejects_simple_and_cross_origin_requests(
+    tmp_path: Path, route: str, headers: dict[str, str], status: int,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from nth_dao.web import create_app
+
+    source = tmp_path / "source"
+    app = create_app(source, require_console_auth=False)
+    response = TestClient(app).post(route, content=b'{"proof":{}}', headers=headers)
+    assert response.status_code == status, response.text
+    assert not (source / "federation" / "inbox").exists()
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_source_proof_parser_rejects_non_json_constants(constant: str) -> None:
+    from fastapi import HTTPException
+
+    from nth_dao.web.v2_api import _source_completion_proof_body
+
+    with pytest.raises(HTTPException) as raised:
+        _source_completion_proof_body(('{"proof":{"value":' + constant + '}}').encode())
+    assert raised.value.status_code == 422
+
+
+def test_frontend_source_receipt_fixture_has_a_real_signature() -> None:
+    from nth_dao.market.source_completion_receipt import (
+        extract_source_completion_receipt,
+    )
+    from nth_dao.spine.event import SpineEvent, verify_event
+
+    path = Path(__file__).parents[1] / "frontend" / "src" / "v2" / "__tests__" / "fixtures" / "source-completion-response.json"
+    response = json.loads(path.read_text(encoding="utf-8"))
+    event, chain = extract_source_completion_receipt(response)
+    assert chain == []
+    assert verify_event(SpineEvent.from_dict(event)) == (True, "ok")
+    changed = {**event, "payload": {**event["payload"], "accepted": True}}
+    assert verify_event(SpineEvent.from_dict(changed))[0] is False
+
+
+@pytest.mark.parametrize("origin,allowed", [
+    ("http://testserver", True), ("http://testserver:80", True),
+    ("http://testserver:0", False), ("http://testserver:81", False),
+    ("http://user@testserver", False), ("http://testserver/path", False),
+])
+def test_portable_json_origin_compares_explicit_ports(origin: str, allowed: bool) -> None:
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from nth_dao.web.v2_api import _require_portable_json_request
+
+    request = Request({
+        "type": "http", "scheme": "http", "server": ("testserver", 80), "path": "/proof",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json"),
+                    (b"origin", origin.encode())],
+    })
+    if allowed:
+        _require_portable_json_request(request)
+    else:
+        with pytest.raises(HTTPException) as raised:
+            _require_portable_json_request(request)
+        assert raised.value.status_code == 403
+
+
+def test_source_record_checks_selected_claim_and_head_before_writing(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from nth_dao.web import create_app
+
+    source = tmp_path / "source"
+    app = create_app(source, require_console_auth=False)
+    _source, _authority, _claimant, _announcement, proof = _source_and_proof(
+        tmp_path, authority=app.state.nth.node_identity,
+    )
+    client = TestClient(app)
+    route = "/api/v2/market/completion-proofs/record-source"
+    selected = {
+        "expected_source_claim_id": proof["source_claim_id"],
+        "expected_head_digest": receipt_digest(proof["completion_chain"][-1]),
+        "expected_proof_digest": receipt_digest(proof),
+    }
+    for wrong in (
+        {**selected, "expected_source_claim_id": "0" * 64},
+        {**selected, "expected_head_digest": "sha256:" + "0" * 64},
+        {**selected, "expected_proof_digest": "sha256:" + "0" * 64},
+    ):
+        response = client.post(route, json={"proof": proof}, params=wrong)
+        assert response.status_code == 409, response.text
+        assert not (source / "federation" / "inbox").exists()
+    valid = client.post(route, json={"proof": proof}, params=selected, headers={
+        "Origin": "http://testserver", "Sec-Fetch-Site": "same-origin",
+    })
+    assert valid.status_code == 200, valid.text
+    assert valid.json()["recorded"] is True
+
+
+def test_portable_proof_rest_roundtrip_keeps_large_signed_integer(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from nth_dao.market.source_completion_receipt import (
+        verify_source_completion_receipt,
+    )
+    from nth_dao.web import create_app
+
+    source_app = create_app(tmp_path / "source", require_console_auth=False)
+    authority = source_app.state.nth.node_identity
+    announcement = sign_announcement(
+        publisher=authority, authority_did=authority.as_did(), title="signed test work",
+        reward_minor=(1 << 53) + 1,
+    )
+    _source, _authority, _claimant, _announcement, proof = _source_and_proof(
+        tmp_path, authority=authority, announcement=announcement,
+    )
+    claimant_app = create_app(tmp_path / "claimant", require_console_auth=False)
+    claimant = TestClient(claimant_app)
+    source = TestClient(source_app)
+    nonce = proof["nonce"]
+    head = receipt_digest(proof["completion_chain"][-1])
+    exported = claimant.get(
+        f"/api/v2/market/claim-intents/{nonce}/completion/proof", params={"head_digest": head},
+    )
+    assert exported.status_code == 200, exported.text
+    assert b'"reward_minor":9007199254740993' in exported.content
+    raw_body = b'{"proof":' + exported.content + b'}'
+    headers = {"Content-Type": "application/json", "Origin": "http://testserver"}
+    preflight = source.post(
+        "/api/v2/market/completion-proofs/verify-source", content=raw_body, headers=headers,
+    )
+    assert preflight.json()["verified"] is True
+    assert not (tmp_path / "source" / "federation" / "inbox").exists()
+    recorded = source.post(
+        "/api/v2/market/completion-proofs/record-source", content=raw_body, headers=headers,
+        params={"expected_source_claim_id": proof["source_claim_id"], "expected_head_digest": head},
+    )
+    assert recorded.status_code == 200, recorded.text
+    lookup = f"/api/v2/market/completion-proofs/source/{proof['source_claim_id']}/{head[7:]}"
+    downloaded = source.get(lookup)
+    response = downloaded.json()
+    assert verify_source_completion_receipt(
+        proof, response["source_receipt_event"], expected_source_did=authority.as_did(),
+        expected_federation_key=announcement_federation_key(announcement),
+        rotation_chain=response["source_rotation_chain"],
+    ) == (True, "ok")
+    imported = claimant.post(
+        f"/api/v2/market/claim-intents/{nonce}/completion/source-receipt",
+        content=b'{"source_response":' + downloaded.content + b'}', headers=headers,
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["observed_locally"] is True
+    assert imported.json()["accepted"] is False and imported.json()["settled"] is False
+    restarted = TestClient(create_app(tmp_path / "claimant", require_console_auth=False))
+    restored = restarted.get(
+        f"/api/v2/market/claim-intents/{nonce}/completion/source-receipt",
+        params={"head_digest": head},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["local_observation_event_id"] == imported.json()["local_observation_event_id"]
 
 
 @pytest.mark.parametrize("route", [

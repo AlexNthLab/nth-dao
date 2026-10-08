@@ -7843,13 +7843,62 @@ class SourceReceiptImportBody(BaseModel):
     source_response: Dict[str, Any]
 
 
-def _unique_source_receipt_json_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def _require_portable_json_request(request: Request) -> None:
+    content_types = request.headers.getlist("content-type")
+    if (
+        len(content_types) != 1
+        or content_types[0].split(";", 1)[0].strip().lower() != "application/json"
+    ):
+        raise HTTPException(status_code=415, detail="application/json is required")
+    fetch_sites = request.headers.getlist("sec-fetch-site")
+    if fetch_sites and (len(fetch_sites) != 1 or fetch_sites[0] not in {"same-origin", "none"}):
+        raise HTTPException(status_code=403, detail="same-origin request is required")
+    origins = request.headers.getlist("origin")
+    if not origins:
+        return
+    try:
+        origin = urlsplit(origins[0])
+        target = request.url
+        same_origin = (
+            len(origins) == 1
+            and origin.scheme in {"http", "https"}
+            and not origin.username and not origin.password
+            and not origin.path and not origin.query and not origin.fragment
+            and origin.scheme == target.scheme
+            and origin.hostname == target.hostname
+            and (origin.port if origin.port is not None else (443 if origin.scheme == "https" else 80))
+            == (target.port if target.port is not None else (443 if target.scheme == "https" else 80))
+        )
+    except ValueError:
+        same_origin = False
+    if not same_origin:
+        raise HTTPException(status_code=403, detail="same-origin request is required")
+
+
+def _reject_portable_json_constant(value: str) -> None:
+    raise ValueError("portable evidence contains a non-JSON numeric constant")
+
+
+def _unique_portable_json_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     for key, value in pairs:
         if key in fields:
-            raise ValueError("source receipt request repeats a JSON field")
+            raise ValueError("portable evidence repeats a JSON field")
         fields[key] = value
     return fields
+
+
+def _source_completion_proof_body(raw: bytes) -> SourceCompletionProofBody:
+    """Preserve the exact JSON field set before signature-bearing proof parsing."""
+    try:
+        parsed = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_portable_json_fields,
+            parse_constant=_reject_portable_json_constant,
+        )
+        return SourceCompletionProofBody.model_validate(parsed)
+    except (UnicodeError, ValueError, TypeError, RecursionError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail="invalid source completion proof JSON") from exc
 
 
 class SocialTargetBody(BaseModel):
@@ -23437,20 +23486,25 @@ def register_v2_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/v2/market/completion-proofs/verify-source")
-    def v2_market_verify_source_claim_completion(
-        body: SourceCompletionProofBody, request: Request,
+    async def v2_market_verify_source_claim_completion(
+        request: Request,
     ) -> Dict[str, Any]:
         """Verify a transferred claimant statement against this node's CAS claim."""
         from nth_dao.market.completion_flow import verify_source_claim_completion
         from nth_dao.market.mission_completion import receipt_digest
 
         _require_federation_operator(request)
+        _require_portable_json_request(request)
+        body = await run_in_threadpool(
+            _source_completion_proof_body, await request.body(),
+        )
         ws = _state_workspace(request)
         identity = _state_node_identity(request)
         if ws is None or identity is None or not callable(getattr(identity, "as_did", None)):
             raise HTTPException(status_code=503, detail="source identity unavailable")
         try:
-            verified, reason = verify_source_claim_completion(
+            verified, reason = await run_in_threadpool(
+                verify_source_claim_completion,
                 ws, body.proof, source_did=identity.as_did(),
             )
         except (OSError, TimeoutError, ValueError, OverflowError, RecursionError) as exc:
@@ -23474,31 +23528,67 @@ def register_v2_routes(app: FastAPI) -> None:
                 "outcome": head["outcome"],
                 "mission_id": head["mission_id"],
                 "completion_head_digest": receipt_digest(body.proof["completion_chain"][-1]),
+                "proof_digest": await run_in_threadpool(receipt_digest, body.proof),
                 "revision": head.get("revision", 0),
             })
         return result
 
     @app.post("/api/v2/market/completion-proofs/record-source")
-    def v2_market_record_source_claim_completion(
-        body: SourceCompletionProofBody, request: Request,
+    async def v2_market_record_source_claim_completion(
+        request: Request,
+        expected_source_claim_id: str | None = None,
+        expected_head_digest: str | None = None,
+        expected_proof_digest: str | None = None,
     ) -> Dict[str, Any]:
         """Retain a verified claimant statement and source-signed receipt audit."""
+        from nth_dao.market.mission_completion import receipt_digest
         from nth_dao.market.source_completion_inbox import (
-            SourceCompletionConflict, SourceCompletionCorrupt,
-            SourceCompletionEvidenceUnavailable, SourceCompletionInbox,
+            SourceCompletionConflict,
+            SourceCompletionCorrupt,
+            SourceCompletionEvidenceUnavailable,
+            SourceCompletionInbox,
             SourceCompletionRejected,
         )
-
         _require_federation_operator(request)
+        _require_portable_json_request(request)
+        body = await run_in_threadpool(
+            _source_completion_proof_body, await request.body(),
+        )
+        if any(pin is not None for pin in (
+            expected_source_claim_id, expected_head_digest, expected_proof_digest,
+        )):
+            if (
+                not isinstance(expected_source_claim_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_source_claim_id) is None
+                or not isinstance(expected_head_digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_head_digest) is None
+                or (expected_proof_digest is not None
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}", expected_proof_digest) is None)
+            ):
+                raise HTTPException(status_code=422, detail="invalid selected completion")
+            try:
+                actual_head = await run_in_threadpool(
+                    receipt_digest, body.proof["completion_chain"][-1],
+                )
+            except (KeyError, IndexError, TypeError, ValueError, RecursionError) as exc:
+                raise HTTPException(status_code=422, detail="invalid completion proof head") from exc
+            if (
+                body.proof.get("source_claim_id") != expected_source_claim_id
+                or actual_head != expected_head_digest
+                or (expected_proof_digest is not None and expected_proof_digest
+                    != await run_in_threadpool(receipt_digest, body.proof))
+            ):
+                raise HTTPException(status_code=409, detail="proof differs from selected completion")
         ws = _state_workspace(request)
         identity = _state_node_identity(request)
         spine = _state_spine(request)
         if ws is None or identity is None or spine is None:
             raise HTTPException(status_code=503, detail="source audit unavailable")
         try:
-            return SourceCompletionInbox(
+            store = SourceCompletionInbox(
                 ws, source_did=identity.as_did(), spine=spine,
-            ).record(body.proof)
+            )
+            return await run_in_threadpool(store.record, body.proof)
         except SourceCompletionRejected as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except SourceCompletionEvidenceUnavailable as exc:
@@ -23603,10 +23693,12 @@ def register_v2_routes(app: FastAPI) -> None:
         )
 
         _require_federation_operator(request)
+        _require_portable_json_request(request)
         try:
             parsed = json.loads(
                 (await request.body()).decode("utf-8"),
-                object_pairs_hook=_unique_source_receipt_json_fields,
+                object_pairs_hook=_unique_portable_json_fields,
+                parse_constant=_reject_portable_json_constant,
             )
             body = SourceReceiptImportBody.model_validate(parsed)
         except (UnicodeError, ValueError, TypeError, RecursionError, ValidationError) as exc:

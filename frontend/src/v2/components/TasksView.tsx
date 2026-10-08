@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { IconBriefcase } from "./Icons";
 import { ClaimSourceReceiptPanel } from "./ClaimSourceReceiptPanel";
+import { SourceCompletionPanel } from "./SourceCompletionPanel";
 import { useToast } from "./Toast";
 import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
@@ -64,6 +65,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const [tasks, setTasks] = useState<TaskAnnouncement[]>([]);
   const [cats, setCats] = useState<TaskCategory[]>([]);
   const [loading, setLoading] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   // 筛选
   const [ctx, setCtx] = useState("");
@@ -526,10 +528,11 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
 
   return (
     <>
-      <aside className="sidebar">
+      <aside className={`sidebar tasks-sidebar${filtersOpen ? " tasks-filters-open" : ""}`} id="tasks-filters">
         <div className="sidebar-head">
           <span className="sidebar-title">{t("类别", "Categories")}</span>
           <span className="sidebar-count">{cats.length}</span>
+          <button className="tasks-filter-toggle btn btn-ghost" type="button" onClick={() => setFiltersOpen(false)}>Close filters</button>
         </div>
         <div className="sidebar-list">
           <button
@@ -603,7 +606,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
         </div>
       </aside>
 
-      <section className="main" style={{ display: "flex", flexDirection: "column" }}>
+      <section className="main tasks-main" style={{ display: "flex", flexDirection: "column" }}>
         <div
           className="main-head"
           style={{
@@ -628,6 +631,9 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
           <button className="btn btn-primary" type="button" onClick={onOpenPublisher}>
             {t("前往市场发布", "Publish in Market")}
           </button>
+          <button className="tasks-filter-toggle btn btn-ghost" type="button"
+            aria-controls="tasks-filters" aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen((current) => !current)}>Filters</button>
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", padding: "16px 24px" }}>
@@ -677,6 +683,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
             </label>}
           </div>
 
+          {tab === "mine" && <SourceCompletionPanel />}
           {tab === "claims" ? (
             <div className="stack" style={{ gap: 10 }} aria-label="Claim intent status">
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -868,7 +875,7 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
               </div>
               <p>
                 {tab === "mine"
-                  ? t("你还没发布任务。", "You haven't published any tasks.")
+                  ? "No unclaimed local tasks match these filters."
                   : t("市场上暂无可承接的活。", "No claimable work on the market.")}
               </p>
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>

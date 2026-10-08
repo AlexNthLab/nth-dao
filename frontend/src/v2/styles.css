@@ -1703,6 +1703,49 @@ select option {
   margin-top: 12px;
 }
 
+.source-completion-workbench { padding: 0 0 20px; margin-bottom: 20px; border-bottom: 1px solid var(--border); min-width: 0; }
+.source-completion-workbench h2 { margin: 0 0 12px; font-size: 16px; }
+.source-completion-file { display: grid; gap: 8px; max-width: 100%; font-size: 12px; }
+.source-completion-file input { width: 100%; min-width: 0; }
+.source-completion-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.source-completion-actions button { white-space: normal; }
+.source-completion-summary { display: grid; grid-template-columns: minmax(90px, 140px) minmax(0, 1fr); gap: 6px 12px; font-size: 12px; }
+.source-completion-summary dt { color: var(--fg-tertiary); }
+.source-completion-summary dd { margin: 0; overflow-wrap: anywhere; }
+.source-completion-value { overflow-wrap: anywhere; }
+.tasks-filter-toggle { display: none; }
+@media (max-width: 900px) {
+  .app-shell:has(> .tasks-main) {
+    grid-template-columns: var(--nav-w) minmax(0, 1fr);
+    grid-template-areas: "topbar topbar" "nav main" "status status";
+  }
+  .app-shell:has(> .tasks-main) > .detail { display: none; }
+  .tasks-main { min-width: 0; }
+  .tasks-main .main-head { flex-wrap: wrap; gap: 10px; padding: 16px; }
+  .tasks-main .main-head > div { min-width: 0; flex-basis: 100%; }
+  .tasks-main .main-head .main-subtitle { overflow-wrap: anywhere; }
+  .tasks-main > div:last-child { padding: 16px !important; }
+  .tasks-filter-toggle { display: inline-flex; }
+  .tasks-sidebar { display: none; }
+  .tasks-sidebar.tasks-filters-open {
+    display: flex; position: fixed; top: var(--topbar-h); left: var(--nav-w);
+    bottom: var(--statusbar-h); width: min(280px, calc(100% - var(--nav-w)));
+    z-index: 20; background: var(--bg-panel); border-right: 1px solid var(--border-strong);
+  }
+  .source-completion-summary { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .source-completion-summary dd { margin-bottom: 8px; }
+}
+@media (max-width: 540px) {
+  .app-shell:has(> .tasks-main) .topbar { gap: 10px; padding: 0 12px; }
+  .app-shell:has(> .tasks-main) .topbar-brand { flex-shrink: 0; white-space: nowrap; }
+  .app-shell:has(> .tasks-main) .topbar-identity { display: none; }
+  .app-shell:has(> .tasks-main) .lang-toggle { flex-shrink: 0; }
+  .app-shell:has(> .tasks-main) .cmdk-trigger { min-width: 0; }
+  .app-shell:has(> .tasks-main) .cmdk-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app-shell:has(> .tasks-main) .statusbar { overflow-x: auto; white-space: nowrap; }
+  .app-shell:has(> .tasks-main) .statusbar-item { flex-shrink: 0; }
+}
+
 .resource-profile-row {
   padding: 12px 0;
   border-top: 1px solid var(--line);
