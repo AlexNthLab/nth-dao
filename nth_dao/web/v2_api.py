@@ -23804,6 +23804,7 @@ def register_v2_routes(app: FastAPI) -> None:
         nonce: str, evidence: Dict[str, Any], source_claim_id: str,
     ) -> Dict[str, Any]:
         from nth_dao.canonical_json import canonical_json
+        from nth_dao.market.mission_completion import receipt_digest
 
         record = evidence["completion_record"]
         return {
@@ -23816,6 +23817,7 @@ def register_v2_routes(app: FastAPI) -> None:
             "outcome": record["outcome"],
             "completed_at_ms": record["completed_at_ms"],
             "revision": record.get("revision", 0),
+            "completion_head_digest": receipt_digest(record),
             "evidence_digest": "sha256:" + hashlib.sha256(
                 canonical_json(evidence)
             ).hexdigest(),

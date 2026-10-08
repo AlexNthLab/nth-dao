@@ -498,7 +498,39 @@ export interface ClaimCompletionSummary {
   outcome: "succeeded" | "failed";
   completed_at_ms: number;
   revision?: number;
+  completion_head_digest?: string;
   evidence_digest: string;
+}
+
+/** A locally verified source statement, never work acceptance or settlement. */
+export interface ClaimSourceReceiptStatus {
+  source_claim_id: string;
+  completion_head_digest: string;
+  expected_response_digest: string;
+  receipt_verified: true;
+  pending: boolean;
+  observed_locally: boolean;
+  local_observation_event_id: string | null;
+  accepted: false;
+  settled: false;
+}
+
+export interface ClaimSourceReceiptObservation {
+  receipt_key: string;
+  source_claim_id: string;
+  completion_head_digest: string;
+  source_receipt_event_id: string;
+  claimant_did: string;
+  source_did: string;
+  nonce_authenticated: false;
+  response_digest: string;
+  receipt_verified: true;
+  observed_locally: true;
+  local_observation_event_id: string;
+  verification_scope: "source_statement_and_proof_binding";
+  accepted: false;
+  settled: false;
+  already_observed: boolean;
 }
 
 export type MarketSearchCategory =

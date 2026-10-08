@@ -1476,6 +1476,12 @@ select option {
 .task-claim-evidence { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 14px; min-width: 0; border-top: 1px solid var(--border); padding-top: 8px; font-size: 11px; color: var(--fg-tertiary); }
 .task-claim-evidence strong { color: var(--accent); }
 .task-claim-evidence span, .task-claim-evidence code { min-width: 0; overflow-wrap: anywhere; }
+.task-source-receipt { display: grid; gap: 7px; min-width: 0; border-top: 1px solid var(--border); padding-top: 8px; font-size: 11px; }
+.task-source-receipt .task-claim-intent-actions { justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+.task-source-receipt-form { display: grid; gap: 6px; min-width: 0; }
+.task-source-receipt-form textarea { width: 100%; min-height: 108px; max-height: 300px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.task-source-receipt-form input[type="file"] { width: 100%; min-width: 0; font-size: 11px; }
+.task-source-receipt-form .btn { justify-self: start; }
 .claim-intent-pending { color: var(--warning); border-color: var(--warning); }
 .claim-intent-confirmed { color: var(--accent); border-color: var(--accent); }
 .claim-intent-rejected { color: var(--danger); border-color: var(--danger); }

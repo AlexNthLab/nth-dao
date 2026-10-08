@@ -15,6 +15,7 @@ import {
   listTaskCategories, reconcileClaimIntent,
 } from "../api";
 import { IconBriefcase } from "./Icons";
+import { ClaimSourceReceiptPanel } from "./ClaimSourceReceiptPanel";
 import { useToast } from "./Toast";
 import { relativeTimeShort } from "../utils/time";
 import { useLang } from "../i18n";
@@ -54,6 +55,8 @@ function formatStorageBytes(bytes: number): string {
 interface TasksViewProps {
   onOpenPublisher?: () => void;
 }
+
+const COMPLETION_CHECK_TIMEOUT_MS = 30_000;
 
 export function TasksView({ onOpenPublisher }: TasksViewProps) {
   const toast = useToast();
@@ -479,24 +482,44 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
       delete next[nonce];
       return next;
     });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    let timedOut = false;
     try {
-      const summary = await getRecordedClaimCompletion(nonce, ac.signal);
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          ac.abort();
+          reject(new Error("Signed completion check timed out; retry."));
+        }, COMPLETION_CHECK_TIMEOUT_MS);
+      });
+      const cancelled = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+        ac.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const summary = await Promise.race([
+        getRecordedClaimCompletion(nonce, ac.signal), deadline, cancelled,
+      ]);
       if (!ac.signal.aborted) {
         setCompletionChecks((current) => ({
           ...current, [nonce]: { summary, checkedAtMs: Date.now() },
         }));
       }
     } catch (error) {
-      if (!ac.signal.aborted) {
+      if (completionController.current === ac && (!ac.signal.aborted || timedOut)) {
         setCompletionErrors((current) => ({
           ...current,
-          [nonce]: error instanceof Error ? error.message : String(error),
+          [nonce]: timedOut
+            ? "Signed completion check timed out; retry."
+            : error instanceof Error ? error.message : String(error),
         }));
       }
     } finally {
+      clearTimeout(timer);
+      if (onAbort) ac.signal.removeEventListener("abort", onAbort);
       if (completionController.current === ac) {
         completionController.current = null;
-        if (!ac.signal.aborted) setCheckingCompletionNonce("");
+        if (!ac.signal.aborted || timedOut) setCheckingCompletionNonce("");
       }
     }
   }
@@ -814,6 +837,14 @@ export function TasksView({ onOpenPublisher }: TasksViewProps) {
                         <span>Evidence: <code title={completionSummary.evidence_digest}>{completionSummary.evidence_digest.slice(0, 25)}…</code></span>
                       </> : <span>No signed completion statement recorded</span>}
                     </div>}
+                    {completionSummary?.completion_head_digest && <ClaimSourceReceiptPanel
+                      key={`${intent.nonce}:${completionSummary.completion_head_digest}`}
+                      nonce={intent.nonce}
+                      head={completionSummary.completion_head_digest}
+                      sourceClaimId={completionSummary.source_claim_id}
+                      sourceDid={record.source_did || ""}
+                      claimantDid={intent.claimant_did}
+                    />}
                   </>}
                 </article>
                 );

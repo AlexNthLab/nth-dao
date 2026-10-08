@@ -30,6 +30,8 @@ import type {
   ClaimIntentPage,
   ClaimEvidenceSummary,
   ClaimCompletionSummary,
+  ClaimSourceReceiptObservation,
+  ClaimSourceReceiptStatus,
   ChatMessage,
   Conversation,
   ConversationSummary,
@@ -3376,10 +3378,163 @@ export async function getRecordedClaimCompletion(
     ))
     || typeof item.evidence_digest !== "string"
     || !/^sha256:[0-9a-f]{64}$/.test(item.evidence_digest)
+    || (item.completion_head_digest !== undefined && (
+      typeof item.completion_head_digest !== "string"
+      || !/^sha256:[0-9a-f]{64}$/.test(item.completion_head_digest)
+    ))
   ) {
     throw new Error("Invalid completion evidence summary");
   }
   return item as unknown as ClaimCompletionSummary;
+}
+
+const CLAIM_RECEIPT_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const CLAIM_RECEIPT_ID = /^[0-9a-f]{64}$/;
+export const SOURCE_RECEIPT_INPUT_LIMIT_BYTES = 1024 * 1024 + 2 * 16 * 1024;
+
+function claimSourceReceiptPath(nonce: string, head: string): string {
+  if (!/^[A-Za-z0-9]{16,64}$/.test(nonce) || !CLAIM_RECEIPT_DIGEST.test(head)) {
+    throw new Error("Invalid source receipt selector");
+  }
+  return `/market/claim-intents/${encodeURIComponent(nonce)}/completion/source-receipt`;
+}
+
+async function sourceReceiptJson(response: Response, kind: string): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error(`Invalid source receipt ${kind}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Invalid source receipt ${kind}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function checkedSourceClaimId(sourceClaimId: string): string {
+  if (!CLAIM_RECEIPT_ID.test(sourceClaimId)) {
+    throw new Error("Invalid source claim ID");
+  }
+  return sourceClaimId;
+}
+
+function parseSourceReceiptStatus(
+  value: Record<string, unknown>, head: string,
+): ClaimSourceReceiptStatus {
+  const pending = value.pending === true && value.observed_locally === false
+    && value.local_observation_event_id === null;
+  const observed = value.pending === false && value.observed_locally === true
+    && typeof value.local_observation_event_id === "string"
+    && CLAIM_RECEIPT_ID.test(value.local_observation_event_id);
+  if (
+    !CLAIM_RECEIPT_ID.test(String(value.source_claim_id ?? ""))
+    || value.completion_head_digest !== head
+    || !CLAIM_RECEIPT_DIGEST.test(String(value.expected_response_digest ?? ""))
+    || value.receipt_verified !== true
+    || value.accepted !== false
+    || value.settled !== false
+    || (!pending && !observed)
+  ) {
+    throw new Error("Invalid source receipt status");
+  }
+  return value as unknown as ClaimSourceReceiptStatus;
+}
+
+function parseSourceReceiptObservation(
+  value: Record<string, unknown>, head: string, sourceClaimId: string,
+): ClaimSourceReceiptObservation {
+  if (
+    value.source_claim_id !== sourceClaimId
+    || value.completion_head_digest !== head
+    || value.receipt_key !== `${sourceClaimId}:${head}`
+    || !CLAIM_RECEIPT_ID.test(String(value.source_receipt_event_id ?? ""))
+    || !CLAIM_RECEIPT_ID.test(String(value.local_observation_event_id ?? ""))
+    || !CLAIM_RECEIPT_DIGEST.test(String(value.response_digest ?? ""))
+    || typeof value.claimant_did !== "string"
+    || !value.claimant_did.startsWith("did:key:")
+    || typeof value.source_did !== "string"
+    || !value.source_did.startsWith("did:key:")
+    || value.nonce_authenticated !== false
+    || value.receipt_verified !== true
+    || value.observed_locally !== true
+    || value.verification_scope !== "source_statement_and_proof_binding"
+    || value.accepted !== false
+    || value.settled !== false
+    || typeof value.already_observed !== "boolean"
+  ) {
+    throw new Error("Invalid source receipt observation");
+  }
+  return value as unknown as ClaimSourceReceiptObservation;
+}
+
+/** A missing local blob is distinct from an unverifiable or unavailable one. */
+export async function getClaimSourceReceiptStatus(
+  nonce: string, head: string, signal?: AbortSignal,
+): Promise<ClaimSourceReceiptStatus | null> {
+  const path = `${claimSourceReceiptPath(nonce, head)}/pending?head_digest=${encodeURIComponent(head)}`;
+  const response = await fetch(`${BASE}${path}`, {
+    signal, credentials: "same-origin", headers: { Accept: "application/json", ...authHeader() },
+  });
+  if (response.status === 404) {
+    let detail: unknown;
+    try {
+      detail = (await response.json() as { detail?: unknown }).detail;
+    } catch {
+      // An older server or proxy may not use the current error envelope.
+    }
+    if (detail === "claimant receipt is not retained") return null;
+    throw new Error("This server does not support source receipt checks");
+  }
+  if (!response.ok) throw new ApiHttpError("GET", path, response.status);
+  return parseSourceReceiptStatus(await sourceReceiptJson(response, "status"), head);
+}
+
+/** The browser transports evidence; the local server validates signatures and pins. */
+export async function importClaimSourceReceipt(
+  nonce: string, head: string, sourceClaimId: string, sourceResponseJson: string,
+  signal?: AbortSignal,
+): Promise<ClaimSourceReceiptObservation> {
+  const path = claimSourceReceiptPath(nonce, head);
+  checkedSourceClaimId(sourceClaimId);
+  if (typeof sourceResponseJson !== "string"
+    || new TextEncoder().encode(sourceResponseJson).byteLength > SOURCE_RECEIPT_INPUT_LIMIT_BYTES) {
+    throw new Error("Invalid source receipt JSON size");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sourceResponseJson);
+  } catch {
+    throw new Error("Invalid source receipt JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid source receipt JSON");
+  }
+  const response = await fetch(`${BASE}${path}`, {
+    method: "POST", credentials: "same-origin", signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...authHeader() },
+    body: `{"source_response":${sourceResponseJson}}`,
+  });
+  if (!response.ok) throw new ApiHttpError("POST", path, response.status);
+  return parseSourceReceiptObservation(await sourceReceiptJson(response, "observation"), head, sourceClaimId);
+}
+
+/** Audit the exact previously retained blob; never resend or trust it blindly. */
+export async function reconcileClaimSourceReceipt(
+  nonce: string, head: string, sourceClaimId: string, responseDigest: string,
+  signal?: AbortSignal,
+): Promise<ClaimSourceReceiptObservation> {
+  const base = claimSourceReceiptPath(nonce, head);
+  checkedSourceClaimId(sourceClaimId);
+  if (!CLAIM_RECEIPT_DIGEST.test(responseDigest)) throw new Error("Invalid source receipt digest");
+  const path = `${base}/reconcile?head_digest=${encodeURIComponent(head)}`
+    + `&expected_response_digest=${encodeURIComponent(responseDigest)}`;
+  const response = await fetch(`${BASE}${path}`, {
+    method: "POST", credentials: "same-origin", signal,
+    headers: { Accept: "application/json", ...authHeader() },
+  });
+  if (!response.ok) throw new ApiHttpError("POST", path, response.status);
+  return parseSourceReceiptObservation(await sourceReceiptJson(response, "observation"), head, sourceClaimId);
 }
 
 /** Ask the original DAO authority to recover a lost signed claim ACK. */

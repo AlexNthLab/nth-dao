@@ -849,6 +849,8 @@ def test_completion_record_endpoint_is_idempotent_and_read_only_on_get(
     assert first.json()["verification_scope"] == "signed_evidence_only"
     assert first.json()["outcome"] == "succeeded"
     assert first.json()["evidence_digest"].startswith("sha256:")
+    assert first.json()["completion_head_digest"] == receipt_digest(completion)
+    assert first.json()["completion_head_digest"] != first.json()["evidence_digest"]
     assert first.json()["source_claim_id"] == ack["ack_id"]
     assert first.json()["nonce_authenticated"] is False
     second = client.post(base + "/record", json=payload)

@@ -87,6 +87,7 @@ import { TasksView } from "../components/TasksView";
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe("TasksView", () => {
@@ -110,6 +111,7 @@ describe("TasksView", () => {
       mission_id: "mission-1", outcome: "succeeded",
       completed_at_ms: 1_700_000_000_000,
       revision: 1,
+      completion_head_digest: `sha256:${"f".repeat(64)}`,
       evidence_digest: `sha256:${"a".repeat(64)}`,
     });
     render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
@@ -121,7 +123,73 @@ describe("TasksView", () => {
     expect(screen.getByText(/Not work acceptance or payment/)).toBeTruthy();
     expect(screen.getByText(/Source claim ID:/)).toBeTruthy();
     expect(screen.getByText(/nonce is not source-authenticated/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check source receipt" })).toBeTruthy();
     expect(screen.queryByText("Mission completed")).toBeNull();
+  });
+
+  it("times out a hung completion check and permits a fresh retry", async () => {
+    const nonce = "t".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "source-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getRecordedClaimCompletion)
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValueOnce(null);
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    await screen.findByText("source-task");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
+    expect(screen.getByRole("button", { name: "Checking…" })).toHaveProperty("disabled", true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(screen.getByRole("button", { name: "Check signed completion" }))
+      .toHaveProperty("disabled", false);
+    expect(vi.mocked(getRecordedClaimCompletion).mock.calls[0][1]?.aborted).toBe(true);
+    expect(screen.getByRole("alert")).toHaveProperty(
+      "textContent", expect.stringContaining("timed out"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("No signed completion statement recorded")).toBeTruthy();
+    expect(getRecordedClaimCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a hung completion check on leaving My claims without a stale error", async () => {
+    const nonce = "u".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "source-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getRecordedClaimCompletion).mockImplementationOnce(() => new Promise(() => {}));
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    await screen.findByText("source-task");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
+    fireEvent.click(screen.getByRole("button", { name: /Available/ }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(vi.mocked(getRecordedClaimCompletion).mock.calls[0][1]?.aborted).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /My claims/ }));
+    expect(screen.getByRole("button", { name: "Check signed completion" }))
+      .toHaveProperty("disabled", false);
+    expect(screen.queryByText(/Signed completion check timed out/)).toBeNull();
   });
 
   it("does not report a completion when none was retained", async () => {
@@ -143,7 +211,36 @@ describe("TasksView", () => {
     fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
     fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
     expect(await screen.findByText("No signed completion statement recorded")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Check source receipt" })).toBeNull();
     expect(screen.queryByText("Signed completion statement recorded")).toBeNull();
+  });
+
+  it("shows a legacy completion without offering a guessed source receipt selector", async () => {
+    const nonce = "l".repeat(24);
+    vi.mocked(listClaimIntents).mockResolvedValueOnce({
+      items: [{
+        state: "confirmed", receipt_id: "receipt-1", source_did: "did:key:zSource",
+        intent: {
+          kind: "nth-market-claim-intent", version: 1,
+          announcement_id: "signed-task", claimant_did: "did:key:zClaimant",
+          cap_token_id: "token-1", nonce,
+          created_at_ms: 1_700_000_000_000,
+          expires_at_ms: 1_700_001_800_000, signature: "signature",
+        },
+      }], stats: { confirmed: 1 },
+    });
+    vi.mocked(getRecordedClaimCompletion).mockResolvedValueOnce({
+      nonce, recorded: true, verification_scope: "signed_evidence_only",
+      source_claim_id: "b".repeat(64), nonce_authenticated: false,
+      mission_id: "mission-1", outcome: "succeeded",
+      completed_at_ms: 1_700_000_000_000,
+      evidence_digest: `sha256:${"a".repeat(64)}`,
+    });
+    render(<LangProvider><ToastProvider><TasksView /></ToastProvider></LangProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /My claims/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Check signed completion" }));
+    expect(await screen.findByText("Signed completion statement recorded")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Check source receipt" })).toBeNull();
   });
 
   it("checks confirmed claim provenance without claiming mission completion", async () => {

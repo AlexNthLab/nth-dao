@@ -353,6 +353,18 @@ fixed canonical JSON, SHA-256, and a signed event. Python verifies the event,
 while the frontend conformance test independently checks its bytes and Ed25519
 signature with WebCrypto. This cross-runtime check does not establish source
 audit inclusion or independent third-party protocol interoperability.
+The v2 Tasks "My claims" view can explicitly check the current signed
+completion head, import a source-provided signed response as JSON or a file,
+and reconcile a verified pending local blob. The completion summary exposes
+`completion_head_digest` separately from `evidence_digest`; older servers may
+omit the former, in which case the existing completion summary remains visible
+but the source receipt controls are unavailable. The UI never fetches a peer's
+operator-only receipt automatically and never treats an observed statement as
+acceptance or settlement. Browser-side parsing only checks the selected claim
+and head for a helpful early error; the original JSON text is submitted so the
+server's duplicate-field rejection and signature checks see the actual input.
+A timed-out write has an unknown outcome: the UI rechecks local verified
+retention before offering another explicit operator action.
 Team owner key drift is fail-closed for membership writes; rotating the owner
 key requires a separate explicit migration and is not performed by receipt
 observation or web bootstrap.
