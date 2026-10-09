@@ -115,10 +115,11 @@ plugin transport wire limit), `MAX_PAYLOAD_DEPTH=16`, `MAX_TTL_MS=7 days`,
    failures for 30 s (constants on `DeliveryRouter`).
 5. **Journal-first persistence.** Outbox and inbox mutate memory only
    after the journal line is fsynced. A torn final line (crash mid-append)
-   is ignored on reload; corruption anywhere else raises. Both journals are
+   is retained in a digest-named quarantine before the verified prefix is
+   restored under the process lock; corruption anywhere else raises. Both journals are
    bounded with explicit compaction (`compact` / `compact_rejections`).
 6. **Live cross-process dedup.** Inbox/outbox re-fold their journal when an
-   mtime/size change from another process is observed, so dedup works
+   mtime/size/file-identity change is observed, so dedup works
    across processes without a broker.
 7. **bitchat borrowings.** Controlled-flood prerequisites
    (hop TTL, content-addressed dedup, jitter budget left to transports),
@@ -145,6 +146,78 @@ ledgers. A principal that can rewrite local files can delete or reorder journal
 events. Deployments that include a hostile local-user threat must place the
 workspace behind OS access controls and replicate audit evidence to an
 independent signed or immutable store.
+
+### Directed Source Receipt Binding
+
+The Market binding in `nth_dao/market/source_receipt_plugin.py` composes the
+Host-governed runtime with directed source receipt validation and durable ACK
+results. Its source sender uses a send-only runtime without creating an unused
+Inbox. Calling `receive` on that runtime fails before invoking the provider.
+The runtime snapshots signed input and submits the exact enqueued wire bytes.
+
+The claimant runtime must use the domain receiver's exact Inbox and its locally
+authorized DID principal. The bridge derives a bounded DID-scoped staging
+Inbox before dispatching to the selected claim. Other claims and unhandled
+kinds remain durable instead of being dropped by a single-claim callback.
+Both staging and receipt Inboxes explicitly set `evict_processed=False`;
+the generic Inbox retains its backward-compatible eviction default.
+Provider lease acknowledgement and domain-signed ACK results are exposed
+separately. A successful provider send or lease acknowledgement is not proof
+of remote business processing, acceptance or settlement. Returning a signed
+ACK to the source is a separate explicit operation; see `docs/federation.md`.
+
+### Receipt Bridge Failure Boundaries
+
+Staging is not business authorization: full source proof and independently
+pinned identity are reverified before any observation or signed ACK. Temporary
+local evidence failure leaves the message pending. Original first-intake time
+is read together with its durable envelope; no remote timestamp can backdate
+a fresh intake. Provider failure and authorized local recovery are separate
+outcomes, so applications must inspect `transport_error` as well as `domain`.
+Per-item I/O failure retains the provider lease and preserves earlier durable
+decisions. Ingress open/read failure does not prevent independent domain
+recovery. Errors expose a stable code and retryability; known Inbox corruption
+is an integrity failure, not a transient provider outage.
+
+Before lease acknowledgement, permanent transport rejections are retained as
+canonical descriptor-hashed files under `transport_quarantine`. A poison ID or
+expiry does not abort intake of a valid sibling. Exact rejection retries do
+not overwrite evidence. Limits are 256 files, 16 MiB total and 2 MiB per record;
+capacity/storage failure retains the lease, without evicting earlier evidence.
+These local quarantine records confer no authorization and are not signed
+Spine audit statements. Best-effort rejection logging alone is insufficient
+to release a provider lease.
+
+The domain's durable handled-message index provides a bounded ACK export
+worklist, separate from pending processing. `ack_exports` on the bridge result
+and the explicit `export-acks` CLI reverify each retained result before export.
+This repairs a crash after the handled marker but before returning an ACK,
+even if no provider item remains. Callers deduplicate domain/export results by
+message ID and inspect both failure lists; an empty failure message ID denotes
+worklist enumeration failure. Export is not proof of ACK return or source
+outbox closure. There is no automatic network ACK-return router in this bridge.
+
+Generic Inbox decisions now carry a local `retryable` flag. Runtime retention
+is no longer decided by matching human-readable rejection strings. Cache
+records may also retain `envelope_sha256`; old records remain readable. Exact
+duplicate recovery after expiry requires a retained digest and first-intake
+time, current intake authority, and valid signature. Legacy compacted records
+without those fields must use the domain's independently verified ACK export.
+
+The outbox adds local `attempt.started` and `attempt.finished` journal events.
+Legacy `attempt` events remain readable and share the same 256-entry budget.
+Starts reserve count and bounded finish space before external calls. Finishes
+are idempotent per attempt ID, can follow a verified terminal ACK, and never
+change that terminal state. Unknown, duplicate or contradictory journal
+completions fail closed. Lossy compaction is postponed while starts remain
+unresolved. Older binaries do not understand these new journal events and must
+not be used to downgrade an updated outbox. These are local persistence changes;
+signed envelope, ACK and provider capability wire versions are unchanged.
+Local read-only route lookup and identifier validation precede reservation.
+Lookup failure creates no provider attempt; a fresh post-lookup clock enforces
+expiry before sending. Provider I/O errors finish actual reservations as
+`error`, preserve queued retry evidence, and never fabricate delivery. Only a
+verified signed ACK can establish the delivered state.
 
 ## Conformance
 

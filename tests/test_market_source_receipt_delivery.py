@@ -18,6 +18,7 @@ from test_market_source_completion import _source_and_proof
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import validate_ack
 from nth_dao.delivery.envelope import sign_envelope
+from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
 from nth_dao.delivery.outbox import OUTBOX_STATE_DELIVERED, DurableOutbox
 from nth_dao.delivery.transports.file_bundle import FileBundleTransport
 from nth_dao.identity import AgentIdentity
@@ -308,6 +309,63 @@ def test_concurrent_retries_have_one_observation_and_identical_ack(tmp_path: Pat
     assert len({canonical_json(value.ack.to_dict()) for value in results}) == 1
 
 
+def test_retained_ack_exports_reverify_proof_and_report_unavailable_results(tmp_path, monkeypatch):
+    _, _, _, _, envelope, receiver, _ = _delivery(tmp_path)
+    original = receiver.receive(envelope)
+    assert receiver.export_retained_acks().results[0].ack.to_dict() == original.ack.to_dict()
+    with monkeypatch.context() as patch:
+        patch.setattr("nth_dao.market.source_receipt_delivery.build_portable_completion_proof_with_pins",
+                      lambda *args, **kwargs: None)
+        failed = receiver.export_retained_acks()
+    assert failed.results == () and failed.failures[0].message_id == envelope.message_id
+    assert failed.failures[0].retryable
+    receiver._result_path(envelope.message_id).write_bytes(b"{}")
+    failed = receiver.export_retained_acks()
+    assert failed.results == () and not failed.failures[0].retryable
+
+
+def test_cli_can_enumerate_signed_ack_exports_without_knowing_message_id(tmp_path, capsys):
+    from nth_dao.cli.source_receipt_delivery import main
+
+    _, claimant, proof, _, envelope, receiver, _ = _delivery(tmp_path)
+    original = receiver.receive(envelope)
+    key = tmp_path / "claimant-key.json"
+    claimant.save(key)
+    assert main([
+        "export-acks", "--workspace", str(receiver.workspace), "--identity-file", str(key),
+        "--spine-file", "spine.jsonl", "--nonce", proof["nonce"],
+    ]) == 0
+    exported = json.loads(capsys.readouterr().out)
+    assert exported["failed"] == []
+    assert exported["exports"][0]["ack"] == original.ack.to_dict()
+
+
+@pytest.mark.parametrize("failure", [OSError, DeliveryInboxCacheCorrupt])
+def test_ack_export_index_failure_is_structured_and_cli_visible(tmp_path, monkeypatch, capsys, failure):
+    from nth_dao.cli.source_receipt_delivery import main
+
+    _, claimant, proof, _, envelope, receiver, _ = _delivery(tmp_path)
+    receiver.receive(envelope)
+    key = tmp_path / "claimant-key.json"
+    claimant.save(key)
+
+    def unavailable(*args, **kwargs):
+        raise failure("injected ACK export index failure")
+
+    monkeypatch.setattr(DeliveryInbox, "processed_message_ids", unavailable)
+    failed = receiver.export_retained_acks()
+    assert failed.results == () and len(failed.failures) == 1
+    assert failed.failures[0].message_id == ""
+    assert failed.failures[0].retryable is (failure is OSError)
+    assert main([
+        "export-acks", "--workspace", str(receiver.workspace), "--identity-file", str(key),
+        "--spine-file", "spine.jsonl", "--nonce", proof["nonce"],
+    ]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["exports"] == [] and output["failed"][0]["message_id"] == ""
+    assert output["failed"][0]["retryable"] is (failure is OSError)
+
+
 def test_strict_embedded_json_cannot_hide_duplicate_fields(tmp_path: Path) -> None:
     authority, _, _, _, envelope, receiver, _ = _delivery(tmp_path)
     payload = dict(envelope.payload)
@@ -355,9 +413,9 @@ def test_mutation_after_snapshot_does_not_change_retained_receipt(tmp_path: Path
     _, _, _, _, envelope, receiver, _ = _delivery(tmp_path)
     accept = receiver.inbox.accept
 
-    def mutate_original(snapshot):
+    def mutate_original(snapshot, **kwargs):
         envelope.payload["source_receipt_json"] = "{}"
-        return accept(snapshot)
+        return accept(snapshot, **kwargs)
 
     monkeypatch.setattr(receiver.inbox, "accept", mutate_original)
     assert receiver.receive(envelope).observation["receipt_verified"] is True
@@ -847,6 +905,45 @@ def test_cli_rejects_validly_signed_ack_from_wrong_recipient(tmp_path: Path, cap
     ]) == 1
     assert capsys.readouterr().out == ""
     assert outbox.get(envelope.message_id).state != OUTBOX_STATE_DELIVERED
+
+
+def test_shared_ack_entry_point_snapshots_before_storage_lookup(tmp_path: Path, monkeypatch) -> None:
+    from nth_dao.market.source_receipt_delivery import (
+        SOURCE_RECEIPT_DELIVERY_ACKNOWLEDGED_EVENT,
+        acknowledge_source_receipt_delivery,
+        open_source_receipt_delivery_outbox,
+    )
+
+    authority, claimant, _, _, envelope, receiver, now = _delivery(tmp_path)
+    _prepare_source(tmp_path, authority, envelope)
+    source = tmp_path / "source"
+    outbox = open_source_receipt_delivery_outbox(source, clock=lambda: now)
+    outbox.enqueue(envelope)
+    ack = receiver.receive(envelope).ack
+    original_get = DurableOutbox.get
+
+    def mutate_caller(box, message_id):
+        record = original_get(box, message_id)
+        ack.signature = "mutated after snapshot"
+        ack.message_id = "sha256:" + "0" * 64
+        return record
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DurableOutbox, "get", mutate_caller)
+        delivered = acknowledge_source_receipt_delivery(
+            ack, workspace=source, identity=authority,
+            spine=SignedEventLog(source / "spine.jsonl", authority), clock=lambda: now,
+        )
+    assert delivered.message_id == envelope.message_id
+    assert delivered.delivered_by == claimant.as_did()
+    assert outbox.compact() == 1
+    assert outbox.get(envelope.message_id).state == OUTBOX_STATE_DELIVERED
+    event = SignedEventLog(source / "spine.jsonl", authority).find_unique_event(
+        SOURCE_RECEIPT_DELIVERY_ACKNOWLEDGED_EVENT,
+        payload_field="message_id", payload_value=envelope.message_id,
+    )
+    assert event.payload["accepted"] is False
+    assert event.payload["settled"] is False
 
 
 def test_cli_ack_audit_failure_is_explicit_and_retryable(tmp_path: Path, capsys, monkeypatch) -> None:

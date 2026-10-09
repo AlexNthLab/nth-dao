@@ -662,6 +662,7 @@ python -m nth_dao.cli.source_receipt_delivery receive --workspace <claimant-work
 python -m nth_dao.cli.source_receipt_delivery acknowledge --workspace <source-workspace> --identity-file <source-key-file> --ack-file <receiver-ack.json>
 python -m nth_dao.cli.source_receipt_delivery resume --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce>
 python -m nth_dao.cli.source_receipt_delivery export-ack --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce> --message-id <delivery-message-id>
+python -m nth_dao.cli.source_receipt_delivery export-acks --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce>
 python -m nth_dao.cli.source_receipt_delivery export-envelope --workspace <source-workspace> --identity-file <source-key-file> --message-id <delivery-message-id>
 ```
 
@@ -674,6 +675,14 @@ per-message errors. It continues after an individual failure, preserves each
 successful result, and exits with status 1 if any item failed. `export-ack`
 reverifies a retained result and returns the same original signed ACK even
 after intake expiry; it does not create a new intake or observation.
+`export-acks` enumerates up to 32 candidates from the durable handled-message
+index, without requiring advance knowledge of message IDs. It emits separate
+`exports` and `failed` arrays and exits with status 1 on any failure. An empty
+failure `message_id` denotes a worklist-level enumeration/storage failure;
+it is not a delivery identifier. A missing or corrupt index never authorizes
+an ACK. Every exported result rechecks the retained intake, signature, local
+proof, source pins and observation binding. Candidates are returned repeatedly
+until the operator handles them; export does not prove return to the source.
 Never transfer identity
 files. Browser non-extractable keys are not exported for these commands; if
 the claimant key is not locally available, use the existing operator receipt
@@ -775,3 +784,106 @@ or settlement. No real funds or automatic network effects are enabled.
 Automatic bilateral network routing, the completion-proof upload direction,
 privacy-preserving transport selection, and UI send/retry controls remain
 separate follow-up work; market discovery still does not broadcast receipts.
+
+### Explicit PluginHost Receipt Bridge
+
+`nth_dao.market.source_receipt_plugin` connects this domain handler to an
+already enabled `org.nth-dao.transport.delivery` provider. It does not install,
+enable, authorize, discover, or choose a provider. The application owns the
+PluginHost lifetime and supplies an existing revocable binding, locally
+derived InvocationAuthority and explicitly permitted destination routes.
+
+`SourceReceiptPluginSender` requires the source DID as its transport principal
+and the selected source Spine signer. Each `submit` rechecks the exact local
+receipt and source-authored preparation event before disclosure, then uses
+the same secure, terminal-evidence-retaining outbox as the offline CLI. The
+provider receives the exact bytes retained in that outbox, not a mutable caller
+object. An expired envelope is not renewed. A Host disable or scope denial
+remains a failed attempt; it never falls back to an ungoverned Transport.
+
+`receive_source_receipt_deliveries` requires the claimant principal and the
+receiver's exact business Inbox. It derives a separate, DID-scoped durable
+staging Inbox under `.nth/plugin_delivery_ingress/<did-hash>`, without mutating
+the caller's runtime. This staging area checks signature, direct recipient and
+intake TTL, but grants no membership, claim authority, work acceptance or
+settlement. It retains other claims and unhandled message kinds for their own
+explicit handlers instead of deleting them as unauthorized business input.
+The selected claim's handler still rechecks complete local proof and source
+identity pins before producing any observation or signed ACK.
+
+Staging retains at most 256 message identities and 16 MiB of pending envelope
+bytes. It does not evict nonce history. Capacity rejection is retryable and
+prevents provider lease acknowledgement; no accepted pending payload is replaced.
+Long-lived staging history, permanently invalid business input and unhandled
+kinds need explicit operator maintenance or a future handler/archive policy.
+There is no automatic deletion, plugin activation or public-network admission
+policy in this bridge. A production network provider must enforce its own
+authenticated route admission and abuse controls.
+
+Permanent transport rejections, including provider ID/expiry substitution,
+are retained under the staging Inbox's `transport_quarantine` directory before
+releasing a lease. Each canonical record preserves the complete provider
+descriptor and envelope bytes, its transport identifier, reason and local time.
+The descriptor hash makes exact retries idempotent without overwriting earlier
+evidence. Quarantine grants no replay, claim or signature authority and is not
+a signed Spine ledger. It is bounded at 256 files / 16 MiB total / 2 MiB per
+record, with no eviction. Capacity or storage failure prevents lease ACK;
+valid siblings can still become durable and proceed to their own domain
+handler. This is backpressure, not a network anti-abuse policy. Operator
+maintenance must preserve retry/rejection evidence; this bridge does not delete it.
+
+Temporarily missing local completion evidence is a structured
+`SourceReceiptDeliveryDeferred`, not a permanent transport rejection. The
+envelope remains durable in staging. Later processing uses the stored original
+intake timestamp, not a timestamp supplied by the remote caller. New expired
+input still rejects. Exact previously retained wire bytes can recover a lost
+ACK after expiry, including after cache compaction; changed bytes, forged
+signatures and revoked local intake authority cannot use that duplicate path.
+
+The return object separates `transport`, `transport_error`, `domain` and
+`ack_exports`. Transport errors retain stable `error_code` and `retryable`
+fields, including provider `claim-closed` failures. Per-item I/O failure keeps
+the lease unacknowledged and preserves partial durable decisions;
+they do not block independently authorized recovery of already local data and
+never cause a fallback provider invocation. `transport` can be absent when no
+honest transport result is available. A provider lease ACK
+does not produce a claimant signature or close the source outbox. Domain audit
+failure is reported per message and leaves pending work durable; successful
+ACKs for other messages remain visible. An empty receive can resume previously
+durable work. A duplicate valid intake reexports its exact retained ACK after
+reverification, without creating another business observation. `ack_exports`
+also enumerates verified, retained ACK candidates after a crash between the
+handled marker and result return, even when the provider queue is empty or its
+message has expired. This worklist is separate from this call's `domain`
+results; deduplicate both by ACK `message_id` before return routing. Export
+failure is separate and does not erase successful domain results. Temporary
+storage failures are retryable; detected Inbox integrity failures are not.
+Callers must inspect `transport_error`, rejected transport decisions and
+failures in both `domain` and `ack_exports`, not only successful signed ACKs.
+
+The route resolver is a local, read-only lookup, not an external sender.
+Routing is resolved and validated before reserving a provider attempt. A
+resolver failure leaves the exact envelope queued without a stranded `started`
+entry. Reservation uses a fresh clock reading, so expiry during route lookup
+prevents provider invocation. Sending reserves an attempt ID, history slot
+and journal completion capacity before the provider call. A signed ACK may win the race with send completion;
+the late outcome remains auditable but cannot overwrite the delivered state.
+Exhausted history or journal capacity prevents another provider invocation.
+Provider I/O failure completes the attempt as `error`, not `sent` or
+`delivered`; exact retry remains available unless a verified signed ACK already
+established delivery. A failed response is not proof the provider did nothing.
+A crash leaves an explicit ambiguous `started` attempt, not a fabricated send
+success. Exact retries keep the original transport message ID while reserving
+a new attempt; unresolved starts require explicit local reconciliation.
+
+The source calls `sender.acknowledge(ack)` only after the signed claimant ACK
+has been explicitly returned. This shares `acknowledge_source_receipt_delivery`
+with the offline CLI: signature, recipient, envelope lifetime, exact local
+receipt and preparation audit are verified before mutation. Source audit
+failure after mutation still raises; the exact ACK retry repairs that audit.
+
+This stage has a two-workspace, Host-governed loopback integration test. It
+does not provide an automatic ACK-return router, a production network transport
+provider, REST/UI send controls, or two-physical-computer acceptance. Existing
+wire versions and conformance fixtures are unchanged. No real funds, work
+acceptance or settlement is enabled.

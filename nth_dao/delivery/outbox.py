@@ -34,6 +34,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
@@ -70,14 +71,18 @@ OUTBOX_TERMINAL_STATES = (OUTBOX_STATE_DELIVERED, OUTBOX_STATE_REJECTED, OUTBOX_
 OUTBOX_ATTEMPT_SENT = "sent"
 OUTBOX_ATTEMPT_ERROR = "error"
 OUTBOX_ATTEMPT_REJECTED = "rejected"
+OUTBOX_ATTEMPT_STARTED = "started"
 OUTBOX_ATTEMPT_OUTCOMES = (OUTBOX_ATTEMPT_SENT, OUTBOX_ATTEMPT_ERROR, OUTBOX_ATTEMPT_REJECTED)
 
 DEFAULT_MAX_PENDING_RECORDS = 4_096
 MAX_ATTEMPTS_PER_RECORD = 256
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
-_JOURNAL_EVENTS = ("enqueued", "attempt", "delivered", "late-delivered", "rejected", "expired")
+_JOURNAL_EVENTS = ("enqueued", "attempt", "attempt.started", "attempt.finished",
+                   "delivered", "late-delivered", "rejected", "expired")
 _MESSAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRANSPORT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_ATTEMPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_ATTEMPT_COMPLETION_RESERVE_BYTES = 2_048
 _EVENT_FIELDS = {
     "enqueued": frozenset(
         {
@@ -91,6 +96,8 @@ _EVENT_FIELDS = {
         }
     ),
     "attempt": frozenset({"event", "message_id", "transport", "at_ms", "outcome"}),
+    "attempt.started": frozenset({"event", "message_id", "attempt_id", "transport", "at_ms"}),
+    "attempt.finished": frozenset({"event", "message_id", "attempt_id", "at_ms", "outcome", "error_code"}),
     "delivered": frozenset({"event", "message_id", "at_ms", "ack_json"}),
     "late-delivered": frozenset({"event", "message_id", "at_ms", "ack_json"}),
     "rejected": frozenset(
@@ -113,12 +120,18 @@ class DeliveryOutboxCorrupt(DeliveryOutboxError):
     """Raised when the journal is damaged beyond a torn final line."""
 
 
-@dataclass
+class DeliveryOutboxAttemptsFull(DeliveryOutboxFull):
+    """No durable attempt slot remains; do not call an external provider."""
+
+
+@dataclass(frozen=True)
 class OutboxAttempt:
     transport: str
     at_ms: int
     outcome: str
     error_code: str = ""
+    attempt_id: str = ""
+    finished_at_ms: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -128,6 +141,9 @@ class OutboxAttempt:
         }
         if self.error_code:
             data["error_code"] = self.error_code
+        if self.attempt_id:
+            data["attempt_id"] = self.attempt_id
+            data["finished_at_ms"] = self.finished_at_ms
         return data
 
 
@@ -303,9 +319,19 @@ class DurableOutbox:
         """
 
         line = canonical_json(event) + b"\n"
+        outstanding = sum(
+            attempt.outcome == OUTBOX_ATTEMPT_STARTED
+            for record in self._records.values() for attempt in record.attempts
+        )
+        if event["event"] == "attempt.started":
+            outstanding += 1
+        elif event["event"] == "attempt.finished":
+            outstanding -= 1
         stream = (open_independent_file(self._journal_path, "ab") if self._reject_links
                   else open(self._journal_path, "ab"))
         with stream as handle:
+            if os.fstat(handle.fileno()).st_size + len(line) + outstanding * _ATTEMPT_COMPLETION_RESERVE_BYTES > MAX_JOURNAL_BYTES:
+                raise DeliveryOutboxFull("outbox journal has no reserved completion capacity")
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
@@ -470,6 +496,73 @@ class DurableOutbox:
                     record.last_error_code = error_code
                 return _copy_record(record)
 
+    def reserve_attempt(
+        self, message_id: str, *, transport: str, at_ms: int | None = None,
+    ) -> OutboxAttempt | None:
+        """Reserve count and journal capacity before any provider side effect.
+
+        A crash leaves a visible ambiguous start. Retrying reserves a new slot;
+        provider idempotency remains keyed by the original delivery message ID.
+        """
+        _validate_transport_name(transport)
+        now = _validate_operation_time(self._clock() if at_ms is None else at_ms, "at_ms")
+        with self._thread_lock, self._process_lock():
+            self._refold_if_changed()
+            record = self._records.get(message_id)
+            if record is None:
+                raise DeliveryOutboxError("outbox record missing")
+            if record.is_terminal:
+                return None
+            if record.expires_at_ms <= now:
+                self._transition_expired(record, now)
+                return None
+            if len(record.attempts) >= MAX_ATTEMPTS_PER_RECORD:
+                raise DeliveryOutboxAttemptsFull("attempt history exceeds the cap")
+            attempt = OutboxAttempt(
+                transport=transport, at_ms=now, outcome=OUTBOX_ATTEMPT_STARTED,
+                attempt_id=uuid.uuid4().hex,
+            )
+            self._append_locked({
+                "event": "attempt.started", "message_id": message_id,
+                "attempt_id": attempt.attempt_id, "transport": transport, "at_ms": now,
+            })
+            record.attempts.append(attempt)
+            return attempt
+
+    def complete_attempt(
+        self, message_id: str, attempt_id: str, *, outcome: str,
+        error_code: str = "", at_ms: int | None = None,
+    ) -> OutboxRecord:
+        """Finish an existing reservation even if a signed ACK won the race."""
+        if not isinstance(attempt_id, str) or _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
+            raise DeliveryOutboxError("attempt_id must identify a reserved attempt")
+        if outcome not in OUTBOX_ATTEMPT_OUTCOMES:
+            raise DeliveryOutboxError(f"unsupported attempt outcome: {outcome}")
+        _validate_error_code(error_code)
+        now = _validate_operation_time(self._clock() if at_ms is None else at_ms, "at_ms")
+        with self._thread_lock, self._process_lock():
+            self._refold_if_changed()
+            record = self._records.get(message_id)
+            if record is None:
+                raise DeliveryOutboxError("outbox record missing")
+            previous = next((item for item in record.attempts if item.attempt_id == attempt_id), None)
+            if previous is None:
+                raise DeliveryOutboxError("attempt reservation is missing")
+            if previous.outcome != OUTBOX_ATTEMPT_STARTED:
+                if previous.outcome != outcome or previous.error_code != error_code:
+                    raise DeliveryOutboxError("attempt outcome already binds a different result")
+                return _copy_record(record)
+            if now < previous.at_ms:
+                raise DeliveryOutboxError("attempt completion predates reservation")
+            event = {
+                "event": "attempt.finished", "message_id": message_id,
+                "attempt_id": attempt_id, "at_ms": now,
+                "outcome": outcome, "error_code": error_code,
+            }
+            self._append_locked(event)
+            _fold_attempt_completion(record, event)
+            return _copy_record(record)
+
     def handle_ack(
         self, ack: DeliveryAck, *, now_ms: Optional[int] = None,
         allow_expired: bool = False,
@@ -581,6 +674,11 @@ class DurableOutbox:
                     # Lossy compaction would discard the bytes needed to
                     # reconcile a delayed ACK or retry an interrupted audit.
                     return len(self._records)
+                if any(attempt.outcome == OUTBOX_ATTEMPT_STARTED
+                       for record in self._records.values() for attempt in record.attempts):
+                    # A provider call may still complete, or need explicit crash
+                    # reconciliation. Never discard its reservation or ACK.
+                    return len(self._records)
                 keep = [
                     record
                     for record in self._records.values()
@@ -599,6 +697,18 @@ class DurableOutbox:
                         }
                     ) + b"\n")
                     for attempt in record.attempts:
+                        if attempt.attempt_id:
+                            lines.append(canonical_json({
+                                "event": "attempt.started", "message_id": record.message_id,
+                                "attempt_id": attempt.attempt_id, "transport": attempt.transport,
+                                "at_ms": attempt.at_ms,
+                            }) + b"\n")
+                            lines.append(canonical_json({
+                                "event": "attempt.finished", "message_id": record.message_id,
+                                "attempt_id": attempt.attempt_id, "outcome": attempt.outcome,
+                                "at_ms": attempt.finished_at_ms, "error_code": attempt.error_code,
+                            }) + b"\n")
+                            continue
                         event: Dict[str, Any] = {
                             "event": "attempt", "message_id": record.message_id,
                             "transport": attempt.transport, "at_ms": attempt.at_ms,
@@ -693,6 +803,24 @@ def _fold_event(records: Dict[str, OutboxRecord], event: Dict[str, Any]) -> None
     if record is None:
         raise DeliveryOutboxCorrupt(f"journal event for unknown message_id: {kind}")
 
+    if kind == "attempt.started":
+        attempt_id = event["attempt_id"]
+        if not isinstance(attempt_id, str) or _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
+            raise DeliveryOutboxCorrupt("invalid attempt reservation identifier")
+        if record.state != OUTBOX_STATE_QUEUED or len(record.attempts) >= MAX_ATTEMPTS_PER_RECORD:
+            raise DeliveryOutboxCorrupt("attempt reservation exceeds a queued record's capacity")
+        if any(item.attempt_id == attempt_id for item in record.attempts):
+            raise DeliveryOutboxCorrupt("duplicate attempt reservation identifier")
+        record.attempts.append(OutboxAttempt(
+            transport=_fold_transport(event), at_ms=_fold_at_ms(event),
+            outcome=OUTBOX_ATTEMPT_STARTED, attempt_id=attempt_id,
+        ))
+        return
+
+    if kind == "attempt.finished":
+        _fold_attempt_completion(record, event)
+        return
+
     if kind == "attempt":
         if record.state != OUTBOX_STATE_QUEUED:
             raise DeliveryOutboxCorrupt("attempt event follows a terminal state")
@@ -782,6 +910,34 @@ def _fold_transport(event: Mapping[str, Any]) -> str:
     if not isinstance(transport, str) or _TRANSPORT_NAME_RE.fullmatch(transport) is None:
         raise DeliveryOutboxCorrupt("journal event transport name is invalid")
     return transport
+
+
+def _fold_attempt_completion(record: OutboxRecord, event: Mapping[str, Any]) -> None:
+    attempt_id = event["attempt_id"]
+    if not isinstance(attempt_id, str) or _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
+        raise DeliveryOutboxCorrupt("invalid attempt completion identifier")
+    index = next((index for index, item in enumerate(record.attempts) if item.attempt_id == attempt_id), None)
+    if index is None or record.attempts[index].outcome != OUTBOX_ATTEMPT_STARTED:
+        raise DeliveryOutboxCorrupt("completion has no unfinished reservation")
+    previous = record.attempts[index]
+    outcome = event["outcome"]
+    if outcome not in OUTBOX_ATTEMPT_OUTCOMES:
+        raise DeliveryOutboxCorrupt("invalid reserved attempt outcome")
+    at_ms = _fold_at_ms(event)
+    if at_ms < previous.at_ms:
+        raise DeliveryOutboxCorrupt("attempt completion predates reservation")
+    try:
+        error_code = _validate_error_code(event["error_code"])
+    except DeliveryOutboxError as exc:
+        raise DeliveryOutboxCorrupt(str(exc)) from exc
+    record.attempts[index] = OutboxAttempt(
+        transport=previous.transport, at_ms=previous.at_ms, outcome=outcome,
+        error_code=error_code, attempt_id=attempt_id, finished_at_ms=at_ms,
+    )
+    if record.state == OUTBOX_STATE_QUEUED:
+        record.last_error_code = error_code
+        if outcome == OUTBOX_ATTEMPT_REJECTED:
+            record.state = OUTBOX_STATE_REJECTED
 
 
 def _fold_at_ms(event: Mapping[str, Any]) -> int:

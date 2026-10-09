@@ -20,6 +20,46 @@ from nth_dao.delivery.inbox import (
 
 pytest.importorskip("nacl")
 
+
+def test_transport_quarantine_exact_descriptor_survives_restart_without_overwrite(tmp_path):
+    directory = tmp_path / "quarantine-idempotent"
+    item = {"envelope_json": '{"body":"untrusted"}', "delivery_id": "invalid-1"}
+    inbox = DeliveryInbox(directory, reject_links=True)
+    inbox.quarantine_transport_item(item, transport="loopback", reason="invalid envelope", at_ms=100)
+    path = next((directory / "transport_quarantine").glob("*.json"))
+    original = path.read_bytes()
+    item["delivery_id"] = "caller-mutated"
+    restarted = DeliveryInbox(directory, reject_links=True)
+    restarted.quarantine_transport_item(
+        {"envelope_json": '{"body":"untrusted"}', "delivery_id": "invalid-1"},
+        transport="loopback", reason="different later reason", at_ms=200,
+    )
+    assert path.read_bytes() == original
+    assert len(list(path.parent.iterdir())) == 1
+    assert restarted.entry_count() == 0
+
+
+def test_transport_quarantine_tampering_is_not_treated_as_durable_rejection(tmp_path):
+    directory = tmp_path / "quarantine-corrupt"
+    item = {"envelope_json": "{}", "delivery_id": "bad-id"}
+    inbox = DeliveryInbox(directory, reject_links=True)
+    inbox.quarantine_transport_item(item, transport="loopback", reason="invalid envelope", at_ms=100)
+    path = next((directory / "transport_quarantine").glob("*.json"))
+    path.write_bytes(b"{}")
+    with pytest.raises(DeliveryInboxCacheCorrupt, match="binding differs"):
+        inbox.quarantine_transport_item(item, transport="loopback", reason="invalid envelope", at_ms=200)
+
+
+def test_processed_message_index_survives_restart_and_excludes_pending(tmp_path, alice_identity):
+    directory = tmp_path / "handled-index"
+    inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+    first, second = _envelope(alice_identity), _envelope(alice_identity)
+    assert inbox.accept(first).accepted and inbox.accept(second).accepted
+    inbox.mark_processed(first.message_id)
+    restarted = DeliveryInbox(directory, clock=lambda: NOW_MS)
+    assert restarted.processed_message_ids() == (first.message_id,)
+    assert restarted.pending()[0].message_id == second.message_id
+
 NOW_MS = 1_750_000_000_000
 
 
@@ -56,6 +96,72 @@ def _envelope(alice_identity, payload=None, ttl_ms=60_000, hop_limit=0):
 
 def _wire(envelope):
     return canonical_json(envelope.to_dict()).decode("utf-8")
+
+
+def test_retained_duplicate_requires_exact_bytes_and_rechecks_authority(tmp_path, alice_identity):
+    allow = True
+
+    def authorize(_envelope):
+        return allow, "permission revoked"
+
+    directory = tmp_path / "retained-duplicate"
+    inbox = DeliveryInbox(directory, clock=lambda: NOW_MS, authorize=authorize)
+    envelope = _envelope(alice_identity, hop_limit=2)
+    assert inbox.accept(envelope).accepted
+    assert inbox.retained_pending(envelope.message_id).accepted_at_ms == NOW_MS
+    detached = inbox.retained_pending(envelope.message_id)
+    detached.envelope.payload.clear()
+    assert inbox.retained_pending(envelope.message_id).envelope.payload == {"body": "hi"}
+    inbox.mark_processed(envelope.message_id)
+    with inbox._process_lock():
+        inbox._compact_cache_journal_locked()
+    reloaded = DeliveryInbox(directory, clock=lambda: NOW_MS + 120_000, authorize=authorize)
+    assert reloaded.retained_duplicate(_wire(envelope)).duplicate
+    assert reloaded.retained_duplicate(_wire(forward_envelope(envelope))) is None
+    allow = False
+    rejected = reloaded.retained_duplicate(_wire(envelope))
+    assert not rejected.duplicate and rejected.reason == "permission revoked"
+
+
+def test_retained_duplicate_does_not_accept_new_expired_or_forged_message(tmp_path, alice_identity):
+    inbox = DeliveryInbox(tmp_path / "new-expired", clock=lambda: NOW_MS + 120_000)
+    envelope = _envelope(alice_identity)
+    assert inbox.retained_duplicate(_wire(envelope)) is None
+    assert not inbox.accept(_wire(envelope)).accepted
+    assert inbox.entry_count() == 0
+    envelope.signature = ""
+    assert inbox.retained_duplicate(_wire(envelope)) is None
+
+
+def test_retained_digest_mismatch_is_cache_corruption(tmp_path, alice_identity):
+    directory = tmp_path / "bad-digest"
+    inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+    assert inbox.accept(_envelope(alice_identity)).accepted
+    cache = directory / "inbox.cache.jsonl"
+    value = json.loads(cache.read_bytes())
+    value["envelope_sha256"] = "sha256:" + "0" * 64
+    cache.write_bytes(canonical_json(value) + b"\n")
+    with pytest.raises(DeliveryInboxCacheCorrupt, match="digest differs"):
+        DeliveryInbox(directory, clock=lambda: NOW_MS)
+
+
+def test_pending_byte_quota_retains_intake_and_reports_retryable_backpressure(tmp_path, alice_identity):
+    first = _envelope(alice_identity, payload={"n": 1})
+    second = _envelope(alice_identity, payload={"n": 2})
+    budget = len(_wire(first).encode("utf-8")) + 1
+    box = DeliveryInbox(tmp_path / "byte-budget", clock=lambda: NOW_MS, max_pending_bytes=budget)
+    assert box.accept(first).accepted
+    rejected = box.accept(second)
+    assert rejected.retryable and not rejected.accepted
+    assert box.pending()[0].message_id == first.message_id
+    box.mark_processed(first.message_id)
+    assert box.accept(second).accepted
+
+
+@pytest.mark.parametrize("limit", [True, 0, -1, "1024"])
+def test_pending_byte_quota_requires_positive_integer(tmp_path, limit):
+    with pytest.raises(ValueError, match="max_pending_bytes"):
+        DeliveryInbox(tmp_path, max_pending_bytes=limit)
 
 
 class TestAccept:
@@ -502,6 +608,30 @@ class TestRejectionTrimLockAndTmp:
 # ─────────────────── adversarial review round 11 (bug BB-p) ───────────────────
 
 
+class TestNonEvictingInbox:
+    def test_processed_entries_are_retained_at_capacity(self, tmp_path, alice_identity):
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS,
+                              max_replay_entries=1, evict_processed=False)
+        first = _envelope(alice_identity)
+        assert inbox.accept(first).accepted
+        assert inbox.mark_processed(first.message_id)
+        second = _envelope(alice_identity, payload={"body": "second"})
+        decision = inbox.accept(second)
+        assert not decision.accepted
+        assert decision.reason == "inbox replay cache retains all envelopes at capacity"
+        assert inbox.accept(first).duplicate
+        restarted = DeliveryInbox(directory, clock=lambda: NOW_MS,
+                                  max_replay_entries=1, evict_processed=False)
+        assert restarted.seen(first.message_id)
+        assert not restarted.seen(second.message_id)
+
+    @pytest.mark.parametrize("value", [0, 1, None, "false"])
+    def test_eviction_policy_requires_boolean(self, tmp_path, value):
+        with pytest.raises(ValueError, match="evict_processed"):
+            DeliveryInbox(tmp_path, evict_processed=value)
+
+
 class TestTornTailRecovery:
     def test_torn_tail_is_retained_before_append_and_restart(self, tmp_path, alice_identity):
         directory = tmp_path / "delivery"
@@ -581,7 +711,10 @@ class TestCacheJournalAutoCompact:
 
         import nth_dao.delivery.inbox as inbox_module
 
-        monkeypatch.setattr(inbox_module, "MAX_CACHE_JOURNAL_BYTES", 2_048)
+        # Eight retained wire digests need more metadata than the legacy rows.
+        # Keep the cap small enough to force repeated compaction but large
+        # enough for the declared live replay window.
+        monkeypatch.setattr(inbox_module, "MAX_CACHE_JOURNAL_BYTES", 4_096)
         directory = tmp_path / "delivery"
         # eviction (8 live entries) and the journal cap compose: the live
         # state always fits the compacted journal

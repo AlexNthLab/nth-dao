@@ -32,7 +32,9 @@ from nth_dao.market.source_receipt_delivery import (
     _receipt,
     _snapshot,
     _write_delivery_bytes,
+    acknowledge_source_receipt_delivery,
     create_source_receipt_delivery,
+    open_source_receipt_delivery_outbox,
     require_prepared_source_receipt_delivery,
     source_receipt_preparation_payload,
 )
@@ -94,12 +96,7 @@ def _print(value: dict) -> None:
 
 
 def _outbox(workspace: Path) -> DurableOutbox:
-    relative = Path(".nth/source_receipt_delivery_outbox")
-    for name in ("outbox.journal.jsonl", "outbox.lock"):
-        _checked_path(workspace, relative / name)
-    return DurableOutbox(
-        _checked_path(workspace, relative), retain_terminal_records=True, reject_links=True,
-    )
+    return open_source_receipt_delivery_outbox(workspace)
 
 
 def _spine(workspace: Path, relative: Path, identity: AgentIdentity) -> SignedEventLog:
@@ -194,9 +191,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     receive = commands.add_parser("receive", help="verify, retain, and acknowledge an addressed envelope")
     resume = commands.add_parser("resume", help="resume only previously durable intake")
     export_ack = commands.add_parser("export-ack", help="reverify and export a retained result, even after expiry")
+    export_acks = commands.add_parser("export-acks", help="enumerate verified retained ACKs without a new lease")
     export_envelope = commands.add_parser("export-envelope", help="reverify and export an existing source envelope")
     acknowledge = commands.add_parser("acknowledge", help="verify an ACK and close the source outbox record")
-    for command in (pack, receive, resume, acknowledge, export_ack, export_envelope):
+    for command in (pack, receive, resume, acknowledge, export_ack, export_acks, export_envelope):
         command.add_argument("--workspace", type=Path, required=True)
         command.add_argument("--identity-file", type=Path, required=True)
         command.add_argument("--spine-file", type=Path, default=Path("spine/events.jsonl"))
@@ -207,7 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pack.add_argument("--ttl-seconds", type=int, default=600)
     pack.add_argument("--renew", action="store_true", help="explicitly create a new generation only after expiry")
     pack.add_argument("--renew-from", help="retained predecessor message ID; makes renewal retries idempotent")
-    for command in (receive, resume, export_ack):
+    for command in (receive, resume, export_ack, export_acks):
         command.add_argument("--nonce", required=True, help="local confirmed claim nonce, not a remote label")
     receive.add_argument("--envelope-file", type=Path, required=True)
     export_ack.add_argument("--message-id", required=True)
@@ -240,25 +238,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(envelope.to_dict())
         elif args.command == "acknowledge":
             ack = DeliveryAck.from_dict(_read(args.ack_file, MAX_ACK_BYTES))
-            outbox = _outbox(args.workspace)
-            queued = outbox.get(ack.message_id)
-            if queued is None:
-                raise ValueError("ack for unknown source receipt delivery")
-            require_prepared_source_receipt_delivery(
-                TransportEnvelope.from_dict(json.loads(queued.envelope_json)),
+            delivered = acknowledge_source_receipt_delivery(
+                ack,
                 workspace=args.workspace, identity=identity, spine=spine,
-            )
-            delivered = outbox.handle_ack(ack, allow_expired=True)
-            spine.append_unique(
-                "market.claim.completion.source_receipt.delivery.acknowledged",
-                {
-                    "message_id": delivered.message_id,
-                    "envelope_sha256": delivered.envelope_sha256,
-                    "receiver_did": delivered.delivered_by,
-                    "verification_scope": "transport_receipt_only",
-                    "accepted": False, "settled": False,
-                },
-                unique_payload_fields=("message_id",),
             )
             _print({
                 "message_id": delivered.message_id, "state": delivered.state,
@@ -282,12 +264,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print({"ack": result.ack.to_dict(), "observation": result.observation})
             else:
-                batch = receiver.resume_pending()
-                _print({"resumed": [
+                batch = receiver.export_retained_acks() if args.command == "export-acks" else receiver.resume_pending()
+                _print({"exports" if args.command == "export-acks" else "resumed": [
                     {"ack": result.ack.to_dict(), "observation": result.observation}
                     for result in batch.results
                 ], "failed": [
-                    {"message_id": item.message_id, "error_code": item.error_code, "reason": item.reason}
+                    {"message_id": item.message_id, "error_code": item.error_code,
+                     "reason": item.reason, "retryable": item.retryable}
                     for item in batch.failures
                 ]})
                 if batch.failures:

@@ -9,6 +9,8 @@ and cross-process lock safety.
 from __future__ import annotations
 
 import json
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 import pytest
 
@@ -23,9 +25,12 @@ from nth_dao.delivery.envelope import (
 )
 from nth_dao.delivery.outbox import (
     DEFAULT_MAX_PENDING_RECORDS,
+    MAX_ATTEMPTS_PER_RECORD,
+    OUTBOX_ATTEMPT_STARTED,
     OUTBOX_STATE_DELIVERED,
     OUTBOX_STATE_QUEUED,
     OUTBOX_STATE_REJECTED,
+    DeliveryOutboxAttemptsFull,
     DeliveryOutboxCorrupt,
     DeliveryOutboxError,
     DeliveryOutboxFull,
@@ -35,6 +40,95 @@ from nth_dao.delivery.outbox import (
 pytest.importorskip("nacl")
 
 NOW_MS = 1_750_000_000_000
+
+
+def test_reserved_attempt_can_finish_after_ack_and_reload(tmp_path, alice_identity, bob_identity):
+    directory = tmp_path / "reserved"
+    box = DurableOutbox(directory, clock=lambda: NOW_MS)
+    envelope = _envelope(alice_identity, recipient=bob_identity.as_did())
+    box.enqueue(envelope)
+    reservation = box.reserve_attempt(envelope.message_id, transport="loopback")
+    assert reservation.outcome == OUTBOX_ATTEMPT_STARTED
+    ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                   envelope_sha256=envelope_digest(envelope), received_at_ms=NOW_MS)
+    box.handle_ack(ack)
+    assert box.compact() == 1
+    restarted = DurableOutbox(directory, clock=lambda: NOW_MS)
+    assert restarted.get(envelope.message_id).state == OUTBOX_STATE_DELIVERED
+    finished = restarted.complete_attempt(envelope.message_id, reservation.attempt_id, outcome="rejected")
+    assert finished.state == OUTBOX_STATE_DELIVERED
+    assert finished.attempts[0].outcome == "rejected"
+    assert restarted.complete_attempt(envelope.message_id, reservation.attempt_id, outcome="rejected").state == OUTBOX_STATE_DELIVERED
+    assert DurableOutbox(directory, clock=lambda: NOW_MS).get(envelope.message_id).state == OUTBOX_STATE_DELIVERED
+    with pytest.raises(DeliveryOutboxError, match="different result"):
+        restarted.complete_attempt(envelope.message_id, reservation.attempt_id, outcome="sent")
+
+
+def test_reserved_attempt_journal_survives_compaction(tmp_path, alice_identity):
+    directory = tmp_path / "reserved-compact"
+    box = DurableOutbox(directory, clock=lambda: NOW_MS)
+    envelope = _envelope(alice_identity)
+    box.enqueue(envelope)
+    reservation = box.reserve_attempt(envelope.message_id, transport="loopback")
+    box.complete_attempt(envelope.message_id, reservation.attempt_id, outcome="error", error_code="timeout")
+    assert box.compact() == 1
+    attempt = DurableOutbox(directory, clock=lambda: NOW_MS).get(envelope.message_id).attempts[0]
+    assert attempt.outcome == "error" and attempt.error_code == "timeout"
+    assert attempt.attempt_id == reservation.attempt_id
+
+
+def _reserve_last_attempt_in_process(args):
+    directory, message_id, barrier = args
+    box = DurableOutbox(directory, clock=lambda: NOW_MS)
+    barrier.wait(timeout=20)
+    try:
+        return box.reserve_attempt(message_id, transport="loopback").attempt_id
+    except DeliveryOutboxAttemptsFull:
+        return ""
+
+
+def test_last_attempt_slot_is_atomic_across_processes(tmp_path, alice_identity):
+    directory = tmp_path / "cross-process-reservation"
+    box = DurableOutbox(directory, clock=lambda: NOW_MS)
+    envelope = _envelope(alice_identity)
+    box.enqueue(envelope)
+    for _ in range(MAX_ATTEMPTS_PER_RECORD - 1):
+        box.record_attempt(envelope.message_id, transport="loopback", outcome="error")
+    context = multiprocessing.get_context("spawn")
+    with context.Manager() as manager:
+        barrier = manager.Barrier(2)
+        with ProcessPoolExecutor(max_workers=2, mp_context=context) as pool:
+            winners = list(pool.map(_reserve_last_attempt_in_process,
+                                   [(directory, envelope.message_id, barrier)] * 2))
+    assert sum(bool(item) for item in winners) == 1
+    assert len(box.get(envelope.message_id).attempts) == MAX_ATTEMPTS_PER_RECORD
+
+
+def test_completion_capacity_is_reserved_against_other_writes(tmp_path, alice_identity, monkeypatch):
+    from nth_dao.delivery import outbox as outbox_module
+
+    box = DurableOutbox(tmp_path / "reserved-bytes", clock=lambda: NOW_MS)
+    envelope = _envelope(alice_identity)
+    box.enqueue(envelope)
+    reservation = box.reserve_attempt(envelope.message_id, transport="loopback")
+    journal = tmp_path / "reserved-bytes/outbox.journal.jsonl"
+    monkeypatch.setattr(outbox_module, "MAX_JOURNAL_BYTES", journal.stat().st_size + 2048)
+    with pytest.raises(DeliveryOutboxFull, match="completion capacity"):
+        box.record_attempt(envelope.message_id, transport="loopback", outcome="error")
+    completed = box.complete_attempt(
+        envelope.message_id, reservation.attempt_id, outcome="error", error_code="\\" * 256,
+    )
+    assert completed.attempts[0].outcome == "error"
+    assert DurableOutbox(tmp_path / "reserved-bytes", clock=lambda: NOW_MS).get(envelope.message_id).attempts[0].outcome == "error"
+
+
+def test_completion_without_reservation_fails_closed(tmp_path, alice_identity):
+    box = DurableOutbox(tmp_path / "no-reservation", clock=lambda: NOW_MS)
+    envelope = _envelope(alice_identity)
+    box.enqueue(envelope)
+    with pytest.raises(DeliveryOutboxError, match="reservation is missing"):
+        box.complete_attempt(envelope.message_id, "0" * 32, outcome="sent")
+    assert box.get(envelope.message_id).attempts == []
 
 
 @pytest.fixture()

@@ -30,7 +30,8 @@ from nth_dao.delivery.envelope import (
     sign_envelope,
     validate_envelope,
 )
-from nth_dao.delivery.inbox import DeliveryInbox
+from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
+from nth_dao.delivery.outbox import DurableOutbox, OutboxRecord
 from nth_dao.identity import AgentIdentity
 from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 from nth_dao.market.claimant_receipt_store import ClaimantSourceReceiptStore
@@ -47,6 +48,7 @@ from nth_dao.util.path_security import path_is_linklike
 
 SOURCE_RECEIPT_DELIVERY_KIND = "market.claim.completion.source-receipt"
 SOURCE_RECEIPT_DELIVERY_PREPARED_EVENT = "market.claim.completion.source_receipt.delivery.prepared"
+SOURCE_RECEIPT_DELIVERY_ACKNOWLEDGED_EVENT = "market.claim.completion.source_receipt.delivery.acknowledged"
 _PAYLOAD_FIELDS = frozenset({
     "source_claim_id", "completion_head_digest", "proof_digest", "source_receipt_json",
 })
@@ -57,6 +59,10 @@ _MAX_RESULT_BYTES = MAX_ENVELOPE_BYTES + MAX_ACK_BYTES + 1_024
 
 class SourceReceiptDeliveryRejected(ValueError):
     """A delivery is unauthenticated, unbound, stale, or not intended for this node."""
+
+
+class SourceReceiptDeliveryDeferred(SourceReceiptDeliveryRejected):
+    """Valid intake must wait for local evidence or explicit storage maintenance."""
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,17 @@ class SourceReceiptDeliveryFailure:
     message_id: str
     error_code: str
     reason: str
+    retryable: bool = True
+
+
+def source_receipt_delivery_failure(message_id: str, exc: Exception) -> SourceReceiptDeliveryFailure:
+    return SourceReceiptDeliveryFailure(
+        message_id=message_id, error_code=type(exc).__name__, reason=str(exc)[:512],
+        retryable=(
+            isinstance(exc, (OSError, RuntimeError, SourceReceiptDeliveryDeferred))
+            and not isinstance(exc, DeliveryInboxCacheCorrupt)
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -259,6 +276,61 @@ def require_prepared_source_receipt_delivery(
     return snapshot
 
 
+def open_source_receipt_delivery_outbox(
+    workspace: Path, *, clock: Callable[[], int] | None = None,
+) -> DurableOutbox:
+    """Use the same secure, evidence-retaining outbox for every entry point."""
+    relative = Path(".nth/source_receipt_delivery_outbox")
+    for name in ("outbox.journal.jsonl", "outbox.lock"):
+        _checked_path(workspace, relative / name)
+    return DurableOutbox(
+        _checked_path(workspace, relative), clock=clock,
+        retain_terminal_records=True, reject_links=True,
+    )
+
+
+def acknowledge_source_receipt_delivery(
+    ack: DeliveryAck, *, workspace: Path, identity: AgentIdentity,
+    spine: SignedEventLog, clock: Callable[[], int] | None = None,
+) -> OutboxRecord:
+    """Verify local source evidence before ACK mutation, then sign its audit.
+
+    If audit fails after delivery persistence, raise and allow the same ACK
+    to repair the audit. Neither success nor a transport ACK accepts work.
+    """
+    if not isinstance(ack, DeliveryAck):
+        raise SourceReceiptDeliveryRejected("ack must be a DeliveryAck")
+    raw = canonical_json(ack.to_dict())
+    if len(raw) > MAX_ACK_BYTES:
+        raise SourceReceiptDeliveryRejected("ack exceeds the wire byte limit")
+    snapshot = DeliveryAck.from_dict(json.loads(raw))
+    now = clock() if clock is not None else int(time.time() * 1000)
+    valid, reason = validate_ack(snapshot, now_ms=now)
+    if not valid:
+        raise SourceReceiptDeliveryRejected(reason)
+    outbox = open_source_receipt_delivery_outbox(workspace, clock=clock)
+    queued = outbox.get(snapshot.message_id)
+    if queued is None:
+        raise SourceReceiptDeliveryRejected("ack for unknown source receipt delivery")
+    require_prepared_source_receipt_delivery(
+        TransportEnvelope.from_dict(json.loads(queued.envelope_json)),
+        workspace=workspace, identity=identity, spine=spine,
+    )
+    delivered = outbox.handle_ack(snapshot, now_ms=now, allow_expired=True)
+    spine.append_unique(
+        SOURCE_RECEIPT_DELIVERY_ACKNOWLEDGED_EVENT,
+        {
+            "message_id": delivered.message_id,
+            "envelope_sha256": delivered.envelope_sha256,
+            "receiver_did": delivered.delivered_by,
+            "verification_scope": "transport_receipt_only",
+            "accepted": False, "settled": False,
+        },
+        unique_payload_fields=("message_id",),
+    )
+    return delivered
+
+
 class SourceReceiptDeliveryReceiver:
     """One confirmed local claim's durable, fail-closed receipt delivery inbox.
 
@@ -292,7 +364,18 @@ class SourceReceiptDeliveryReceiver:
             directory, authorize=self._authorize, clock=self._clock,
             max_replay_entries=_MAX_DELIVERIES_PER_CLAIM,
             reject_links=True,
+            evict_processed=False,
         )
+
+    @property
+    def source_claim_id(self) -> str:
+        return self._source_claim_id
+
+    def current_time_ms(self) -> int:
+        value = self._clock()
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise SourceReceiptDeliveryRejected("delivery clock must return positive integer ms")
+        return value
 
     def _check_storage_paths(self) -> None:
         for name in ("inbox.cache.jsonl", "inbox.rejections.jsonl", "inbox.lock", "intake.lock"):
@@ -313,7 +396,7 @@ class SourceReceiptDeliveryReceiver:
             head_digest=envelope.payload["completion_head_digest"],
         )
         if built is None:
-            raise SourceReceiptDeliveryRejected("matching local completion head is unavailable")
+            raise SourceReceiptDeliveryDeferred("matching local completion head is unavailable")
         proof, source_did, federation_key = built
         if proof["intent"]["claimant_did"] != self.identity.as_did():
             raise SourceReceiptDeliveryRejected("local claimant identity changed")
@@ -411,6 +494,27 @@ class SourceReceiptDeliveryReceiver:
                 raise SourceReceiptDeliveryRejected("retained delivery result belongs to another message")
             return self._process(envelope)
 
+    def export_retained_acks(self) -> SourceReceiptResumeResult:
+        """Reverify a bounded ACK worklist from the durable handled index.
+
+        Returned ACKs are export candidates, not evidence of their return to
+        the source. Repeated exports are exact and cause no new business work.
+        An empty failure message_id denotes worklist enumeration failure.
+        """
+        try:
+            self._check_storage_paths()
+            message_ids = self.inbox.processed_message_ids(max_items=_MAX_DELIVERIES_PER_CLAIM)
+        except (OSError, DeliveryInboxCacheCorrupt, SourceReceiptDeliveryRejected) as exc:
+            return SourceReceiptResumeResult(results=(), failures=(source_receipt_delivery_failure("", exc),))
+        results = []
+        failures = []
+        for message_id in message_ids:
+            try:
+                results.append(self.get_ack(message_id))
+            except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as exc:
+                failures.append(source_receipt_delivery_failure(message_id, exc))
+        return SourceReceiptResumeResult(results=tuple(results), failures=tuple(failures))
+
     def _process(self, envelope: TransportEnvelope) -> SourceReceiptDeliveryResult:
         accepted_at = self.inbox.accepted_at(envelope.message_id)
         if accepted_at is None:
@@ -437,12 +541,36 @@ class SourceReceiptDeliveryReceiver:
 
     def receive(self, envelope: TransportEnvelope) -> SourceReceiptDeliveryResult:
         snapshot = _snapshot(envelope)
+        return self._receive_snapshot(snapshot, accepted_at_ms=self.current_time_ms())
+
+    def receive_retained(
+        self, ingress: DeliveryInbox, message_id: str,
+    ) -> SourceReceiptDeliveryResult:
+        """Resume trusted local intake; never backdate using a caller's timestamp.
+
+        The ingress grants no domain authority. Full proof and independently
+        pinned source identity are reverified before observation or signing.
+        """
+        if not isinstance(ingress, DeliveryInbox):
+            raise TypeError("ingress must be a DeliveryInbox")
+        retained = ingress.retained_pending(message_id)
+        if retained is None:
+            if self.inbox.seen(message_id) and self._result_path(message_id).exists():
+                return self.get_ack(message_id)
+            raise SourceReceiptDeliveryDeferred("retained ingress item is unavailable")
+        return self._receive_snapshot(
+            _snapshot(retained.envelope), accepted_at_ms=retained.accepted_at_ms,
+        )
+
+    def _receive_snapshot(
+        self, snapshot: TransportEnvelope, *, accepted_at_ms: int,
+    ) -> SourceReceiptDeliveryResult:
         self._check_storage_paths()
         with InterProcessLock(self._intake_lock, reject_links=True):
             self._check_storage_paths()
             if self._result_path(snapshot.message_id).exists():
                 return self._process(snapshot)
-            valid, reason = validate_envelope(snapshot, now_ms=self._clock(), require_signature=True)
+            valid, reason = validate_envelope(snapshot, now_ms=accepted_at_ms, require_signature=True)
             if not valid:
                 raise SourceReceiptDeliveryRejected(reason)
             self._verify_local(snapshot)
@@ -453,8 +581,8 @@ class SourceReceiptDeliveryReceiver:
                 not self.inbox.seen(snapshot.message_id)
                 and self.inbox.entry_count() >= _MAX_DELIVERIES_PER_CLAIM
             ):
-                raise SourceReceiptDeliveryRejected("source receipt delivery inbox is at capacity")
-            decision = self.inbox.accept(snapshot)
+                raise SourceReceiptDeliveryDeferred("source receipt delivery inbox is at capacity")
+            decision = self.inbox.accept(snapshot, now_ms=accepted_at_ms)
             if not decision.accepted and not decision.duplicate:
                 raise SourceReceiptDeliveryRejected(decision.reason)
             return self._process(snapshot)
@@ -470,22 +598,24 @@ class SourceReceiptDeliveryReceiver:
                 try:
                     results.append(self._process(_snapshot(envelope)))
                 except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as exc:
-                    failures.append(SourceReceiptDeliveryFailure(
-                        message_id=envelope.message_id,
-                        error_code=type(exc).__name__, reason=str(exc)[:512],
-                    ))
+                    failures.append(source_receipt_delivery_failure(envelope.message_id, exc))
             return SourceReceiptResumeResult(results=tuple(results), failures=tuple(failures))
 
 
 __all__ = [
+    "SOURCE_RECEIPT_DELIVERY_ACKNOWLEDGED_EVENT",
     "SOURCE_RECEIPT_DELIVERY_KIND",
     "SOURCE_RECEIPT_DELIVERY_PREPARED_EVENT",
+    "SourceReceiptDeliveryDeferred",
     "SourceReceiptDeliveryFailure",
     "SourceReceiptDeliveryReceiver",
     "SourceReceiptDeliveryRejected",
     "SourceReceiptDeliveryResult",
     "SourceReceiptResumeResult",
+    "acknowledge_source_receipt_delivery",
     "create_source_receipt_delivery",
+    "open_source_receipt_delivery_outbox",
     "require_prepared_source_receipt_delivery",
+    "source_receipt_delivery_failure",
     "source_receipt_preparation_payload",
 ]
