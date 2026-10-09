@@ -41,8 +41,7 @@ from urllib.parse import urlsplit
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import (
     ACK_KIND,
-    DeliveryAck,
-    validate_ack,
+    ack_from_envelope,
 )
 from nth_dao.delivery.envelope import (
     MAX_ENVELOPE_BYTES,
@@ -50,7 +49,6 @@ from nth_dao.delivery.envelope import (
     validate_envelope,
 )
 from nth_dao.delivery.inbox import DeliveryInbox
-from nth_dao.did_key import is_did_key
 from nth_dao.delivery.transports.base import (
     PRIVACY_PEER,
     SendResult,
@@ -58,6 +56,7 @@ from nth_dao.delivery.transports.base import (
     TransportCapabilities,
     TransportHealth,
 )
+from nth_dao.did_key import is_did_key
 
 logger = logging.getLogger("nth_dao.delivery")
 
@@ -481,32 +480,6 @@ class FederationIngestServer:
             self._thread.join(timeout=5.0)
             self._thread = None
         self._running = False
-
-
-def ack_from_envelope(envelope: TransportEnvelope) -> DeliveryAck:
-    """Unwrap a signed ACK carried as ``kind="delivery.ack"`` envelope payload.
-
-    The host calls this AFTER the inbox accepted the envelope. The inner ACK
-    must carry a valid receiver signature, and the envelope author must BE
-    the ACK receiver — an envelope signed by anyone else cannot vouch for
-    their ACK.
-    """
-
-    if envelope.kind != ACK_KIND:
-        raise ValueError("envelope is not a delivery.ack")
-    payload = envelope.payload
-    if not isinstance(payload, dict) or frozenset(payload) != {"ack"}:
-        raise ValueError("delivery.ack payload must hold exactly one 'ack' object")
-    try:
-        ack = DeliveryAck.from_dict(payload["ack"])
-    except ValueError as exc:
-        raise ValueError(f"invalid ack inside envelope: {exc}") from exc
-    if ack.receiver_did != envelope.sender_did:
-        raise ValueError("ack receiver does not match the envelope author")
-    ok, reason = validate_ack(ack)
-    if not ok:
-        raise ValueError(f"invalid ack signature: {reason}")
-    return ack
 
 
 __all__ = [

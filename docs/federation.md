@@ -811,14 +811,37 @@ explicit handlers instead of deleting them as unauthorized business input.
 The selected claim's handler still rechecks complete local proof and source
 identity pins before producing any observation or signed ACK.
 
-Staging retains at most 256 message identities and 16 MiB of pending envelope
-bytes. It does not evict nonce history. Capacity rejection is retryable and
+Staging retains at most 256 active-cache identities and 16 MiB of pending
+envelope bytes. Completed entries leave immutable, disk-indexed evidence under
+`processed_archive/messages` and hashed nonce pointers under
+`processed_archive/nonces`, with immutable address/nonce/digest bindings in
+`processed_archive/catalog.sqlite3`, before their active slots can be reused. Nonce
+history is not evicted, and exact old retries remain distinguishable after
+restart. Capacity rejection for pending work is retryable and
 prevents provider lease acknowledgement; no accepted pending payload is replaced.
-Long-lived staging history, permanently invalid business input and unhandled
-kinds need explicit operator maintenance or a future handler/archive policy.
+The archive is local replay evidence, not a signed business ledger. Its disk
+usage grows with completed history; preserve it and the inbox journal together
+in backups. A durable `archive_enabled` journal marker survives compaction and
+rejects a disabled/older reader instead of silently ignoring archived replay
+history. Legacy compacted tombstones retain replay identity but cannot fabricate
+missing wire bytes. Storage failure leaves pending work intact. Permanently
+invalid business input and unhandled kinds still need explicit operator
+maintenance or their own handler policy.
 There is no automatic deletion, plugin activation or public-network admission
 policy in this bridge. A production network provider must enforce its own
 authenticated route admission and abuse controls.
+
+The upgraded marker pins `catalog_version=1`. A lost nonce pointer, catalog or
+message file is an integrity error rather than fresh intake. A complete legacy
+JSON-only archive can migrate once under the inbox lock; catalog loss after the
+marker upgrade cannot silently trigger a rebuild. Preserve all three components
+in backups. These local checks cannot prevent a privileged writer from replacing
+the entire history with an older consistent copy.
+
+Forward receipt results distinguish business failures from `staging_failures`.
+If observation and signed ACK persistence succeeded but a staging marker failed,
+the genuine domain result and ACK remain visible, the staging error is reported
+separately, and the retained item can repair its marker on an exact retry.
 
 Permanent transport rejections, including provider ID/expiry substitution,
 are retained under the staging Inbox's `transport_quarantine` directory before
@@ -876,14 +899,89 @@ A crash leaves an explicit ambiguous `started` attempt, not a fabricated send
 success. Exact retries keep the original transport message ID while reserving
 a new attempt; unresolved starts require explicit local reconciliation.
 
-The source calls `sender.acknowledge(ack)` only after the signed claimant ACK
-has been explicitly returned. This shares `acknowledge_source_receipt_delivery`
+The source may call `sender.acknowledge(ack)` after the signed claimant ACK
+has been explicitly returned, or use the signed return-envelope handler below.
+Both share `acknowledge_source_receipt_delivery`
 with the offline CLI: signature, recipient, envelope lifetime, exact local
 receipt and preparation audit are verified before mutation. Source audit
 failure after mutation still raises; the exact ACK retry repairs that audit.
 
-This stage has a two-workspace, Host-governed loopback integration test. It
-does not provide an automatic ACK-return router, a production network transport
-provider, REST/UI send controls, or two-physical-computer acceptance. Existing
-wire versions and conformance fixtures are unchanged. No real funds, work
-acceptance or settlement is enabled.
+### Explicit Signed ACK Return
+
+`nth_dao.delivery.acknowledgement.sign_ack_envelope` packs an already signed
+claimant ACK into the existing `delivery.ack` envelope. The outer signer must
+be the inner ACK receiver. Packing is pure: it neither stores nor discloses
+data and grants no provider or route authority. The caller supplies the
+independently pinned source DID and retains the exact return envelope in its
+own durable outbox before an explicitly authorized provider submission. Retry
+those retained bytes, not a fresh nonce or an automatically renewed envelope.
+
+`ack_from_envelope` is now transport-independent, with its former federation
+import retained. It verifies the complete outer and inner signatures and
+their author binding. Without `now_ms` it performs no freshness check; this
+mode is for cryptographic authorization of retained intake, not fresh network
+admission. Fresh intake must be checked against the local clock by an Inbox.
+
+`nth_dao.market.source_receipt_ack.SourceReceiptAckReceiver` owns a source-DID
+scoped business Inbox under `.nth/source_receipt_ack_inbox/<did-hash>`. Before
+changing the original source receipt outbox it rechecks the signed return
+envelope, direct source routing, original recipient, exact wire digest,
+original receipt time bounds, locally retained source response and matching
+source-authored preparation audit. A valid generic ACK alone cannot close a
+source receipt. Rejected source deliveries are not reopened. This Inbox is
+bounded at 256 active-cache identities and 4 MiB of pending bytes. Completed
+evidence uses the same non-evicting disk archive as staging, so completed history
+does not permanently exhaust intake capacity. Source outbox instances are reused
+with exact-directory, independent-file and terminal-retention checks; changes on
+disk still trigger refolding under the cross-process lock.
+
+`receive_source_receipt_acks(runtime=..., receiver=..., receive_id=...)` requires
+that source principal and the receiver's exact business Inbox. It uses the
+same bounded, DID-scoped PluginHost staging area, dispatching only
+verified `delivery.ack` whose inner `message_id` belongs to the local source
+receipt outbox. Valid ACKs for other domains remain staged without a spurious
+source-receipt error. Domain
+results are separate from provider lease outcomes and `transport_error`.
+Each result's `message_id` identifies the return envelope; its
+`delivery.message_id` identifies the original source receipt. A failure with
+an empty `message_id` denotes inability to enumerate the local ACK worklist,
+not success or rejection of an individual remote message.
+`staging_failures` separately reports per-item processed-marker I/O or integrity
+failures after a successful business transition. A message is never both a
+domain success and a domain failure. Marker retry preserves and rechecks the
+original result rather than fabricating a new business effect. Concurrent
+completion recovers exact pending or archived bytes and the first intake clock;
+current source evidence and signatures are still reverified.
+
+Accepted return bytes and their original local intake time are retained before
+source processing. If a source audit write fails after outbox delivery was
+persisted, the operation still fails and remains pending. An empty receive or
+`receiver.resume_pending()` revalidates this local evidence and repairs the
+audit after restart, including after the return envelope expires. New expired
+input remains rejected. Provider revocation blocks new provider invocation;
+it does not revoke independently authorized recovery of already local data.
+Known Inbox or outbox corruption is non-retryable integrity failure, not a
+temporary provider outage. Permanently invalid business input remains staged
+and requires explicit operator maintenance; signature checks are not an
+anti-abuse policy.
+
+No signed ACK-of-ACK is created. Provider send acceptance or lease
+acknowledgement does not prove the source applied the return ACK. The
+claimant's return outbox therefore remains queued after provider acceptance;
+it must not be marked delivered merely to clear a retry list. A future
+confirmation/lifecycle policy must be explicit and cannot create an endless
+ACK loop. The original source receipt outbox alone reaches `delivered` through
+this business handler, with its source-signed delivery audit. No work acceptance
+or settlement follows.
+
+Tests exercise both directions through an enabled, route-authorized loopback
+provider across two workspaces, including exact-byte restart recovery, audit
+failure and lost provider lease acknowledgement. This is not an automatic
+daemon/router, production network provider, REST/UI integration, or
+two-physical-computer acceptance. Wire versions are unchanged. The additive
+public `ack-return-envelope-v1.json` fixture covers transport binding only;
+Python domain tests separately check local source authorization. No real
+funds execution is enabled.
+Independent Node negative checks re-sign the outer packet around malformed
+inner ACKs. Every case must fail at its intended signature or binding gate;
+a mutation test removes the inner verifier and requires the checker to fail.

@@ -1244,6 +1244,53 @@ receiver ACK with Node crypto. The Node checker needs JSON reviver source
 support and is a fixture checker, not a production verifier or a claim that
 every protocol layer has passed third-party interoperability certification.
 
+#### Directed ACK Return Carrier
+
+Return transport reuses the existing `delivery.ack` kind with payload exactly
+`{"ack": <signed DeliveryAck>}`. The outer author MUST equal the inner
+`receiver_did`. Both signatures MUST verify. Source receipt return handling
+requires the original source DID as direct recipient, no DAO routing, and
+`routing = {"hop_limit": 0, "hop_count": 0}`. An outer signature alone is not
+authorization to mutate the original source outbox: the recipient, digest,
+receipt lifetime and locally retained source preparation MUST still verify.
+
+Fresh return intake uses its own envelope TTL and local clock. Recovery MUST
+use the first-intake time retained with the exact signed return bytes, not a
+timestamp supplied by a remote caller. Source audit failure after delivery
+persistence MUST remain visible and retryable from durable intake. Processed
+markers follow audit success. Rejected original deliveries MUST NOT reopen.
+
+ACK dispatch MUST select the business owner from the verified inner original
+message ID, not from the generic `delivery.ack` kind alone. Valid foreign-domain
+ACKs remain available to their handlers. Completed business results and failed
+staging markers MUST be reported separately, never as contradictory domain
+outcomes for the same return message. Recovery after concurrent completion MUST
+reverify retained bytes, first-intake time and current source evidence.
+
+The reference staging/source-ACK Inboxes bound active entries, not lifetime
+history. Completed evidence and nonce tombstones are archived before cache
+eviction. Pending entries MUST NOT be evicted. The archive-enabled local
+journal marker MUST survive compaction and prevent readers from silently
+ignoring archived replay history. Operators MUST preserve archive and journal
+together; the archive is local intake evidence, not signed business authority.
+
+No ACK-of-ACK is implied. The claimant's return send/lease outcome does not
+prove source application; it MUST NOT manufacture delivery confirmation for
+the return outbox. The source delivery audit continues to mean transport
+receipt only, not work acceptance or settlement.
+
+The additive public fixture
+`nth_dao/market/vectors/ack-return-envelope-v1.json` uses synthetic identities
+and an illustrative `example.receipt` payload. It checks both signatures,
+DID/key binding, direct return routing, original message/digest binding and
+strict intake time boundaries. It does NOT establish local source business
+authority. Python domain tests cover that gate separately. The Node checker
+above verifies this fixture too and rejects five isolated tampered cases without
+using Python signature helpers. This is independent crypto verification of
+published fixtures, not production interoperability certification.
+Inner-negative cases use valid newly signed outer packets and ephemeral
+synthetic keys. Removing the inner signature verifier MUST fail the checker.
+
 ---
 
 *This section adds source receipt delivery without changing earlier wire versions.*

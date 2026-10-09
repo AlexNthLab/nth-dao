@@ -31,7 +31,7 @@ from nth_dao.delivery.envelope import (
     validate_envelope,
 )
 from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
-from nth_dao.delivery.outbox import DurableOutbox, OutboxRecord
+from nth_dao.delivery.outbox import DeliveryOutboxCorrupt, DurableOutbox, OutboxRecord
 from nth_dao.identity import AgentIdentity
 from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
 from nth_dao.market.claimant_receipt_store import ClaimantSourceReceiptStore
@@ -86,7 +86,7 @@ def source_receipt_delivery_failure(message_id: str, exc: Exception) -> SourceRe
         message_id=message_id, error_code=type(exc).__name__, reason=str(exc)[:512],
         retryable=(
             isinstance(exc, (OSError, RuntimeError, SourceReceiptDeliveryDeferred))
-            and not isinstance(exc, DeliveryInboxCacheCorrupt)
+            and not isinstance(exc, (DeliveryInboxCacheCorrupt, DeliveryOutboxCorrupt))
         ),
     )
 
@@ -298,6 +298,17 @@ def acknowledge_source_receipt_delivery(
     If audit fails after delivery persistence, raise and allow the same ACK
     to repair the audit. Neither success nor a transport ACK accepts work.
     """
+    return _acknowledge_source_receipt_delivery(
+        ack, workspace=workspace, identity=identity, spine=spine, clock=clock,
+    )
+
+
+def _acknowledge_source_receipt_delivery(
+    ack: DeliveryAck, *, workspace: Path, identity: AgentIdentity,
+    spine: SignedEventLog, clock: Callable[[], int] | None = None,
+    outbox: DurableOutbox | None = None,
+) -> OutboxRecord:
+    """Shared gate; reuse storage only after exact scope/policy validation."""
     if not isinstance(ack, DeliveryAck):
         raise SourceReceiptDeliveryRejected("ack must be a DeliveryAck")
     raw = canonical_json(ack.to_dict())
@@ -308,7 +319,13 @@ def acknowledge_source_receipt_delivery(
     valid, reason = validate_ack(snapshot, now_ms=now)
     if not valid:
         raise SourceReceiptDeliveryRejected(reason)
-    outbox = open_source_receipt_delivery_outbox(workspace, clock=clock)
+    if outbox is None:
+        outbox = open_source_receipt_delivery_outbox(workspace, clock=clock)
+    if not isinstance(outbox, DurableOutbox):
+        raise TypeError("source receipt outbox must be a DurableOutbox")
+    outbox.require_retained_independent_storage(
+        _checked_path(workspace, Path(".nth/source_receipt_delivery_outbox")),
+    )
     queued = outbox.get(snapshot.message_id)
     if queued is None:
         raise SourceReceiptDeliveryRejected("ack for unknown source receipt delivery")

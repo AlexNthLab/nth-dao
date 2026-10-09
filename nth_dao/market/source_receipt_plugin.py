@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 
-from nth_dao.delivery.acknowledgement import DeliveryAck
+from nth_dao.delivery.acknowledgement import ACK_KIND, DeliveryAck
 from nth_dao.delivery.envelope import TransportEnvelope
 from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
 from nth_dao.delivery.outbox import DurableOutbox, OutboxRecord
@@ -24,13 +24,18 @@ from nth_dao.delivery.plugin_runtime import (
 )
 from nth_dao.delivery.transports.base import SendResult
 from nth_dao.identity import AgentIdentity
+from nth_dao.market.source_receipt_ack import (
+    SourceReceiptAckReceiver,
+    SourceReceiptAckResumeResult,
+)
 from nth_dao.market.source_receipt_delivery import (
     SOURCE_RECEIPT_DELIVERY_KIND,
+    SourceReceiptDeliveryFailure,
     SourceReceiptDeliveryReceiver,
     SourceReceiptDeliveryRejected,
     SourceReceiptResumeResult,
+    _acknowledge_source_receipt_delivery,
     _checked_path,
-    acknowledge_source_receipt_delivery,
     open_source_receipt_delivery_outbox,
     require_prepared_source_receipt_delivery,
     source_receipt_delivery_failure,
@@ -42,14 +47,16 @@ MAX_PLUGIN_INGRESS_ENTRIES = 256
 MAX_PLUGIN_INGRESS_PENDING_BYTES = 16 * 1024 * 1024
 
 
-def open_source_receipt_plugin_inbox(receiver: SourceReceiptDeliveryReceiver) -> DeliveryInbox:
+def open_source_receipt_plugin_inbox(
+    receiver: SourceReceiptDeliveryReceiver | SourceReceiptAckReceiver,
+) -> DeliveryInbox:
     """DID-scoped bounded staging, not claim authorization or work acceptance.
 
     Other claims and kinds remain durable for their own explicit handlers.
     Signature, direct recipient and intake TTL are still checked before ACK.
     """
-    if not isinstance(receiver, SourceReceiptDeliveryReceiver):
-        raise TypeError("receiver must be a SourceReceiptDeliveryReceiver")
+    if not isinstance(receiver, (SourceReceiptDeliveryReceiver, SourceReceiptAckReceiver)):
+        raise TypeError("receiver must be a source receipt or source ACK receiver")
     did = receiver.identity.as_did()
     relative = Path(".nth/plugin_delivery_ingress") / sha256(did.encode("utf-8")).hexdigest()
     for name in ("inbox.cache.jsonl", "inbox.rejections.jsonl", "inbox.lock"):
@@ -61,7 +68,7 @@ def open_source_receipt_plugin_inbox(receiver: SourceReceiptDeliveryReceiver) ->
     return DeliveryInbox(
         _checked_path(receiver.workspace, relative), authorize=authorize,
         clock=receiver.current_time_ms, max_replay_entries=MAX_PLUGIN_INGRESS_ENTRIES,
-        reject_links=True, evict_processed=False,
+        reject_links=True, archive_processed=True,
         max_pending_bytes=MAX_PLUGIN_INGRESS_PENDING_BYTES,
     )
 
@@ -85,6 +92,68 @@ class SourceReceiptPluginReceiveResult:
     ack_exports: SourceReceiptResumeResult = field(
         default_factory=lambda: SourceReceiptResumeResult(results=(), failures=()),
     )
+    staging_failures: tuple[SourceReceiptDeliveryFailure, ...] = ()
+
+    def __post_init__(self) -> None:
+        completed = {item.ack.message_id for item in self.domain.results}
+        if completed.intersection(item.message_id for item in self.domain.failures):
+            raise ValueError("a source receipt cannot be both completed and domain-failed")
+
+
+@dataclass(frozen=True)
+class SourceReceiptAckPluginReceiveResult:
+    """Source transitions are separate from the return-provider lease ACK."""
+
+    transport: PluginReceiveResult | None
+    domain: SourceReceiptAckResumeResult
+    transport_error: SourceReceiptTransportFailure | None = None
+    staging_failures: tuple[SourceReceiptDeliveryFailure, ...] = ()
+
+    def __post_init__(self) -> None:
+        completed = {item.message_id for item in self.domain.results}
+        if completed.intersection(item.message_id for item in self.domain.failures):
+            raise ValueError("a source ACK cannot be both completed and domain-failed")
+
+
+def _lease_into_ingress(
+    runtime: PluginDeliveryRuntime, receiver: SourceReceiptDeliveryReceiver | SourceReceiptAckReceiver,
+    *, receive_id: str, max_items: int, lease_ms: int,
+) -> tuple[DeliveryInbox | None, PluginReceiveResult | None, SourceReceiptTransportFailure | None]:
+    ingress = None
+    transport = None
+    error = None
+    try:
+        ingress = open_source_receipt_plugin_inbox(receiver)
+        transport = runtime.with_inbox(ingress).receive(
+            receive_id=receive_id, max_items=max_items, lease_ms=lease_ms,
+        )
+    except PluginDeliveryRuntimeError as exc:
+        transport = exc.partial_result
+        error = SourceReceiptTransportFailure(
+            error_code=exc.error_code, reason=str(exc)[:512], retryable=exc.retryable,
+        )
+    except OSError as exc:
+        error = SourceReceiptTransportFailure(error_code="ingress-storage-unavailable", reason=str(exc)[:512])
+    except (DeliveryInboxCacheCorrupt, SourceReceiptDeliveryRejected) as exc:
+        error = SourceReceiptTransportFailure(
+            error_code="ingress-integrity-failed", reason=str(exc)[:512], retryable=False,
+        )
+    return ingress, transport, error
+
+
+def _pending_ingress(
+    ingress: DeliveryInbox | None, error: SourceReceiptTransportFailure | None,
+) -> tuple[list[TransportEnvelope], SourceReceiptTransportFailure | None]:
+    if ingress is None:
+        return [], error
+    try:
+        return ingress.pending(max_items=MAX_PLUGIN_INGRESS_ENTRIES), error
+    except OSError as exc:
+        return [], SourceReceiptTransportFailure(error_code="ingress-storage-unavailable", reason=str(exc)[:512])
+    except DeliveryInboxCacheCorrupt as exc:
+        return [], SourceReceiptTransportFailure(
+            error_code="ingress-integrity-failed", reason=str(exc)[:512], retryable=False,
+        )
 
 
 class SourceReceiptPluginSender:
@@ -126,9 +195,9 @@ class SourceReceiptPluginSender:
 
     def acknowledge(self, ack: DeliveryAck) -> OutboxRecord:
         """Apply a separately returned signed ACK using the CLI's domain gate."""
-        return acknowledge_source_receipt_delivery(
+        return _acknowledge_source_receipt_delivery(
             ack, workspace=self._workspace, identity=self._identity,
-            spine=self._spine, clock=self._clock,
+            spine=self._spine, clock=self._clock, outbox=self.outbox,
         )
 
 
@@ -150,42 +219,14 @@ def receive_source_receipt_deliveries(
         raise SourceReceiptDeliveryRejected("plugin runtime must use the receiver's exact durable inbox")
     if runtime.principal != receiver.identity.as_did():
         raise SourceReceiptDeliveryRejected("claimant transport principal differs from the selected identity")
-    ingress = None
-    transport = None
-    transport_error = None
-    try:
-        ingress = open_source_receipt_plugin_inbox(receiver)
-        transport = runtime.with_inbox(ingress).receive(
-            receive_id=receive_id, max_items=max_items, lease_ms=lease_ms,
-        )
-    except PluginDeliveryRuntimeError as exc:
-        transport = exc.partial_result
-        transport_error = SourceReceiptTransportFailure(
-            error_code=exc.error_code, reason=str(exc)[:512], retryable=exc.retryable,
-        )
-    except OSError as exc:
-        transport_error = SourceReceiptTransportFailure(
-            error_code="ingress-storage-unavailable", reason=str(exc)[:512],
-        )
-    except (DeliveryInboxCacheCorrupt, SourceReceiptDeliveryRejected) as exc:
-        transport_error = SourceReceiptTransportFailure(
-            error_code="ingress-integrity-failed", reason=str(exc)[:512], retryable=False,
-        )
+    ingress, transport, transport_error = _lease_into_ingress(
+        runtime, receiver, receive_id=receive_id, max_items=max_items, lease_ms=lease_ms,
+    )
     resumed = receiver.resume_pending()
     results = {item.ack.message_id: item for item in resumed.results}
     failures = {item.message_id: item for item in resumed.failures}
-    pending = ()
-    if ingress is not None:
-        try:
-            pending = ingress.pending(max_items=MAX_PLUGIN_INGRESS_ENTRIES)
-        except OSError as exc:
-            transport_error = SourceReceiptTransportFailure(
-                error_code="ingress-storage-unavailable", reason=str(exc)[:512],
-            )
-        except DeliveryInboxCacheCorrupt as exc:
-            transport_error = SourceReceiptTransportFailure(
-                error_code="ingress-integrity-failed", reason=str(exc)[:512], retryable=False,
-            )
+    staging_failures = []
+    pending, transport_error = _pending_ingress(ingress, transport_error)
     for envelope in pending:
         if (
             envelope.kind != SOURCE_RECEIPT_DELIVERY_KIND
@@ -193,13 +234,16 @@ def receive_source_receipt_deliveries(
             or envelope.message_id in failures
         ):
             continue
+        if envelope.message_id not in results:
+            try:
+                results[envelope.message_id] = receiver.receive_retained(ingress, envelope.message_id)
+            except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as exc:
+                failures[envelope.message_id] = source_receipt_delivery_failure(envelope.message_id, exc)
+                continue
         try:
-            result = receiver.receive_retained(ingress, envelope.message_id)
             ingress.mark_processed(envelope.message_id)
-            results[envelope.message_id] = result
-            failures.pop(envelope.message_id, None)
         except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as exc:
-            failures[envelope.message_id] = source_receipt_delivery_failure(envelope.message_id, exc)
+            staging_failures.append(source_receipt_delivery_failure(envelope.message_id, exc))
     # A durable result may predate a redelivered lease. Recover the exact ACK,
     # rather than reporting a duplicate as though it produced no result.
     for decision in transport.decisions if transport is not None else ():
@@ -217,13 +261,60 @@ def receive_source_receipt_deliveries(
         domain=SourceReceiptResumeResult(results=tuple(results.values()), failures=tuple(failures.values())),
         transport_error=transport_error,
         ack_exports=receiver.export_retained_acks(),
+        staging_failures=tuple(staging_failures),
+    )
+
+
+def receive_source_receipt_acks(
+    *, runtime: PluginDeliveryRuntime, receiver: SourceReceiptAckReceiver,
+    receive_id: str, max_items: int = 16, lease_ms: int = 30_000,
+) -> SourceReceiptAckPluginReceiveResult:
+    """Apply returned ACKs through the Host and audited source domain gate.
+
+    Only verified delivery.ack belonging to the source receipt outbox is
+    dispatched here. Other domains stay staged. No ACK-of-ACK is produced.
+    """
+    if not isinstance(runtime, PluginDeliveryRuntime) or not isinstance(receiver, SourceReceiptAckReceiver):
+        raise TypeError("runtime and receiver must be source ACK runtime components")
+    if runtime.inbox is not receiver.inbox or runtime.principal != receiver.identity.as_did():
+        raise SourceReceiptDeliveryRejected("source ACK runtime principal or exact inbox differs")
+    ingress, transport, transport_error = _lease_into_ingress(
+        runtime, receiver, receive_id=receive_id, max_items=max_items, lease_ms=lease_ms,
+    )
+    resumed = receiver.resume_pending()
+    results = {item.message_id: item for item in resumed.results}
+    failures = {item.message_id: item for item in resumed.failures}
+    staging_failures = []
+    pending, transport_error = _pending_ingress(ingress, transport_error)
+    for envelope in pending:
+        if envelope.kind != ACK_KIND or envelope.message_id in failures:
+            continue
+        if envelope.message_id not in results:
+            try:
+                if not receiver.owns_ack(envelope):
+                    continue
+                results[envelope.message_id] = receiver.receive_retained(ingress, envelope.message_id)
+            except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as exc:
+                failures[envelope.message_id] = source_receipt_delivery_failure(envelope.message_id, exc)
+                continue
+        try:
+            ingress.mark_processed(envelope.message_id)
+        except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as exc:
+            staging_failures.append(source_receipt_delivery_failure(envelope.message_id, exc))
+    return SourceReceiptAckPluginReceiveResult(
+        transport=transport,
+        domain=SourceReceiptAckResumeResult(results=tuple(results.values()), failures=tuple(failures.values())),
+        transport_error=transport_error,
+        staging_failures=tuple(staging_failures),
     )
 
 
 __all__ = [
+    "SourceReceiptAckPluginReceiveResult",
     "SourceReceiptPluginReceiveResult",
     "SourceReceiptPluginSender",
     "SourceReceiptTransportFailure",
     "open_source_receipt_plugin_inbox",
+    "receive_source_receipt_acks",
     "receive_source_receipt_deliveries",
 ]

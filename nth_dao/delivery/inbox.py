@@ -19,6 +19,9 @@ the integration design doc §5.1 / §10:
 Every rejection is recorded with an explicit reason. The replay cache is
 bounded. Only processed replay entries may be evicted; an inbox full of
 unprocessed envelopes rejects new intake instead of silently losing work.
+With ``archive_processed`` enabled, completed evidence and nonce tombstones
+remain disk-indexed after cache eviction. That store grows with history and
+must be backed up together with the journal; it is not an anti-abuse policy.
 """
 
 from __future__ import annotations
@@ -38,6 +41,10 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
 
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery._journal import journal_fingerprint, recover_torn_tail
+from nth_dao.delivery._processed_archive import (
+    ProcessedArchive,
+    ProcessedArchiveCorrupt,
+)
 from nth_dao.delivery.envelope import (
     TransportEnvelope,
     TransportEnvelopeRejected,
@@ -59,7 +66,7 @@ MAX_TRANSPORT_QUARANTINE_ENTRIES = 256
 MAX_TRANSPORT_QUARANTINE_BYTES = 16 * 1024 * 1024
 MAX_TRANSPORT_QUARANTINE_RECORD_BYTES = 2 * 1024 * 1024
 _MESSAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_CACHE_EVENTS = ("accepted", "processed", "evicted")
+_CACHE_EVENTS = ("accepted", "processed", "evicted", "archive_enabled")
 _ACCEPTED_REQUIRED_FIELDS = frozenset(
     {"event", "message_id", "sender_did", "nonce"}
 )
@@ -111,6 +118,7 @@ class DeliveryInbox:
         reject_links: bool = False,
         evict_processed: bool = True,
         max_pending_bytes: int | None = None,
+        archive_processed: bool = False,
     ) -> None:
         if (
             isinstance(max_replay_entries, bool)
@@ -131,6 +139,9 @@ class DeliveryInbox:
         if type(evict_processed) is not bool:
             raise ValueError("evict_processed must be a boolean")
         self._evict_processed = evict_processed
+        if type(archive_processed) is not bool or (archive_processed and not evict_processed):
+            raise ValueError("archive_processed requires processed-entry eviction")
+        self._archive = ProcessedArchive(self._dir) if archive_processed else None
         if max_pending_bytes is not None and (
             isinstance(max_pending_bytes, bool) or not isinstance(max_pending_bytes, int) or max_pending_bytes < 1
         ):
@@ -149,8 +160,22 @@ class DeliveryInbox:
         self._pending_json: "OrderedDict[str, str]" = OrderedDict()
         self._cache_stat: Optional[Tuple[int, ...]] = None
         self._cache_seen = False
+        self._archive_enabled = False
+        self._archive_catalogued = False
+        self._archive_required = False
         with self._process_lock():
             self._load_cache_locked()
+            if self._archive is not None and not self._archive_enabled:
+                self._append_cache_locked({"event": "archive_enabled"})
+                self._archive_enabled = True
+            if self._archive is not None and not self._archive_catalogued:
+                try:
+                    self._archive.initialize_catalog()
+                except ProcessedArchiveCorrupt as exc:
+                    raise DeliveryInboxCacheCorrupt(str(exc)) from exc
+                self._archive_catalogued = True
+                self._compact_cache_journal_locked(log_level=logging.DEBUG)
+            self._archive_required = self._archive_enabled
 
     def _process_lock(self) -> InterProcessLock:
         if self._reject_links:
@@ -220,7 +245,7 @@ class DeliveryInbox:
         with self._thread_lock:
             with self._process_lock():
                 self._refold_if_changed_locked()
-                if envelope.message_id in self._by_message_id:
+                if envelope.message_id in self._by_message_id or self._archived(envelope.message_id) is not None:
                     return InboxDecision(
                         accepted=False,
                         reason="duplicate",
@@ -229,7 +254,9 @@ class DeliveryInbox:
                         duplicate=True,
                     )
                 nonce_key = (envelope.sender_did, envelope.nonce)
-                if nonce_key in self._nonces:
+                if nonce_key in self._nonces or (
+                    self._archive is not None and self._archived_nonce(*nonce_key) is not None
+                ):
                     replayed = True
                 else:
                     try:
@@ -265,7 +292,7 @@ class DeliveryInbox:
         with self._thread_lock:
             with self._process_lock():
                 self._refold_if_changed_locked()
-                return message_id in self._by_message_id
+                return message_id in self._by_message_id or self._archived(message_id) is not None
 
     def accepted_at(self, message_id: str) -> Optional[int]:
         """Return the durable first-acceptance time for one message.
@@ -283,6 +310,9 @@ class DeliveryInbox:
             with self._process_lock():
                 self._refold_if_changed_locked()
                 accepted_at_ms = self._accepted_at_ms.get(message_id, 0)
+                if not accepted_at_ms:
+                    archived = self._archived(message_id)
+                    accepted_at_ms = archived["at_ms"] if archived else 0
                 return accepted_at_ms or None
 
     def entry_count(self) -> int:
@@ -336,6 +366,62 @@ class DeliveryInbox:
             if not valid or envelope.message_id != message_id:
                 raise DeliveryInboxCacheCorrupt(f"invalid retained intake: {reason}")
             return RetainedInboxEntry(envelope=envelope, accepted_at_ms=accepted_at)
+
+    def retained_entry(self, message_id: str) -> RetainedInboxEntry | None:
+        """Reverify exact pending or archived intake, including its first clock.
+
+        Legacy processed tombstones lacking bytes cannot reconstruct a result.
+        An archived record does not authorize business effects on its own.
+        """
+        if not isinstance(message_id, str) or _MESSAGE_ID_RE.fullmatch(message_id) is None:
+            raise ValueError("message_id is not a content address")
+        with self._thread_lock, self._process_lock():
+            self._refold_if_changed_locked()
+            encoded = self._pending_json.get(message_id)
+            accepted_at = self._accepted_at_ms.get(message_id)
+            digest = self._envelope_digests.get(message_id)
+            if encoded is None:
+                archived = self._archived(message_id)
+                if archived is None or archived["envelope_json"] is None:
+                    return None
+                encoded, accepted_at, digest = (
+                    archived["envelope_json"], archived["at_ms"], archived["envelope_sha256"],
+                )
+            try:
+                envelope = TransportEnvelope.from_dict(json.loads(encoded))
+                valid, reason = validate_envelope(envelope, now_ms=accepted_at, require_signature=True)
+                if (not accepted_at or not valid or envelope.message_id != message_id
+                    or canonical_json(envelope.to_dict()).decode() != encoded or envelope_digest(envelope) != digest):
+                    raise ValueError(f"retained intake binding differs: {reason}")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise DeliveryInboxCacheCorrupt("invalid retained intake evidence") from exc
+            return RetainedInboxEntry(envelope=envelope, accepted_at_ms=accepted_at)
+
+    def _archived(self, message_id: str) -> dict | None:
+        try:
+            return self._archive.message(message_id) if self._archive else None
+        except ProcessedArchiveCorrupt as exc:
+            raise DeliveryInboxCacheCorrupt(str(exc)) from exc
+
+    def _archived_nonce(self, sender: str, nonce: str) -> str | None:
+        try:
+            return self._archive.nonce_message(sender, nonce) if self._archive else None
+        except ProcessedArchiveCorrupt as exc:
+            raise DeliveryInboxCacheCorrupt(str(exc)) from exc
+
+    def _archive_processed_locked(self, message_id: str) -> None:
+        if self._archive is None:
+            return
+        if message_id not in self._pending_json and self._archived(message_id) is not None:
+            return
+        sender, nonce = self._by_message_id[message_id]
+        try:
+            self._archive.store({"message_id": message_id, "sender_did": sender, "nonce": nonce,
+                                 "at_ms": self._accepted_at_ms.get(message_id, 0),
+                                 "envelope_sha256": self._envelope_digests.get(message_id),
+                                 "envelope_json": self._pending_json.get(message_id)})
+        except ProcessedArchiveCorrupt as exc:
+            raise DeliveryInboxCacheCorrupt(str(exc)) from exc
 
     def quarantine_transport_item(
         self, item: Mapping[str, Any], *, transport: str, reason: str, at_ms: int,
@@ -421,7 +507,12 @@ class DeliveryInbox:
         with self._thread_lock, self._process_lock():
             self._refold_if_changed_locked()
             accepted_at = self._accepted_at_ms.get(envelope.message_id)
-            if not accepted_at or self._envelope_digests.get(envelope.message_id) != digest:
+            retained_digest = self._envelope_digests.get(envelope.message_id)
+            if not accepted_at:
+                archived = self._archived(envelope.message_id)
+                if archived is not None:
+                    accepted_at, retained_digest = archived["at_ms"], archived["envelope_sha256"]
+            if not accepted_at or retained_digest != digest:
                 return None
             valid, _reason = validate_envelope(envelope, now_ms=accepted_at, require_signature=True)
             if not valid:
@@ -447,7 +538,10 @@ class DeliveryInbox:
             with self._process_lock():
                 self._refold_if_changed_locked()
                 if message_id not in self._by_message_id:
+                    if self._archived(message_id) is not None:
+                        return False
                     raise KeyError(message_id)
+                self._archive_processed_locked(message_id)
                 if message_id not in self._pending_json:
                     return False
                 self._append_cache_locked(
@@ -597,6 +691,7 @@ class DeliveryInbox:
                 raise DeliveryInboxFull("replay cache retains all envelopes at capacity")
             for candidate_id, candidate_key in self._by_message_id.items():
                 if candidate_id not in self._pending_json:
+                    self._archive_processed_locked(candidate_id)
                     evicted_id, evicted_key = candidate_id, candidate_key
                     break
             if evicted_id is None:
@@ -662,10 +757,13 @@ class DeliveryInbox:
         stat = self._storage_metadata(self._cache_path)
         self._cache_stat = journal_fingerprint(stat)
 
-    def _compact_cache_journal_locked(self) -> None:
+    def _compact_cache_journal_locked(self, *, log_level: int = logging.WARNING) -> None:
         """Rewrite the current cache state while holding the process lock."""
 
-        lines = []
+        marker = {"event": "archive_enabled"}
+        if self._archive_catalogued:
+            marker["catalog_version"] = 1
+        lines = [canonical_json(marker) + b"\n"] if self._archive_enabled else []
         for message_id, (sender_did, nonce) in self._by_message_id.items():
             event: Dict[str, Any] = {
                 "event": "accepted", "message_id": message_id,
@@ -683,9 +781,8 @@ class DeliveryInbox:
         atomic_write_bytes(self._cache_path, b"".join(lines), reject_links=self._reject_links)
         stat = self._storage_metadata(self._cache_path)
         self._cache_stat = journal_fingerprint(stat)
-        logger.warning(
-            "inbox cache journal exceeded %d bytes; compacted to %d live entries",
-            MAX_CACHE_JOURNAL_BYTES,
+        logger.log(
+            log_level, "inbox cache journal compacted to %d live entries",
             len(self._by_message_id),
         )
 
@@ -706,13 +803,15 @@ class DeliveryInbox:
             self._envelope_digests.clear()
             self._nonces.clear()
             self._pending_json.clear()
+            self._archive_enabled = False
+            self._archive_catalogued = False
             self._load_cache_locked()
 
     def _load_cache_locked(self) -> None:
         try:
             self._storage_metadata(self._cache_path)
         except FileNotFoundError as exc:
-            if self._cache_seen:
+            if self._cache_seen or (self._dir / "processed_archive").exists():
                 raise DeliveryInboxCacheCorrupt("previously retained inbox journal is missing") from exc
             self._cache_stat = None
             return
@@ -720,6 +819,16 @@ class DeliveryInbox:
         with self._open_storage(self._cache_path, "rb") as handle:
             raw = handle.read()
         self._fold_cache_lines(raw)
+        if (
+            self._archive is not None and not self._archive_enabled
+            and (self._archive_required or self._archive.directory.exists())
+        ):
+            raise DeliveryInboxCacheCorrupt("completed archive marker is missing")
+        if self._archive_catalogued:
+            try:
+                self._archive.require_catalog()
+            except ProcessedArchiveCorrupt as exc:
+                raise DeliveryInboxCacheCorrupt(str(exc)) from exc
         recover_torn_tail(self._cache_path, raw)
         if len(raw) > MAX_CACHE_JOURNAL_BYTES:
             self._compact_cache_journal_locked()
@@ -750,6 +859,15 @@ class DeliveryInbox:
             if kind not in _CACHE_EVENTS:
                 raise DeliveryInboxCacheCorrupt(f"unknown cache event: {kind!r}")
             fields = frozenset(event)
+            if kind == "archive_enabled":
+                if fields not in ({"event"}, {"event", "catalog_version"}) or self._archive is None or self._archive_enabled:
+                    raise DeliveryInboxCacheCorrupt("completed archive must remain enabled without duplicate markers")
+                if "catalog_version" in event:
+                    if type(event["catalog_version"]) is not int or event["catalog_version"] != 1:
+                        raise DeliveryInboxCacheCorrupt("completed archive catalog version differs")
+                    self._archive_catalogued = True
+                self._archive_enabled = True
+                continue
             if kind == "accepted":
                 if not _ACCEPTED_REQUIRED_FIELDS <= fields or not fields <= (
                     _ACCEPTED_REQUIRED_FIELDS | _ACCEPTED_OPTIONAL_FIELDS

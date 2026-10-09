@@ -159,8 +159,10 @@ The claimant runtime must use the domain receiver's exact Inbox and its locally
 authorized DID principal. The bridge derives a bounded DID-scoped staging
 Inbox before dispatching to the selected claim. Other claims and unhandled
 kinds remain durable instead of being dropped by a single-claim callback.
-Both staging and receipt Inboxes explicitly set `evict_processed=False`;
-the generic Inbox retains its backward-compatible eviction default.
+Staging and source ACK intake enable the completed archive, while the
+claimant's per-claim receipt Inbox retains its explicit lifetime bound and
+`evict_processed=False`. The generic Inbox keeps its backward-compatible
+default unless archive mode is selected.
 Provider lease acknowledgement and domain-signed ACK results are exposed
 separately. A successful provider send or lease acknowledgement is not proof
 of remote business processing, acceptance or settlement. Returning a signed
@@ -218,6 +220,36 @@ Lookup failure creates no provider attempt; a fresh post-lookup clock enforces
 expiry before sending. Provider I/O errors finish actual reservations as
 `error`, preserve queued retry evidence, and never fabricate delivery. Only a
 verified signed ACK can establish the delivered state.
+
+### Source ACK Return
+
+`market/source_receipt_ack.py` provides a durable source-side ACK receiver;
+`receive_source_receipt_acks` in the PluginHost bridge polls an explicitly
+enabled provider and dispatches retained `delivery.ack` envelopes to it. The
+neutral `delivery/acknowledgement.py` owns both ACK packing and unwrapping;
+the federation transport's previous unwrapping import remains available.
+No wire version or automatic provider selection is added.
+
+Outer/inner signatures, direct source destination, original recipient,
+original wire digest and receipt lifetime are verified. The source's locally
+retained business receipt and preparation audit remain mandatory. The source
+ACK Inbox retains at most 256 identities and 4 MiB pending bytes without
+eviction. It rejects linked storage and unauthorized or unbound ACKs.
+
+Source processing closes only the original receipt outbox and signs a source
+delivery audit. Domain and staging processed markers follow successful audit.
+If audit persistence fails after outbox mutation, the operation fails visibly
+and its pending intake repairs the audit on retry. Recovery uses retained
+first-intake time after restart/TTL expiry; fresh expired input still rejects.
+An unavailable provider does not block authorized local recovery. Known
+Inbox/outbox corruption is a non-retryable integrity failure.
+
+There is no ACK-of-ACK. The claimant return outbox is not declared delivered
+by provider acceptance, while source processing can close the original source
+outbox. Exact return bytes stay available for retries. Return-outbox lifecycle,
+an automatic router, production network admission, UI controls and real
+two-computer testing remain separate work. This path does not accept work or
+settle funds.
 
 ## Conformance
 
@@ -560,3 +592,38 @@ The current Nostr tier is public-only. Private payload encryption, BLE, sealed
 courier transport, and cross-node claim semantics remain outside delivery v1.
 Network adapters that still expose only the low-level `Transport` ABC must be
 wrapped as governed plugin providers before they are enabled by default.
+
+
+## Completed Intake Archive
+
+The source-receipt PluginHost bridge and source ACK receiver opt into
+`DeliveryInbox(archive_processed=True)`. The bounded active cache is not a
+lifetime message quota: before processed entries can be evicted, immutable
+message evidence and hashed sender/nonce lookup pointers are persisted in a
+separate local archive. Pending envelopes are never evicted. Exact retries and
+nonce replays remain distinguishable after eviction and restart. A retained
+entry remains evidence of local intake, not permission or proof of business
+correctness; every recovered source ACK rechecks local source authority.
+
+The archive-enabled marker survives cache compaction and forbids silent
+downgrade to a reader that ignores replay history. Legacy tombstones lacking
+wire bytes cannot reconstruct a result. Archive disk usage grows with history;
+backup/restore must preserve journal and archive together. No automatic archive
+deletion or production-network admission policy is provided here.
+
+`processed_archive/catalog.sqlite3` transactionally retains each completed
+message address, sender/nonce hash and canonical record digest. Indexed lookups
+cross-check both immutable JSON files against this catalog. A missing nonce
+pointer therefore indicates corruption, not a previously unseen nonce. The
+journal marker pins `catalog_version=1`; a missing or corrupt catalog cannot be
+silently recreated. Legacy JSON-only archives are upgraded once under the inbox
+process lock, after verifying every message/pointer pair. Legacy evidence is
+preserved. The catalog is published before upgrading the marker, and committed
+before marking work processed or evicting its active slot. Interrupted pending
+writes can retry exactly. This is local durability evidence, not protection
+against an administrator rewriting all local history or restoring a complete
+older backup. Backups must include the journal, catalog and JSON evidence.
+
+Both the forward receipt and ACK bridges report completed business outcomes separately from
+`staging_failures`. A failed staging marker does not undo signed audit/outbox
+effects and must not classify the same message as domain-success and failure.

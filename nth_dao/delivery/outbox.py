@@ -226,6 +226,16 @@ class DurableOutbox:
         with self._process_lock():
             self._load()
 
+    def require_retained_independent_storage(self, directory: PathLike) -> None:
+        """Check a reused outbox's exact local scope and evidence policy."""
+        if (
+            self._dir.absolute() != Path(directory).absolute()
+            or not self._reject_links or not self._retain_terminal_records
+        ):
+            raise ValueError("outbox must retain independent evidence in the exact selected directory")
+        for path in (self._journal_path, self._lock_path):
+            check_independent_file(path, missing_ok=True)
+
     def _process_lock(self) -> InterProcessLock:
         if self._reject_links:
             return InterProcessLock(self._lock_path, reject_links=True)

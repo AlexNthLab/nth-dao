@@ -15,7 +15,7 @@ from test_market_source_receipt_delivery import _delivery, _prepare_source, _res
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import sign_ack
 from nth_dao.delivery.envelope import envelope_digest
-from nth_dao.delivery.inbox import DeliveryInbox
+from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
 from nth_dao.delivery.outbox import OUTBOX_STATE_DELIVERED, DurableOutbox
 from nth_dao.delivery.plugin_runtime import (
     PluginDeliveryRuntime,
@@ -310,15 +310,16 @@ def test_unhandled_kind_is_retained_without_business_ack(tmp_path, dao_id, hop_l
 def test_shared_ingress_full_is_retryable_not_provider_acknowledged(tmp_path, monkeypatch):
     monkeypatch.setattr("nth_dao.market.source_receipt_plugin.MAX_PLUGIN_INGRESS_ENTRIES", 1)
     source, _, first, receiver, _, _host, _, sender, runtime = _setup(tmp_path)
-    assert sender.submit(first).accepted
-    receive_source_receipt_deliveries(runtime=runtime, receiver=receiver, receive_id="fill-ingress")
+    # Pending work, not successfully archived history, consumes queue capacity.
+    assert open_source_receipt_plugin_inbox(receiver).accept(first).accepted
     second = _resign(source, first, nonce="secondaftercapacity0001")
     _prepare_source(tmp_path, source, second)
     assert sender.submit(second).accepted
     full = receive_source_receipt_deliveries(runtime=runtime, receiver=receiver, receive_id="full-ingress")
     assert full.transport.decisions[0].retryable
     assert not full.transport.transport_acknowledged
-    monkeypatch.setattr("nth_dao.market.source_receipt_plugin.MAX_PLUGIN_INGRESS_ENTRIES", 2)
+    assert full.domain.results[0].ack.message_id == first.message_id
+    # The same capacity suffices once the first message has been processed.
     retry = receive_source_receipt_deliveries(runtime=runtime, receiver=receiver, receive_id="full-ingress")
     assert retry.transport.replayed and retry.transport.transport_acknowledged
     assert retry.domain.results[0].ack.message_id == second.message_id
@@ -525,6 +526,10 @@ def test_ingress_io_failure_does_not_block_independent_domain_recovery(tmp_path,
             unavailable()
         return pending(self, **kwargs)
 
+    if failure == "write":
+        # Bootstrap has its own durable archive marker. Inject this case into
+        # message persistence, after initialization, not before provider intake.
+        open_source_receipt_plugin_inbox(receiver)
     with monkeypatch.context() as patch:
         if failure == "open":
             patch.setattr("nth_dao.market.source_receipt_plugin.open_source_receipt_plugin_inbox", unavailable)
@@ -641,6 +646,35 @@ def test_crash_before_ack_return_recovers_from_durable_export_worklist(tmp_path,
     assert exported.observation["local_observation_event_id"] == original.observation["local_observation_event_id"]
     assert sender.acknowledge(exported.ack).state == OUTBOX_STATE_DELIVERED
     assert len(restarted.export_retained_acks().results) == 1
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+@pytest.mark.parametrize("error", [OSError, DeliveryInboxCacheCorrupt])
+def test_staging_marker_failure_keeps_forward_receipt_success_separate(tmp_path, monkeypatch, resumed, error):
+    _, _, envelope, receiver, _, _host, _binding, _sender, runtime = _setup(tmp_path)
+    ingress = open_source_receipt_plugin_inbox(receiver)
+    assert ingress.accept(envelope).accepted
+    if resumed:
+        assert receiver.inbox.accept(envelope).accepted
+    mark_processed = DeliveryInbox.mark_processed
+    def fail_staging(self, message_id):
+        if self._dir == ingress._dir:
+            raise error("injected forward staging marker failure")
+        return mark_processed(self, message_id)
+    with monkeypatch.context() as patch:
+        patch.setattr(DeliveryInbox, "mark_processed", fail_staging)
+        result = receive_source_receipt_deliveries(runtime=runtime, receiver=receiver, receive_id="marker-failure")
+    assert len(result.domain.results) == 1 and result.domain.failures == ()
+    assert result.domain.results[0].ack.message_id == envelope.message_id
+    assert len(result.staging_failures) == 1
+    assert result.staging_failures[0].message_id == envelope.message_id
+    assert result.staging_failures[0].retryable is (error is OSError)
+    assert len(result.ack_exports.results) == 1 and receiver.inbox.pending() == []
+    assert len(ingress.pending()) == 1
+    retry = receive_source_receipt_deliveries(runtime=runtime, receiver=receiver, receive_id="marker-repair")
+    assert retry.domain.failures == retry.staging_failures == ()
+    assert retry.domain.results[0].ack.to_dict() == result.domain.results[0].ack.to_dict()
+    assert ingress.pending() == []
 
 
 def test_ack_export_survives_provider_and_all_node_clocks_expiring(tmp_path, monkeypatch):

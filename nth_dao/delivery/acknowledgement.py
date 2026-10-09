@@ -21,6 +21,7 @@ rejected.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import asdict, dataclass
@@ -28,7 +29,14 @@ from typing import Any, Dict, Optional
 
 from nth_dao.b64u import b64u_decode, b64u_encode
 from nth_dao.canonical_json import canonical_json
-from nth_dao.delivery.envelope import MAX_CLOCK_SKEW_MS, MAX_SAFE_INTEGER
+from nth_dao.delivery.envelope import (
+    MAX_CLOCK_SKEW_MS,
+    MAX_ENVELOPE_BYTES,
+    MAX_SAFE_INTEGER,
+    TransportEnvelope,
+    sign_envelope,
+    validate_envelope,
+)
 from nth_dao.did_key import (
     DIDKeyError,
     decode_ed25519_did_key,
@@ -220,6 +228,64 @@ def ack_digest(ack: DeliveryAck) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(ack.to_dict())).hexdigest()
 
 
+def ack_from_envelope(envelope: TransportEnvelope, *, now_ms: int | None = None) -> DeliveryAck:
+    """Verify both signatures and bind the outer author to the ACK receiver.
+
+    This grants no authority to acknowledge a local outbox. The domain still
+    checks the original recipient, wire digest, lifetime and local evidence.
+    For retained intake, now_ms must come from its durable acceptance record.
+    """
+    if not isinstance(envelope, TransportEnvelope):
+        raise DeliveryAckRejected("ACK envelope must be a TransportEnvelope")
+    try:
+        raw = canonical_json(envelope.to_dict())
+        if len(raw) > MAX_ENVELOPE_BYTES:
+            raise ValueError("ACK envelope exceeds the wire byte limit")
+        envelope = TransportEnvelope.from_dict(json.loads(raw))
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise DeliveryAckRejected(f"invalid ACK envelope: {exc}") from exc
+    valid, reason = validate_envelope(envelope, now_ms=now_ms, require_signature=True)
+    if not valid:
+        raise DeliveryAckRejected(f"invalid ACK envelope: {reason}")
+    if envelope.kind != ACK_KIND:
+        raise DeliveryAckRejected("envelope is not a delivery.ack")
+    if set(envelope.payload) != {"ack"}:
+        raise DeliveryAckRejected("delivery.ack payload must hold exactly one 'ack' object")
+    ack = DeliveryAck.from_dict(envelope.payload["ack"])
+    if ack.receiver_did != envelope.sender_did:
+        raise DeliveryAckRejected("ack receiver does not match the envelope author")
+    valid, reason = validate_ack(ack, now_ms=now_ms, require_signature=True)
+    if not valid:
+        raise DeliveryAckRejected(f"invalid ACK signature: {reason}")
+    return ack
+
+
+def sign_ack_envelope(
+    identity: AgentIdentity, ack: DeliveryAck, *, recipient: str,
+    created_at_ms: int, expires_at_ms: int, nonce: str | None = None,
+) -> TransportEnvelope:
+    """Pure packing; caller retains exact bytes before governed disclosure.
+
+    No provider selection, route authority, storage, audit, or ACK renewal is
+    implied. Retry the retained envelope rather than generating a new nonce.
+    """
+    if not isinstance(ack, DeliveryAck):
+        raise DeliveryAckRejected("ack must be a DeliveryAck")
+    raw = canonical_json(ack.to_dict())
+    if len(raw) > MAX_ACK_BYTES:
+        raise DeliveryAckRejected("ack exceeds the wire byte limit")
+    snapshot = DeliveryAck.from_dict(json.loads(raw))
+    valid, reason = validate_ack(snapshot, now_ms=created_at_ms, require_signature=True)
+    if not valid:
+        raise DeliveryAckRejected(reason)
+    if not isinstance(identity, AgentIdentity) or snapshot.receiver_did != identity.as_did():
+        raise DeliveryAckRejected("ACK signer differs from the envelope signer")
+    return sign_envelope(
+        identity, kind=ACK_KIND, recipient=recipient, payload={"ack": snapshot.to_dict()},
+        created_at_ms=created_at_ms, expires_at_ms=expires_at_ms, nonce=nonce,
+    )
+
+
 __all__ = [
     "ACK_KIND",
     "ACK_PROTOCOL",
@@ -229,6 +295,8 @@ __all__ = [
     "DeliveryAck",
     "DeliveryAckRejected",
     "ack_digest",
+    "ack_from_envelope",
     "sign_ack",
+    "sign_ack_envelope",
     "validate_ack",
 ]

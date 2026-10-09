@@ -19,7 +19,9 @@ Boundary rules (never violated by this layer):
 from nth_dao.delivery.acknowledgement import (
     DeliveryAck,
     DeliveryAckRejected,
+    ack_from_envelope,
     sign_ack,
+    sign_ack_envelope,
     validate_ack,
 )
 from nth_dao.delivery.courier import (
@@ -119,6 +121,7 @@ __all__ = [
     "TransportEnvelope",
     "TransportEnvelopeRejected",
     "ack_envelopes_from_report",
+    "ack_from_envelope",
     "courier_envelope_digest",
     "envelope_digest",
     "forward_envelope",
@@ -127,6 +130,7 @@ __all__ = [
     "process_handover",
     "seal_courier_envelope",
     "sign_ack",
+    "sign_ack_envelope",
     "sign_envelope",
     "validate_ack",
     "validate_courier_wire",

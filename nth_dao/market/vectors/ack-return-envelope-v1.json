@@ -1,0 +1,55 @@
+{
+  "format": "nth-delivery-ack-envelope-v1",
+  "synthetic": true,
+  "verification_scope": "wire_binding_only_not_local_source_authorization",
+  "source_pubkey_hex": "35f3a53d3ab55fef1bd9db38a18fbfc1bb3cf4f5d95f29e966289c99cdc6122c",
+  "receiver_pubkey_hex": "abd98cfd32c2f06375006e660311bb231a6a9b98991ec52315f7e6e218b3f1dd",
+  "now_ms": 1791472911860,
+  "original_envelope": {
+    "message_id": "sha256:31f750258867e43c7d09f6635d32e0b7cb7cbccc6b42ccdd908ea3e247bcc4e5",
+    "kind": "example.receipt",
+    "sender_did": "did:key:z6Mki5s8mY9zxycWeQrUr7Nf4bDLt2cUCy6yTKnYQis4zbQP",
+    "recipient": "did:key:z6Mkr26AWYmtQLRm25fEsNE6By8d6ETAhFF2N74YETdFUDet",
+    "created_at_ms": 1791472911860,
+    "expires_at_ms": 1791472971860,
+    "nonce": "ffffffffffffffffffffffffffffffff",
+    "payload_hash": "sha256:a7d40b0f8bbbf8569bbc8b60742fe9f4f1311bd4e4f52efba38219bdb4987ebd",
+    "payload": {"fixture": "ack-return-binding-only"},
+    "routing": {"hop_limit": 0, "hop_count": 0},
+    "signature": "snRkibzbUuJ5fPLyNKJybcXsYcs7GSDiKoD1gFG4rNF_0Y1UGAqsTrHxRe6xc-wyT_VeotxL6-QMQ7YTcemOBA",
+    "protocol": "nth-transport-envelope",
+    "version": 1
+  },
+  "return_envelope": {
+    "message_id": "sha256:ef6d9cfc32d18917565b7174af8354035192db8787796d765404b6d435b254b9",
+    "kind": "delivery.ack",
+    "sender_did": "did:key:z6Mkr26AWYmtQLRm25fEsNE6By8d6ETAhFF2N74YETdFUDet",
+    "recipient": "did:key:z6Mki5s8mY9zxycWeQrUr7Nf4bDLt2cUCy6yTKnYQis4zbQP",
+    "created_at_ms": 1791472911860,
+    "expires_at_ms": 1791472971860,
+    "nonce": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "payload_hash": "sha256:660b5477663d4e5c165000044d74ab667da00a59a73cecc9b924b181fc472814",
+    "payload": {
+      "ack": {
+        "message_id": "sha256:31f750258867e43c7d09f6635d32e0b7cb7cbccc6b42ccdd908ea3e247bcc4e5",
+        "envelope_sha256": "sha256:1d97286795bd7267052ea5a31453aca76ce8af188b5c577ae987790fbcbab089",
+        "receiver_did": "did:key:z6Mkr26AWYmtQLRm25fEsNE6By8d6ETAhFF2N74YETdFUDet",
+        "received_at_ms": 1791472911860,
+        "signature": "vzUSFPowJLmoLmb6XWcVHjpQD-rOf6KAOEQiXQd0Qj45Q3bRSrwEdcOG1WWIA1rXC9HNHw5HFFivz-hge_iHAA",
+        "protocol": "nth-delivery-ack",
+        "version": 1,
+        "kind": "delivery.ack",
+        "status": "received"
+      }
+    },
+    "routing": {"hop_limit": 0, "hop_count": 0},
+    "signature": "69mP_rCa8g5pS0y6Pfb5vFvABOfJOxAXNU41063DjtGqwTrB06dYG54ILwQhcjLrLkf-4mDyhVYfye9RMFAhBQ",
+    "protocol": "nth-transport-envelope",
+    "version": 1
+  },
+  "time_cases": [
+    {"id": "fresh", "now_ms": 1791472911860, "expected_valid": true},
+    {"id": "expiry_is_strict", "now_ms": 1791472971860, "expected_valid": false},
+    {"id": "future_beyond_skew", "now_ms": 1791472611859, "expected_valid": false}
+  ]
+}
