@@ -15,6 +15,7 @@ import pytest
 from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import sign_ack
 from nth_dao.delivery.envelope import (
+    MAX_CLOCK_SKEW_MS,
     TransportEnvelopeRejected,
     envelope_digest,
     forward_envelope,
@@ -734,6 +735,203 @@ class TestCompactLockOrder:
 # ─────────────────── adversarial review round 4 (bug Q) ───────────────────
 
 
+class TestJournalAvailability:
+    def test_missing_existing_journal_blocks_cached_read_and_append(self, tmp_path, alice_identity):
+        directory = tmp_path / "delivery"
+        box = DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert box.stats()["total"] == 0
+        first = _envelope(alice_identity)
+        box.enqueue(first)
+        journal = directory / "outbox.journal.jsonl"
+        saved = journal.with_suffix(".test-saved")
+        journal.rename(saved)
+        with pytest.raises(DeliveryOutboxCorrupt, match="journal is missing"):
+            box.get(first.message_id)
+        with pytest.raises(DeliveryOutboxCorrupt, match="journal is missing"):
+            box.enqueue(_envelope(alice_identity, payload={"n": 2}))
+        assert not journal.exists()
+        saved.rename(journal)
+        assert box.get(first.message_id) is not None
+
+    def test_journal_stat_error_does_not_use_cached_state(self, tmp_path, alice_identity, monkeypatch):
+        from pathlib import Path
+
+        box = DurableOutbox(tmp_path / "delivery", clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity)
+        box.enqueue(envelope)
+        original = Path.stat
+
+        def denied(path, *args, **kwargs):
+            if path == box._journal_path:
+                raise PermissionError("injected journal permission failure")
+            return original(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "stat", denied)
+            with pytest.raises(PermissionError, match="journal permission"):
+                box.get(envelope.message_id)
+        assert box.get(envelope.message_id) is not None
+
+
+class TestTornTailRecovery:
+    def test_torn_tail_is_retained_before_append_and_restart(self, tmp_path, alice_identity):
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS)
+        first = _envelope(alice_identity, payload={"n": 1})
+        second = _envelope(alice_identity, payload={"n": 2})
+        outbox.enqueue(first)
+        journal = directory / "outbox.journal.jsonl"
+        tail = b'{"event":"enque'
+        with journal.open("ab") as handle:
+            handle.write(tail)
+        restarted = DurableOutbox(directory, clock=lambda: NOW_MS)
+        restarted.enqueue(second)
+        reloaded = DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.get(first.message_id) is not None
+        assert reloaded.get(second.message_id) is not None
+        assert [item.read_bytes() for item in directory.glob("*.torn.*")] == [tail]
+
+    def test_corrupt_prefix_is_not_rewritten(self, tmp_path):
+        directory = tmp_path / "delivery"
+        directory.mkdir()
+        journal = directory / "outbox.journal.jsonl"
+        original = b'{"invalid":true}\n{"torn":'
+        journal.write_bytes(original)
+        with pytest.raises(DeliveryOutboxCorrupt):
+            DurableOutbox(directory, clock=lambda: NOW_MS)
+        assert journal.read_bytes() == original
+        assert list(directory.glob("*.torn.*")) == []
+
+
+class TestAckSnapshot:
+    def test_caller_mutation_while_waiting_for_lock_cannot_change_journal(
+        self, tmp_path, alice_identity, bob_identity, monkeypatch,
+    ):
+        import threading
+
+        import nth_dao.delivery.outbox as module
+
+        directory = tmp_path / "delivery"
+        box = DurableOutbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity, recipient=bob_identity.as_did())
+        box.enqueue(envelope)
+        ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                       envelope_sha256=envelope_digest(envelope), received_at_ms=NOW_MS)
+        expected = ack.to_dict()
+        validated = threading.Event()
+        original = module.validate_ack
+        results = []
+        errors = []
+
+        def capture_validation(*args, **kwargs):
+            result = original(*args, **kwargs)
+            validated.set()
+            return result
+
+        def handle():
+            try:
+                results.append(box.handle_ack(ack, allow_expired=True))
+            except Exception as exc:
+                errors.append(exc)
+
+        monkeypatch.setattr(module, "validate_ack", capture_validation)
+        with box._thread_lock:
+            worker = threading.Thread(target=handle)
+            worker.start()
+            assert validated.wait(5)
+            ack.signature = "not-a-signature"
+            ack.received_at_ms += 1
+        worker.join(5)
+        assert not worker.is_alive()
+        assert errors == []
+        assert results[0].state == OUTBOX_STATE_DELIVERED
+        event = json.loads((directory / "outbox.journal.jsonl").read_bytes().splitlines()[-1])
+        assert json.loads(event["ack_json"]) == expected
+        assert DurableOutbox(directory).get(envelope.message_id).state == OUTBOX_STATE_DELIVERED
+
+    def test_authorizer_cannot_mutate_verified_ack(self, tmp_path, alice_identity, bob_identity):
+        def authorize(ack, envelope):
+            ack.signature = "not-a-signature"
+            ack.receiver_did = alice_identity.as_did()
+            envelope.payload.clear()
+            return True, "ok"
+
+        directory = tmp_path / "delivery"
+        box = DurableOutbox(directory, clock=lambda: NOW_MS, authorize_ack=authorize)
+        envelope = _envelope(alice_identity)
+        box.enqueue(envelope)
+        ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                       envelope_sha256=envelope_digest(envelope), received_at_ms=NOW_MS)
+        assert box.handle_ack(ack).delivered_by == bob_identity.as_did()
+        assert DurableOutbox(directory).get(envelope.message_id).delivered_by == bob_identity.as_did()
+
+
+class TestLateAcknowledgement:
+    def test_expired_direct_delivery_accepts_only_explicit_timely_ack(self, tmp_path, alice_identity, bob_identity):
+        directory = tmp_path / "delivery"
+        outbox = DurableOutbox(directory, clock=lambda: NOW_MS, retain_terminal_records=True)
+        envelope = _envelope(alice_identity, recipient=bob_identity.as_did(), ttl_ms=1_000)
+        outbox.enqueue(envelope)
+        assert outbox.pending(now_ms=NOW_MS + 2_000) == []
+        assert outbox.compact() == 1
+        ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                       envelope_sha256=envelope_digest(envelope), received_at_ms=NOW_MS + 100)
+        with pytest.raises(DeliveryOutboxError, match="expired"):
+            outbox.handle_ack(ack, now_ms=NOW_MS + 2_000)
+        result = outbox.handle_ack(ack, now_ms=NOW_MS + 2_000, allow_expired=True)
+        assert result.state == OUTBOX_STATE_DELIVERED
+        assert DurableOutbox(directory).get(envelope.message_id).state == OUTBOX_STATE_DELIVERED
+        assert outbox.compact() == 1
+        assert DurableOutbox(directory).get(envelope.message_id).delivered_at_ms == NOW_MS + 100
+
+    @pytest.mark.parametrize("received_at", [NOW_MS - MAX_CLOCK_SKEW_MS - 1, NOW_MS + 1_000])
+    def test_late_ack_rejects_out_of_lifetime_receipt(self, tmp_path, alice_identity, bob_identity, received_at):
+        outbox = DurableOutbox(tmp_path / "delivery", clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity, recipient=bob_identity.as_did(), ttl_ms=1_000)
+        outbox.enqueue(envelope)
+        outbox.pending(now_ms=NOW_MS + 2_000)
+        ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                       envelope_sha256=envelope_digest(envelope), received_at_ms=received_at)
+        with pytest.raises(DeliveryOutboxError, match="outside"):
+            outbox.handle_ack(ack, now_ms=NOW_MS + 2_000, allow_expired=True)
+
+    def test_rejected_delivery_cannot_be_reopened_by_late_ack(self, outbox, alice_identity, bob_identity):
+        envelope = _envelope(alice_identity, recipient=bob_identity.as_did())
+        outbox.enqueue(envelope)
+        outbox.record_attempt(envelope.message_id, transport="file_bundle", outcome="rejected")
+        ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                       envelope_sha256=envelope_digest(envelope), received_at_ms=NOW_MS)
+        with pytest.raises(DeliveryOutboxError, match="rejected"):
+            outbox.handle_ack(ack, allow_expired=True)
+
+    @pytest.mark.parametrize("offset,accepted", [
+        (-MAX_CLOCK_SKEW_MS - 1, False), (-MAX_CLOCK_SKEW_MS, True),
+        (-60_000, True), (-1, True), (0, True), (999, True), (1_000, False),
+    ])
+    @pytest.mark.parametrize("expired", [False, True])
+    def test_ack_time_boundaries_match_envelope_intake(
+        self, tmp_path, alice_identity, bob_identity, offset, accepted, expired,
+    ):
+        from nth_dao.delivery.envelope import validate_envelope
+
+        directory = tmp_path / "delivery"
+        box = DurableOutbox(directory, clock=lambda: NOW_MS, retain_terminal_records=True)
+        envelope = _envelope(alice_identity, recipient=bob_identity.as_did(), ttl_ms=1_000)
+        box.enqueue(envelope)
+        if expired:
+            box.pending(now_ms=NOW_MS + 2_000)
+        receipt_time = NOW_MS + offset
+        ack = sign_ack(bob_identity, message_id=envelope.message_id,
+                       envelope_sha256=envelope_digest(envelope), received_at_ms=receipt_time)
+        assert validate_envelope(envelope, now_ms=receipt_time)[0] is accepted
+        if not accepted:
+            with pytest.raises(DeliveryOutboxError, match="outside"):
+                box.handle_ack(ack, now_ms=NOW_MS + 2_000, allow_expired=True)
+            return
+        assert box.handle_ack(ack, now_ms=NOW_MS + 2_000, allow_expired=True).state == OUTBOX_STATE_DELIVERED
+        assert DurableOutbox(directory).get(envelope.message_id).delivered_at_ms == receipt_time
+
+
 class TestFingerprintUnderLock:
     def test_append_fingerprint_captured_while_holding_lock(self, tmp_path, alice_identity, monkeypatch):
         """Bug Q: the journal fingerprint must be sampled while STILL holding
@@ -758,21 +956,24 @@ class TestFingerprintUnderLock:
                 return False
 
         monkeypatch.setattr(outbox_module, "InterProcessLock", RecordingLock)
-        real_fstat = outbox_module.os.fstat
+        metadata = outbox._journal_metadata
 
-        def spy_fstat(fd):
-            events.append("fstat")
-            return real_fstat(fd)
+        def spy_metadata():
+            result = metadata()
+            events.append("stat")
+            return result
 
-        monkeypatch.setattr(outbox_module.os, "fstat", spy_fstat)
+        monkeypatch.setattr(outbox, "_journal_metadata", spy_metadata)
 
         outbox.enqueue(_envelope(alice_identity))
 
-        assert events == ["lock", "fstat", "unlock"]
+        assert events == ["lock", "stat", "unlock"]
 
     def test_fingerprint_matches_disk_after_append(self, tmp_path, alice_identity):
         outbox = DurableOutbox(tmp_path / "delivery", clock=lambda: NOW_MS)
         outbox.enqueue(_envelope(alice_identity))
         journal = tmp_path / "delivery" / "outbox.journal.jsonl"
         stat = journal.stat()
-        assert outbox._journal_stat == (stat.st_mtime_ns, stat.st_size)
+        from nth_dao.delivery._journal import journal_fingerprint
+
+        assert outbox._journal_stat == journal_fingerprint(stat)

@@ -34,13 +34,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.delivery._journal import journal_fingerprint, recover_torn_tail
 from nth_dao.delivery.envelope import (
     TransportEnvelope,
     TransportEnvelopeRejected,
     envelope_digest,
     validate_envelope,
 )
-from nth_dao.util.io import InterProcessLock
+from nth_dao.util.io import InterProcessLock, atomic_write_bytes, open_independent_file
+from nth_dao.util.path_security import check_independent_file
 
 logger = logging.getLogger("nth_dao.delivery")
 
@@ -89,6 +91,7 @@ class DeliveryInbox:
         authorize: Optional[AuthorizeCallable] = None,
         clock: Optional[Callable[[], int]] = None,
         max_replay_entries: int = DEFAULT_MAX_REPLAY_ENTRIES,
+        reject_links: bool = False,
     ) -> None:
         if (
             isinstance(max_replay_entries, bool)
@@ -103,16 +106,38 @@ class DeliveryInbox:
         self._authorize = authorize
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._max_entries = max_replay_entries
+        if type(reject_links) is not bool:
+            raise ValueError("reject_links must be a boolean")
+        self._reject_links = reject_links
         self._thread_lock = threading.RLock()
+        if self._reject_links:
+            for path in (self._cache_path, self._rejection_path):
+                check_independent_file(path, missing_ok=True)
         self._dir.mkdir(parents=True, exist_ok=True)
         # message_id -> (sender_did, nonce); insertion order = eviction order
         self._by_message_id: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
         self._accepted_at_ms: Dict[str, int] = {}
         self._nonces: Dict[Tuple[str, str], str] = {}
         self._pending_json: "OrderedDict[str, str]" = OrderedDict()
-        self._cache_stat: Optional[Tuple[int, int]] = None
-        with InterProcessLock(self._lock_path):
+        self._cache_stat: Optional[Tuple[int, ...]] = None
+        self._cache_seen = False
+        with self._process_lock():
             self._load_cache_locked()
+
+    def _process_lock(self) -> InterProcessLock:
+        if self._reject_links:
+            return InterProcessLock(self._lock_path, reject_links=True)
+        return InterProcessLock(self._lock_path)
+
+    def _open_storage(self, path: Path, mode: str):
+        if self._reject_links:
+            return open_independent_file(path, mode)
+        return open(path, mode)
+
+    def _storage_metadata(self, path: Path):
+        if self._reject_links:
+            return check_independent_file(path)
+        return path.stat()
 
     # ─────────────────────── the pipeline ───────────────────────
 
@@ -162,7 +187,7 @@ class DeliveryInbox:
         replayed = False
         full = False
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed_locked()
                 if envelope.message_id in self._by_message_id:
                     return InboxDecision(
@@ -205,7 +230,7 @@ class DeliveryInbox:
 
     def seen(self, message_id: str) -> bool:
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed_locked()
                 return message_id in self._by_message_id
 
@@ -222,14 +247,14 @@ class DeliveryInbox:
         ):
             raise ValueError("message_id is not a content address")
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed_locked()
                 accepted_at_ms = self._accepted_at_ms.get(message_id, 0)
                 return accepted_at_ms or None
 
     def entry_count(self) -> int:
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed_locked()
                 return len(self._by_message_id)
 
@@ -239,7 +264,7 @@ class DeliveryInbox:
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
             raise ValueError("max_items must be a positive integer")
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed_locked()
                 pending_json = list(self._pending_json.values())[:max_items]
         envelopes: list[TransportEnvelope] = []
@@ -258,7 +283,7 @@ class DeliveryInbox:
         if not isinstance(message_id, str) or _MESSAGE_ID_RE.fullmatch(message_id) is None:
             raise ValueError("message_id is not a content address")
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed_locked()
                 if message_id not in self._by_message_id:
                     raise KeyError(message_id)
@@ -274,28 +299,16 @@ class DeliveryInbox:
     def compact_rejections(self, max_keep: int = DEFAULT_MAX_REJECTION_LOG) -> int:
         """Trim the rejection log to the most recent ``max_keep`` lines."""
 
-        import os
-        import secrets
-
         if max_keep < 1:
             raise ValueError("max_keep must be a positive integer")
-        with InterProcessLock(self._lock_path):
+        with self._process_lock():
             if not self._rejection_path.exists():
                 return 0
-            lines = self._rejection_path.read_bytes().splitlines()
+            with self._open_storage(self._rejection_path, "rb") as handle:
+                lines = handle.read().splitlines()
             kept = lines[-max_keep:]
-            tmp = self._rejection_path.with_suffix(
-                f".jsonl.{secrets.token_hex(4)}.tmp"
-            )
-            try:
-                with open(tmp, "wb") as handle:
-                    handle.writelines(line + b"\n" for line in kept)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp, self._rejection_path)
-            except OSError:
-                tmp.unlink(missing_ok=True)
-                raise
+            atomic_write_bytes(self._rejection_path, b"".join(line + b"\n" for line in kept),
+                               reject_links=self._reject_links)
             return len(kept)
 
     # ─────────────────────── internals ───────────────────────
@@ -361,8 +374,8 @@ class DeliveryInbox:
         }
         try:
             with (
-                InterProcessLock(self._lock_path),
-                open(self._rejection_path, "ab") as handle,
+                self._process_lock(),
+                self._open_storage(self._rejection_path, "ab") as handle,
             ):
                 handle.write(canonical_json(event) + b"\n")
                 handle.flush()
@@ -381,17 +394,15 @@ class DeliveryInbox:
         (round-4 bug R).
         """
 
-        import os
-        import secrets
-
         try:
-            if self._rejection_path.stat().st_size <= REJECTION_LOG_MAX_BYTES:
+            if self._storage_metadata(self._rejection_path).st_size <= REJECTION_LOG_MAX_BYTES:
                 return
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 # re-stat under the lock: another process may have trimmed
-                if self._rejection_path.stat().st_size <= REJECTION_LOG_MAX_BYTES:
+                if self._storage_metadata(self._rejection_path).st_size <= REJECTION_LOG_MAX_BYTES:
                     return
-                lines = self._rejection_path.read_bytes().splitlines()
+                with self._open_storage(self._rejection_path, "rb") as handle:
+                    lines = handle.read().splitlines()
                 budget = int(REJECTION_LOG_MAX_BYTES * 0.75)
                 kept: list = []
                 total = 0
@@ -402,19 +413,8 @@ class DeliveryInbox:
                     kept.append(line)
                     total = candidate
                 kept.reverse()
-                tmp = self._rejection_path.with_suffix(
-                    f".jsonl.{secrets.token_hex(4)}.tmp"
-                )
-                try:
-                    with open(tmp, "wb") as handle:
-                        for line in kept:
-                            handle.write(line + b"\n")
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    os.replace(tmp, self._rejection_path)
-                except OSError:
-                    tmp.unlink(missing_ok=True)
-                    raise
+                atomic_write_bytes(self._rejection_path, b"".join(line + b"\n" for line in kept),
+                                   reject_links=self._reject_links)
                 logger.warning(
                     "inbox rejection journal exceeded %d bytes; trimmed to the "
                     "newest %d entries", REJECTION_LOG_MAX_BYTES, len(kept),
@@ -467,7 +467,7 @@ class DeliveryInbox:
 
     def _compact_if_oversized_locked(self) -> None:
         try:
-            if self._cache_path.stat().st_size > MAX_CACHE_JOURNAL_BYTES:
+            if self._storage_metadata(self._cache_path).st_size > MAX_CACHE_JOURNAL_BYTES:
                 self._compact_cache_journal_locked()
         except OSError:  # pragma: no cover - stat after our own append
             pass
@@ -478,45 +478,36 @@ class DeliveryInbox:
     def _append_cache_events_locked(self, events: list[Dict[str, Any]]) -> None:
         import os
 
-        with open(self._cache_path, "ab") as handle:
+        with self._open_storage(self._cache_path, "ab") as handle:
             for event in events:
                 handle.write(canonical_json(event) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-            stat = os.fstat(handle.fileno())
-            self._cache_stat = (stat.st_mtime_ns, stat.st_size)
+            self._cache_seen = True
+        # Windows fstat/stat disagree about ctime; sample the closed pathname
+        # while the caller still owns the process lock.
+        stat = self._storage_metadata(self._cache_path)
+        self._cache_stat = journal_fingerprint(stat)
 
     def _compact_cache_journal_locked(self) -> None:
         """Rewrite the current cache state while holding the process lock."""
 
-        import os
-        import secrets
-
-        tmp = self._cache_path.with_suffix(f".jsonl.{secrets.token_hex(4)}.tmp")
-        try:
-            with open(tmp, "wb") as handle:
-                for message_id, (sender_did, nonce) in self._by_message_id.items():
-                    event: Dict[str, Any] = {
-                        "event": "accepted",
-                        "message_id": message_id,
-                        "sender_did": sender_did,
-                        "nonce": nonce,
-                    }
-                    accepted_at_ms = self._accepted_at_ms.get(message_id, 0)
-                    if accepted_at_ms:
-                        event["at_ms"] = accepted_at_ms
-                    envelope_json = self._pending_json.get(message_id)
-                    if envelope_json is not None:
-                        event["envelope_json"] = envelope_json
-                    handle.write(canonical_json(event) + b"\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self._cache_path)
-        except OSError:
-            tmp.unlink(missing_ok=True)
-            raise
-        stat = self._cache_path.stat()
-        self._cache_stat = (stat.st_mtime_ns, stat.st_size)
+        lines = []
+        for message_id, (sender_did, nonce) in self._by_message_id.items():
+            event: Dict[str, Any] = {
+                "event": "accepted", "message_id": message_id,
+                "sender_did": sender_did, "nonce": nonce,
+            }
+            accepted_at_ms = self._accepted_at_ms.get(message_id, 0)
+            if accepted_at_ms:
+                event["at_ms"] = accepted_at_ms
+            envelope_json = self._pending_json.get(message_id)
+            if envelope_json is not None:
+                event["envelope_json"] = envelope_json
+            lines.append(canonical_json(event) + b"\n")
+        atomic_write_bytes(self._cache_path, b"".join(lines), reject_links=self._reject_links)
+        stat = self._storage_metadata(self._cache_path)
+        self._cache_stat = journal_fingerprint(stat)
         logger.warning(
             "inbox cache journal exceeded %d bytes; compacted to %d live entries",
             MAX_CACHE_JOURNAL_BYTES,
@@ -527,10 +518,12 @@ class DeliveryInbox:
         """Re-fold when another process changed the cache journal."""
 
         try:
-            stat = self._cache_path.stat()
-        except OSError:
+            stat = self._storage_metadata(self._cache_path)
+        except FileNotFoundError as exc:
+            if self._cache_seen:
+                raise DeliveryInboxCacheCorrupt("previously retained inbox journal is missing") from exc
             return
-        current = (stat.st_mtime_ns, stat.st_size)
+        current = journal_fingerprint(stat)
         if current != self._cache_stat:
             logger.debug("delivery inbox cache changed on disk; re-folding")
             self._by_message_id.clear()
@@ -540,16 +533,23 @@ class DeliveryInbox:
             self._load_cache_locked()
 
     def _load_cache_locked(self) -> None:
-        if not self._cache_path.exists():
+        try:
+            self._storage_metadata(self._cache_path)
+        except FileNotFoundError as exc:
+            if self._cache_seen:
+                raise DeliveryInboxCacheCorrupt("previously retained inbox journal is missing") from exc
             self._cache_stat = None
             return
-        raw = self._cache_path.read_bytes()
+        self._cache_seen = True
+        with self._open_storage(self._cache_path, "rb") as handle:
+            raw = handle.read()
         self._fold_cache_lines(raw)
+        recover_torn_tail(self._cache_path, raw)
         if len(raw) > MAX_CACHE_JOURNAL_BYTES:
             self._compact_cache_journal_locked()
             return
-        stat = self._cache_path.stat()
-        self._cache_stat = (stat.st_mtime_ns, stat.st_size)
+        stat = self._storage_metadata(self._cache_path)
+        self._cache_stat = journal_fingerprint(stat)
 
     def _fold_cache_lines(self, raw: bytes) -> None:
         """Fold cache journal bytes into the in-memory state (fail closed)."""

@@ -24,7 +24,8 @@ from nth_dao.identity import AgentIdentity
 from nth_dao.spine.event import (
     GENESIS_PREV, MAX_SPINE_PAYLOAD_BYTES, SpineEvent, sign_event, verify_event,
 )
-from nth_dao.util.io import InterProcessLock, atomic_write_bytes
+from nth_dao.util.io import InterProcessLock, atomic_write_bytes, open_independent_file
+from nth_dao.util.path_security import check_independent_file
 
 MAX_SPINE_LINE_BYTES = 2 * 1024 * 1024
 MAX_SPINE_APPEND_BATCH = 1_000
@@ -77,12 +78,16 @@ class SignedEventLog:
         identity: AgentIdentity,
         *,
         lock_timeout: float = DEFAULT_SPINE_LOCK_TIMEOUT_SECONDS,
+        reject_links: bool = False,
     ) -> None:
         self._path = Path(path)
         self._pending_path = self._path.with_name(
             self._path.name + ".append.pending"
         )
         self._identity = identity
+        if type(reject_links) is not bool:
+            raise ValueError("reject_links must be a boolean")
+        self._reject_links = reject_links
         self._lock = threading.Lock()
         if (
             isinstance(lock_timeout, bool)
@@ -100,15 +105,36 @@ class SignedEventLog:
             tuple[str, tuple[str, ...]],
             dict[tuple[str, str], set[tuple[str, int]]],
         ] = {}
+        if self._reject_links:
+            self._check_storage_paths()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._load_head()
 
+    def _check_storage_paths(self) -> None:
+        for path in (self._path, self._pending_path):
+            check_independent_file(path, missing_ok=True)
+        InterProcessLock(self._path, reject_links=True).check_path()
+
+    def require_independent_storage(self) -> None:
+        """Monotonically enable checked I/O for a security-sensitive caller."""
+        with self._lock:
+            self._check_storage_paths()
+            self._reject_links = True
+
+    def _process_lock(self) -> InterProcessLock:
+        if self._reject_links:
+            self._check_storage_paths()
+            return InterProcessLock(self._path, timeout=self._lock_timeout, reject_links=True)
+        return InterProcessLock(self._path, timeout=self._lock_timeout)
+
+    def _open_storage(self, path: Path, mode: str):
+        if self._reject_links:
+            return open_independent_file(path, mode)
+        return path.open(mode)
+
     def _load_head(self) -> None:
         try:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 events: list[SpineEvent] = []
                 if self._path.exists():
@@ -225,11 +251,15 @@ class SignedEventLog:
 
     def _write_append_intent_unlocked(self, *, base_size: int, line: bytes) -> None:
         encoded = self._encode_append_intent(base_size=base_size, line=line)
-        atomic_write_bytes(self._pending_path, encoded)
+        if self._reject_links:
+            atomic_write_bytes(self._pending_path, encoded, reject_links=True)
+        else:
+            atomic_write_bytes(self._pending_path, encoded)
 
     def _read_append_intent_unlocked(self) -> tuple[int, bytes] | None:
         try:
-            raw = self._pending_path.read_bytes()
+            with self._open_storage(self._pending_path, "rb") as stream:
+                raw = stream.read(MAX_SPINE_APPEND_INTENT_BYTES + 1)
         except FileNotFoundError:
             return None
         if not 1 <= len(raw) <= MAX_SPINE_APPEND_INTENT_BYTES:
@@ -271,6 +301,8 @@ class SignedEventLog:
         return base_size, line
 
     def _clear_append_intent_unlocked(self) -> None:
+        if self._reject_links:
+            check_independent_file(self._pending_path, missing_ok=True)
         self._pending_path.unlink(missing_ok=True)
         if os.name != "nt":
             parent_fd = os.open(self._pending_path.parent, os.O_RDONLY)
@@ -280,7 +312,7 @@ class SignedEventLog:
                 os.close(parent_fd)
 
     def _write_record_unlocked(self, record: bytes) -> None:
-        with self._path.open("ab") as stream:
+        with self._open_storage(self._path, "ab") as stream:
             stream.write(record)
             stream.flush()
             os.fsync(stream.fileno())
@@ -294,7 +326,7 @@ class SignedEventLog:
         if current_size < base_size:
             raise ValueError("spine append intent base exceeds log size")
         if base_size:
-            with self._path.open("rb") as stream:
+            with self._open_storage(self._path, "rb") as stream:
                 stream.seek(base_size - 1)
                 if stream.read(1) != b"\n":
                     raise ValueError("spine append intent base is not line-aligned")
@@ -326,14 +358,14 @@ class SignedEventLog:
         available = current_size - base_size
         existing_suffix = b""
         if available:
-            with self._path.open("rb") as stream:
+            with self._open_storage(self._path, "rb") as stream:
                 stream.seek(base_size)
                 existing_suffix = stream.read(min(available, len(record)))
         if existing_suffix != record[: len(existing_suffix)]:
             raise ValueError("spine append tail conflicts with signed intent")
         if available < len(record):
             if current_size:
-                with self._path.open("r+b") as stream:
+                with self._open_storage(self._path, "r+b") as stream:
                     stream.truncate(base_size)
                     stream.flush()
                     os.fsync(stream.fileno())
@@ -366,7 +398,7 @@ class SignedEventLog:
         *,
         stop_offset: int | None = None,
     ) -> Iterator[tuple[int, bytes]]:
-        with self._path.open("rb") as stream:
+        with self._open_storage(self._path, "rb") as stream:
             if stop_offset == 0:
                 return
             line_number = 0
@@ -577,7 +609,7 @@ class SignedEventLog:
 
         try:
             digest = hashlib.sha256()
-            with self._path.open("rb") as stream:
+            with self._open_storage(self._path, "rb") as stream:
                 while chunk := stream.read(1024 * 1024):
                     digest.update(chunk)
                 metadata = os.fstat(stream.fileno())
@@ -619,7 +651,7 @@ class SignedEventLog:
         expected_size = prefix_size + sum(len(part) for part in parts)
         digest = hashlib.sha256()
         try:
-            with self._path.open("rb") as stream:
+            with self._open_storage(self._path, "rb") as stream:
                 remaining = prefix_size
                 while remaining:
                     chunk = stream.read(min(1024 * 1024, remaining))
@@ -661,10 +693,7 @@ class SignedEventLog:
         """Return a storage token and detached events from a verified snapshot."""
 
         with self._lock:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 ok, reason, events, token = self._verified_events_cached_unlocked()
                 if not ok:
@@ -688,10 +717,7 @@ class SignedEventLog:
         # Neither caller input nor returned views may own the verified cache.
         payload = self._snapshot_payload(payload)
         with self._lock, self._append_outcome_guard() as appended:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 # A second process may have advanced the chain since this
                 # instance was constructed.
@@ -790,10 +816,7 @@ class SignedEventLog:
         ):
             raise ValueError("event_id must be 64 lowercase hexadecimal characters")
         with self._lock:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 ok, reason, events, _token = self._verified_events_cached_unlocked()
                 if not ok:
@@ -821,10 +844,7 @@ class SignedEventLog:
         """Return detached events from one lock-consistent verified snapshot."""
 
         with self._lock:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 ok, reason, events, _token = self._verified_events_cached_unlocked()
                 if not ok:
@@ -868,10 +888,7 @@ class SignedEventLog:
             if not isinstance(value, str) or not value or len(value) > 2_048:
                 raise ValueError(f"{name} must be a bounded non-empty string")
         with self._lock:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 ok, reason, events, _token = self._verified_events_cached_unlocked()
                 if not ok:
@@ -911,7 +928,7 @@ class SignedEventLog:
                 raise ValueError(f"{name} must be a bounded non-empty string")
         if type(limit) is not int or not 1 <= limit <= 1_024:
             raise ValueError("limit must be between 1 and 1024")
-        with self._lock, InterProcessLock(self._path, timeout=self._lock_timeout):
+        with self._lock, self._process_lock():
             self._recover_pending_append_unlocked()
             ok, reason, events, _token = self._verified_events_cached_unlocked()
             if not ok:
@@ -941,10 +958,7 @@ class SignedEventLog:
         ):
             raise ValueError("event_id must be a lowercase SHA-256 digest")
         with self._lock:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 ok, reason, events, _token = self._verified_events_cached_unlocked()
                 if not ok:
@@ -1031,10 +1045,7 @@ class SignedEventLog:
                         f"unique payload field {field!r} must be a non-empty string"
                     )
         with self._lock, self._append_outcome_guard() as appended:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 self._recover_pending_append_unlocked()
                 ok, reason, events, token = self._verified_events_cached_unlocked()
                 if not ok:
@@ -1129,10 +1140,7 @@ class SignedEventLog:
         Integrity verification must not crash and accidentally hide tampering.
         """
         with self._lock:
-            with InterProcessLock(
-                self._path,
-                timeout=self._lock_timeout,
-            ):
+            with self._process_lock():
                 try:
                     self._recover_pending_append_unlocked()
                 except (OSError, TypeError, ValueError) as exc:

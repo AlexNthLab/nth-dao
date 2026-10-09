@@ -295,8 +295,9 @@ receive HTTP 429. Multiple server processes do not share this admission budget.
 The result still reports `nonce_authenticated: false`, `accepted: false`, and
 `settled: false`. It is a source receipt of a claimant statement, not an
 acknowledgement to the claimant, a work review, a reputation decision, or a
-payment instruction. Automated bilateral transport and acknowledgement remain
-future protocol work. The local audit payload has a versioned structural vector
+payment instruction. Automated bilateral network delivery remains future
+protocol work. Directed offline source receipt delivery is available through
+the explicit CLI described below. The local audit payload has a versioned structural vector
 at `nth_dao/market/vectors/source-completion-received-v1.json`. The fixed
 signed event and rotation fixture at
 `nth_dao/market/vectors/source-completion-receipt-crypto-v1.json` is verified
@@ -642,3 +643,135 @@ semantics. Background and initial UI scans only retain bounded in-memory
 discovery results. A verified identity card proves key control, not trust; the
 operator must explicitly approve a nearby URL before it is persisted as a seed
 and polled. Approved seed persistence is bounded to 128 URLs.
+
+## Directed Offline Source Receipt Delivery
+
+`nth_dao.market.source_receipt_delivery` binds the existing signed transport
+envelope to one source-signed completion receipt and its claimant. It is a
+transport-neutral domain handler, not a new discovery service. A controlled
+two-workspace test carries its envelope through the existing file-bundle
+transport, persists the claimant observation, and returns a receiver-signed
+ACK to close the sender outbox. This is not a two-physical-computer network
+acceptance result.
+
+The explicit operator entry point is:
+
+```text
+python -m nth_dao.cli.source_receipt_delivery pack --workspace <source-workspace> --identity-file <source-key-file> --proof-file <completion-proof.json> --receipt-file <source-response.json> --source-did <independently-pinned-source-did> --federation-key <independently-pinned-federation-key>
+python -m nth_dao.cli.source_receipt_delivery receive --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce> --envelope-file <receipt-envelope.json>
+python -m nth_dao.cli.source_receipt_delivery acknowledge --workspace <source-workspace> --identity-file <source-key-file> --ack-file <receiver-ack.json>
+python -m nth_dao.cli.source_receipt_delivery resume --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce>
+python -m nth_dao.cli.source_receipt_delivery export-ack --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce> --message-id <delivery-message-id>
+python -m nth_dao.cli.source_receipt_delivery export-envelope --workspace <source-workspace> --identity-file <source-key-file> --message-id <delivery-message-id>
+```
+
+Commands emit ASCII-safe JSON on stdout. Store input files as UTF-8; Windows
+PowerShell 5's default UTF-16 redirection is not a JSON wire export. `pack`
+emits the envelope. `receive` emits an object with separate `ack` and
+`observation` members; transfer only its `ack` object back as `receiver-ack.json`.
+`resume` emits a `resumed` array with the same members and a `failed` array of
+per-message errors. It continues after an individual failure, preserves each
+successful result, and exits with status 1 if any item failed. `export-ack`
+reverifies a retained result and returns the same original signed ACK even
+after intake expiry; it does not create a new intake or observation.
+Never transfer identity
+files. Browser non-extractable keys are not exported for these commands; if
+the claimant key is not locally available, use the existing operator receipt
+import path instead of substituting another principal.
+
+The default audit file is `<workspace>/spine/events.jsonl`. An existing
+non-default log can be selected with `--spine-file <relative-workspace-path>`;
+absolute and drive-relative paths, parent traversal, NTFS alternate streams,
+symlinks, and junctions are refused. The CLI
+does not create a missing signing identity. `pack` rechecks the source's local
+retained proof/receipt and signed audit before preparation, writes a signed
+preparation request, then durably queues the exact envelope under
+`.nth/source_receipt_delivery_outbox` before stdout disclosure. Preparation
+does not claim a successful send. A transport adapter can consume that same
+generic outbox later, subject to separate PluginHost approval and routing.
+The pure signing helper by itself performs no disclosure audit or IO; it is
+not a substitute for the operator entry point's retention/audit gate.
+
+Repeated `pack` calls for the same signed receipt reuse its retained envelope,
+including after a lost stdout response or failed preparation audit. The
+`prepared/<receipt-event-hash>/<generation>.json` files preserve up to 32
+generations; all retained generations are reverified before reuse. The default
+does not silently renew TTL. Add `--renew --renew-from <previous-message-id>`
+to the original `pack` command only after that generation expires and only if
+it has not been acknowledged. A retained predecessor is the renewal operation
+key: the exact retry recovers its existing child, including after an audit or
+enqueue failure, rather than creating another generation. `--renew` alone is
+rejected because it cannot distinguish a retry from a new renewal.
+`export-envelope` reexports an already queued, audited envelope by message ID,
+including older pre-generation-store envelopes; it does not renew or enqueue.
+An expired preparation that never reached the outbox requires explicit renewal.
+
+The claimant handler selects one local confirmed claim, independently
+reconstructs its exact historical completion proof and pins, and rechecks the
+source statement. It persists an envelope under `.nth/source_receipt_deliveries`,
+then imports the receipt and writes the signed local observation. It persists
+the signed ACK, exact envelope and observation event binding before completing
+intake. Reexport checks the original intake time, local evidence and audit;
+corrupt or missing evidence is not silently repaired. Only after
+all that succeeds does it complete intake and return the ACK. Failed domain
+audits and processed-marker writes remain pending and return no ACK. Explicit
+`resume` can reprocess already durable intake after its TTL expires; it never
+admits a new expired envelope. A known envelope with a retained result can
+return the same first-intake ACK after expiry; it is not fresh intake.
+This domain inbox retains 32 distinct deliveries per source claim without
+evicting replay records. At capacity it rejects new envelopes and still
+allows known exact retries. No automatic record deletion is provided.
+
+`acknowledge` verifies the receiver signature, original recipient, envelope
+digest, time binding, exact source receipt kind and payload, retained local
+source evidence, matching preparation audit, and source outbox record. It records transport
+delivery and then a source-signed ACK observation. If that last audit fails,
+the command reports failure even though the outbox may already be delivered;
+retry the exact ACK after resolving the audit/storage issue. Do not treat a
+CLI failure as proof that every earlier write was rolled back.
+
+Only this domain explicitly opts into delayed confirmation of an expired
+direct delivery: the signed ACK's receipt time may precede creation by at most
+the envelope's five-minute clock skew and must be strictly before expiry.
+These are the same time bounds used for receiver intake; expiry has no grace
+period. A rejected record cannot be reopened. The local
+outbox journals this as `late-delivered`; older software without that local
+journal event must not reopen the directory. Wire envelope/ACK versions are
+unchanged. This domain retains terminal outbox records, so ordinary `compact()`
+does not discard delayed-ACK or audit-retry evidence. The 64 MiB journal cap
+still fails closed; archival is a separate explicit lifecycle, not deletion
+of replay or retry evidence.
+
+Before append after a torn Inbox/Outbox journal, recovery validates the complete
+prefix, retains the uncommitted tail in a digest-named `.torn.*` file, and
+atomically restores the prefix under the process lock. Mid-file corruption
+still rejects recovery. Actual `.lock` suffix paths, including `.lock.lock`
+files, are checked by the lock component; this domain enables no-follow and
+opened-file identity/regular-file checks for journal reads and writes, not
+only lock files. Data and lock files must have one hard link. Receipt-store
+locks and Spine log/append-intent/lock paths are also checked at operation
+time. Known journals that disappear or become unreadable fail closed rather
+than substituting cached acceptance state. Cache fingerprints include file
+identity, so a same-size/mtime replacement is reread. Secure atomic publication
+checks its own temporary inode and never cleans up a different replacement.
+Test-owned hardlink attacks are covered; real symlink tests require OS
+privileges and may be skipped. These checks are not an OS sandbox against
+another process with unrestricted rights to rewrite the entire workspace.
+
+All intake rechecks remain fail closed on changed local signed evidence,
+unavailable completion heads, wrong source rotation, and corrupt retained
+receipts. A retired receipt signer cannot delegate a new envelope to an
+unrelated or successor key in this version; use manual receipt import for
+that historical statement. A newly signed receipt with a valid pinned-to-
+current rotation chain is supported. Source responses that do not fit the
+generic envelope's 256 KiB payload limit remain on the explicit larger JSON
+import path; this implementation never truncates rotation evidence or widens
+the transport protocol limits.
+
+Wire details and the public cross-runtime fixture are in `docs/PROTOCOLS.md`
+section 14. The signature proves authorship and binding, not source Spine
+inclusion, ongoing remote retention, work correctness, acceptance, reputation,
+or settlement. No real funds or automatic network effects are enabled.
+Automatic bilateral network routing, the completion-proof upload direction,
+privacy-preserving transport selection, and UI send/retry controls remain
+separate follow-up work; market discovery still does not broadcast receipts.

@@ -18,7 +18,9 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional, Union
+from typing import Any, BinaryIO, Iterator, Optional, Union
+
+from nth_dao.util.path_security import check_independent_file
 
 logger = logging.getLogger("nth_dao.util.io")
 
@@ -80,23 +82,72 @@ def atomic_write_text(path: PathLike, content: str, *, encoding: str = "utf-8") 
         raise
 
 
-def atomic_write_bytes(path: PathLike, content: bytes) -> None:
+def open_independent_file(path: PathLike, mode: str) -> BinaryIO:
+    """Open checked binary storage; validate the descriptor before any write.
+
+    ``wb`` creates an exclusive temporary file rather than truncating an
+    existing pathname. Existing records use append or explicit ``r+b``.
+    """
+    path = Path(path)
+    if mode not in {"rb", "ab", "wb", "r+b"}:
+        raise ValueError("independent storage requires a supported binary mode")
+    before = check_independent_file(path, missing_ok=mode in {"ab", "wb"})
+    flags = os.O_RDONLY if mode == "rb" else os.O_RDWR
+    flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if mode == "ab":
+        flags |= os.O_APPEND
+    if mode == "wb" or (mode == "ab" and before is None):
+        flags |= os.O_CREAT | os.O_EXCL
+    fd = os.open(path, flags, 0o600)
+    try:
+        current = check_independent_file(path)
+        opened = os.fstat(fd)
+        import stat
+
+        if (
+            current is None or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            or (before is not None and (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino))
+        ):
+            raise ValueError("independent file is unsafe or changed during open")
+        return os.fdopen(fd, mode)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def atomic_write_bytes(path: PathLike, content: bytes, *, reject_links: bool = False) -> None:
     """Atomically replace one file with exact bytes and fsync before rename."""
 
     if not isinstance(content, bytes):
         raise TypeError("content must be bytes")
+    if type(reject_links) is not bool:
+        raise ValueError("reject_links must be a boolean")
     path = Path(path)
+    if reject_links:
+        check_independent_file(path, missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if reject_links:
+        check_independent_file(path, missing_ok=True)
     fd, tmp = tempfile.mkstemp(
         prefix=path.name + ".",
         suffix=".tmp",
         dir=str(path.parent),
     )
+    owned = None
     try:
         with os.fdopen(fd, "wb") as stream:
+            if reject_links:
+                metadata = os.fstat(stream.fileno())
+                owned = (metadata.st_dev, metadata.st_ino)
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        if reject_links:
+            check_independent_file(path, missing_ok=True)
+            metadata = check_independent_file(Path(tmp))
+            if metadata is None or (metadata.st_dev, metadata.st_ino) != owned:
+                raise ValueError("atomic temporary file changed before publication")
         os.replace(tmp, str(path))
         if os.name != "nt":
             parent_fd = os.open(path.parent, os.O_RDONLY)
@@ -106,7 +157,12 @@ def atomic_write_bytes(path: PathLike, content: bytes) -> None:
                 os.close(parent_fd)
     except Exception:
         try:
-            os.unlink(tmp)
+            if not reject_links:
+                os.unlink(tmp)
+            else:
+                metadata = Path(tmp).stat(follow_symlinks=False)
+                if (metadata.st_dev, metadata.st_ino) == owned:
+                    os.unlink(tmp)
         except OSError:
             pass
         raise
@@ -166,19 +222,64 @@ class InterProcessLock:
             write(mission_path, data)
     """
 
-    def __init__(self, path: PathLike, timeout: float = 10.0, poll: float = 0.05):
+    def __init__(self, path: PathLike, timeout: float = 10.0, poll: float = 0.05,
+                 *, reject_links: bool = False):
         self.lock_path = Path(str(path) + ".lock")
+        if type(reject_links) is not bool:
+            raise ValueError("reject_links must be a boolean")
+        self.reject_links = reject_links
         self.timeout = timeout
         self.poll = poll
         self._fh = None
         self._acquired = False
 
+    def check_path(self) -> None:
+        """Check the actual lock file, not merely the caller's lock target."""
+        import stat
+
+        from nth_dao.util.path_security import path_is_linklike
+
+        if any(path_is_linklike(path) for path in (self.lock_path, *self.lock_path.parents)):
+            raise ValueError("process lock path traverses a link")
+        try:
+            metadata = self.lock_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("process lock file is not an independent regular file")
+
+    def _open_checked(self):
+        import stat
+
+        self.check_path()
+        flags = (
+            os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+        fd = os.open(self.lock_path, flags, 0o600)
+        try:
+            self.check_path()
+            opened = os.fstat(fd)
+            current = self.lock_path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode)
+                or opened.st_nlink != 1 or current.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise ValueError("process lock file is unsafe or changed during open")
+            return os.fdopen(fd, "a+")
+        except BaseException:
+            os.close(fd)
+            raise
+
     def acquire(self) -> bool:
         import time
 
+        if self.reject_links:
+            self.check_path()
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.time() + self.timeout
-        self._fh = open(self.lock_path, "a+")
+        self._fh = self._open_checked() if self.reject_links else open(self.lock_path, "a+")
 
         if sys.platform == "win32":
             import msvcrt

@@ -454,7 +454,9 @@ class TestReviewRoundThree:
         assert inbox._cache_stat is not None
         stat = directory / "inbox.cache.jsonl"
         current = stat.stat()
-        assert inbox._cache_stat == (current.st_mtime_ns, current.st_size)
+        from nth_dao.delivery._journal import journal_fingerprint
+
+        assert inbox._cache_stat == journal_fingerprint(current)
 
 
 # ─────────────────── adversarial review round 4 (bug R) ───────────────────
@@ -498,6 +500,75 @@ class TestRejectionTrimLockAndTmp:
 
 
 # ─────────────────── adversarial review round 11 (bug BB-p) ───────────────────
+
+
+class TestTornTailRecovery:
+    def test_torn_tail_is_retained_before_append_and_restart(self, tmp_path, alice_identity):
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity)
+        assert inbox.accept(envelope).accepted
+        cache = directory / "inbox.cache.jsonl"
+        tail = b'{"event":"proce'
+        with cache.open("ab") as handle:
+            handle.write(tail)
+        restarted = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        assert restarted.mark_processed(envelope.message_id)
+        reloaded = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        assert reloaded.seen(envelope.message_id)
+        assert reloaded.pending() == []
+        assert [item.read_bytes() for item in directory.glob("*.torn.*")] == [tail]
+
+    def test_corrupt_prefix_is_not_rewritten(self, tmp_path):
+        directory = tmp_path / "delivery"
+        directory.mkdir()
+        cache = directory / "inbox.cache.jsonl"
+        original = b'{"invalid":true}\n{"torn":'
+        cache.write_bytes(original)
+        with pytest.raises(DeliveryInboxCacheCorrupt):
+            DeliveryInbox(directory, clock=lambda: NOW_MS)
+        assert cache.read_bytes() == original
+        assert list(directory.glob("*.torn.*")) == []
+
+
+class TestJournalAvailability:
+    def test_missing_existing_journal_blocks_cached_reads(self, tmp_path, alice_identity):
+        from nth_dao.delivery.inbox import DeliveryInboxCacheCorrupt
+
+        directory = tmp_path / "delivery"
+        inbox = DeliveryInbox(directory, clock=lambda: NOW_MS)
+        assert inbox.entry_count() == 0
+        envelope = _envelope(alice_identity)
+        assert inbox.accept(envelope).accepted
+        journal = directory / "inbox.cache.jsonl"
+        saved = journal.with_suffix(".test-saved")
+        journal.rename(saved)
+        with pytest.raises(DeliveryInboxCacheCorrupt, match="journal is missing"):
+            inbox.accepted_at(envelope.message_id)
+        with pytest.raises(DeliveryInboxCacheCorrupt, match="journal is missing"):
+            inbox.accept(envelope)
+        assert not journal.exists()
+        saved.rename(journal)
+        assert inbox.accepted_at(envelope.message_id) == NOW_MS
+
+    def test_journal_stat_error_does_not_use_cached_state(self, tmp_path, alice_identity, monkeypatch):
+        from pathlib import Path
+
+        inbox = DeliveryInbox(tmp_path / "delivery", clock=lambda: NOW_MS)
+        envelope = _envelope(alice_identity)
+        assert inbox.accept(envelope).accepted
+        original = Path.stat
+
+        def denied(path, *args, **kwargs):
+            if path == inbox._cache_path:
+                raise PermissionError("injected journal permission failure")
+            return original(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "stat", denied)
+            with pytest.raises(PermissionError, match="journal permission"):
+                inbox.accepted_at(envelope.message_id)
+        assert inbox.accepted_at(envelope.message_id) == NOW_MS
 
 
 class TestCacheJournalAutoCompact:

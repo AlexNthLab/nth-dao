@@ -39,18 +39,22 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from nth_dao.canonical_json import canonical_json
+from nth_dao.delivery._journal import journal_fingerprint, recover_torn_tail
 from nth_dao.delivery.acknowledgement import (
+    MAX_ACK_BYTES,
     DeliveryAck,
     validate_ack,
 )
 from nth_dao.delivery.envelope import (
+    MAX_CLOCK_SKEW_MS,
     MAX_ENVELOPE_BYTES,
     TransportEnvelope,
     TransportEnvelopeRejected,
     envelope_digest,
     validate_envelope,
 )
-from nth_dao.util.io import InterProcessLock
+from nth_dao.util.io import InterProcessLock, atomic_write_bytes, open_independent_file
+from nth_dao.util.path_security import check_independent_file
 
 logger = logging.getLogger("nth_dao.delivery")
 
@@ -71,7 +75,7 @@ OUTBOX_ATTEMPT_OUTCOMES = (OUTBOX_ATTEMPT_SENT, OUTBOX_ATTEMPT_ERROR, OUTBOX_ATT
 DEFAULT_MAX_PENDING_RECORDS = 4_096
 MAX_ATTEMPTS_PER_RECORD = 256
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
-_JOURNAL_EVENTS = ("enqueued", "attempt", "delivered", "rejected", "expired")
+_JOURNAL_EVENTS = ("enqueued", "attempt", "delivered", "late-delivered", "rejected", "expired")
 _MESSAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRANSPORT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _EVENT_FIELDS = {
@@ -88,6 +92,7 @@ _EVENT_FIELDS = {
     ),
     "attempt": frozenset({"event", "message_id", "transport", "at_ms", "outcome"}),
     "delivered": frozenset({"event", "message_id", "at_ms", "ack_json"}),
+    "late-delivered": frozenset({"event", "message_id", "at_ms", "ack_json"}),
     "rejected": frozenset(
         {"event", "message_id", "transport", "at_ms", "error_code"}
     ),
@@ -174,6 +179,8 @@ class DurableOutbox:
         max_pending_records: int = DEFAULT_MAX_PENDING_RECORDS,
         clock: Optional[Callable[[], int]] = None,
         authorize_ack: Optional[AckAuthorizer] = None,
+        retain_terminal_records: bool = False,
+        reject_links: bool = False,
     ) -> None:
         self._dir = Path(directory)
         self._journal_path = self._dir / "outbox.journal.jsonl"
@@ -187,12 +194,31 @@ class DurableOutbox:
             raise ValueError("max_pending_records must be a positive integer")
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._authorize_ack = authorize_ack
+        if type(retain_terminal_records) is not bool:
+            raise ValueError("retain_terminal_records must be a boolean")
+        self._retain_terminal_records = retain_terminal_records
+        if type(reject_links) is not bool:
+            raise ValueError("reject_links must be a boolean")
+        self._reject_links = reject_links
         self._records: Dict[str, OutboxRecord] = {}
         self._thread_lock = threading.RLock()
         self._journal_stat: Optional[tuple] = None
+        self._journal_seen = False
+        if self._reject_links:
+            check_independent_file(self._journal_path, missing_ok=True)
         self._dir.mkdir(parents=True, exist_ok=True)
-        with InterProcessLock(self._lock_path):
+        with self._process_lock():
             self._load()
+
+    def _process_lock(self) -> InterProcessLock:
+        if self._reject_links:
+            return InterProcessLock(self._lock_path, reject_links=True)
+        return InterProcessLock(self._lock_path)
+
+    def _journal_metadata(self):
+        if self._reject_links:
+            return check_independent_file(self._journal_path)
+        return self._journal_path.stat()
 
     # ─────────────────────── persistence ───────────────────────
 
@@ -200,18 +226,28 @@ class DurableOutbox:
         """Fold the journal. Tolerates a torn final line; corrupts loudly."""
 
         records: Dict[str, OutboxRecord] = {}
-        if not self._journal_path.exists():
+        try:
+            metadata = self._journal_metadata()
+        except FileNotFoundError as exc:
+            if self._journal_seen:
+                raise DeliveryOutboxCorrupt("previously retained outbox journal is missing") from exc
             self._records = records
             self._journal_stat = None
             return
-        if self._journal_path.stat().st_size > MAX_JOURNAL_BYTES:
+        self._journal_seen = True
+        if metadata.st_size > MAX_JOURNAL_BYTES:
             raise DeliveryOutboxCorrupt(
                 f"outbox journal exceeds {MAX_JOURNAL_BYTES} bytes; run compact() "
                 "before loading (fail closed against disk-exhaustion floods)"
             )
-        stat = self._journal_path.stat()
-        self._journal_stat = (stat.st_mtime_ns, stat.st_size)
-        raw = self._journal_path.read_bytes()
+        self._journal_stat = None
+        if self._reject_links:
+            with open_independent_file(self._journal_path, "rb") as handle:
+                raw = handle.read(MAX_JOURNAL_BYTES + 1)
+            if len(raw) > MAX_JOURNAL_BYTES:
+                raise DeliveryOutboxCorrupt("outbox journal exceeds byte limit")
+        else:
+            raw = self._journal_path.read_bytes()
         lines = raw.split(b"\n")
         torn_tail = bool(raw) and not raw.endswith(b"\n")
         for index, line in enumerate(lines):
@@ -233,6 +269,9 @@ class DurableOutbox:
             if not isinstance(event, dict):
                 raise DeliveryOutboxCorrupt(f"journal line {index + 1} is not an object")
             _fold_event(records, event)
+        recover_torn_tail(self._journal_path, raw)
+        stat = self._journal_metadata()
+        self._journal_stat = journal_fingerprint(stat)
         self._records = records
 
     def _refold_if_changed(self) -> None:
@@ -244,12 +283,12 @@ class DurableOutbox:
         """
 
         try:
-            if not self._journal_path.exists():
-                return
-            stat = self._journal_path.stat()
-        except OSError:
+            stat = self._journal_metadata()
+        except FileNotFoundError as exc:
+            if self._journal_seen:
+                raise DeliveryOutboxCorrupt("previously retained outbox journal is missing") from exc
             return
-        current = (stat.st_mtime_ns, stat.st_size)
+        current = journal_fingerprint(stat)
         if current != self._journal_stat:
             logger.debug("delivery outbox journal changed on disk; re-folding")
             self._records = {}
@@ -264,24 +303,24 @@ class DurableOutbox:
         """
 
         line = canonical_json(event) + b"\n"
-        with open(self._journal_path, "ab") as handle:
+        stream = (open_independent_file(self._journal_path, "ab") if self._reject_links
+                  else open(self._journal_path, "ab"))
+        with stream as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+            self._journal_seen = True
             # capture our fingerprint while STILL holding the lock: a stat
             # taken after release could absorb another process's append and
             # permanently hide it from the re-fold check (round-4 bug Q)
-            try:
-                stat = os.fstat(handle.fileno())
-                self._journal_stat = (stat.st_mtime_ns, stat.st_size)
-            except OSError:  # pragma: no cover - fstat on our own fd
-                pass
+        stat = self._journal_metadata()
+        self._journal_stat = journal_fingerprint(stat)
 
     # ─────────────────────── queries ───────────────────────
 
     def get(self, message_id: str) -> Optional[OutboxRecord]:
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
                 record = self._records.get(message_id)
                 return _copy_record(record) if record else None
@@ -293,7 +332,7 @@ class DurableOutbox:
             self._clock() if now_ms is None else now_ms, "now_ms"
         )
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
                 expired = [
                     record
@@ -311,7 +350,7 @@ class DurableOutbox:
 
     def stats(self) -> Dict[str, int]:
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
                 counts: Dict[str, int] = {}
                 for record in self._records.values():
@@ -344,7 +383,7 @@ class DurableOutbox:
         if len(envelope_json.encode("utf-8")) > MAX_ENVELOPE_BYTES:
             raise TransportEnvelopeRejected("envelope exceeds the wire byte limit")
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
                 existing = self._records.get(envelope.message_id)
                 if existing is not None:
@@ -401,7 +440,7 @@ class DurableOutbox:
             self._clock() if at_ms is None else at_ms, "at_ms"
         )
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
                 record = self._require_live(message_id)
                 if len(record.attempts) >= MAX_ATTEMPTS_PER_RECORD:
@@ -431,7 +470,10 @@ class DurableOutbox:
                     record.last_error_code = error_code
                 return _copy_record(record)
 
-    def handle_ack(self, ack: DeliveryAck, *, now_ms: Optional[int] = None) -> OutboxRecord:
+    def handle_ack(
+        self, ack: DeliveryAck, *, now_ms: Optional[int] = None,
+        allow_expired: bool = False,
+    ) -> OutboxRecord:
         """Apply one verified ACK: mark delivered, cancel other copies.
 
         The ACK must carry a valid receiver signature. Matching is by
@@ -439,6 +481,17 @@ class DurableOutbox:
         hop count legitimately ACKs the same message identity.
         """
 
+        if type(allow_expired) is not bool:
+            raise ValueError("allow_expired must be a boolean")
+        if not isinstance(ack, DeliveryAck):
+            raise TransportEnvelopeRejected("ack must be a DeliveryAck")
+        try:
+            ack_bytes = canonical_json(ack.to_dict())
+            if len(ack_bytes) > MAX_ACK_BYTES:
+                raise ValueError("ack exceeds the wire byte limit")
+            ack = DeliveryAck.from_dict(json.loads(ack_bytes))
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise TransportEnvelopeRejected(f"invalid delivery ack: {exc}") from exc
         ok, reason = validate_ack(ack, now_ms=now_ms if now_ms is not None else self._clock())
         if not ok:
             raise TransportEnvelopeRejected(f"invalid delivery ack: {reason}")
@@ -446,7 +499,7 @@ class DurableOutbox:
             self._clock() if now_ms is None else now_ms, "now_ms"
         )
         with self._thread_lock:
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
                 record = self._records.get(ack.message_id)
                 if record is None:
@@ -456,16 +509,21 @@ class DurableOutbox:
                     raise DeliveryOutboxError(
                         "ack envelope_sha256 does not match a valid forwarded envelope"
                     )
+                if allow_expired and not _ack_within_lifetime(ack, envelope):
+                    raise DeliveryOutboxError("ack receipt time is outside the envelope lifetime")
                 if record.state == OUTBOX_STATE_DELIVERED:
                     if ack.receiver_did != record.delivered_by:
                         raise DeliveryOutboxError(
                             "ack receiver does not match the recorded delivery"
                         )
                     return _copy_record(record)
-                if record.state != OUTBOX_STATE_QUEUED:
+                late = record.state == OUTBOX_STATE_EXPIRED and allow_expired
+                if record.state != OUTBOX_STATE_QUEUED and not late:
                     raise DeliveryOutboxError(
                         f"cannot acknowledge record in state {record.state}"
                     )
+                if late and not envelope.recipient.startswith("did:key:"):
+                    raise DeliveryOutboxError("late acknowledgement requires a direct DID recipient")
                 if envelope.recipient.startswith("did:key:"):
                     if ack.receiver_did != envelope.recipient:
                         raise DeliveryOutboxError(
@@ -478,7 +536,8 @@ class DurableOutbox:
                 else:
                     try:
                         allowed, authorization_reason = self._authorize_ack(
-                            ack, envelope
+                            DeliveryAck.from_dict(json.loads(ack_bytes)),
+                            TransportEnvelope.from_dict(envelope.to_dict()),
                         )
                     except Exception as exc:
                         raise DeliveryOutboxError(
@@ -490,10 +549,10 @@ class DurableOutbox:
                         )
                 self._append_locked(
                     {
-                        "event": "delivered",
+                        "event": "late-delivered" if late else "delivered",
                         "message_id": record.message_id,
                         "at_ms": now,
-                        "ack_json": canonical_json(ack.to_dict()).decode("utf-8"),
+                        "ack_json": ack_bytes.decode("utf-8"),
                     }
                 )
                 record.state = OUTBOX_STATE_DELIVERED
@@ -504,7 +563,7 @@ class DurableOutbox:
     def compact(self) -> int:
         """Rewrite the journal keeping only pending records; return kept count.
 
-        Terminal records (delivered/rejected/expired) leave the journal. The
+        Terminal records leave the journal unless explicit retention is enabled. The
         journal is re-folded from disk first, so records another process
         appended are never dropped. The rewrite is atomic: write a fresh
         journal to a temp file, fsync, then replace, under the cross-process
@@ -516,45 +575,43 @@ class DurableOutbox:
             # before acquiring it leaves a window where another process
             # appends a record and our os.replace below silently drops it
             # (round-3 review bug I)
-            with InterProcessLock(self._lock_path):
+            with self._process_lock():
                 self._refold_if_changed()
+                if self._retain_terminal_records:
+                    # Lossy compaction would discard the bytes needed to
+                    # reconcile a delayed ACK or retry an interrupted audit.
+                    return len(self._records)
                 keep = [
                     record
                     for record in self._records.values()
                     if not record.is_terminal
                 ]
-                tmp_path = self._journal_path.with_suffix(".jsonl.tmp")
-                with open(tmp_path, "wb") as handle:
-                    for record in keep:
-                        handle.write(canonical_json(
-                            {
-                                "event": "enqueued",
-                                "message_id": record.message_id,
-                                "envelope_json": record.envelope_json,
-                                "envelope_sha256": record.envelope_sha256,
-                                "created_at_ms": record.created_at_ms,
-                                "expires_at_ms": record.expires_at_ms,
-                                "at_ms": record.created_at_ms,
-                            }
-                        ) + b"\n")
-                        for attempt in record.attempts:
-                            event: Dict[str, Any] = {
-                                "event": "attempt",
-                                "message_id": record.message_id,
-                                "transport": attempt.transport,
-                                "at_ms": attempt.at_ms,
-                                "outcome": attempt.outcome,
-                            }
-                            if attempt.error_code:
-                                event["error_code"] = attempt.error_code
-                            handle.write(canonical_json(event) + b"\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp_path, self._journal_path)
+                lines = []
+                for record in keep:
+                    lines.append(canonical_json(
+                        {
+                            "event": "enqueued", "message_id": record.message_id,
+                            "envelope_json": record.envelope_json,
+                            "envelope_sha256": record.envelope_sha256,
+                            "created_at_ms": record.created_at_ms,
+                            "expires_at_ms": record.expires_at_ms,
+                            "at_ms": record.created_at_ms,
+                        }
+                    ) + b"\n")
+                    for attempt in record.attempts:
+                        event: Dict[str, Any] = {
+                            "event": "attempt", "message_id": record.message_id,
+                            "transport": attempt.transport, "at_ms": attempt.at_ms,
+                            "outcome": attempt.outcome,
+                        }
+                        if attempt.error_code:
+                            event["error_code"] = attempt.error_code
+                        lines.append(canonical_json(event) + b"\n")
+                atomic_write_bytes(self._journal_path, b"".join(lines), reject_links=self._reject_links)
                 # fingerprint captured INSIDE the lock (round-4 bug Q)
                 try:
-                    stat = os.stat(self._journal_path)
-                    self._journal_stat = (stat.st_mtime_ns, stat.st_size)
+                    stat = self._journal_metadata()
+                    self._journal_stat = journal_fingerprint(stat)
                 except OSError:  # pragma: no cover - stat after our own replace
                     pass
             self._records = {record.message_id: record for record in keep}
@@ -665,11 +722,14 @@ def _fold_event(records: Dict[str, OutboxRecord], event: Dict[str, Any]) -> None
             record.last_error_code = validated_error_code
         return
 
-    if record.state in OUTBOX_TERMINAL_STATES:
+    late = kind == "late-delivered" and record.state == OUTBOX_STATE_EXPIRED
+    if kind == "late-delivered" and not late:
+        raise DeliveryOutboxCorrupt("late-delivered event requires an expired record")
+    if record.state in OUTBOX_TERMINAL_STATES and not late:
         raise DeliveryOutboxCorrupt(f"{kind} event follows a terminal state")
 
     at_ms = _fold_at_ms(event)
-    if kind == "delivered":
+    if kind in ("delivered", "late-delivered"):
         ack_json = event.get("ack_json")
         if not isinstance(ack_json, str):
             raise DeliveryOutboxCorrupt("delivered event ack_json must be text")
@@ -683,6 +743,11 @@ def _fold_event(records: Dict[str, OutboxRecord], event: Dict[str, Any]) -> None
         if not ok:
             raise DeliveryOutboxCorrupt(f"delivered event ACK is invalid: {reason}")
         envelope = _record_envelope(record)
+        if late and (
+            not envelope.recipient.startswith("did:key:")
+            or not _ack_within_lifetime(ack, envelope)
+        ):
+            raise DeliveryOutboxCorrupt("late-delivered ACK is outside its direct delivery lifetime")
         if ack.message_id != message_id or not _ack_digest_matches_envelope(
             ack.envelope_sha256, envelope
         ):
@@ -755,6 +820,13 @@ def _ack_digest_matches_envelope(
         if envelope_digest(candidate) == acknowledged_digest:
             return True
     return False
+
+
+def _ack_within_lifetime(ack: DeliveryAck, envelope: TransportEnvelope) -> bool:
+    return (
+        envelope.created_at_ms - MAX_CLOCK_SKEW_MS
+        <= ack.received_at_ms < envelope.expires_at_ms
+    )
 
 
 def _record_envelope(record: OutboxRecord) -> TransportEnvelope:

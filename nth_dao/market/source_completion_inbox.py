@@ -388,7 +388,7 @@ class SourceCompletionInbox:
         source_claim_id = payload["source_claim_id"]
         slot = self._slot(source_claim_id)
         path = slot / (payload["completion_head_digest"][7:] + ".json")
-        with InterProcessLock(self._lock_target(source_claim_id)):
+        with InterProcessLock(self._lock_target(source_claim_id), reject_links=True):
             count, total = self._entries(slot)
             existing_event = self._audit(payload)
             try:
@@ -469,7 +469,7 @@ class SourceCompletionInbox:
             if self._audited_heads(source_claim_id):
                 raise SourceCompletionCorrupt("audited source proof is missing")
             raise SourceCompletionRejected("pending source proof is absent")
-        with InterProcessLock(self._lock_target(source_claim_id)):
+        with InterProcessLock(self._lock_target(source_claim_id), reject_links=True):
             retained, pending, _, lineage = self._lineage_state(slot)
             item = retained.get(digest)
             if item is not None:
@@ -502,7 +502,7 @@ class SourceCompletionInbox:
                 raise SourceCompletionCorrupt("audited source proof is missing")
             if not slot.exists():
                 return None
-        with InterProcessLock(self._lock_target(source_claim_id)):
+        with InterProcessLock(self._lock_target(source_claim_id), reject_links=True):
             self._entries(slot)
             retained, pending, _, lineage = self._lineage_state(slot)
             item = retained.get(f"sha256:{head_hex}")

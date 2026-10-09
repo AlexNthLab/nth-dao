@@ -1148,4 +1148,102 @@ Deterministic positive and negative cases are in the
 
 ---
 
-*Last updated for nth-dao v0.10.0 (Trade Offer Head Proof v1, 2026-08-02).*
+## 14. Directed Source Completion Receipt Delivery v1
+
+This domain binding reuses `nth-transport-envelope` v1 and `nth-delivery-ack`
+v1. It introduces no new transport, payment instruction, or trusted relay.
+The envelope `kind` is `market.claim.completion.source-receipt`. The payload
+has exactly these fields:
+
+```json
+{
+  "source_claim_id": "<source-signed claim ACK id>",
+  "completion_head_digest": "sha256:<64 lowercase hex characters>",
+  "proof_digest": "sha256:<64 lowercase hex characters>",
+  "source_receipt_json": "<canonical JSON text of the source response>"
+}
+```
+
+The sender MUST be the signed source receipt event's author. The recipient
+MUST be its signed claimant DID. This version permits only direct DID routing:
+no `dao_id`, no `reply_to`, and exactly `hop_limit: 0, hop_count: 0`.
+The normal envelope signature, content address, TTL, nonce, payload limit,
+and receiver clock-skew checks still apply. The canonical embedded text MUST
+be preserved verbatim: parsing it in a runtime that rounds integers and then
+reserializing it changes signed evidence. Noncanonical embedded JSON,
+including duplicate fields and non-JSON constants, MUST be rejected.
+
+The receiver MUST select an independently confirmed local claim. A remote
+nonce is not that selection. Before durable intake and again before local
+observation, the receiver verifies the complete locally retained historical
+completion proof, pinned source DID/federation key, source receipt signature,
+any dual-signed rotation chain, claim ACK id, head digest, and proof digest.
+Only the claimant signing principal may produce the transport ACK. A
+different local operator can continue using the existing manual receipt
+import API; it cannot impersonate the claimant transport endpoint.
+
+The receiver retains the envelope before domain processing, then records
+the immutable source receipt and signed local observation. It MUST retain the
+exact signed ACK with its envelope and observation event binding before
+marking intake processed. Only after that
+succeeds does it return a receiver-signed ACK.
+An interrupted audit or processed-marker write returns failure, not an ACK.
+Explicit recovery rechecks previously durable pending evidence at its stored
+first-intake time, even after the intake TTL has expired; new expired intake
+is still forbidden. ACK retry bytes use the original first-intake timestamp.
+Reexport of a completed result MUST reverify its signatures, envelope digest,
+confirmed local claim, historical proof and retained observation. It MUST NOT
+reinterpret reexport as fresh intake or create another business observation.
+Batch recovery reports per-message successes and failures; one failure MUST
+NOT hide completed ACKs or stop unrelated pending deliveries.
+
+This reference inbox retains at most 32 distinct deliveries per source claim.
+It never evicts a processed entry to admit a new one. Capacity checks and
+intake are serialized across processes; an exact known envelope can still be
+retried. No automatic deletion, compaction that discards these nonce records,
+or automatic TTL renewal is provided by this domain handler. Source-side pack
+retries reuse an exact retained generation. Explicit renewal is permitted only
+after the previous generation expires and before delivery acknowledgement,
+with a new signed nonce/TTL/message ID and retained generation history.
+The operator MUST identify the retained predecessor message ID when renewing.
+One predecessor has one retained successor; retries recover that successor
+before considering a new generation. A bare renewal flag is not an operation
+identity and is rejected by the reference CLI.
+A future archival policy
+needs an explicit lifecycle design, not silent removal of replay protection.
+
+Source preparation and ACK observation have signed audit types:
+`market.claim.completion.source_receipt.delivery.prepared` and
+`market.claim.completion.source_receipt.delivery.acknowledged`.
+Preparation is not a send-success event. ACK observation proves only a
+recipient-authored transport receipt, not ongoing remote storage or business
+acceptance. Neither it nor the local observation implies work quality,
+source Spine inclusion, settlement, or authenticated claim nonce.
+
+Source ACK mutation MUST require the exact retained source receipt and matching
+source-authored preparation event, not merely a valid generic transport ACK.
+An expired direct delivery may be explicitly confirmed by an authorized ACK
+whose signed receipt time is within
+`[created_at_ms - MAX_CLOCK_SKEW_MS, expires_at_ms)`, where the envelope clock
+skew is 300000 ms. Receiver intake uses the same bounds; expiry is strict. This
+does not permit new expired intake, retransmission or reopening rejection.
+The local outbox uses `late-delivered` for this transition; it is a storage
+extension, not a wire version change. Terminal records remain available for
+late confirmation and interrupted audit retries in this domain.
+The reference outbox snapshots ACK bytes before validation and persists those
+same bytes; authorization callbacks receive detached copies. Local journal
+and audit I/O MUST reject linked storage. A previously known journal becoming
+unavailable MUST NOT be replaced by in-memory acceptance evidence.
+
+The public vector is
+`nth_dao/market/vectors/source-receipt-delivery-v1.json`. Its signed receipt
+contains an integer beyond JavaScript's safe range. Python checks the full
+proof binding; `node tools/check_source_receipt_delivery.cjs` independently
+checks the envelope address/signature, lossless embedded event signature, and
+receiver ACK with Node crypto. The Node checker needs JSON reviver source
+support and is a fixture checker, not a production verifier or a claim that
+every protocol layer has passed third-party interoperability certification.
+
+---
+
+*This section adds source receipt delivery without changing earlier wire versions.*

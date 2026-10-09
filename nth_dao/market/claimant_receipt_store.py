@@ -285,7 +285,7 @@ class ClaimantSourceReceiptStore:
             payload["completion_head_digest"][7:] + "-" + payload["response_digest"][7:]
             + ".json"
         )
-        with InterProcessLock(self._lock_target(payload["source_claim_id"])):
+        with InterProcessLock(self._lock_target(payload["source_claim_id"]), reject_links=True):
             entries = self._entries(slot)
             existing = self._matched(entries, payload["completion_head_digest"])
             audited = self._audit(payload)
@@ -327,7 +327,7 @@ class ClaimantSourceReceiptStore:
         claim = resolve_confirmed_claim_evidence(self.workspace, nonce)
         source_claim_id = self._source_id(claim["authority_ack"]["ack_id"])
         slot = self._slot(source_claim_id)
-        with InterProcessLock(self._lock_target(source_claim_id)):
+        with InterProcessLock(self._lock_target(source_claim_id), reject_links=True):
             path = self._matched(self._entries(slot), head)
             if path is None:
                 key = f"{source_claim_id}:{head}"
@@ -373,7 +373,7 @@ class ClaimantSourceReceiptStore:
         claim = resolve_confirmed_claim_evidence(self.workspace, nonce)
         source_claim_id = self._source_id(claim["authority_ack"]["ack_id"])
         slot = self._slot(source_claim_id)
-        with InterProcessLock(self._lock_target(source_claim_id)):
+        with InterProcessLock(self._lock_target(source_claim_id), reject_links=True):
             path = self._matched(self._entries(slot), head)
             if path is None:
                 audited = self.spine.find_unique_event(
@@ -444,7 +444,7 @@ class ClaimantSourceReceiptStore:
 
         if _locked:
             return read_locked()
-        with InterProcessLock(self._lock_target(source_claim_id)):
+        with InterProcessLock(self._lock_target(source_claim_id), reject_links=True):
             return read_locked()
 
 
