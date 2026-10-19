@@ -119,6 +119,7 @@ class DeliveryInbox:
         evict_processed: bool = True,
         max_pending_bytes: int | None = None,
         archive_processed: bool = False,
+        read_only: bool = False,
     ) -> None:
         if (
             isinstance(max_replay_entries, bool)
@@ -141,7 +142,10 @@ class DeliveryInbox:
         self._evict_processed = evict_processed
         if type(archive_processed) is not bool or (archive_processed and not evict_processed):
             raise ValueError("archive_processed requires processed-entry eviction")
-        self._archive = ProcessedArchive(self._dir) if archive_processed else None
+        if type(read_only) is not bool:
+            raise ValueError("read_only must be a boolean")
+        self.read_only = read_only
+        self._archive = ProcessedArchive(self._dir, read_only=read_only) if archive_processed else None
         if max_pending_bytes is not None and (
             isinstance(max_pending_bytes, bool) or not isinstance(max_pending_bytes, int) or max_pending_bytes < 1
         ):
@@ -165,6 +169,10 @@ class DeliveryInbox:
         self._archive_required = False
         with self._process_lock():
             self._load_cache_locked()
+            if self.read_only and self._archive is not None and (
+                not self._archive_enabled or not self._archive_catalogued
+            ):
+                raise DeliveryInboxCacheCorrupt("archive requires explicit initialization or migration")
             if self._archive is not None and not self._archive_enabled:
                 self._append_cache_locked({"event": "archive_enabled"})
                 self._archive_enabled = True
@@ -182,7 +190,13 @@ class DeliveryInbox:
             return InterProcessLock(self._lock_path, reject_links=True)
         return InterProcessLock(self._lock_path)
 
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise PermissionError("inbox is read-only")
+
     def _open_storage(self, path: Path, mode: str):
+        if mode != "rb":
+            self._require_writable()
         if self._reject_links:
             return open_independent_file(path, mode)
         return open(path, mode)
@@ -202,7 +216,7 @@ class DeliveryInbox:
     ) -> InboxDecision:
         """Run the full pipeline. Returns a decision; never raises for
         malformed input — everything is an explicit rejection reason."""
-
+        self._require_writable()
         now = self._clock() if now_ms is None else now_ms
         if isinstance(source, str):
             envelope, decision = self._parse(source)
@@ -431,6 +445,7 @@ class DeliveryInbox:
         This bounded local evidence store grants no business or replay authority.
         Exact descriptors are idempotent; capacity failure never evicts evidence.
         """
+        self._require_writable()
         if not isinstance(transport, str) or not transport or len(transport) > 256:
             raise ValueError("quarantine transport must be bounded text")
         if not isinstance(reason, str) or not reason or len(reason) > 512:
@@ -496,6 +511,7 @@ class DeliveryInbox:
         Old journals without a retained digest fail closed and cannot use this
         recovery path. Domain processing still rechecks its own authorization.
         """
+        self._require_writable()
         envelope, rejected = self._parse(encoded)
         if rejected is not None:
             return rejected
@@ -531,7 +547,7 @@ class DeliveryInbox:
 
     def mark_processed(self, message_id: str) -> bool:
         """Durably mark one accepted envelope as handled by the domain layer."""
-
+        self._require_writable()
         if not isinstance(message_id, str) or _MESSAGE_ID_RE.fullmatch(message_id) is None:
             raise ValueError("message_id is not a content address")
         with self._thread_lock:
@@ -553,7 +569,7 @@ class DeliveryInbox:
 
     def compact_rejections(self, max_keep: int = DEFAULT_MAX_REJECTION_LOG) -> int:
         """Trim the rejection log to the most recent ``max_keep`` lines."""
-
+        self._require_writable()
         if max_keep < 1:
             raise ValueError("max_keep must be a positive integer")
         with self._process_lock():
@@ -621,6 +637,7 @@ class DeliveryInbox:
         return decision
 
     def _journal_rejection(self, message_id: str, sender_did: str, reason: str) -> None:
+        self._require_writable()
         import os
 
         event = {
@@ -650,7 +667,7 @@ class DeliveryInbox:
         compact) could silently drop lines or corrupt the temp file
         (round-4 bug R).
         """
-
+        self._require_writable()
         try:
             if self._storage_metadata(self._rejection_path).st_size <= REJECTION_LOG_MAX_BYTES:
                 return
@@ -759,7 +776,7 @@ class DeliveryInbox:
 
     def _compact_cache_journal_locked(self, *, log_level: int = logging.WARNING) -> None:
         """Rewrite the current cache state while holding the process lock."""
-
+        self._require_writable()
         marker = {"event": "archive_enabled"}
         if self._archive_catalogued:
             marker["catalog_version"] = 1
@@ -829,8 +846,9 @@ class DeliveryInbox:
                 self._archive.require_catalog()
             except ProcessedArchiveCorrupt as exc:
                 raise DeliveryInboxCacheCorrupt(str(exc)) from exc
-        recover_torn_tail(self._cache_path, raw)
-        if len(raw) > MAX_CACHE_JOURNAL_BYTES:
+        if not self.read_only:
+            recover_torn_tail(self._cache_path, raw)
+        if not self.read_only and len(raw) > MAX_CACHE_JOURNAL_BYTES:
             self._compact_cache_journal_locked()
             return
         stat = self._storage_metadata(self._cache_path)

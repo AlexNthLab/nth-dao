@@ -3045,13 +3045,10 @@ def _state_receipts_store(request: Request) -> Optional[Any]:
 
 def _has_console_bearer(request: Request) -> bool:
     """Return whether the request carries the current console Bearer token."""
+    from .bearer import console_bearer_matches
 
     expected = str(getattr(request.app.state, "nth_console_token", "") or "")
-    supplied = request.headers.get("Authorization", "")
-    prefix = "Bearer "
-    if not expected or not supplied.startswith(prefix):
-        return False
-    return hmac.compare_digest(supplied[len(prefix):].strip(), expected)
+    return console_bearer_matches(request.headers.raw, expected)
 
 
 def _require_console_bearer_for_sensitive_read(request: Request) -> None:
@@ -12421,6 +12418,21 @@ def register_v2_routes(app: FastAPI) -> None:
     register_commerce_routes(
         app,
         sensitive_read_guard=_require_console_bearer_for_sensitive_read,
+    )
+
+    from .source_receipt_delivery_api import register_source_receipt_delivery_routes
+
+    def receipt_delivery_context(request: Request) -> tuple:
+        workspace = _state_workspace(request)
+        identity = _state_node_identity(request)
+        spine = _state_spine(request)
+        if workspace is None or identity is None or spine is None:
+            raise HTTPException(status_code=503, detail="local receipt signing context unavailable")
+        return workspace, identity, spine
+
+    register_source_receipt_delivery_routes(
+        app, operator_guard=_require_federation_operator,
+        json_guard=_require_portable_json_request, context_for=receipt_delivery_context,
     )
 
     # Load durable AgentLink state before requests arrive. The store converts

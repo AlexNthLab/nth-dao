@@ -12,6 +12,7 @@
     {"name": "v2-expired-retained-queue", "preparation_version": 2, "queued": true, "committed": false, "expired": true, "rejected": false, "expected": "ready"},
     {"name": "v2-expired-without-queue", "preparation_version": 2, "queued": false, "committed": false, "expired": true, "rejected": false, "expected": "deferred"},
     {"name": "committed-queue-missing", "preparation_version": 2, "queued": false, "committed": true, "expired": false, "rejected": false, "expected": "integrity-error"},
+    {"name": "committed-prepared-bytes-missing", "preparation_version": 2, "queued": true, "committed": true, "expired": false, "rejected": false, "prepared_bytes_retained": false, "expected": "integrity-error"},
     {"name": "committed-rejection-retained", "preparation_version": 2, "queued": true, "committed": true, "expired": false, "rejected": true, "expected": "ready"},
     {"name": "legacy-queue-retained", "preparation_version": 1, "queued": true, "committed": false, "expired": false, "rejected": true, "expected": "ready"},
     {"name": "legacy-queue-missing", "preparation_version": 1, "queued": false, "committed": false, "expired": false, "rejected": false, "expected": "integrity-error"}

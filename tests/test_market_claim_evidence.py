@@ -1216,7 +1216,7 @@ def test_confirmed_claim_evidence_rejects_rewritten_source(tmp_path: Path) -> No
         resolve_confirmed_claim_evidence(tmp_path, intent["nonce"])
 
 
-def test_confirmed_claim_evidence_survives_archival_and_index_migration(
+def test_confirmed_claim_evidence_requires_explicit_archive_index_migration(
     tmp_path: Path,
 ) -> None:
     tracker, intent, _receipt, ack = _prepared_claim(tmp_path, max_intents=1)
@@ -1233,6 +1233,14 @@ def test_confirmed_claim_evidence_survives_archival_and_index_migration(
     )
     with sqlite3.connect(index) as database:
         database.execute("UPDATE bindings SET segment_name = NULL")
+    before = index.read_bytes()
+    with pytest.raises(IntentTrackerCorrupt, match="explicit refresh or migration"):
+        resolve_confirmed_claim_evidence(tmp_path, intent["nonce"])
+    assert index.read_bytes() == before
+    assert (
+        resolve_confirmed_claim_evidence(tmp_path, intent["nonce"], read_only=False)["authority_ack"]
+        == ack
+    )
     assert (
         resolve_confirmed_claim_evidence(tmp_path, intent["nonce"])["authority_ack"]
         == ack

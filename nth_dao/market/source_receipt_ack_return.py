@@ -25,9 +25,11 @@ from nth_dao.delivery.envelope import (
 from nth_dao.delivery.outbox import DeliveryOutboxCorrupt, DurableOutbox
 from nth_dao.market.source_receipt_delivery import (
     SourceReceiptDeliveryDeferred,
+    SourceReceiptDeliveryNotRetained,
     SourceReceiptDeliveryReceiver,
     SourceReceiptDeliveryRejected,
     SourceReceiptDeliveryResult,
+    SourceReceiptDeliveryResultPending,
     _checked_path,
     _snapshot,
     _write_delivery_bytes,
@@ -56,10 +58,14 @@ class SourceReceiptAckReturnStore:
         self.outbox = DurableOutbox(
             self._path(Path(".")), clock=receiver.current_time_ms,
             retain_terminal_records=True, reject_links=True,
+            read_only=receiver.read_only,
         )
 
     def _path(self, relative: Path) -> Path:
-        return _checked_path(self.receiver.workspace, self._relative / relative)
+        try:
+            return _checked_path(self.receiver.workspace, self._relative / relative)
+        except SourceReceiptDeliveryRejected as exc:
+            raise DeliveryOutboxCorrupt("ACK return storage path is unsafe") from exc
 
     def _check(self) -> None:
         receiver = self.receiver
@@ -72,26 +78,55 @@ class SourceReceiptAckReturnStore:
     def _prepared_path(self, original: TransportEnvelope) -> Path:
         return self._path(Path("prepared") / (original.message_id[7:] + ".json"))
 
+    def _retained_delivery(
+        self, message_id: str,
+    ) -> tuple[TransportEnvelope, SourceReceiptDeliveryResult]:
+        try:
+            return self.receiver.get_retained_delivery(message_id)
+        except (SourceReceiptDeliveryNotRetained, SourceReceiptDeliveryResultPending) as exc:
+            if (
+                self._audit(message_id) is not None
+                or self._audit(message_id, event_type=SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT) is not None
+            ):
+                raise DeliveryOutboxCorrupt("audited original delivery result is missing") from exc
+            raise
+
     def _read(self, original: TransportEnvelope) -> TransportEnvelope:
-        with open_independent_file(self._prepared_path(original), "rb") as stream:
-            raw = stream.read(MAX_ENVELOPE_BYTES + 1)
+        try:
+            with open_independent_file(self._prepared_path(original), "rb") as stream:
+                raw = stream.read(MAX_ENVELOPE_BYTES + 1)
+        except FileNotFoundError as exc:
+            if (
+                self._audit(original.message_id) is not None
+                or self._audit(original.message_id, event_type=SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT) is not None
+            ):
+                raise DeliveryOutboxCorrupt("audited ACK return bytes are missing") from exc
+            raise SourceReceiptDeliveryNotRetained("ACK return has not been prepared") from exc
+        except ValueError as exc:
+            raise DeliveryOutboxCorrupt("ACK return storage is not an independent regular file") from exc
         if len(raw) > MAX_ENVELOPE_BYTES:
-            raise SourceReceiptDeliveryRejected("ACK return exceeds the wire byte limit")
-        value = json.loads(raw)
-        if canonical_json(value) != raw:
-            raise SourceReceiptDeliveryRejected("retained ACK return is not canonical JSON")
-        return _snapshot(TransportEnvelope.from_dict(value))
+            raise DeliveryOutboxCorrupt("ACK return exceeds the wire byte limit")
+        try:
+            value = json.loads(raw)
+            if canonical_json(value) != raw:
+                raise ValueError("retained ACK return is not canonical JSON")
+            return _snapshot(TransportEnvelope.from_dict(value))
+        except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise DeliveryOutboxCorrupt("retained ACK return bytes are invalid") from exc
 
     def _payload(
         self, envelope: TransportEnvelope, original: TransportEnvelope, result: SourceReceiptDeliveryResult,
     ) -> dict:
-        ack = ack_from_envelope(envelope)
+        try:
+            ack = ack_from_envelope(envelope)
+        except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise DeliveryOutboxCorrupt("retained ACK return signatures or payload are invalid") from exc
         if (
             envelope.recipient != original.sender_did or envelope.dao_id is not None
             or envelope.routing != {"hop_limit": 0, "hop_count": 0}
             or canonical_json(ack.to_dict()) != canonical_json(result.ack.to_dict())
         ):
-            raise SourceReceiptDeliveryRejected("ACK return differs from verified local delivery evidence")
+            raise DeliveryOutboxCorrupt("ACK return differs from verified local delivery evidence")
         return {
             "original_message_id": original.message_id,
             "message_id": envelope.message_id, "envelope_sha256": envelope_digest(envelope),
@@ -113,17 +148,23 @@ class SourceReceiptAckReturnStore:
         self, payload: dict, *, event_type: str = SOURCE_RECEIPT_ACK_RETURN_PREPARED_EVENT,
     ) -> SpineEvent:
         event = self._audit(payload["original_message_id"], event_type=event_type)
+        if event is None:
+            if event_type != SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT and self._audit(
+                payload["original_message_id"], event_type=SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT,
+            ) is not None:
+                raise DeliveryOutboxCorrupt("committed ACK return preparation or commit audit is missing")
+            raise SourceReceiptDeliveryDeferred("ACK return preparation or commit audit is pending; explicit preparation is required")
         expected = payload
-        if (event is not None and event_type == SOURCE_RECEIPT_ACK_RETURN_PREPARED_EVENT
+        if (event_type == SOURCE_RECEIPT_ACK_RETURN_PREPARED_EVENT
                 and "preparation_version" in event.payload):
             if type(event.payload["preparation_version"]) is not int or event.payload["preparation_version"] != 2:
-                raise SourceReceiptDeliveryRejected("ACK return preparation version is unsupported")
+                raise DeliveryOutboxCorrupt("ACK return preparation version is unsupported")
             expected = {**payload, "preparation_version": 2}
         if (
-            event is None or event.author_did != self.receiver.identity.as_did()
+            event.author_did != self.receiver.identity.as_did()
             or canonical_json(event.payload) != canonical_json(expected)
         ):
-            raise SourceReceiptDeliveryRejected("ACK return lacks matching claimant preparation or commit audit")
+            raise DeliveryOutboxCorrupt("ACK return lacks matching claimant preparation or commit audit")
         return event
 
     @staticmethod
@@ -136,7 +177,7 @@ class SourceReceiptAckReturnStore:
         if record is None and committed:
             raise DeliveryOutboxCorrupt("committed ACK return outbox record is missing; automatic recreation is forbidden")
         if record is None or record.envelope_json.encode("utf-8") != canonical_json(envelope.to_dict()):
-            raise SourceReceiptDeliveryRejected("ACK return lacks matching retained outbox bytes")
+            raise DeliveryOutboxCorrupt("ACK return lacks matching retained outbox bytes")
 
     def prepare(self, original_message_id: str, *, ttl_ms: int = 600_000) -> TransportEnvelope:
         """Persist once or repair an interrupted preparation; never implicitly renew.
@@ -146,20 +187,21 @@ class SourceReceiptAckReturnStore:
         queued v2 preparation may finish its commit without changing bytes.
         Legacy preparation can be adopted only with its retained queue record.
         """
+        self.receiver._require_writable()
         if type(ttl_ms) is not int or not 1 <= ttl_ms <= MAX_TTL_MS:
             raise ValueError("ACK return TTL must be a positive integer within the wire limit")
         self._check()
         with InterProcessLock(self._path(Path("preparation.lock")), reject_links=True):
             self._check()
             self.outbox.require_retained_independent_storage(self._path(Path(".")))
-            original, result = self.receiver.get_retained_delivery(original_message_id)
+            original, result = self._retained_delivery(original_message_id)
             committed = self._audit(original.message_id, event_type=SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT)
             path = self._prepared_path(original)
             if path.exists():
                 envelope = self._read(original)
             else:
                 if self._audit(original.message_id) is not None or committed is not None:
-                    raise SourceReceiptDeliveryRejected("audited ACK return bytes are missing")
+                    raise DeliveryOutboxCorrupt("audited ACK return bytes are missing")
                 now = self.receiver.current_time_ms()
                 envelope = sign_ack_envelope(
                     self.receiver.identity, result.ack, recipient=original.sender_did,
@@ -173,7 +215,7 @@ class SourceReceiptAckReturnStore:
                 event = self._require_audit(payload)
             if committed is not None:
                 if event is None:
-                    raise SourceReceiptDeliveryRejected("committed ACK return preparation audit is missing")
+                    raise DeliveryOutboxCorrupt("committed ACK return preparation audit is missing")
                 self._require_audit(self._commit_payload(payload, event), event_type=SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT)
                 self._require_outbox(envelope, committed=True)
                 return envelope
@@ -190,7 +232,7 @@ class SourceReceiptAckReturnStore:
                     envelope, now_ms=self.receiver.current_time_ms(), require_signature=True,
                 )
                 if not valid:
-                    raise SourceReceiptDeliveryRejected(reason)
+                    raise DeliveryOutboxCorrupt(reason)
                 self.receiver.spine.append_unique(
                     SOURCE_RECEIPT_ACK_RETURN_PREPARED_EVENT, {**payload, "preparation_version": 2},
                     unique_payload_fields=("original_message_id",),
@@ -198,7 +240,7 @@ class SourceReceiptAckReturnStore:
                 event = self._require_audit(payload)
                 self.outbox.enqueue(envelope, now_ms=self.receiver.current_time_ms())
             if event is None:
-                raise SourceReceiptDeliveryRejected("ACK return preparation was not persisted")
+                raise DeliveryOutboxCorrupt("ACK return preparation was not persisted")
             self._require_outbox(envelope)
             commit_payload = self._commit_payload(payload, event)
             self.receiver.spine.append_unique(
@@ -215,7 +257,7 @@ class SourceReceiptAckReturnStore:
         with InterProcessLock(self._path(Path("preparation.lock")), reject_links=True):
             self._check()
             self.outbox.require_retained_independent_storage(self._path(Path(".")))
-            original, result = self.receiver.get_retained_delivery(original_message_id)
+            original, result = self._retained_delivery(original_message_id)
             envelope = self._read(original)
             payload = self._payload(envelope, original, result)
             event = self._require_audit(payload)

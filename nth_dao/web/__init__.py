@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+import asyncio
 import hashlib
 import ipaddress
 import logging
 import os
-import hmac
 import json
 import re
 import secrets
@@ -103,10 +103,15 @@ from nth_dao.plugins import (
     PluginLifecycleError,
     PluginSchemaError,
 )
+from nth_dao.web.bearer import console_bearer_matches, extract_bearer_token
 from nth_dao.web.rate_limit import (
     PersistentRateLimiter,
     RateLimiter,
     enforce_min_response_time,
+)
+from nth_dao.web.source_receipt_delivery_api import (
+    SourceReceiptNoStoreMiddleware,
+    source_receipt_request_limit,
 )
 from team_layer.blackboard import Blackboard
 
@@ -177,6 +182,14 @@ class _RequestBodyTooLarge(Exception):
     pass
 
 
+class _RequestBodyTimedOut(Exception):
+    pass
+
+
+_SOURCE_PROOF_BODY_IDLE_TIMEOUT_S = 10.0
+_SOURCE_PROOF_BODY_TOTAL_TIMEOUT_S = 30.0
+
+
 class _FederationBodyLimitMiddleware:
     """Bound anonymous federation writes before FastAPI buffers JSON."""
 
@@ -187,6 +200,7 @@ class _FederationBodyLimitMiddleware:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path") or "")
+        receipt_limit = source_receipt_request_limit(scope)
         is_source_proof_read = (
             scope.get("type") == "http"
             and scope.get("method") == "GET"
@@ -220,6 +234,9 @@ class _FederationBodyLimitMiddleware:
                 ) is not None
             )
         )
+        if receipt_limit is not None:
+            is_source_proof_read = scope.get("method") == "GET"
+            is_source_proof_write = scope.get("method") == "POST"
         if is_source_proof_read or is_source_proof_write:
             if not self._source_proof_operator_authorized(scope):
                 await JSONResponse(
@@ -241,11 +258,11 @@ class _FederationBodyLimitMiddleware:
                         await busy(scope, receive, send)
                         return
                     try:
-                        await self._dispatch(scope, receive, send)
+                        await self._dispatch(scope, receive, send, bound_body_time=True)
                     finally:
                         self._source_proof_read_slots.release()
                 else:
-                    await self._dispatch(scope, receive, send)
+                    await self._dispatch(scope, receive, send, bound_body_time=True)
             finally:
                 self._source_proof_slots.release()
             return
@@ -256,16 +273,7 @@ class _FederationBodyLimitMiddleware:
         state = getattr(scope.get("app"), "state", None)
         if bool(getattr(state, "nth_require_console_auth", True)):
             expected = str(getattr(state, "nth_console_token", "") or "")
-            values = [
-                value for name, value in scope.get("headers") or []
-                if name.lower() == b"authorization"
-            ]
-            if not expected or len(values) != 1:
-                return False
-            supplied = values[0].decode("latin-1")
-            return supplied.startswith("Bearer ") and hmac.compare_digest(
-                supplied[len("Bearer "):].strip(), expected,
-            )
+            return console_bearer_matches(scope.get("headers") or [], expected)
         client = scope.get("client")
         host = str(client[0]).strip() if client else ""
         if host == "testclient":
@@ -275,8 +283,11 @@ class _FederationBodyLimitMiddleware:
         except ValueError:
             return False
 
-    async def _dispatch(self, scope: dict, receive: Any, send: Any) -> None:
+    async def _dispatch(
+        self, scope: dict, receive: Any, send: Any, *, bound_body_time: bool = False,
+    ) -> None:
         path = str(scope.get("path") or "")
+        receipt_limit = source_receipt_request_limit(scope)
         is_foreign_claim = (
             scope.get("type") == "http"
             and scope.get("method") == "POST"
@@ -479,11 +490,15 @@ class _FederationBodyLimitMiddleware:
             or is_trade_receipt_review_write
             or is_trade_proposal_accept
             or is_resource_profile_write
+            or receipt_limit is not None
         ):
             await self.app(scope, receive, send)
             return
 
-        if is_foreign_claim:
+        if receipt_limit is not None:
+            max_body_bytes = receipt_limit
+            body_label = "source receipt delivery"
+        elif is_foreign_claim:
             max_body_bytes = _FOREIGN_CLAIM_MAX_BODY_BYTES
             body_label = "foreign claim"
         elif is_claim_completion_write:
@@ -593,14 +608,31 @@ class _FederationBodyLimitMiddleware:
             return
 
         received = 0
+        body_complete = False
+        body_deadline = (
+            time.monotonic() + _SOURCE_PROOF_BODY_TOTAL_TIMEOUT_S
+            if bound_body_time else None
+        )
 
         async def limited_receive() -> dict:
-            nonlocal received
-            message = await receive()
+            nonlocal received, body_complete
+            if body_deadline is not None and not body_complete:
+                remaining = body_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _RequestBodyTimedOut
+                try:
+                    message = await asyncio.wait_for(
+                        receive(), timeout=min(_SOURCE_PROOF_BODY_IDLE_TIMEOUT_S, remaining),
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise _RequestBodyTimedOut from exc
+            else:
+                message = await receive()
             if message.get("type") == "http.request":
                 received += len(message.get("body") or b"")
                 if received > max_body_bytes:
                     raise _RequestBodyTooLarge
+                body_complete = not message.get("more_body", False)
             return message
 
         try:
@@ -609,6 +641,13 @@ class _FederationBodyLimitMiddleware:
             response = JSONResponse(
                 status_code=413,
                 content={"detail": f"{body_label} body exceeds {limit_label}"},
+            )
+            await response(scope, receive, send)
+        except _RequestBodyTimedOut:
+            response = JSONResponse(
+                status_code=408,
+                content={"detail": "source proof request body read timed out"},
+                headers={"Connection": "close"},
             )
             await response(scope, receive, send)
 
@@ -863,11 +902,7 @@ def _load_or_create_console_token() -> str:
 
 
 def _extract_bearer_token(request: Request) -> str:
-    auth = request.headers.get("authorization", "")
-    prefix = "Bearer "
-    if not auth.startswith(prefix):
-        return ""
-    return auth[len(prefix):].strip()
+    return extract_bearer_token(request.headers.raw).decode("ascii")
 
 
 def _extract_cap_token_auth(request: Request) -> str:
@@ -2590,9 +2625,8 @@ def create_app(
             return await call_next(request)
 
         # Console Bearer path (operator full access)
-        supplied = _extract_bearer_token(request)
         expected = str(app.state.nth_console_token)
-        if not supplied or not hmac.compare_digest(supplied, expected):
+        if not console_bearer_matches(request.headers.raw, expected):
             return JSONResponse(
                 {"detail": "missing or invalid console token"},
                 status_code=401,
@@ -5111,6 +5145,7 @@ def create_app(
             status_code=503,
         )
 
+    app.add_middleware(SourceReceiptNoStoreMiddleware)
     return app
 
 

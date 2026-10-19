@@ -1059,3 +1059,94 @@ automatic dispatch, REST/UI controls and two-physical-computer acceptance
 remain future work. The existing public ACK-envelope conformance vector and
 wire version remain unchanged; local preparation authority is covered by
 domain tests, not inferred from wire compatibility.
+
+### Operator Console Receipt Transfer API
+
+`web/source_receipt_delivery_api.py` exposes the existing local domain stores
+without selecting a provider or issuing a network request. These are console
+operations, not anonymous peer federation endpoints. Only the configured
+console operator is authorized; explicitly unauthenticated development apps
+retain the existing loopback-only restriction. A delegated Agent capability
+does not grant this authority. The node uses its existing identity and Spine;
+keys, workspace paths, destinations and remote intake clocks are not accepted.
+The node identity must itself be the confirmed claimant for claimant actions.
+
+Let `C` be `/api/v2/market/claim-intents/{nonce}/completion/source-receipt/deliveries`
+and `S` be `/api/v2/market/completion-proofs/source-receipt-acks`:
+
+| Method | Path | Input and result |
+| --- | --- | --- |
+| POST | `C` | Exact source receipt envelope; verifies and retains its signed claimant ACK and observation |
+| POST | `C/reconcile` | Empty body; recover already durable claimant intake |
+| POST | `C/{message_id}/ack-return` | `{}` or strict integer `ttl_ms`; explicitly prepare/repair the immutable audited ACK return |
+| GET | `C/{message_id}/ack-return` | Reverify and export the prepared envelope; never prepare, migrate or renew it |
+| POST | `S` | Exact signed return envelope; reverify and close only the original source receipt outbox |
+| POST | `S/reconcile` | Empty body; recover already durable source ACK intake and audit |
+
+All POST operations require same-origin JSON request headers, including
+`Content-Type: application/json` on empty-body reconciliation. Unknown query
+overrides, duplicate JSON fields, non-JSON numbers and preparation options are
+rejected. Intake bodies are bounded at 512 KiB, preparation at 4 KiB and
+reconciliation at zero bytes, including streamed bodies without Content-Length.
+Console authorization precedes body consumption. These operations share the
+source-proof preparse concurrency budget (two total operations, at most one
+read). Body reads in that shared budget have a 10-second idle limit and a
+30-second total limit. A stalled or continuously trickling body returns HTTP
+408, closes the connection and releases the slot before any domain work.
+These upload limits do not cancel verification or persistence after the final
+body chunk. Blocking verification and persistence run in a worker, not the ASGI loop.
+Global console auth, the preparse guard and sensitive route checks share one
+byte-safe Bearer parser. Duplicate Authorization fields and non-ASCII Bearer
+bytes reject rather than selecting one ambiguous value or raising TypeError.
+
+Every successful result declares `verification_scope=transport_receipt_only`,
+`accepted=false`, and `settled=false`. Preparation/export wrap the exact signed
+packet in `envelope`; this is not evidence of provider submission or remote
+confirmation. Every receipt-transfer response uses `Cache-Control: no-store`,
+including authentication, validation, quota, timeout and unexpected server
+errors. A previously checked packet or negative lookup must not bypass current
+local verification through browser caching.
+GET rechecks retained evidence without completing pending intake or appending
+business audit. Filesystem locking can create lock files, but only an explicit
+POST intake/reconciliation operation completes an interrupted intake.
+Its storage views do not recover torn journal tails, create quarantine copies,
+compact journals or initialize/migrate archive indexes. Existing indexes use
+SQLite read-only mode. Missing or stale indexes fail closed until an explicit
+writable operation performs maintenance; constructors can still create missing
+directories and coordination lock files. SDK callers must explicitly select
+`read_only=True` for the same guarantee; default writer behavior is unchanged.
+Intake returns signed evidence only after durable domain audit.
+Reconciliation returns `complete`, `results` and per-item `failures`; HTTP 200
+does not imply completion when `complete=false`. An empty result is not proof
+that a remote peer received anything.
+
+Domain errors use `detail.code` and `detail.retryable`: evidence not ready is
+409 (`receipt-evidence-unavailable`); rejected evidence is 422
+(`receipt-delivery-rejected`); a delivery never retained or a return never
+prepared is 404 (`receipt-delivery-not-retained`). An accepted delivery whose
+result write is pending is 409, not a missing record. Missing processed result
+bytes or audited return bytes are integrity failures, including when signed
+preparation/commit evidence survives loss of the original intake index.
+An intake still marked pending cannot downgrade missing original result bytes
+to 409 once a signed return preparation or commit proves that result existed.
+By contrast, temporarily unavailable completion evidence remains retryable.
+Malformed or non-canonical retained JSON, bad retained signatures, changed ACK
+or observation bindings and unsafe retained file links are storage integrity
+failures, not incoming-request 422 errors. Valid uncommitted return bytes are
+409 pending and can be committed only by explicit preparation, never by GET.
+Unclassified filesystem errors are not mapped to a domain 404.
+Storage failure is 503 with retryable true;
+known inbox/outbox corruption is 503 with code
+`receipt-delivery-integrity-failed` and retryable false. Integrity failure must
+not trigger automatic re-preparation. Error bodies do not expose storage paths
+or exception text. Authentication, media-type and request-shape errors retain
+the existing console HTTP conventions.
+Retryability is shared with the domain batch classifier: only explicit I/O,
+capacity, deferred-evidence and pending-audit conditions permit retry. An
+unclassified runtime/type/value invariant failure requires operator review,
+not automatic repetition. A generic RuntimeError is not a transient category.
+
+`market/vectors/source-receipt-console-v1.json` freezes this local route/limit
+contract, not a new signed peer-wire format. No UI controls, production network
+admission, automatic dispatch, return renewal, ACK-of-ACK or real funds are
+enabled. Two-workspace REST tests do not replace physical two-computer testing.

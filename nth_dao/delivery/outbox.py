@@ -197,6 +197,7 @@ class DurableOutbox:
         authorize_ack: Optional[AckAuthorizer] = None,
         retain_terminal_records: bool = False,
         reject_links: bool = False,
+        read_only: bool = False,
     ) -> None:
         self._dir = Path(directory)
         self._journal_path = self._dir / "outbox.journal.jsonl"
@@ -216,6 +217,9 @@ class DurableOutbox:
         if type(reject_links) is not bool:
             raise ValueError("reject_links must be a boolean")
         self._reject_links = reject_links
+        if type(read_only) is not bool:
+            raise ValueError("read_only must be a boolean")
+        self.read_only = read_only
         self._records: Dict[str, OutboxRecord] = {}
         self._thread_lock = threading.RLock()
         self._journal_stat: Optional[tuple] = None
@@ -240,6 +244,10 @@ class DurableOutbox:
         if self._reject_links:
             return InterProcessLock(self._lock_path, reject_links=True)
         return InterProcessLock(self._lock_path)
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise PermissionError("outbox is read-only")
 
     def _journal_metadata(self):
         if self._reject_links:
@@ -295,7 +303,8 @@ class DurableOutbox:
             if not isinstance(event, dict):
                 raise DeliveryOutboxCorrupt(f"journal line {index + 1} is not an object")
             _fold_event(records, event)
-        recover_torn_tail(self._journal_path, raw)
+        if not self.read_only:
+            recover_torn_tail(self._journal_path, raw)
         stat = self._journal_metadata()
         self._journal_stat = journal_fingerprint(stat)
         self._records = records
@@ -327,7 +336,7 @@ class DurableOutbox:
         refold, validation, append, and the in-memory update. Locking only
         this write would leave a check-then-append race between processes.
         """
-
+        self._require_writable()
         line = canonical_json(event) + b"\n"
         outstanding = sum(
             attempt.outcome == OUTBOX_ATTEMPT_STARTED
@@ -362,7 +371,7 @@ class DurableOutbox:
                 return _copy_record(record) if record else None
 
     def pending(self, now_ms: Optional[int] = None) -> List[OutboxRecord]:
-        """Non-terminal records; expired ones are folded to expired first."""
+        """Live records; read-only views filter expiry without journaling it."""
 
         now = _validate_operation_time(
             self._clock() if now_ms is None else now_ms, "now_ms"
@@ -376,12 +385,13 @@ class DurableOutbox:
                     if record.state == OUTBOX_STATE_QUEUED
                     and record.expires_at_ms <= now
                 ]
-                for record in expired:
-                    self._transition_expired(record, now)
+                if not self.read_only:
+                    for record in expired:
+                        self._transition_expired(record, now)
                 return [
                     _copy_record(record)
                     for record in self._records.values()
-                    if record.state == OUTBOX_STATE_QUEUED
+                    if record.state == OUTBOX_STATE_QUEUED and record.expires_at_ms > now
                 ]
 
     def stats(self) -> Dict[str, int]:
@@ -404,7 +414,7 @@ class DurableOutbox:
         Already-expired envelopes are rejected (fail closed) instead of
         being parked as dead records.
         """
-
+        self._require_writable()
         now = _validate_operation_time(
             self._clock() if now_ms is None else now_ms, "now_ms"
         )
@@ -467,7 +477,7 @@ class DurableOutbox:
         error_code: str = "",
     ) -> OutboxRecord:
         """Append one delivery attempt outcome for a queued record."""
-
+        self._require_writable()
         _validate_transport_name(transport)
         if outcome not in OUTBOX_ATTEMPT_OUTCOMES:
             raise DeliveryOutboxError(f"unsupported attempt outcome: {outcome}")
@@ -514,6 +524,7 @@ class DurableOutbox:
         A crash leaves a visible ambiguous start. Retrying reserves a new slot;
         provider idempotency remains keyed by the original delivery message ID.
         """
+        self._require_writable()
         _validate_transport_name(transport)
         now = _validate_operation_time(self._clock() if at_ms is None else at_ms, "at_ms")
         with self._thread_lock, self._process_lock():
@@ -544,6 +555,7 @@ class DurableOutbox:
         error_code: str = "", at_ms: int | None = None,
     ) -> OutboxRecord:
         """Finish an existing reservation even if a signed ACK won the race."""
+        self._require_writable()
         if not isinstance(attempt_id, str) or _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
             raise DeliveryOutboxError("attempt_id must identify a reserved attempt")
         if outcome not in OUTBOX_ATTEMPT_OUTCOMES:
@@ -583,6 +595,7 @@ class DurableOutbox:
         ``message_id`` (content address) — a forwarded copy with a different
         hop count legitimately ACKs the same message identity.
         """
+        self._require_writable()
 
         if type(allow_expired) is not bool:
             raise ValueError("allow_expired must be a boolean")
@@ -672,7 +685,7 @@ class DurableOutbox:
         journal to a temp file, fsync, then replace, under the cross-process
         lock.
         """
-
+        self._require_writable()
         with self._thread_lock:
             # refold must happen INSIDE the cross-process lock: refolding
             # before acquiring it leaves a window where another process

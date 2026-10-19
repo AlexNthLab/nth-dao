@@ -33,10 +33,38 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
+def _free_port(*, sock_type: int = socket.SOCK_STREAM, bind_addr: str = "127.0.0.1") -> int:
+    with socket.socket(socket.AF_INET, sock_type) as sock:
+        sock.bind((bind_addr, 0))
         return int(sock.getsockname()[1])
+
+
+@pytest.mark.parametrize("sock_type,bind_addr", [
+    (socket.SOCK_STREAM, "127.0.0.1"), (socket.SOCK_DGRAM, "0.0.0.0"),
+])
+def test_free_port_probes_the_actual_transport_and_bind_address(monkeypatch, sock_type, bind_addr):
+    calls = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def bind(self, address):
+            calls.append(address)
+
+        def getsockname(self):
+            return bind_addr, 42424
+
+    def socket_factory(family, kind):
+        assert family == socket.AF_INET and kind == sock_type
+        return Probe()
+
+    monkeypatch.setattr(socket, "socket", socket_factory)
+    assert _free_port(sock_type=sock_type, bind_addr=bind_addr) == 42424
+    assert calls == [(bind_addr, 0)]
 
 
 class _BackgroundServer:
@@ -79,7 +107,7 @@ def test_discovered_node_is_verified_and_its_task_is_pulled_over_http(
     from nth_dao.discovery.lan import LANDiscovery
 
     source_port = _free_port()
-    discovery_port = _free_port()
+    discovery_port = _free_port(sock_type=socket.SOCK_DGRAM, bind_addr="0.0.0.0")
     source_url = f"http://127.0.0.1:{source_port}"
     monkeypatch.setenv("NTH_PUBLIC_BASE_URL", source_url)
     monkeypatch.setenv("NTH_LAN_PUBLISH", "1")
@@ -92,6 +120,8 @@ def test_discovered_node_is_verified_and_its_task_is_pulled_over_http(
     source_did = source_app.state.nth.node_identity.as_did()
 
     with _BackgroundServer(source_app, source_port):
+        responder = source_app.state.nth.lan_udp_responder
+        assert responder is not None and responder.is_running(), "UDP LAN publisher did not start"
         published = TestClient(source_app).post(
             "/api/v2/market/announce",
             json={

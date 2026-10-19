@@ -193,9 +193,9 @@ def test_corrupted_preparation_cannot_be_exported_or_repaired_as_fresh(tmp_path,
         path.rename(tmp_path / "moved-return.json")
     else:
         path.write_bytes(canonical_json(_resign(claimant, returned, nonce="a" * 32).to_dict()))
-    with pytest.raises((OSError, ValueError)):
+    with pytest.raises(DeliveryOutboxCorrupt):
         store.get(original.message_id)
-    with pytest.raises((OSError, ValueError)):
+    with pytest.raises(DeliveryOutboxCorrupt):
         store.prepare(original.message_id)
     assert store.outbox.stats()["total"] == 1
 
@@ -236,7 +236,7 @@ def test_future_partial_return_is_not_audited_or_queued(tmp_path):
     path = store._prepared_path(original)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(canonical_json(future.to_dict()))
-    with pytest.raises(SourceReceiptDeliveryRejected, match="future"):
+    with pytest.raises(DeliveryOutboxCorrupt, match="future"):
         store.prepare(original.message_id)
     assert store._audit(original.message_id) is None and store.outbox.stats()["total"] == 0
 
@@ -559,7 +559,7 @@ def test_invalid_signed_commit_cannot_authorize_export_or_recovery(tmp_path, mon
     writer.append_unique(SOURCE_RECEIPT_ACK_RETURN_COMMITTED_EVENT, payload,
                          unique_payload_fields=("original_message_id",))
     for action in (store.get, store.prepare):
-        with pytest.raises(SourceReceiptDeliveryRejected, match="commit audit"):
+        with pytest.raises(DeliveryOutboxCorrupt, match="commit audit"):
             action(original.message_id)
 
 
@@ -651,13 +651,15 @@ def test_local_commit_policy_vectors(tmp_path, vector):
                 {**payload, _COMMIT_VECTORS["commit_binding_field"]: preparation.event_id},
                 unique_payload_fields=("original_message_id",),
             )
+        if not vector.get("prepared_bytes_retained", True):
+            path.rename(path.with_name("preserved-prepared-bytes.json"))
     if vector["expired"]:
         receiver._clock = lambda: now + 2000
     if vector["expected"] != "ready":
         error = DeliveryOutboxCorrupt if vector["expected"] == "integrity-error" else SourceReceiptDeliveryDeferred
         with pytest.raises(error):
             store.prepare(original.message_id)
-        assert store.outbox.stats()["total"] == 0
+        assert store.outbox.stats()["total"] == int(vector["queued"])
         return
     actual = store.prepare(original.message_id)
     if returned is not None:

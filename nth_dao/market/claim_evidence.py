@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from nth_dao.market.claim_ack import AuthorityClaimAckStore
-from nth_dao.market.claim_intent import IntentTracker
 from nth_dao.market.announcement import (
     TaskAnnouncement,
     announcement_federation_key,
     verify_announcement,
 )
 from nth_dao.market.claim import _claim_timeline
+from nth_dao.market.claim_ack import AuthorityClaimAckStore
+from nth_dao.market.claim_intent import IntentTracker
 
 
 class ClaimEvidenceUnavailable(ValueError):
@@ -22,16 +22,19 @@ class ClaimEvidenceUnavailable(ValueError):
 def resolve_confirmed_claim_evidence(
     workspace: Path,
     nonce: str,
+    *, read_only: bool = True,
 ) -> dict[str, Any]:
     """Return one confirmed claim's verified announcement, receipt, and source ACK.
 
     This proves source acceptance of the claim, not mission execution or
     delivery. Legacy hash-only intents have no retained claim evidence and
     cannot be promoted to a verification-grade completion chain.
+    Reads never recover journals or migrate archive indexes by default.
+    Set read_only=False only for explicit writable recovery or maintenance.
     """
 
     ws = Path(workspace)
-    tracker = IntentTracker(ws / "federation" / "claim_intents")
+    tracker = IntentTracker(ws / "federation" / "claim_intents", read_only=read_only)
     record = tracker.record(nonce)
     if record is None:
         record = tracker.archived_record(nonce)

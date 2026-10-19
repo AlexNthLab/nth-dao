@@ -28,9 +28,10 @@ class ProcessedArchiveCorrupt(RuntimeError):
 
 
 class ProcessedArchive:
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, read_only: bool = False) -> None:
         self.directory = directory / "processed_archive"
         self.catalog_path = self.directory / "catalog.sqlite3"
+        self.read_only = read_only
 
     @staticmethod
     def _nonce_key(sender: str, nonce: str) -> str:
@@ -59,7 +60,8 @@ class ProcessedArchive:
             self._check_catalog_paths()
             with open_independent_file(self.catalog_path, "rb") as pinned:
                 metadata = os.fstat(pinned.fileno())
-                uri = "file:" + quote(str(self.catalog_path), safe="/\\:") + "?mode=rw"
+                mode = "ro" if self.read_only else "rw"
+                uri = "file:" + quote(str(self.catalog_path), safe="/\\:") + "?mode=" + mode
                 with closing(sqlite3.connect(uri, uri=True, timeout=10)) as database:
                     database.execute("PRAGMA trusted_schema=OFF")
                     database.execute("PRAGMA synchronous=FULL")
@@ -86,6 +88,8 @@ class ProcessedArchive:
         The caller holds the inbox process lock. Publish the new database before
         upgrading the journal marker; a crash before publication can retry.
         """
+        if self.read_only:
+            raise PermissionError("processed archive is read-only")
         try:
             if check_independent_file(self.catalog_path, missing_ok=True) is not None:
                 self.require_catalog()
@@ -202,6 +206,8 @@ class ProcessedArchive:
             raise ProcessedArchiveCorrupt("completed archive path is unsafe") from exc
 
     def store(self, record: dict) -> None:
+        if self.read_only:
+            raise PermissionError("processed archive is read-only")
         raw = canonical_json(record)
         message_id = record["message_id"]
         # Write the evidence before its lookup pointer. A crash between writes

@@ -308,6 +308,42 @@ The HTTP liveness projection does not import/probe optional mDNS availability;
 full federation diagnostics still perform that check. Optional cold startup
 must not turn an unrelated receipt operation into an unhealthy-node signal.
 
+### Local Console Transfer Boundary
+
+`web/source_receipt_delivery_api.py` now provides operator-only REST intake,
+retained-intake reconciliation, explicit return preparation and exact return
+export over the existing receipt stores. The focused route module receives
+the application's existing identity/Spine context and console/JSON guards.
+Its route classifier is also used by pre-buffer middleware so authentication,
+byte limits and the existing two-operation source-proof budget apply before
+JSON parsing. Storage/verification run outside the ASGI event loop.
+The shared budget bounds request-body reads by idle and total deadlines;
+completed-body persistence is never cancelled by the upload timeout.
+GET verifies retained results without marking intake processed. Only explicit
+POST intake/reconciliation advances that state. Signed preparation/commit
+evidence distinguishes missing committed bytes from an ordinary absent return.
+The GET route constructs explicit read-only Inbox, Outbox and Claim Intent
+views. They validate the complete journal prefix in memory, without repairing
+torn tails, writing quarantine files, compacting or migrating archive indexes.
+Existing archive catalogs are opened read-only; a missing or stale index needs
+explicit writable maintenance. Lock files and missing storage directories can
+still be created for coordination. SDK constructors remain writable by default;
+callers needing the same read guarantee must select `read_only=True`.
+Signed preparation or commit evidence overrides a stale intake-pending marker
+when the original result is missing. This is a non-retryable integrity error,
+not deferred intake. Invalid retained bytes, signatures and bindings are also
+typed storage corruption, distinct from rejected incoming wire data. Valid
+partial preparations remain pending until explicit preparation completes them.
+The response-boundary cache policy covers success, guarded errors and server
+failures, not only the normal handler return.
+
+There is no anonymous peer endpoint or implicit transport call. Error codes
+preserve retryability, especially non-retryable committed-journal loss.
+Reconciliation reports partial failures explicitly. All results remain
+transport-only, never work acceptance or settlement. See the endpoint table
+in `docs/federation.md`. The local console contract vector does not claim
+cross-implementation cryptographic conformance; signed peer bytes are unchanged.
+
 ## Conformance
 
 `delivery_envelope_v1` and `delivery_ack_v1` categories in

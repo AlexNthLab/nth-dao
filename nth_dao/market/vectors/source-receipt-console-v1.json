@@ -1,0 +1,30 @@
+{
+  "kind": "nth-source-receipt-console-rest",
+  "version": 1,
+  "scope": "local-console-contract-not-peer-wire-cryptography",
+  "verification_scope": "transport_receipt_only",
+  "accepted": false,
+  "settled": false,
+  "response_cache_control": "no-store",
+  "get_domain_state_transitions": false,
+  "get_storage_recovery": false,
+  "get_archive_index_migration": false,
+  "body_read_limits": {"idle_timeout_s": 10, "total_timeout_s": 30, "timeout_status": 408},
+  "errors": [
+    {"condition": "not-retained", "status": 404, "code": "receipt-delivery-not-retained", "retryable": false},
+    {"condition": "pending", "status": 409, "code": "receipt-evidence-unavailable", "retryable": true},
+    {"condition": "rejected", "status": 422, "code": "receipt-delivery-rejected", "retryable": false},
+    {"condition": "storage", "status": 503, "code": "receipt-delivery-storage-unavailable", "retryable": true},
+    {"condition": "corrupt", "status": 503, "code": "receipt-delivery-integrity-failed", "retryable": false},
+    {"condition": "pending-result", "status": 409, "code": "receipt-evidence-unavailable", "retryable": true},
+    {"condition": "corrupt-retained-result", "status": 503, "code": "receipt-delivery-integrity-failed", "retryable": false}
+  ],
+  "operations": [
+    {"name": "receive-delivery", "method": "POST", "path": "/api/v2/market/claim-intents/{nonce}/completion/source-receipt/deliveries", "max_body_bytes": 524288},
+    {"name": "reconcile-deliveries", "method": "POST", "path": "/api/v2/market/claim-intents/{nonce}/completion/source-receipt/deliveries/reconcile", "max_body_bytes": 0},
+    {"name": "prepare-return", "method": "POST", "path": "/api/v2/market/claim-intents/{nonce}/completion/source-receipt/deliveries/{message_id}/ack-return", "max_body_bytes": 4096},
+    {"name": "export-return", "method": "GET", "path": "/api/v2/market/claim-intents/{nonce}/completion/source-receipt/deliveries/{message_id}/ack-return", "max_body_bytes": 0},
+    {"name": "receive-ack", "method": "POST", "path": "/api/v2/market/completion-proofs/source-receipt-acks", "max_body_bytes": 524288},
+    {"name": "reconcile-acks", "method": "POST", "path": "/api/v2/market/completion-proofs/source-receipt-acks/reconcile", "max_body_bytes": 0}
+  ]
+}

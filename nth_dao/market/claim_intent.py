@@ -42,6 +42,7 @@ from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from nth_dao.b64u import b64u_decode, b64u_encode
 from nth_dao.canonical_json import canonical_json
@@ -58,9 +59,9 @@ from nth_dao.market.announcement import (
     verify_announcement,
 )
 from nth_dao.market.claim import (
+    MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS,
     ClaimOutcome,
     ClaimRejected,
-    MAX_FOREIGN_CLAIM_CLOCK_SKEW_MS,
     _claim_timeline,
     record_foreign_claim,
 )
@@ -440,6 +441,7 @@ class IntentTracker:
         max_intents: int = DEFAULT_MAX_TRACKED_INTENTS,
         max_receipt_store_bytes: int = DEFAULT_MAX_RECEIPT_STORE_BYTES,
         max_receipt_files: int = DEFAULT_MAX_RECEIPT_FILES,
+        read_only: bool = False,
     ) -> None:
         if (
             isinstance(max_intents, bool)
@@ -454,6 +456,9 @@ class IntentTracker:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         self._dir = Path(directory)
+        if type(read_only) is not bool:
+            raise ValueError("read_only must be a boolean")
+        self.read_only = read_only
         self._journal_path = self._dir / _JOURNAL
         self._dir.mkdir(parents=True, exist_ok=True)
         self._max_intents = max_intents
@@ -465,6 +470,16 @@ class IntentTracker:
         self._intents: dict[str, dict[str, Any]] = {}
         with InterProcessLock(self._journal_path):
             self._load_locked()
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise PermissionError("claim-intent tracker is read-only")
+
+    def _archive_database(self, path: Path):
+        if self.read_only:
+            uri = "file:" + quote(str(path), safe="/\\:") + "?mode=ro"
+            return sqlite3.connect(uri, uri=True, timeout=10)
+        return sqlite3.connect(path, timeout=10)
 
     def _load_locked(self) -> None:
         self._intents = {}
@@ -479,7 +494,7 @@ class IntentTracker:
             )
         raw = self._journal_path.read_bytes()
         torn = bool(raw) and not raw.endswith(b"\n")
-        if torn:
+        if torn and not self.read_only:
             complete_size = raw.rfind(b"\n") + 1
             logger.warning(
                 "claim-intent journal torn tail; truncating %d byte(s)",
@@ -495,6 +510,8 @@ class IntentTracker:
                     f"cannot repair claim-intent journal torn tail: {exc}"
                 ) from exc
             raw = raw[:complete_size]
+        elif torn:
+            raw = raw[:raw.rfind(b"\n") + 1]
         lines = raw.split(b"\n")
         for index, line in enumerate(lines):
             if not line.strip():
@@ -617,6 +634,23 @@ class IntentTracker:
             return
         try:
             paths = sorted(archive_dir.glob("claim-intents-*.jsonl"))
+            if self.read_only:
+                with closing(self._archive_database(index_path)) as database:
+                    known = {
+                        name: (size, mtime_ns) for name, size, mtime_ns in
+                        database.execute("SELECT name, size, mtime_ns FROM segments")
+                    }
+                    current = {}
+                    for path in paths:
+                        if _ARCHIVE_NAME_RE.fullmatch(path.name) is None:
+                            raise IntentTrackerCorrupt("claim-intent archive name is invalid")
+                        metadata = path.stat()
+                        current[path.name] = (metadata.st_size, metadata.st_mtime_ns)
+                    if current != known or database.execute(
+                        "SELECT 1 FROM bindings WHERE segment_name IS NULL LIMIT 1"
+                    ).fetchone() is not None:
+                        raise IntentTrackerCorrupt("archive index requires explicit refresh or migration")
+                return
             with closing(sqlite3.connect(index_path, timeout=10)) as database:
                 database.execute("PRAGMA synchronous=FULL")
                 with database:
@@ -738,7 +772,7 @@ class IntentTracker:
             if not index_path.exists():
                 return False, False
         try:
-            with closing(sqlite3.connect(index_path, timeout=10)) as database:
+            with closing(self._archive_database(index_path)) as database:
                 nonce_found = database.execute(
                     "SELECT 1 FROM bindings WHERE nonce = ?", (nonce,),
                 ).fetchone() is not None
@@ -753,6 +787,7 @@ class IntentTracker:
             ) from exc
 
     def _save_receipt_locked(self, raw: bytes, receipt_hash: str) -> None:
+        self._require_writable()
         path = self._dir / _RECEIPT_DIR / f"{receipt_hash}.json"
         try:
             try:
@@ -832,7 +867,7 @@ class IntentTracker:
             index_path = self._dir / _ARCHIVE_DIR / _ARCHIVE_INDEX
             if index_path.exists():
                 try:
-                    with closing(sqlite3.connect(index_path, timeout=10)) as database:
+                    with closing(self._archive_database(index_path)) as database:
                         expected.update(
                             row[0] for row in database.execute(
                                 "SELECT DISTINCT receipt_hash FROM bindings "
@@ -885,7 +920,7 @@ class IntentTracker:
                     if index_path.exists():
                         try:
                             with closing(
-                                sqlite3.connect(index_path, timeout=10)
+                                self._archive_database(index_path)
                             ) as database:
                                 archived = database.execute(
                                     "SELECT 1 FROM bindings WHERE receipt_hash = ? "
@@ -940,7 +975,7 @@ class IntentTracker:
                 return 0
             seen: set[str] = set()
             try:
-                with closing(sqlite3.connect(index_path, timeout=10)) as database:
+                with closing(self._archive_database(index_path)) as database:
                     for path in sorted(archive_dir.glob("claim-intents-*.jsonl")):
                         match = _ARCHIVE_NAME_RE.fullmatch(path.name)
                         if match is None:
@@ -1177,6 +1212,7 @@ class IntentTracker:
         *,
         protected_nonces: frozenset[str] = frozenset(),
     ) -> None:
+        self._require_writable()
         encoded = [canonical_json(event) + b"\n" for event in events]
         current_size = (
             self._journal_path.stat().st_size if self._journal_path.exists() else 0
@@ -1222,7 +1258,7 @@ class IntentTracker:
         idempotent without copying the entire active journal each time.
         Pending and currently transitioning intents are never removed.
         """
-
+        self._require_writable()
         free_slots = self._max_intents - len(self._intents)
         remove_count = max(minimum_free - free_slots, force_terminal, 0)
         if remove_count == 0:
@@ -1876,7 +1912,7 @@ class IntentTracker:
             if not index_path.exists():
                 return None
             try:
-                with closing(sqlite3.connect(index_path, timeout=10)) as database:
+                with closing(self._archive_database(index_path)) as database:
                     row = database.execute(
                         "SELECT intent_hash, receipt_id, receipt_hash, "
                         "receipt_retained, segment_name FROM bindings WHERE nonce = ?",

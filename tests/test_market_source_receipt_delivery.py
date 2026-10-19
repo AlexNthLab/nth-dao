@@ -216,7 +216,7 @@ def test_retained_result_tampering_is_not_silently_repaired(tmp_path: Path) -> N
     value = json.loads(path.read_bytes())
     value["ack"]["envelope_sha256"] = "sha256:" + "0" * 64
     path.write_bytes(canonical_json(value))
-    with pytest.raises(SourceReceiptDeliveryRejected):
+    with pytest.raises(DeliveryInboxCacheCorrupt):
         receiver.get_ack(envelope.message_id)
 
 
@@ -243,7 +243,7 @@ def test_ack_export_rejects_missing_intake_journal_even_with_cached_result(tmp_p
         receiver.workspace, nonce=proof["nonce"], identity=claimant,
         spine=SignedEventLog(receiver.workspace / "spine.jsonl", claimant), clock=lambda: now,
     )
-    with pytest.raises(SourceReceiptDeliveryRejected, match="durable first-acceptance"):
+    with pytest.raises(DeliveryInboxCacheCorrupt, match="durable first-acceptance"):
         restarted.get_ack(envelope.message_id)
     assert not journal.exists()
     saved.rename(journal)
@@ -497,8 +497,9 @@ def test_corrupt_local_receipt_is_not_silently_repaired_on_duplicate(tmp_path: P
     retained = next((receiver.store.root / proof["source_claim_id"]).glob("*.json"))
     # Mechanical corruption of test-owned evidence, not user/runtime files.
     retained.write_bytes(b"{}")
-    with pytest.raises(ValueError, match="content hash"):
+    with pytest.raises(DeliveryInboxCacheCorrupt, match="evidence is invalid") as caught:
         receiver.receive(envelope)
+    assert "content hash" in str(caught.value.__cause__)
 
 
 @pytest.mark.parametrize("receipt_form", ["response", "event"])

@@ -30,11 +30,27 @@ from nth_dao.delivery.envelope import (
     sign_envelope,
     validate_envelope,
 )
-from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
-from nth_dao.delivery.outbox import DeliveryOutboxCorrupt, DurableOutbox, OutboxRecord
+from nth_dao.delivery.inbox import (
+    DeliveryInbox,
+    DeliveryInboxCacheCorrupt,
+    DeliveryInboxFull,
+)
+from nth_dao.delivery.outbox import (
+    DeliveryOutboxCorrupt,
+    DeliveryOutboxFull,
+    DurableOutbox,
+    OutboxRecord,
+)
 from nth_dao.identity import AgentIdentity
-from nth_dao.market.claim_evidence import resolve_confirmed_claim_evidence
-from nth_dao.market.claimant_receipt_store import ClaimantSourceReceiptStore
+from nth_dao.market.claim_evidence import (
+    ClaimEvidenceUnavailable,
+    resolve_confirmed_claim_evidence,
+)
+from nth_dao.market.claimant_receipt_store import (
+    ClaimantReceiptMissing,
+    ClaimantReceiptPending,
+    ClaimantSourceReceiptStore,
+)
 from nth_dao.market.completion_flow import build_portable_completion_proof_with_pins
 from nth_dao.market.source_completion_inbox import SourceCompletionInbox, _io_path
 from nth_dao.market.source_completion_receipt import (
@@ -65,6 +81,14 @@ class SourceReceiptDeliveryDeferred(SourceReceiptDeliveryRejected):
     """Valid intake must wait for local evidence or explicit storage maintenance."""
 
 
+class SourceReceiptDeliveryResultPending(SourceReceiptDeliveryDeferred):
+    """Accepted intake has no result file and has not been marked processed."""
+
+
+class SourceReceiptDeliveryNotRetained(FileNotFoundError):
+    """The selected delivery or return has no retained local record."""
+
+
 @dataclass(frozen=True)
 class SourceReceiptDeliveryResult:
     """A signed transport ACK and a separately audited local observation."""
@@ -85,8 +109,13 @@ def source_receipt_delivery_failure(message_id: str, exc: Exception) -> SourceRe
     return SourceReceiptDeliveryFailure(
         message_id=message_id, error_code=type(exc).__name__, reason=str(exc)[:512],
         retryable=(
-            isinstance(exc, (OSError, RuntimeError, SourceReceiptDeliveryDeferred))
-            and not isinstance(exc, (DeliveryInboxCacheCorrupt, DeliveryOutboxCorrupt))
+            isinstance(exc, (
+                OSError, SourceReceiptDeliveryDeferred, ClaimEvidenceUnavailable,
+                ClaimantReceiptMissing, ClaimantReceiptPending, DeliveryInboxFull, DeliveryOutboxFull,
+            ))
+            and not isinstance(exc, (
+                DeliveryInboxCacheCorrupt, DeliveryOutboxCorrupt, SourceReceiptDeliveryNotRetained,
+            ))
         ),
     )
 
@@ -359,14 +388,18 @@ class SourceReceiptDeliveryReceiver:
     def __init__(
         self, workspace: Path, *, nonce: str, identity: AgentIdentity,
         spine: SignedEventLog, clock: Callable[[], int] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.workspace = Path(workspace)
         self.nonce = nonce
         self.identity = identity
         self.spine = spine
+        if type(read_only) is not bool:
+            raise ValueError("read_only must be a boolean")
+        self.read_only = read_only
         spine.require_independent_storage()
         self._clock = clock or (lambda: int(time.time() * 1000))
-        claim = resolve_confirmed_claim_evidence(self.workspace, nonce)
+        claim = resolve_confirmed_claim_evidence(self.workspace, nonce, read_only=read_only)
         if claim["intent"]["claimant_did"] != identity.as_did() or not identity.can_sign:
             raise SourceReceiptDeliveryRejected("receiver identity differs from the confirmed claimant")
         self.store = ClaimantSourceReceiptStore(
@@ -382,6 +415,7 @@ class SourceReceiptDeliveryReceiver:
             max_replay_entries=_MAX_DELIVERIES_PER_CLAIM,
             reject_links=True,
             evict_processed=False,
+            read_only=read_only,
         )
 
     @property
@@ -393,6 +427,10 @@ class SourceReceiptDeliveryReceiver:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise SourceReceiptDeliveryRejected("delivery clock must return positive integer ms")
         return value
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise PermissionError("source receipt receiver is read-only")
 
     def _check_storage_paths(self) -> None:
         for name in ("inbox.cache.jsonl", "inbox.rejections.jsonl", "inbox.lock", "intake.lock"):
@@ -435,12 +473,15 @@ class SourceReceiptDeliveryReceiver:
     def _result_path(self, message_id: str) -> Path:
         if not isinstance(message_id, str) or _MESSAGE_ID_RE.fullmatch(message_id) is None:
             raise SourceReceiptDeliveryRejected("delivery message ID is invalid")
-        return _checked_path(self.workspace, self._directory / "results" / (message_id[7:] + ".json"))
+        try:
+            return _checked_path(self.workspace, self._directory / "results" / (message_id[7:] + ".json"))
+        except SourceReceiptDeliveryRejected as exc:
+            raise DeliveryInboxCacheCorrupt("retained delivery result path is unsafe") from exc
 
     def _read_result(self, path: Path) -> dict:
         before = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > _MAX_RESULT_BYTES:
-            raise SourceReceiptDeliveryRejected("retained delivery result is unsafe")
+            raise DeliveryInboxCacheCorrupt("retained delivery result is unsafe")
         flags = (
             os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_NONBLOCK", 0)
@@ -456,20 +497,23 @@ class SourceReceiptDeliveryReceiver:
                 or (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
                 or opened.st_size > _MAX_RESULT_BYTES
             ):
-                raise SourceReceiptDeliveryRejected("retained delivery result changed during read")
+                raise DeliveryInboxCacheCorrupt("retained delivery result changed during read")
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 raw = stream.read(_MAX_RESULT_BYTES + 1)
         finally:
             os.close(fd)
         if len(raw) > _MAX_RESULT_BYTES:
-            raise SourceReceiptDeliveryRejected("retained delivery result exceeds size limit")
-        value = json.loads(raw)
-        if (
-            canonical_json(value) != raw
-            or set(value) != {"version", "envelope", "ack", "observation_event_id"}
-            or type(value["version"]) is not int or value["version"] != 1
-        ):
-            raise SourceReceiptDeliveryRejected("retained delivery result is not canonical v1")
+            raise DeliveryInboxCacheCorrupt("retained delivery result exceeds size limit")
+        try:
+            value = json.loads(raw)
+            if (
+                not isinstance(value, dict) or canonical_json(value) != raw
+                or set(value) != {"version", "envelope", "ack", "observation_event_id"}
+                or type(value["version"]) is not int or value["version"] != 1
+            ):
+                raise ValueError("retained delivery result is not canonical v1")
+        except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise DeliveryInboxCacheCorrupt("retained delivery result bytes are invalid") from exc
         return value
 
     def _retained_result(self, envelope: TransportEnvelope) -> SourceReceiptDeliveryResult | None:
@@ -477,6 +521,16 @@ class SourceReceiptDeliveryReceiver:
         if not path.exists():
             return None
         value = self._read_result(path)
+        try:
+            return self._verify_retained_result(envelope, value)
+        except (SourceReceiptDeliveryDeferred, ClaimEvidenceUnavailable, ClaimantReceiptMissing, ClaimantReceiptPending):
+            raise
+        except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise DeliveryInboxCacheCorrupt("retained delivery result evidence is invalid") from exc
+
+    def _verify_retained_result(
+        self, envelope: TransportEnvelope, value: dict,
+    ) -> SourceReceiptDeliveryResult:
         retained = _snapshot(TransportEnvelope.from_dict(value["envelope"]))
         if canonical_json(retained.to_dict()) != canonical_json(envelope.to_dict()):
             raise SourceReceiptDeliveryRejected("retained delivery envelope differs")
@@ -511,15 +565,32 @@ class SourceReceiptDeliveryReceiver:
 
         This is local retained evidence, not fresh intake or routing authority.
         Both snapshots are bound to the first-acceptance record and local pins.
+        Reading never completes an interrupted intake; use resume_pending for
+        that state transition.
         """
         self._check_storage_paths()
         with InterProcessLock(self._intake_lock, reject_links=True):
             self._check_storage_paths()
-            value = self._read_result(self._result_path(message_id))
-            envelope = _snapshot(TransportEnvelope.from_dict(value["envelope"]))
+            try:
+                value = self._read_result(self._result_path(message_id))
+            except FileNotFoundError as exc:
+                if self.inbox.retained_pending(message_id) is not None:
+                    raise SourceReceiptDeliveryResultPending("accepted delivery result is still pending") from exc
+                if self.inbox.seen(message_id):
+                    raise DeliveryInboxCacheCorrupt("processed delivery result is missing") from exc
+                raise SourceReceiptDeliveryNotRetained("delivery has not been retained") from exc
+            try:
+                envelope = _snapshot(TransportEnvelope.from_dict(value["envelope"]))
+            except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as exc:
+                raise DeliveryInboxCacheCorrupt("retained delivery envelope is invalid") from exc
             if envelope.message_id != message_id:
-                raise SourceReceiptDeliveryRejected("retained delivery result belongs to another message")
-            return envelope, self._process(envelope)
+                raise DeliveryInboxCacheCorrupt("retained delivery result belongs to another message")
+            if self.inbox.accepted_at(message_id) is None:
+                raise DeliveryInboxCacheCorrupt("delivery lacks durable first-acceptance time")
+            result = self._retained_result(envelope)
+            if result is None:
+                raise DeliveryInboxCacheCorrupt("retained delivery result is unavailable")
+            return envelope, result
 
     def export_retained_acks(self) -> SourceReceiptResumeResult:
         """Reverify a bounded ACK worklist from the durable handled index.
@@ -543,6 +614,7 @@ class SourceReceiptDeliveryReceiver:
         return SourceReceiptResumeResult(results=tuple(results), failures=tuple(failures))
 
     def _process(self, envelope: TransportEnvelope) -> SourceReceiptDeliveryResult:
+        self._require_writable()
         accepted_at = self.inbox.accepted_at(envelope.message_id)
         if accepted_at is None:
             raise SourceReceiptDeliveryRejected("delivery lacks durable first-acceptance time")
@@ -567,6 +639,7 @@ class SourceReceiptDeliveryReceiver:
         return SourceReceiptDeliveryResult(observation=observation, ack=ack)
 
     def receive(self, envelope: TransportEnvelope) -> SourceReceiptDeliveryResult:
+        self._require_writable()
         snapshot = _snapshot(envelope)
         return self._receive_snapshot(snapshot, accepted_at_ms=self.current_time_ms())
 
@@ -578,6 +651,7 @@ class SourceReceiptDeliveryReceiver:
         The ingress grants no domain authority. Full proof and independently
         pinned source identity are reverified before observation or signing.
         """
+        self._require_writable()
         if not isinstance(ingress, DeliveryInbox):
             raise TypeError("ingress must be a DeliveryInbox")
         retained = ingress.retained_pending(message_id)
@@ -616,6 +690,7 @@ class SourceReceiptDeliveryReceiver:
 
     def resume_pending(self) -> SourceReceiptResumeResult:
         """Resume already durable work, including after its intake TTL expired."""
+        self._require_writable()
         self._check_storage_paths()
         with InterProcessLock(self._intake_lock, reject_links=True):
             self._check_storage_paths()
@@ -635,9 +710,11 @@ __all__ = [
     "SOURCE_RECEIPT_DELIVERY_PREPARED_EVENT",
     "SourceReceiptDeliveryDeferred",
     "SourceReceiptDeliveryFailure",
+    "SourceReceiptDeliveryNotRetained",
     "SourceReceiptDeliveryReceiver",
     "SourceReceiptDeliveryRejected",
     "SourceReceiptDeliveryResult",
+    "SourceReceiptDeliveryResultPending",
     "SourceReceiptResumeResult",
     "acknowledge_source_receipt_delivery",
     "create_source_receipt_delivery",
