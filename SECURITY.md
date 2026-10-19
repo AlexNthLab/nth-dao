@@ -79,6 +79,34 @@ need to handle these in your deployment:
   for v1.0). Fork freely; the protocol spec in `docs/PROTOCOLS.md` is
   intentionally implementable in any language.
 
+## Release Privacy Gate
+
+Run `python tools/release_gate.py` before publishing. Development checks may
+use `--allow-dirty`, which still scans staged blobs and eligible untracked
+files; it does not authorize committing runtime data. Use `--dist` to inspect
+the actual wheel/sdist as well. Findings contain locations and fixed reasons,
+never private key values.
+
+Content scans have a 2 MiB per-input budget and a 10,000-document JSON/JSONL
+budget. UTF-8 and BOM-marked UTF-16/UTF-32 are supported. Duplicate object
+fields cannot hide private keys, and each whitespace-separated JSON document
+is examined. Private signing-key fields (including private JWK parameters)
+may be absent, null or an empty string; other representations require review,
+including byte arrays, nested objects and invalid scalar types. Truncated,
+invalid or over-budget JSON-shaped input, unknown
+binary data and unsupported encoding produce explicit incomplete-scan
+findings, not a clean result. Oversize inputs must be reduced or separately
+reviewed; they are never silently skipped. Index scans pin the immutable Git
+blob before checking its size, and archive member reads are bounded.
+
+The existing public Logo assets have exact path-and-SHA-256 entries in
+`REVIEWED_BINARY_ASSETS`. A new/modified binary needs an explicit review and
+updated registry entry; merely using an image extension grants no exemption.
+An approved binary hash records a manual review, not a claim that a generic
+secret scanner understands image metadata or arbitrary compressed content.
+This gate supplements review; it is not a proof that every possible secret
+encoding or personal detail has been recognized.
+
 ## Key Management
 
 ### What can go wrong

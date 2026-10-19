@@ -8,17 +8,24 @@ tracked tree and the final archives define what a release exposes.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import subprocess
 import sys
 import tarfile
 import zipfile
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Iterator
-
 
 MAX_TEXT_BYTES = 2 * 1024 * 1024
+MAX_JSON_DOCUMENTS = 10_000
+# Exact, previously reviewed public assets; extensions alone grant no bypass.
+REVIEWED_BINARY_ASSETS = {
+    "frontend/public/nth-dao-logo.jpg": "7f081d7dcae3e43e773ddf78fe09f45e1c453d70e430fbd5edf9fbac6a2acacb",
+    "nth_dao/web/static/nth-dao-logo.jpg": "7f081d7dcae3e43e773ddf78fe09f45e1c453d70e430fbd5edf9fbac6a2acacb",
+}
 RUNTIME_ROOTS = frozenset(
     {
         ".nth",
@@ -111,8 +118,7 @@ def _git(root: Path, *args: str) -> bytes:
     result = subprocess.run(
         ["git", *args],
         cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if result.returncode:
@@ -189,20 +195,121 @@ def scan_name(
 
 
 def scan_text(location: str, text: str) -> list[Finding]:
+    try:
+        if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+            return [Finding(location, "content scan incomplete: text exceeds byte limit")]
+    except UnicodeError:
+        return [Finding(location, "content scan incomplete: invalid Unicode")]
     findings: list[Finding] = []
     for reason, pattern in CONTENT_PATTERNS:
         if pattern.search(text):
             findings.append(Finding(location, reason))
+    contains_key, incomplete = _scan_json(text)
+    if contains_key:
+        findings.append(Finding(location, "JSON private signing key"))
+    if incomplete and (_looks_like_json(text) or Path(location).suffix.lower() in {".json", ".jsonl", ".ndjson"}):
+        findings.append(Finding(location, "content scan incomplete: invalid or over-budget JSON/JSONL"))
     return findings
 
 
+def _looks_like_json(text: str) -> bool:
+    prefix = text.lstrip("\ufeff \t\r\n")
+    if prefix.startswith("{"):
+        return True
+    if not prefix.startswith("["):
+        return False
+    value = prefix[1:].lstrip()
+    return not value or value[0] in '{["-0123456789]' or value.startswith(("true", "false", "null"))
+
+
+def _scan_json(text: str) -> tuple[bool, bool]:
+    """Scan whitespace-separated JSON documents without logging private values.
+
+    Inspect each object pair before folding duplicate fields so a later empty
+    value cannot hide private material. Parsing failures are not clean scans;
+    the caller distinguishes JSON-shaped input from ordinary source text.
+    """
+    found = False
+
+    def private_value(value: object) -> bool:
+        # Only an explicit null or empty string denotes absent private material.
+        # Arrays/objects may contain raw key bytes; invalid scalar types also
+        # require review rather than becoming a type-based scanner bypass.
+        return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+    def inspect(pairs: list[tuple[str, object]]) -> dict:
+        nonlocal found
+        for key, value in pairs:
+            if key.lower().replace("_", "").replace("-", "") in {"privatekey", "signingkey"}:
+                found |= private_value(value)
+        if any(key == "kty" and value in ("OKP", "EC", "RSA") for key, value in pairs):
+            found |= any(key == "d" and private_value(value) for key, value in pairs)
+        return dict(pairs)
+
+    text = text.lstrip("\ufeff")
+    decoder = json.JSONDecoder(object_pairs_hook=inspect)
+    position = 0
+    documents = 0
+    while position < len(text):
+        while position < len(text) and text[position] in " \t\r\n":
+            position += 1
+        if position == len(text):
+            break
+        if documents >= MAX_JSON_DOCUMENTS:
+            return found, True
+        try:
+            _, position = decoder.raw_decode(text, position)
+        except (ValueError, RecursionError):
+            return found, True
+        documents += 1
+        if position < len(text) and text[position] not in " \t\r\n":
+            return found, True
+    return found, False
+
+
 def _decode_text(data: bytes) -> str | None:
-    if len(data) > MAX_TEXT_BYTES or b"\0" in data:
+    if len(data) > MAX_TEXT_BYTES:
         return None
     try:
-        return data.decode("utf-8")
+        if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+            text = data.decode("utf-32")
+        elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            text = data.decode("utf-16")
+        else:
+            text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         return None
+    return None if "\0" in text else text
+
+
+def scan_bytes(location: str, data: bytes, *, logical_name: str) -> list[Finding]:
+    """Every input is scanned, explicitly pinned binary, or visibly blocked."""
+    if len(data) > MAX_TEXT_BYTES:
+        return [Finding(location, "content scan incomplete: input exceeds byte limit")]
+    text = _decode_text(data)
+    if text is not None:
+        return scan_text(location, text)
+    expected = REVIEWED_BINARY_ASSETS.get(logical_name)
+    if expected is not None and hashlib.sha256(data).hexdigest() == expected:
+        return []
+    return [Finding(location, "content scan incomplete: unreviewed binary or unsupported encoding")]
+
+
+def _read_file(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        return stream.read(MAX_TEXT_BYTES + 1)
+
+
+def _read_index(root: Path, relative: str) -> bytes:
+    # Pin the immutable blob before checking its size; an index edit cannot
+    # swap in a larger object between the check and the bounded blob read.
+    oid = _git(root, "rev-parse", "--verify", f":{relative}").strip()
+    if len(oid) not in {40, 64} or any(char not in b"0123456789abcdef" for char in oid):
+        raise RuntimeError("index input has no unambiguous blob identity")
+    size = int(_git(root, "cat-file", "-s", oid.decode("ascii")))
+    if size > MAX_TEXT_BYTES:
+        raise RuntimeError("content scan incomplete: index blob exceeds byte limit")
+    return _git(root, "cat-file", "blob", oid.decode("ascii"))
 
 
 def scan_tracked_tree(root: Path) -> list[Finding]:
@@ -212,21 +319,19 @@ def scan_tracked_tree(root: Path) -> list[Finding]:
         relative = path.relative_to(root).as_posix()
         findings.extend(scan_name(relative))
         try:
-            index_text = _decode_text(_git(root, "show", f":{relative}"))
-        except RuntimeError as exc:
+            index_data = _read_index(root, relative)
+        except (RuntimeError, ValueError) as exc:
             findings.append(Finding(f"index:{relative}", str(exc)))
         else:
-            if index_text is not None:
-                findings.extend(scan_text(f"index:{relative}", index_text))
+            findings.extend(scan_bytes(f"index:{relative}", index_data, logical_name=relative))
         if not path.is_file():
             continue
         try:
-            text = _decode_text(path.read_bytes())
+            data = _read_file(path)
         except OSError as exc:
             findings.append(Finding(relative, f"could not read tracked file: {exc}"))
             continue
-        if text is not None:
-            findings.extend(scan_text(relative, text))
+        findings.extend(scan_bytes(relative, data, logical_name=relative))
     return findings
 
 
@@ -239,12 +344,11 @@ def scan_untracked_tree(root: Path) -> list[Finding]:
         if not path.is_file():
             continue
         try:
-            text = _decode_text(path.read_bytes())
+            data = _read_file(path)
         except OSError as exc:
             findings.append(Finding(relative, f"could not read untracked file: {exc}"))
             continue
-        if text is not None:
-            findings.extend(scan_text(relative, text))
+        findings.extend(scan_bytes(relative, data, logical_name=relative))
     return findings
 
 
@@ -254,7 +358,8 @@ def _archive_members(path: Path) -> Iterator[tuple[str, bytes]]:
             for info in archive.infolist():
                 if info.is_dir():
                     continue
-                yield info.filename, archive.read(info)
+                with archive.open(info) as handle:
+                    yield info.filename, handle.read(MAX_TEXT_BYTES + 1)
         return
     if tarfile.is_tarfile(path):
         with tarfile.open(path, "r:*") as archive:
@@ -263,7 +368,8 @@ def _archive_members(path: Path) -> Iterator[tuple[str, bytes]]:
                     continue
                 handle = archive.extractfile(info)
                 if handle is not None:
-                    yield info.name, handle.read()
+                    with handle:
+                        yield info.name, handle.read(MAX_TEXT_BYTES + 1)
         return
     raise ValueError(f"unsupported distribution archive: {path}")
 
@@ -294,9 +400,7 @@ def scan_distribution(path: Path, root: Path) -> list[Finding]:
             wheel_names.add(logical)
             if logical.startswith(("tests/", "examples/")):
                 findings.append(Finding(location, "non-runtime tree included in wheel"))
-        text = _decode_text(data)
-        if text is not None:
-            findings.extend(scan_text(location, text))
+        findings.extend(scan_bytes(location, data, logical_name=logical))
 
     if is_wheel:
         expected = {
