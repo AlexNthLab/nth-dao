@@ -12233,8 +12233,8 @@ def _market_announcement_compatibility_status(
     }
 
 
-def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
-    """Return configuration and live publication state for LAN federation."""
+def _lan_federation_runtime_status(app: FastAPI, *, probe_mdns: bool = True) -> Dict[str, Any]:
+    """Return LAN state; liveness skips optional import diagnostics it does not expose."""
     public_peer_url = str(
         getattr(app.state, "nth_public_base_url", "") or ""
     )
@@ -12243,12 +12243,14 @@ def _lan_federation_runtime_status(app: FastAPI) -> Dict[str, Any]:
     configured = bool(
         public_peer_url and publish_enabled and discovery_enabled
     )
-    try:
-        from nth_dao.discovery import mdns_available
+    mdns_transport_available = False
+    if probe_mdns:
+        try:
+            from nth_dao.discovery import mdns_available
 
-        mdns_transport_available = bool(mdns_available())
-    except (ImportError, RuntimeError):
-        mdns_transport_available = False
+            mdns_transport_available = bool(mdns_available())
+        except (ImportError, RuntimeError):
+            mdns_transport_available = False
     nth_state = getattr(app.state, "nth", None)
     mdns_publisher_active = bool(
         getattr(nth_state, "mdns_responder", None)
@@ -25828,7 +25830,7 @@ def register_v2_routes(app: FastAPI) -> None:
             if getattr(route, "path", "").startswith(prefix)
             and getattr(route, "path", "") != "/api/v2/health"
         })
-        lan_runtime = _lan_federation_runtime_status(app)
+        lan_runtime = _lan_federation_runtime_status(app, probe_mdns=False)
         return {
             "ok": True,
             "phase": 1,
