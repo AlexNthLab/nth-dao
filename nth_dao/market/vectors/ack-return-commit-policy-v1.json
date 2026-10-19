@@ -1,0 +1,19 @@
+{
+  "kind": "nth-source-receipt-ack-return-commit-policy",
+  "version": 1,
+  "scope": "local-durability-policy-not-wire-cryptography",
+  "preparation_event_type": "market.claim.completion.source_receipt.ack_return.prepared",
+  "commit_event_type": "market.claim.completion.source_receipt.ack_return.committed",
+  "commit_binding_field": "preparation_event_id",
+  "cases": [
+    {"name": "initial", "preparation_version": null, "queued": false, "committed": false, "expired": false, "rejected": false, "expected": "ready"},
+    {"name": "v2-interrupted-enqueue", "preparation_version": 2, "queued": false, "committed": false, "expired": false, "rejected": false, "expected": "ready"},
+    {"name": "v2-interrupted-commit", "preparation_version": 2, "queued": true, "committed": false, "expired": false, "rejected": false, "expected": "ready"},
+    {"name": "v2-expired-retained-queue", "preparation_version": 2, "queued": true, "committed": false, "expired": true, "rejected": false, "expected": "ready"},
+    {"name": "v2-expired-without-queue", "preparation_version": 2, "queued": false, "committed": false, "expired": true, "rejected": false, "expected": "deferred"},
+    {"name": "committed-queue-missing", "preparation_version": 2, "queued": false, "committed": true, "expired": false, "rejected": false, "expected": "integrity-error"},
+    {"name": "committed-rejection-retained", "preparation_version": 2, "queued": true, "committed": true, "expired": false, "rejected": true, "expected": "ready"},
+    {"name": "legacy-queue-retained", "preparation_version": 1, "queued": true, "committed": false, "expired": false, "rejected": true, "expected": "ready"},
+    {"name": "legacy-queue-missing", "preparation_version": 1, "queued": false, "committed": false, "expired": false, "rejected": false, "expected": "integrity-error"}
+  ]
+}

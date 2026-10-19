@@ -39,6 +39,8 @@ from nth_dao.delivery.outbox import (
     OUTBOX_ATTEMPT_REJECTED,
     OUTBOX_ATTEMPT_SENT,
     OUTBOX_STATE_DELIVERED,
+    DeliveryOutboxCorrupt,
+    DeliveryOutboxError,
     DeliveryOutboxFull,
     DurableOutbox,
     OutboxAttempt,
@@ -137,9 +139,15 @@ class PluginDeliveryRuntime:
             inbox=inbox, clock=self._clock,
         )
 
-    def submit(self, envelope: TransportEnvelope) -> SendResult:
-        """Durably enqueue and submit one envelope through PluginHost."""
+    def submit(self, envelope: TransportEnvelope, *, require_retained: bool = False) -> SendResult:
+        """Submit through PluginHost, normally enqueuing before disclosure.
 
+        A domain with a separate durable commit uses require_retained=True:
+        missing records are integrity failures, never permission to enqueue.
+        """
+
+        if type(require_retained) is not bool:
+            raise TypeError("require_retained must be a boolean")
         now_ms = self._now_ms()
         if not isinstance(envelope, TransportEnvelope):
             return SendResult(accepted=False, error_code="invalid-envelope: wrong type")
@@ -157,7 +165,12 @@ class PluginDeliveryRuntime:
         )
         if not ok:
             return SendResult(accepted=False, error_code=f"invalid-envelope: {reason}")
-        record = self.outbox.enqueue(envelope, now_ms=now_ms)
+        if require_retained:
+            record = self.outbox.get(envelope.message_id)
+            if record is None or record.envelope_json.encode("utf-8") != raw:
+                raise DeliveryOutboxCorrupt("required retained outbox record is missing or differs")
+        else:
+            record = self.outbox.enqueue(envelope, now_ms=now_ms)
         if record.is_terminal:
             return SendResult(
                 accepted=record.state == OUTBOX_STATE_DELIVERED,
@@ -179,6 +192,10 @@ class PluginDeliveryRuntime:
             )
         except DeliveryOutboxFull:
             return SendResult(accepted=False, error_code="outbox-attempt-capacity")
+        except DeliveryOutboxError as exc:
+            if require_retained:
+                raise DeliveryOutboxCorrupt("required retained outbox changed before dispatch") from exc
+            raise
         if attempt is None:
             current = self.outbox.get(record.message_id)
             delivered = current is not None and current.state == OUTBOX_STATE_DELIVERED

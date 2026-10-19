@@ -985,3 +985,77 @@ funds execution is enabled.
 Independent Node negative checks re-sign the outer packet around malformed
 inner ACKs. Every case must fail at its intended signature or binding gate;
 a mutation test removes the inner verifier and requires the checker to fail.
+
+### Persistent Claimant ACK Return Entry Points
+
+`SourceReceiptAckReturnStore` binds one prepared return to the original
+locally retained source receipt delivery. The source destination comes from
+that verified original envelope. Its inner ACK is the exact retained signed
+claimant ACK, not a replacement ACK or a caller-supplied object. Preparation
+is separately claimant-audited before outbox enqueue and stdout/provider
+disclosure. Local proof, pins, observation, signer, storage scope and audit
+are reverified on every export or submission.
+
+```python
+from nth_dao.market.source_receipt_plugin import SourceReceiptAckPluginSender
+
+# receiver already verified and retained the addressed source receipt.
+# binding, authority and route_resolver are explicit Host-governed choices.
+sender = SourceReceiptAckPluginSender(
+    receiver=receiver, binding=binding, authority=authority,
+    route_resolver=route_resolver,
+)
+returned = sender.store.prepare(original_message_id, ttl_ms=600_000)
+sent = sender.submit(original_message_id)
+# sent.accepted means provider acceptance, not source confirmation.
+```
+
+The offline operational path is:
+
+```console
+python -m nth_dao.cli.source_receipt_delivery pack-ack-return --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce> --message-id <original-delivery-id> --ttl-seconds 600
+python -m nth_dao.cli.source_receipt_delivery export-ack-return --workspace <claimant-workspace> --identity-file <claimant-key-file> --nonce <local-confirmed-claim-nonce> --message-id <original-delivery-id>
+python -m nth_dao.cli.source_receipt_delivery receive-ack-return --workspace <source-workspace> --identity-file <source-key-file> --envelope-file <returned-ack-envelope.json>
+python -m nth_dao.cli.source_receipt_delivery resume-ack-returns --workspace <source-workspace> --identity-file <source-key-file>
+```
+
+Pack and export print the canonical return envelope, without network effects.
+Repeated pack calls keep the original TTL and exact bytes. CLI intake checks
+both signatures and the source's independently retained original/audit; a
+valid generic ACK or modified destination is insufficient. Source results
+identify both return and original message IDs and explicitly report
+`verification_scope=transport_receipt_only`, `accepted=false`, `settled=false`.
+Resume uses only durable local intake and can repair an interrupted source
+audit after return expiry; it does not backdate a new remote submission.
+
+Storage is private runtime data under
+`.nth/source_receipt_ack_return_outbox/<source-claim-id>`. The prepared file,
+claimant preparation audit, signed local commit and exact outbox bytes must
+agree. New preparation audit payloads carry integer `preparation_version=2`.
+The `market.claim.completion.source_receipt.ack_return.committed` payload binds
+the preparation's `preparation_event_id`; it proves local enqueue only, not
+remote receipt or acceptance. Export and provider submission require this
+commit. Missing committed queue records fail with `DeliveryOutboxCorrupt`,
+not automatic re-enqueue or a reset of rejection/attempt history.
+
+Damaged/missing audited bytes reject; an unaudited partial file can repair only
+while fresh. A queued v2 record whose commit write failed can finish that
+commit after expiry without re-enqueueing or refreshing its signed packet.
+Legacy unversioned preparation is explicitly adopted by `pack-ack-return`
+only if its exact queue record still exists; attempts and terminal state stay
+unchanged. Missing legacy queue evidence requires operator recovery, not a
+guess that first enqueue never happened. `export-ack-return` never performs
+this migration itself. Restore independently retained queue history rather
+than deleting preparation/commit audits to make a retry appear fresh.
+
+The local commit policy vectors in `ack-return-commit-policy-v1.json` cover
+these decisions. The witness does not anchor every later generic journal
+suffix or defend privileged rollback of the whole local history. The
+governed ACK sender uses `require_retained=True`; even queue loss after the
+domain check cannot trigger the generic runtime's default enqueue behavior.
+No implicit renewal, acknowledgement-of-acknowledgement or pending-record
+cleanup is added. Expired return renewal, confirmed terminal lifecycle,
+automatic dispatch, REST/UI controls and two-physical-computer acceptance
+remain future work. The existing public ACK-envelope conformance vector and
+wire version remain unchanged; local preparation authority is covered by
+domain tests, not inferred from wire compatibility.

@@ -28,6 +28,7 @@ from nth_dao.market.source_receipt_ack import (
     SourceReceiptAckReceiver,
     SourceReceiptAckResumeResult,
 )
+from nth_dao.market.source_receipt_ack_return import SourceReceiptAckReturnStore
 from nth_dao.market.source_receipt_delivery import (
     SOURCE_RECEIPT_DELIVERY_KIND,
     SourceReceiptDeliveryFailure,
@@ -201,6 +202,32 @@ class SourceReceiptPluginSender:
         )
 
 
+class SourceReceiptAckPluginSender:
+    """Send only audited, locally verified ACK returns through the Host.
+
+    Preparation is explicit. Submission takes the original message ID, never
+    a caller-supplied envelope or recipient. The caller owns Host lifetime.
+    """
+
+    def __init__(
+        self, *, receiver: SourceReceiptDeliveryReceiver, binding: ProviderBinding,
+        authority: InvocationAuthority, route_resolver: RouteResolver,
+    ) -> None:
+        if not isinstance(receiver, SourceReceiptDeliveryReceiver):
+            raise TypeError("receiver must be a SourceReceiptDeliveryReceiver")
+        if not isinstance(authority, InvocationAuthority) or authority.principal != receiver.identity.as_did():
+            raise SourceReceiptDeliveryRejected("ACK transport principal differs from the confirmed claimant")
+        self.store = SourceReceiptAckReturnStore(receiver)
+        self._runtime = PluginDeliveryRuntime(
+            binding=binding, authority=authority, route_resolver=route_resolver,
+            outbox=self.store.outbox, clock=receiver.current_time_ms,
+        )
+
+    def submit(self, original_message_id: str) -> SendResult:
+        """Reverify proof, exact ACK, audit and retained bytes before disclosure."""
+        return self._runtime.submit(self.store.get(original_message_id), require_retained=True)
+
+
 def receive_source_receipt_deliveries(
     *, runtime: PluginDeliveryRuntime, receiver: SourceReceiptDeliveryReceiver,
     receive_id: str, max_items: int = 16, lease_ms: int = 30_000,
@@ -311,6 +338,7 @@ def receive_source_receipt_acks(
 
 __all__ = [
     "SourceReceiptAckPluginReceiveResult",
+    "SourceReceiptAckPluginSender",
     "SourceReceiptPluginReceiveResult",
     "SourceReceiptPluginSender",
     "SourceReceiptTransportFailure",

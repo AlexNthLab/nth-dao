@@ -12,7 +12,11 @@ from nth_dao.canonical_json import canonical_json
 from nth_dao.delivery.acknowledgement import sign_ack
 from nth_dao.delivery.envelope import sign_envelope
 from nth_dao.delivery.inbox import DeliveryInbox, DeliveryInboxCacheCorrupt
-from nth_dao.delivery.outbox import OUTBOX_STATE_DELIVERED, DurableOutbox
+from nth_dao.delivery.outbox import (
+    OUTBOX_STATE_DELIVERED,
+    DeliveryOutboxCorrupt,
+    DurableOutbox,
+)
 from nth_dao.delivery.plugin_runtime import (
     PluginDeliveryRuntime,
     PluginDeliveryRuntimeError,
@@ -85,6 +89,53 @@ def _envelope(sender: AgentIdentity, recipient: str):
         created_at_ms=now_ms,
         expires_at_ms=now_ms + 60_000,
     )
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_retained_only_submission_never_calls_enqueue(tmp_path, monkeypatch, retained):
+    host, binding = _enabled_binding(tmp_path)
+    alice, bob = AgentIdentity.generate(label="alice"), AgentIdentity.generate(label="bob")
+    runtime = _runtime(tmp_path, name="alice", identity=alice, binding=binding,
+                       routes=(loopback_route_id(bob.as_did()),))
+    envelope = _envelope(alice, bob.as_did())
+    if retained:
+        runtime.outbox.enqueue(envelope)
+    monkeypatch.setattr(runtime.outbox, "enqueue", lambda *a, **k: pytest.fail("retained-only enqueue"))
+    if retained:
+        assert runtime.submit(envelope, require_retained=True).accepted
+    else:
+        monkeypatch.setattr(host, "invoke", lambda *a, **k: pytest.fail("unretained disclosure"))
+        with pytest.raises(DeliveryOutboxCorrupt):
+            runtime.submit(envelope, require_retained=True)
+        assert runtime.outbox.stats()["total"] == 0
+
+
+def test_retained_only_submission_stops_if_record_disappears_during_route_resolution(tmp_path, monkeypatch):
+    host, binding = _enabled_binding(tmp_path)
+    alice, bob = AgentIdentity.generate(label="alice"), AgentIdentity.generate(label="bob")
+    runtime = _runtime(tmp_path, name="alice", identity=alice, binding=binding,
+                       routes=(loopback_route_id(bob.as_did()),))
+    envelope = _envelope(alice, bob.as_did())
+    runtime.outbox.enqueue(envelope)
+
+    def lose_record(recipient):
+        journal = tmp_path / "alice/outbox/outbox.journal.jsonl"
+        journal.rename(journal.with_name("preserved-journal.jsonl"))
+        journal.write_bytes(b"")
+        return loopback_route_id(recipient)
+
+    runtime._route_resolver = lose_record
+    monkeypatch.setattr(host, "invoke", lambda *a, **k: pytest.fail("lost record disclosed"))
+    with pytest.raises(DeliveryOutboxCorrupt):
+        runtime.submit(envelope, require_retained=True)
+
+
+def test_retained_only_flag_is_strict_boolean(tmp_path):
+    _host, binding = _enabled_binding(tmp_path)
+    alice = AgentIdentity.generate(label="alice")
+    runtime = _runtime(tmp_path, name="alice", identity=alice, binding=binding)
+    with pytest.raises(TypeError, match="boolean"):
+        runtime.submit(_envelope(alice, alice.as_did()), require_retained=1)
 
 
 def test_plugin_runtime_persists_before_transport_ack_and_applies_signed_ack(

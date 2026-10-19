@@ -233,8 +233,10 @@ No wire version or automatic provider selection is added.
 Outer/inner signatures, direct source destination, original recipient,
 original wire digest and receipt lifetime are verified. The source's locally
 retained business receipt and preparation audit remain mandatory. The source
-ACK Inbox retains at most 256 identities and 4 MiB pending bytes without
-eviction. It rejects linked storage and unauthorized or unbound ACKs.
+ACK Inbox bounds its active cache at 256 identities and pending bytes at
+4 MiB. Completed records remain in its indexed, non-evicting disk archive;
+they do not permanently consume active intake capacity. It rejects linked
+storage and unauthorized or unbound ACKs.
 
 Source processing closes only the original receipt outbox and signs a source
 delivery audit. Domain and staging processed markers follow successful audit.
@@ -250,6 +252,61 @@ outbox. Exact return bytes stay available for retries. Return-outbox lifecycle,
 an automatic router, production network admission, UI controls and real
 two-computer testing remain separate work. This path does not accept work or
 settle funds.
+
+### Durable ACK Return Preparation
+
+`market/source_receipt_ack_return.py` now supplies
+`SourceReceiptAckReturnStore(receiver)`. It derives the return recipient from
+the verified original source envelope, not a caller-selected DID. Each
+original delivery has one immutable prepared return under
+`.nth/source_receipt_ack_return_outbox/<source-claim-id>`. Before preparation
+and every export, it rechecks the local completion proof, source pins, exact
+retained claimant ACK, claimant Spine signer and independent storage.
+
+Ordering is prepared canonical file -> claimant-signed
+`market.claim.completion.source_receipt.ack_return.prepared` v2 audit -> retained
+outbox -> claimant-signed `market.claim.completion.source_receipt.ack_return.committed`
+audit. The commit binds the exact preparation event ID. Both audits and the
+exact queue record are mandatory before stdout/provider disclosure.
+A cross-process preparation lock makes restart/concurrent retries
+reuse the same envelope, nonce and signature. Interrupted audit/enqueue
+retries repair those stages using the retained file; conflicting or missing
+audited bytes fail closed. The reused outbox must match the exact directory
+and independent-file/terminal-retention policies before any preparation.
+Missing committed queue records are non-retryable integrity errors, never
+permission to re-enqueue. The sender uses the runtime's explicit
+`require_retained=True` mode, which cannot create a missing queue record even
+if it disappears between domain verification and transport dispatch.
+
+Local v2 preparation declares that no disclosure is allowed before commit.
+It can repair interrupted enqueue while fresh, or append its missing commit
+from an already durable record even after expiry, without re-enqueueing.
+Legacy unversioned preparation must retain its queue record: an explicit
+`prepare` call adds the commit while preserving attempts and terminal state.
+Missing legacy queue history fails closed because the old format cannot
+distinguish first-enqueue interruption from history loss. This witness detects
+missing committed records; it does not cryptographically anchor every later
+generic journal suffix or protect against privileged rollback of local history.
+
+`SourceReceiptAckPluginSender` submits by original message ID after these
+checks. Provider choice, explicit route grants and revocation still belong
+to PluginHost; preparation does not install or enable providers. Provider
+acceptance leaves the return outbox queued, not remotely confirmed.
+
+Offline CLI commands `pack-ack-return`, `export-ack-return`,
+`receive-ack-return` and `resume-ack-returns` use the same domain gates.
+Completed expired preparations remain exportable as exact historical bytes,
+but cannot be freshly submitted. Expired partial preparations cannot be
+backdated into an outbox. Explicit ACK-return renewal and terminal lifecycle
+are not implemented; existing bare signed ACK export/import remains separate.
+No wire format changed, automatic router, UI control or real-funds execution
+is implied. Tests use synthetic workspaces and a governed loopback provider,
+not two physical computers or a production transport admission policy.
+`market/vectors/ack-return-commit-policy-v1.json` fixes the local recovery
+decision table. These policy vectors are not wire-cryptography conformance.
+The HTTP liveness projection does not import/probe optional mDNS availability;
+full federation diagnostics still perform that check. Optional cold startup
+must not turn an unrelated receipt operation into an unhealthy-node signal.
 
 ## Conformance
 

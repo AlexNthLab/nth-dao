@@ -502,6 +502,16 @@ class SourceReceiptDeliveryReceiver:
 
     def get_ack(self, message_id: str) -> SourceReceiptDeliveryResult:
         """Reverify and export a durable result without accepting a new envelope."""
+        return self.get_retained_delivery(message_id)[1]
+
+    def get_retained_delivery(
+        self, message_id: str,
+    ) -> tuple[TransportEnvelope, SourceReceiptDeliveryResult]:
+        """Export the verified original and result together, including its source DID.
+
+        This is local retained evidence, not fresh intake or routing authority.
+        Both snapshots are bound to the first-acceptance record and local pins.
+        """
         self._check_storage_paths()
         with InterProcessLock(self._intake_lock, reject_links=True):
             self._check_storage_paths()
@@ -509,7 +519,7 @@ class SourceReceiptDeliveryReceiver:
             envelope = _snapshot(TransportEnvelope.from_dict(value["envelope"]))
             if envelope.message_id != message_id:
                 raise SourceReceiptDeliveryRejected("retained delivery result belongs to another message")
-            return self._process(envelope)
+            return envelope, self._process(envelope)
 
     def export_retained_acks(self) -> SourceReceiptResumeResult:
         """Reverify a bounded ACK worklist from the durable handled index.
